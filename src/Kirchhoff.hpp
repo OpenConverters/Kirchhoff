@@ -155,6 +155,7 @@
  * | Isolated buck (Flybuck)   | `design_isolated_buck`  / `build_isolated_buck_tas`      | coupled-inductor buck + isolated secondary rail |
  * | Isolated buck-boost       | `design_isolated_buck_boost` / `build_isolated_buck_boost_tas` | inverting Fly-Buck-Boost + isolated secondary |
  * | Weinberg                  | `design_weinberg`       / `build_weinberg_tas`           | current-fed push-pull, input coupled inductor, boost-capable |
+ * | LLC resonant              | `design_llc`            / `build_llc_tas`                | half-bridge Lr-Cr-Lm resonant tank, CT rectifier, freq gain |
  *
  * @section fidelity Component fidelity
  *
@@ -202,3 +203,4 @@
 #include "IsolatedBuck.hpp"
 #include "IsolatedBuckBoost.hpp"
 #include "Weinberg.hpp"
+#include "Llc.hpp"

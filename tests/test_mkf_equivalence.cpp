@@ -36,6 +36,7 @@
 #include "IsolatedBuck.hpp"
 #include "IsolatedBuckBoost.hpp"
 #include "Weinberg.hpp"
+#include "Llc.hpp"
 #include "Flyback.hpp"
 #include "TasAssembler.hpp"
 #include "Fidelity.hpp"
@@ -697,6 +698,40 @@ TEST_CASE("Weinberg: Kirchhoff design+simulation matches MKF ideal reference", "
     const double mkfEff = sim.at("efficiency").get<double>();
     INFO("weinberg efficiency: Kirchhoff=" << r.eff << " vs MKF=" << mkfEff);
     CHECK(r.eff >= mkfEff);
+    CHECK(r.eff <= 1.05);
+}
+
+TEST_CASE("LLC: Kirchhoff design+simulation matches MKF ideal reference", "[equivalence][llc]") {
+    // LLC resonant (half-bridge, center-tapped rectifier): a half-bridge drives a series Lr-Cr tank in
+    // series with the transformer magnetizing Lm; gain is set by fsw vs the tank resonance fr. New
+    // piece: a RESONANT tank (explicit Lr+Cr+Lm) instead of a duty/phase-set square wave.
+    //
+    // Resonant-family tolerance is 3% (not 2%): MKF abstracts the half-bridge to an IDEAL ±Vbus/2
+    // bipolar voltage source (no switches) + a near-ideal rectifier diode (N=0.01, ~0V drop), whereas
+    // Kirchhoff builds the REAL split-cap half-bridge of actual switches (with ZVS body diodes) + N=1
+    // diodes. The two agree to ~2-2.5% on Vout — the real switches' ZVS transitions + the ~0.9V diode
+    // drop vs MKF's ideal source. (LLC.h itself notes ±10% vs bench is normal; this is a documented
+    // model-fidelity difference, not a relaxed bug threshold.)
+    constexpr double kResTol = 0.03;
+    json fx = load_fixture("llc");
+    const json& in = fx.at("inputs");
+    const json& sim = fx.at("sim");
+
+    double mkfVout = rerun_mkf_vout(fx, "llc");
+    check_close("MKF deck reproducibility (Vout)", mkfVout, sim.at("voutMean").get<double>(), kReproTol);
+
+    json di = kirchhoff_inputs(in);
+    di["simStimulusFsw"] = json::array({in.at("switchingFrequency").get<double>()});
+    Kirchhoff::LlcDesign d = Kirchhoff::design_llc(di);
+    json tas = Kirchhoff::build_llc_tas(d);
+    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "llc");
+
+    check_close("Vout", r.vout, sim.at("voutMean").get<double>(), kResTol);
+    check_close("Iout", r.iout, sim.at("ioutMean").get<double>(), kResTol);
+    // Efficiency is NOT compared: MKF's LLC deck powers the tank from an ideal bipolar source, so its
+    // vin_dc carries ~no current and its reported efficiency is not a physical converter efficiency.
+    // Just sanity-check Kirchhoff's (real-bridge) figure is below the unity ceiling.
+    INFO("llc efficiency (Kirchhoff real bridge): " << r.eff);
     CHECK(r.eff <= 1.05);
 }
 

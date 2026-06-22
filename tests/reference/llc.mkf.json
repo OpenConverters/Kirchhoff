@@ -1,0 +1,37 @@
+{
+  "deck": "* LLC Resonant Converter v3.3 (Separate Ls)\n* Half-Bridge\n* Vin=400V  fsw=100kHz  outputs=1\n* Ls=67.9922uH  Cr=23.2842nF  Lm=339.961uH\n*   output 0: Vout=48V Iout=5A n=4.17\n\nVin vin_dc 0 400\n\nVbridge sw_node mid_point PULSE(-200 200 0 5.000000e-07 5.000000e-07 4.500000e-06 1.000000e-05)\nVmid mid_point 0 0\nVpri_sense sw_node lr_in 0\n\n* Resonant tank (separate inductor)\nCr lr_in cr_ls 2.328419e-08\nLr cr_ls pri_top 6.799220e-05\n\n* Transformer (k~0.999, pairwise K statements for ngspice compatibility)\nLpri pri_top pri_bot 3.399610e-04\nLsec1_o1 sec_top_sec_o1 sec_ct_o1 1.955046e-05\nLsec2_o1 sec_ct_o1 sec_bot_sec_o1 1.955046e-05\nK1 Lpri Lsec1_o1 9.990000e-01\nK2 Lpri Lsec2_o1 9.990000e-01\nK3 Lsec1_o1 Lsec2_o1 9.990000e-01\n\nRpri_ret pri_bot mid_point 0.001\n\nEvpri_w vpri_w 0 pri_top pri_bot 1\nEvsec1_w_o1 vsec1_w_o1 0 sec_top_sec_o1 sec_ct_o1 1\nEvsec2_w_o1 vsec2_w_o1 0 sec_ct_o1 sec_bot_sec_o1 1\n\n.model DRECT D(Is=1e-8 N=0.01 RS=0.01)\n* Output 1 rectifier (CT Vout=4.800000e+01V Rload=9.600000e+00)\nD1_o1 sec_top_o1 vout_pos_o1 DRECT\nD2_o1 sec_bot_o1 vout_pos_o1 DRECT\nRsn1_o1 sec_top_o1 vout_pos_o1 100\nCsn1_o1 sec_top_o1 vout_pos_o1 100p\nRsn2_o1 sec_bot_o1 vout_pos_o1 100\nCsn2_o1 sec_bot_o1 vout_pos_o1 100p\nVsec1_sense_o1 sec_top_sec_o1 sec_top_o1 0\nVsec2_sense_o1 sec_bot_sec_o1 sec_bot_o1 0\nVsec_sense_o1 sec_ct_o1 vout_neg_o1 0\nVgnd_o1 vout_neg_o1 0 0\nResr_o1 vout_pos_o1 vout_cap_o1 0.05\nCout_o1 vout_cap_o1 vout_neg_o1 4.700000e-05\nRload_o1 vout_cap_o1 vout_neg_o1 9.600000e+00\n\n.ic v(vout_cap_o1)=4.800000e+01 v(cr_ls)=0\n\n.options RELTOL=1.000000e-02 ABSTOL=1.000000e-07 VNTOL=1.000000e-04 ITL1=500 ITL4=500\n.options METHOD=GEAR TRTOL=7.000000\n\n.tran 5.000000e-08 2.001000e-02 2.000000e-02 5.000000e-08 UIC\n\n.save v(vin_dc) i(Vin) v(vpri_w) v(pri_top) v(pri_bot) i(Vpri_sense) v(sw_node) v(mid_point) v(sec_top_o1) v(sec_bot_o1) v(vsec1_w_o1) v(vsec2_w_o1) v(vout_pos_o1) v(vout_cap_o1) i(Vsec1_sense_o1) i(Vsec2_sense_o1) i(Vsec_sense_o1)\n\n.end\n",
+  "design": {
+    "loadResistance": 9.6,
+    "magnetizingInductance": 0.000339961,
+    "resonantCapacitance": 2.328419124795961e-08,
+    "resonantInductance": 6.799220456283868e-05,
+    "turnsRatios": [
+      4.17,
+      4.17
+    ]
+  },
+  "inputs": {
+    "currentRippleRatio": 0.0,
+    "inputVoltage": 400.0,
+    "outputCurrent": 5.0,
+    "outputPower": 240.0,
+    "outputVoltage": 48.0,
+    "switchingFrequency": 100000.0
+  },
+  "probes": {
+    "measFrom": 0.02,
+    "measTo": 0.02001,
+    "voutNode": "vout_cap_o1"
+  },
+  "sim": {
+    "efficiency": 1.2878471468910784,
+    "iinMean": 0.6000000000000022,
+    "ioutMean": 5.674159698252091,
+    "pin": 240.0,
+    "pout": 309.0833152538588,
+    "vinMean": 399.9999999999999,
+    "voutMean": 54.47193310322008,
+    "voutRipplePkPk": 0.2619567259693838
+  },
+  "topology": "llc"
+}

@@ -23,7 +23,7 @@ add_subdirectory("${PSMA_ROOT}/SAS"      "${CMAKE_BINARY_DIR}/SAS")
 add_subdirectory("${PSMA_ROOT}/MAS/kirchhoff" "${CMAKE_BINARY_DIR}/MAS")
 add_subdirectory("${PSMA_ROOT}/CIAS"     "${CMAKE_BINARY_DIR}/CIAS")
 
-add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/Dab.cpp src/IsolatedBuck.cpp src/IsolatedBuckBoost.cpp src/Weinberg.cpp src/TasAssembler.cpp)
+add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/Dab.cpp src/IsolatedBuck.cpp src/IsolatedBuckBoost.cpp src/Weinberg.cpp src/Llc.cpp src/TasAssembler.cpp)
 target_include_directories(kirchhoff PUBLIC
     src
     "${PSMA_ROOT}/PEAS/src"

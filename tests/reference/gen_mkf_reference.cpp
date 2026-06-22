@@ -43,6 +43,7 @@
 #include "converter_models/IsolatedBuck.h"
 #include "converter_models/IsolatedBuckBoost.h"
 #include "converter_models/Weinberg.h"
+#include "converter_models/Llc.h"
 
 using namespace MAS;
 using namespace OpenMagnetics;
@@ -95,6 +96,7 @@ constexpr size_t kDabSettlingPeriods     = 2400;
 constexpr size_t kIBuckSettlingPeriods   = 7200;   // Cpri=100µF/24Ω -> RC=2.4ms -> ~30·RC at 100kHz
 constexpr size_t kIBBSettlingPeriods     = 4000;   // Cpri=100µF/12Ω -> RC=1.2ms -> ~30·RC at 100kHz
 constexpr size_t kWeinSettlingPeriods    = 3000;   // current-fed L1 loop needs ~30ms to fully settle
+constexpr size_t kLlcSettlingPeriods     = 2000;   // Cout=47µF/9.6Ω -> RC=0.45ms; tank + RC settle
 
 struct SimRead {
     double voutMean = 0, ioutMean = 0, vinMean = 0, iinMean = 0;
@@ -1028,6 +1030,59 @@ void gen_weinberg(const std::string& outPath) {
               << " Vout=" << r.voutMean << " Iout=" << r.ioutMean << " eff=" << r.efficiency << "\n";
 }
 
+// ── LLC resonant (half-bridge, center-tapped rectifier) ────────────────
+void gen_llc(const std::string& outPath) {
+    // 400V bus -> 48V/5A, HB, center-tapped rectifier, Q=0.4, Ln=5, fr=√(80k·200k)=126.5kHz, operated
+    // at fsw=100kHz (below fr -> gain>1 -> Vout~54V). MKF abstracts the half-bridge to an ideal ±Vbus/2
+    // source + near-ideal diodes, so Kirchhoff's real-switch deck lands ~2-2.5% off (documented).
+    const double Vin = 400.0, Vout = 48.0, Iout = 5.0, Fs = 100e3;
+
+    json llcJson;
+    llcJson["inputVoltage"] = {{"nominal", Vin}, {"minimum", Vin * 0.95}, {"maximum", Vin * 1.05}};
+    llcJson["bridgeType"] = "halfBridge";
+    llcJson["rectifierType"] = "centerTapped";
+    llcJson["minSwitchingFrequency"] = 80000;
+    llcJson["maxSwitchingFrequency"] = 200000;
+    llcJson["qualityFactor"] = 0.4;
+    llcJson["inductanceRatio"] = 5.0;
+    llcJson["integratedResonantInductor"] = false;
+    llcJson["operatingPoints"] = json::array({
+        json{{"ambientTemperature", 25.0}, {"outputVoltages", {Vout}},
+             {"outputCurrents", {Iout}}, {"switchingFrequency", Fs}}});
+    OpenMagnetics::Llc llc(llcJson);
+
+    auto dr = llc.process_design_requirements();
+    const double Lm = resolve_dimensional_values(dr.get_magnetizing_inductance());
+    std::vector<double> tr;
+    for (const auto& t : dr.get_turns_ratios()) tr.push_back(resolve_dimensional_values(t));
+
+    llc.set_num_steady_state_periods(kLlcSettlingPeriods);
+    llc.set_num_periods_to_extract(1);
+    const std::string deck = llc.generate_ngspice_circuit(tr, Lm, 0, 0);
+    auto wfs = llc.simulate_and_extract_topology_waveforms(tr, Lm, 1);
+    SimRead r = read_waveforms(wfs.at(0));
+
+    json fx;
+    fx["topology"] = "llc";
+    fx["inputs"]   = {{"inputVoltage", Vin}, {"outputVoltage", Vout}, {"outputCurrent", Iout},
+                      {"outputPower", Vout * Iout}, {"switchingFrequency", Fs}, {"currentRippleRatio", 0.0}};
+    fx["design"]   = {{"magnetizingInductance", Lm}, {"turnsRatios", tr},
+                      {"resonantInductance", llc.get_computed_resonant_inductance()},
+                      {"resonantCapacitance", llc.get_computed_resonant_capacitance()},
+                      {"loadResistance", Vout / Iout}};
+    fx["sim"]      = {{"voutMean", r.voutMean}, {"ioutMean", r.ioutMean}, {"vinMean", r.vinMean},
+                      {"iinMean", r.iinMean}, {"pin", r.pin}, {"pout", r.pout},
+                      {"efficiency", r.efficiency}, {"voutRipplePkPk", r.voutRipplePkPk}};
+    const double fT = 1.0 / Fs;
+    fx["probes"]   = {{"voutNode", "vout_cap_o1"}, {"measFrom", kLlcSettlingPeriods * fT},
+                      {"measTo", (kLlcSettlingPeriods + 1) * fT}};
+    fx["deck"] = deck;
+    write_fixture(outPath, fx);
+    std::cout << "  llc: n=" << (tr.empty()?0.0:tr[0]) << " Lr=" << llc.get_computed_resonant_inductance()*1e6
+              << "uH Cr=" << llc.get_computed_resonant_capacitance()*1e9 << "nF Lm=" << Lm*1e6
+              << "uH Vout=" << r.voutMean << " Iout=" << r.ioutMean << "\n";
+}
+
 }  // namespace
 
 // Optional topology-name filter: `gen_mkf_reference <dir> [name1 name2 ...]` regenerates only the
@@ -1057,6 +1112,7 @@ int main(int argc, char** argv) {
         if (want("isolated_buck"))      gen_isolated_buck(dir + "/isolated_buck.mkf.json");
         if (want("isolated_buck_boost")) gen_isolated_buck_boost(dir + "/isolated_buck_boost.mkf.json");
         if (want("weinberg"))           gen_weinberg(dir + "/weinberg.mkf.json");
+        if (want("llc"))                gen_llc(dir + "/llc.mkf.json");
     } catch (const std::exception& e) {
         std::cerr << "MKF reference generation FAILED: " << e.what() << "\n";
         return 1;
