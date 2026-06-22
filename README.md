@@ -41,7 +41,7 @@ git clone --recurse-submodules git@github.com:OpenConverters/Kirchhoff.git
 cd Kirchhoff
 cmake -S . -B build -G Ninja
 cmake --build build -j4
-ctest --test-dir build            # 17-topology MKF-equivalence gate + schema checks
+ctest --test-dir build            # 18-topology MKF-equivalence gate + schema checks
 
 # a single end-to-end demo:
 cmake --build build -j4 --target flyback_demo && ./build/flyback_demo
@@ -75,7 +75,7 @@ To make Kirchhoff match MKF, Kirchhoff's **ideal device models are pinned to MKF
 transformer `K=0.9999`) and each topology's design math is a faithful port of MKF's
 `process_design_requirements()`.
 
-**17 topologies** are MKF-equivalence-verified: flyback, boost, buck, forward, two-switch-forward,
+**18 topologies** are MKF-equivalence-verified: flyback, boost, buck, forward, two-switch-forward,
 SEPIC, Cuk, Zeta, push-pull, **phase-shifted full bridge (PSFB)** (first phase-shift-modulated bridge —
 4 switches, leg-to-leg phase, series resonant Lr, full-bridge rectifier), **asymmetric half-bridge
 (AHB)** (2-switch complementary-duty isolated bridge with a DC-blocking cap; gain 2·D·(1−D)·Vin/n),
@@ -90,7 +90,10 @@ buck whose filter inductor is a coupled inductor — regulated non-isolated prim
 a flyback-rectified isolated secondary bias rail; the asserted output is the primary, the secondary
 loads the coupled inductor internally), and **isolated buck-boost** (inverting Fly-Buck-Boost: a
 flyback-style single switch whose non-isolated primary rail is an inverting buck-boost output
-V_pri=−Vin·D/(1−D), compared on magnitude like Ćuk, plus an isolated flyback secondary).
+V_pri=−Vin·D/(1−D), compared on magnitude like Ćuk, plus an isolated flyback secondary), and
+**Weinberg** (current-fed, push-pull-derivative, boost-capable isolated converter: an input coupled
+inductor L1 current-feeds a center-tapped push-pull primary; a 4-winding CT transformer drives a
+center-tapped full-wave rectifier; boost regime M=1/(2·n·(1−D))).
 
 Current agreement: **boost** Vout/Iout 0.2 %, η 0.2 %; **flyback** Vout/Iout 1.9 %, η 2.5 %; **PSFB**
 Vout/Iout ~0.9 % (efficiency directional — Kirchhoff's ideal switches beat MKF's lossy rectifier diodes).

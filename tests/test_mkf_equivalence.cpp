@@ -35,6 +35,7 @@
 #include "Dab.hpp"
 #include "IsolatedBuck.hpp"
 #include "IsolatedBuckBoost.hpp"
+#include "Weinberg.hpp"
 #include "Flyback.hpp"
 #include "TasAssembler.hpp"
 #include "Fidelity.hpp"
@@ -660,6 +661,41 @@ TEST_CASE("IsolatedBuckBoost: Kirchhoff design+simulation matches MKF ideal refe
     // diodes; Kirchhoff's net-source efficiency is the cleaner figure -> >= MKF's.
     const double mkfEff = sim.at("efficiency").get<double>();
     INFO("isolated_buck_boost efficiency: Kirchhoff=" << r.eff << " vs MKF=" << mkfEff);
+    CHECK(r.eff >= mkfEff);
+    CHECK(r.eff <= 1.05);
+}
+
+TEST_CASE("Weinberg: Kirchhoff design+simulation matches MKF ideal reference", "[equivalence][weinberg]") {
+    // Weinberg: current-fed, push-pull-derivative, boost-capable isolated converter. An input coupled
+    // inductor L1 current-feeds a center-tapped push-pull primary; a 4-winding main transformer
+    // (CT primary + CT secondary, modelled as one coupled magnetic with turnsRatios=[1,n,n]) drives a
+    // center-tapped full-wave rectifier. Boost regime (D>0.5), M = 1/(2·n·(1−D)). New piece vs
+    // push-pull: the current-fed input coupled inductor (the converter's defining feature).
+    json fx = load_fixture("weinberg");
+    const json& in = fx.at("inputs");
+    const json& sim = fx.at("sim");
+
+    double mkfVout = rerun_mkf_vout(fx, "weinberg");
+    check_close("MKF deck reproducibility (Vout)", mkfVout, sim.at("voutMean").get<double>(), kReproTol);
+
+    json di = kirchhoff_inputs(in);
+    di["simStimulusFsw"] = json::array({in.at("switchingFrequency").get<double>()});
+    Kirchhoff::WeinbergDesign d = Kirchhoff::design_weinberg(di);
+    json tas = Kirchhoff::build_weinberg_tas(d);
+    // Force a long settle window (~3600 periods): the current-fed L1 loop settles much slower than the
+    // output-cap RC alone, so the settle-window arg passes a larger effective capacitance than the deck
+    // cap (the deck keeps its own ~95µF). Mirrors MKF's 3000 settling periods.
+    const double settleCap = 200e-6;
+    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, settleCap, d.inputVoltage, "weinberg");
+
+    check_close("Vout", r.vout, sim.at("voutMean").get<double>(), kVoutTol);
+    check_close("Iout", r.iout, sim.at("ioutMean").get<double>(), kIoutTol);
+    // Efficiency directional: MKF's deck carries lossy real rectifier diodes (IS=1e-12 RS=0.05) + the
+    // 100Ω switch/diode snubbers (the snubbers dominate in this high-drain-voltage boost design);
+    // Kirchhoff replicates the snubbers but uses ideal-ish diodes, so its efficiency is the cleaner
+    // figure -> >= MKF's. The sub-unity ceiling still catches a gross energy-balance bug.
+    const double mkfEff = sim.at("efficiency").get<double>();
+    INFO("weinberg efficiency: Kirchhoff=" << r.eff << " vs MKF=" << mkfEff);
     CHECK(r.eff >= mkfEff);
     CHECK(r.eff <= 1.05);
 }

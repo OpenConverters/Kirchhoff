@@ -42,6 +42,7 @@
 #include "converter_models/Dab.h"
 #include "converter_models/IsolatedBuck.h"
 #include "converter_models/IsolatedBuckBoost.h"
+#include "converter_models/Weinberg.h"
 
 using namespace MAS;
 using namespace OpenMagnetics;
@@ -93,6 +94,7 @@ constexpr size_t kPshbSettlingPeriods    = 2400;
 constexpr size_t kDabSettlingPeriods     = 2400;
 constexpr size_t kIBuckSettlingPeriods   = 7200;   // Cpri=100µF/24Ω -> RC=2.4ms -> ~30·RC at 100kHz
 constexpr size_t kIBBSettlingPeriods     = 4000;   // Cpri=100µF/12Ω -> RC=1.2ms -> ~30·RC at 100kHz
+constexpr size_t kWeinSettlingPeriods    = 3000;   // current-fed L1 loop needs ~30ms to fully settle
 
 struct SimRead {
     double voutMean = 0, ioutMean = 0, vinMean = 0, iinMean = 0;
@@ -978,6 +980,54 @@ void gen_isolated_buck_boost(const std::string& outPath) {
               << " Vpri=" << r.voutMean << " Ipri=" << r.ioutMean << " eff=" << r.efficiency << " (inverting)\n";
 }
 
+// ── Weinberg (current-fed push-pull, boost regime) ─────────────────────
+void gen_weinberg(const std::string& outPath) {
+    // 48->12V/2A, Fs=100kHz, ideal (Vd=0, η=1). Current-fed push-pull: input coupled inductor L1 feeds
+    // a CT push-pull primary -> 4-winding transformer -> CT-FW rectifier. Boost regime (D>0.5), n=4.667.
+    const double Vin = 48.0, Vout = 12.0, Iout = 2.0, Fs = 100e3, ripple = 0.30;
+
+    OpenMagnetics::Weinberg w;
+    DimensionWithTolerance iv;
+    iv.set_nominal(Vin); iv.set_minimum(Vin * 0.95); iv.set_maximum(Vin * 1.05);
+    w.set_input_voltage(iv);
+    w.set_efficiency(1.0);
+    w.set_diode_voltage_drop(0.0);
+    w.set_current_ripple_ratio(ripple);
+    TopologyExcitation op;
+    op.set_output_voltages({Vout});
+    op.set_output_currents({Iout});
+    op.set_switching_frequency(Fs);
+    op.set_ambient_temperature(25.0);
+    w.set_operating_points(std::vector<TopologyExcitation>{op});
+
+    auto dr = w.process_design_requirements();
+    const double L1 = dr.get_magnetizing_inductance().get_minimum().value();
+    std::vector<double> tr;
+    for (const auto& t : dr.get_turns_ratios()) tr.push_back(t.get_nominal().value());
+
+    w.set_num_steady_state_periods(kWeinSettlingPeriods);
+    w.set_num_periods_to_extract(1);
+    const std::string deck = w.generate_ngspice_circuit(tr[0], L1, 0, 0);
+    auto wfs = w.simulate_and_extract_topology_waveforms(tr[0], L1, 1);
+    SimRead r = read_waveforms(wfs.at(0));
+
+    json fx;
+    fx["topology"] = "weinberg";
+    fx["inputs"]   = {{"inputVoltage", Vin}, {"outputVoltage", Vout}, {"outputCurrent", Iout},
+                      {"outputPower", Vout * Iout}, {"switchingFrequency", Fs}, {"currentRippleRatio", ripple}};
+    fx["design"]   = {{"inputInductance", L1}, {"turnsRatios", tr}, {"loadResistance", Vout / Iout}};
+    fx["sim"]      = {{"voutMean", r.voutMean}, {"ioutMean", r.ioutMean}, {"vinMean", r.vinMean},
+                      {"iinMean", r.iinMean}, {"pin", r.pin}, {"pout", r.pout},
+                      {"efficiency", r.efficiency}, {"voutRipplePkPk", r.voutRipplePkPk}};
+    const double fT = 1.0 / Fs;
+    fx["probes"]   = {{"voutNode", "out_node"}, {"measFrom", kWeinSettlingPeriods * fT},
+                      {"measTo", (kWeinSettlingPeriods + 1) * fT}};
+    fx["deck"] = deck;
+    write_fixture(outPath, fx);
+    std::cout << "  weinberg: n=" << (tr.empty()?0.0:tr[0]) << " L1=" << L1*1e6 << "uH"
+              << " Vout=" << r.voutMean << " Iout=" << r.ioutMean << " eff=" << r.efficiency << "\n";
+}
+
 }  // namespace
 
 // Optional topology-name filter: `gen_mkf_reference <dir> [name1 name2 ...]` regenerates only the
@@ -1006,6 +1056,7 @@ int main(int argc, char** argv) {
         if (want("dab"))                gen_dab(dir + "/dab.mkf.json");
         if (want("isolated_buck"))      gen_isolated_buck(dir + "/isolated_buck.mkf.json");
         if (want("isolated_buck_boost")) gen_isolated_buck_boost(dir + "/isolated_buck_boost.mkf.json");
+        if (want("weinberg"))           gen_weinberg(dir + "/weinberg.mkf.json");
     } catch (const std::exception& e) {
         std::cerr << "MKF reference generation FAILED: " << e.what() << "\n";
         return 1;

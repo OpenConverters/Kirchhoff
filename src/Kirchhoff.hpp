@@ -154,6 +154,7 @@
  * | Dual active bridge        | `design_dab`            / `build_dab_tas`                 | isolated bidirectional, 8 switches, SPS phase-shift |
  * | Isolated buck (Flybuck)   | `design_isolated_buck`  / `build_isolated_buck_tas`      | coupled-inductor buck + isolated secondary rail |
  * | Isolated buck-boost       | `design_isolated_buck_boost` / `build_isolated_buck_boost_tas` | inverting Fly-Buck-Boost + isolated secondary |
+ * | Weinberg                  | `design_weinberg`       / `build_weinberg_tas`           | current-fed push-pull, input coupled inductor, boost-capable |
  *
  * @section fidelity Component fidelity
  *
@@ -200,3 +201,4 @@
 #include "Dab.hpp"
 #include "IsolatedBuck.hpp"
 #include "IsolatedBuckBoost.hpp"
+#include "Weinberg.hpp"
