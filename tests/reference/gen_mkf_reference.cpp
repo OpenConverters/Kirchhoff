@@ -45,6 +45,7 @@
 #include "converter_models/Weinberg.h"
 #include "converter_models/Llc.h"
 #include "converter_models/Src.h"
+#include "converter_models/Cllc.h"
 
 using namespace MAS;
 using namespace OpenMagnetics;
@@ -99,6 +100,7 @@ constexpr size_t kIBBSettlingPeriods     = 4000;   // Cpri=100µF/12Ω -> RC=1.2
 constexpr size_t kWeinSettlingPeriods    = 3000;   // current-fed L1 loop needs ~30ms to fully settle
 constexpr size_t kLlcSettlingPeriods     = 2000;   // Cout=47µF/9.6Ω -> RC=0.45ms; tank + RC settle
 constexpr size_t kSrcSettlingPeriods     = 2000;   // Cout=47µF/4.8Ω -> RC=0.23ms; tank + RC settle
+constexpr size_t kCllcSettlingPeriods    = 2000;   // output precharged via .ic, settles fast
 
 struct SimRead {
     double voutMean = 0, ioutMean = 0, vinMean = 0, iinMean = 0;
@@ -1138,6 +1140,61 @@ void gen_src(const std::string& outPath) {
               << "uH Vout=" << r.voutMean << " Iout=" << r.ioutMean << "\n";
 }
 
+// ── CLLC bidirectional resonant (full bridge both sides, active SR) ────
+void gen_cllc(const std::string& outPath) {
+    // 750V -> 600V/11kW, symmetric, forward power flow, fr=fsw=73kHz. 8 real switches (primary full
+    // bridge + secondary active synchronous rectifier), dual resonant tanks (Cr1+Lr1, Lr2+Cr2). MKF
+    // uses real switches (RON pinned to ours) -> tight 2% match; needs .ic output precharge to start.
+    const double Vin = 750.0, Vout = 600.0, Iout = 18.33, Fs = 73000.0;
+
+    json j;
+    j["inputVoltage"] = {{"minimum", 700.0}, {"maximum", 800.0}, {"nominal", Vin}};
+    j["maxSwitchingFrequency"] = 250000;
+    j["minSwitchingFrequency"] = 40000;
+    j["efficiency"] = 0.95;
+    j["qualityFactor"] = 0.3;
+    j["symmetricDesign"] = true;
+    j["bidirectional"] = true;
+    j["operatingPoints"] = json::array({
+        json{{"outputVoltages", {Vout}}, {"outputCurrents", {Iout}}, {"switchingFrequency", Fs},
+             {"ambientTemperature", 25.0}, {"powerFlow", "forward"}}});
+    OpenMagnetics::CllcConverter c(j);
+
+    auto dr = c.process_design_requirements();
+    const double Lm = resolve_dimensional_values(dr.get_magnetizing_inductance());
+    std::vector<double> tr;
+    for (const auto& t : dr.get_turns_ratios()) tr.push_back(resolve_dimensional_values(t));
+    auto p = c.calculate_resonant_parameters();
+
+    c.set_num_steady_state_periods(kCllcSettlingPeriods);
+    c.set_num_periods_to_extract(1);
+    const std::string deck = c.generate_ngspice_circuit(tr[0], p, 0, 0);
+    auto wfs = c.simulate_and_extract_topology_waveforms(tr, Lm, 1);
+    SimRead r = read_waveforms(wfs.at(0));
+
+    json fx;
+    fx["topology"] = "cllc";
+    fx["inputs"]   = {{"inputVoltage", Vin}, {"outputVoltage", Vout}, {"outputCurrent", Iout},
+                      {"outputPower", Vout * Iout}, {"switchingFrequency", Fs}, {"currentRippleRatio", 0.0}};
+    fx["design"]   = {{"magnetizingInductance", Lm}, {"turnsRatios", tr},
+                      {"primaryResonantInductance", p.primaryResonantInductance},
+                      {"primaryResonantCapacitance", p.primaryResonantCapacitance},
+                      {"secondaryResonantInductance", p.secondaryResonantInductance},
+                      {"secondaryResonantCapacitance", p.secondaryResonantCapacitance},
+                      {"loadResistance", Vout / Iout}};
+    fx["sim"]      = {{"voutMean", r.voutMean}, {"ioutMean", r.ioutMean}, {"vinMean", r.vinMean},
+                      {"iinMean", r.iinMean}, {"pin", r.pin}, {"pout", r.pout},
+                      {"efficiency", r.efficiency}, {"voutRipplePkPk", r.voutRipplePkPk}};
+    const double fT = 1.0 / Fs;
+    fx["probes"]   = {{"voutNode", "vout_p"}, {"measFrom", kCllcSettlingPeriods * fT},
+                      {"measTo", (kCllcSettlingPeriods + 1) * fT}};
+    fx["deck"] = deck;
+    write_fixture(outPath, fx);
+    std::cout << "  cllc: n=" << (tr.empty()?0.0:tr[0]) << " Lr1=" << p.primaryResonantInductance*1e6
+              << "uH Cr1=" << p.primaryResonantCapacitance*1e9 << "nF Lm=" << Lm*1e6
+              << "uH Vout=" << r.voutMean << " Iout=" << r.ioutMean << "\n";
+}
+
 }  // namespace
 
 // Optional topology-name filter: `gen_mkf_reference <dir> [name1 name2 ...]` regenerates only the
@@ -1169,6 +1226,7 @@ int main(int argc, char** argv) {
         if (want("weinberg"))           gen_weinberg(dir + "/weinberg.mkf.json");
         if (want("llc"))                gen_llc(dir + "/llc.mkf.json");
         if (want("src"))                gen_src(dir + "/src.mkf.json");
+        if (want("cllc"))               gen_cllc(dir + "/cllc.mkf.json");
     } catch (const std::exception& e) {
         std::cerr << "MKF reference generation FAILED: " << e.what() << "\n";
         return 1;

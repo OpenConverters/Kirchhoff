@@ -157,6 +157,7 @@
  * | Weinberg                  | `design_weinberg`       / `build_weinberg_tas`           | current-fed push-pull, input coupled inductor, boost-capable |
  * | LLC resonant              | `design_llc`            / `build_llc_tas`                | half-bridge Lr-Cr-Lm resonant tank, CT rectifier, freq gain |
  * | SRC series resonant       | `design_src`            / `build_src_tas`                | half-bridge Lr-Cr series tank (no resonant Lm), step-down |
+ * | CLLC resonant             | `design_cllc`           / `build_cllc_tas`               | bidirectional, active bridges both sides, dual resonant tanks |
  *
  * @section fidelity Component fidelity
  *
@@ -206,3 +207,4 @@
 #include "Weinberg.hpp"
 #include "Llc.hpp"
 #include "Src.hpp"
+#include "Cllc.hpp"

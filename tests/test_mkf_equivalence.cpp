@@ -38,6 +38,7 @@
 #include "Weinberg.hpp"
 #include "Llc.hpp"
 #include "Src.hpp"
+#include "Cllc.hpp"
 #include "Flyback.hpp"
 #include "TasAssembler.hpp"
 #include "Fidelity.hpp"
@@ -759,6 +760,38 @@ TEST_CASE("SRC: Kirchhoff design+simulation matches MKF ideal reference", "[equi
     check_close("Iout", r.iout, sim.at("ioutMean").get<double>(), kResTol);
     // Efficiency not compared (MKF's ideal-bipolar-source bridge draws ~no vin_dc current); sanity only.
     INFO("src efficiency (Kirchhoff real bridge): " << r.eff);
+    CHECK(r.eff <= 1.05);
+}
+
+TEST_CASE("CLLC: Kirchhoff design+simulation matches MKF ideal reference", "[equivalence][cllc]") {
+    // CLLC bidirectional resonant (full bridge both sides, active synchronous rectifier): resonant on
+    // BOTH sides (primary Cr1+Lr1, secondary Lr2+Cr2) around the transformer Lm, symmetric tank. 8 real
+    // switches. New pieces: a second resonant tank AND the first use of simulation.initialConditions —
+    // the active SR can't cold-start into 0 V and the series caps make the DC point singular, so the
+    // assembler precharges the output node and runs with use-initial-conditions (UIC). Because both
+    // bridges are real switches (RON pinned to MKF's), the resonant-family ideal-source caveat does NOT
+    // apply — CLLC is compared at the tight 2% band.
+    json fx = load_fixture("cllc");
+    const json& in = fx.at("inputs");
+    const json& sim = fx.at("sim");
+
+    double mkfVout = rerun_mkf_vout(fx, "cllc");
+    check_close("MKF deck reproducibility (Vout)", mkfVout, sim.at("voutMean").get<double>(), kReproTol);
+
+    json di = kirchhoff_inputs(in);
+    di["simStimulusFsw"] = json::array({in.at("switchingFrequency").get<double>()});
+    Kirchhoff::CllcDesign d = Kirchhoff::design_cllc(di);
+    json tas = Kirchhoff::build_cllc_tas(d);
+    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "cllc");
+
+    check_close("Vout", r.vout, sim.at("voutMean").get<double>(), kVoutTol);
+    check_close("Iout", r.iout, sim.at("ioutMean").get<double>(), kIoutTol);
+    // Efficiency directional: both decks are all-active-switch (no rectifier diode drop), but MKF senses
+    // input at the primary switch drains while Kirchhoff senses the true source current; Kirchhoff's is
+    // the cleaner figure -> >= MKF's, with a sub-unity ceiling to catch a gross energy-balance bug.
+    const double mkfEff = sim.at("efficiency").get<double>();
+    INFO("cllc efficiency: Kirchhoff=" << r.eff << " vs MKF=" << mkfEff);
+    CHECK(r.eff >= mkfEff * 0.97);
     CHECK(r.eff <= 1.05);
 }
 

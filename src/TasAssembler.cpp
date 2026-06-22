@@ -348,8 +348,23 @@ std::string tas_to_ngspice(const json& tasDoc, const PEAS::Fidelity& fidelity) {
     const double period = 1.0 / fsw;
     if (stopTime <= 0) stopTime = 600 * period;
     if (maxStep <= 0) maxStep = period / 200.0;
+
+    // Optional initial conditions: pre-charge nodes at t=0 (e.g. a resonant converter's output cap)
+    // and run the transient with use-initial-conditions (UIC) so ngspice SKIPS the DC operating point.
+    // Two things this unblocks: a resonant tank whose series caps make the DC operating point singular
+    // (UIC steps over it), and an active synchronous rectifier that can't self-start into a 0 V output
+    // (the precharge gives it a rail to rectify into). The IC node names are inter-stage group /
+    // external-port names, mapped to their top-level deck node here (so the in-subckt output cap, whose
+    // terminal IS the external port node, is initialised correctly). Simulator-agnostic in TAS; this is
+    // just the ngspice realisation.
+    const json initialConditions = sim.value("initialConditions", json::array());
+    const bool useIc = !initialConditions.empty();
+    for (const auto& ic : initialConditions)
+        os << ".ic v(" << group_node(ic.at("node").get<std::string>()) << ")="
+           << ic.at("voltage").get<double>() << "\n";
+
     os << ".options reltol=1e-3 abstol=1e-9 vntol=1e-6 method=gear\n";
-    os << ".tran " << maxStep << " " << stopTime << " 0 " << maxStep << "\n";
+    os << ".tran " << maxStep << " " << stopTime << " 0 " << maxStep << (useIc ? " uic" : "") << "\n";
     os << ".control\nrun\n";
     if (!outputNode.empty()) {
         const double from = stopTime - 50 * period;

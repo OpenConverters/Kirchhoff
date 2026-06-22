@@ -41,7 +41,7 @@ git clone --recurse-submodules git@github.com:OpenConverters/Kirchhoff.git
 cd Kirchhoff
 cmake -S . -B build -G Ninja
 cmake --build build -j4
-ctest --test-dir build            # 20-topology MKF-equivalence gate + schema checks
+ctest --test-dir build            # 21-topology MKF-equivalence gate + schema checks
 
 # a single end-to-end demo:
 cmake --build build -j4 --target flyback_demo && ./build/flyback_demo
@@ -75,7 +75,7 @@ To make Kirchhoff match MKF, Kirchhoff's **ideal device models are pinned to MKF
 transformer `K=0.9999`) and each topology's design math is a faithful port of MKF's
 `process_design_requirements()`.
 
-**20 topologies** are MKF-equivalence-verified: flyback, boost, buck, forward, two-switch-forward,
+**21 topologies** are MKF-equivalence-verified: flyback, boost, buck, forward, two-switch-forward,
 SEPIC, Cuk, Zeta, push-pull, **phase-shifted full bridge (PSFB)** (first phase-shift-modulated bridge —
 4 switches, leg-to-leg phase, series resonant Lr, full-bridge rectifier), **asymmetric half-bridge
 (AHB)** (2-switch complementary-duty isolated bridge with a DC-blocking cap; gain 2·D·(1−D)·Vin/n),
@@ -97,7 +97,13 @@ center-tapped full-wave rectifier; boost regime M=1/(2·n·(1−D))), and **LLC 
 driving a series Lr-Cr tank in series with the transformer magnetizing Lm; gain set by fsw vs the tank
 resonance fr; CT rectifier). The resonant family is compared at a documented **3 %** tolerance: MKF
 abstracts the half-bridge to an ideal ±Vbus/2 source + near-ideal diode, while Kirchhoff builds the
-real split-cap switching half-bridge — they agree to ~2–2.5 %. The family includes **LLC** (Lr-Cr-Lm) and **SRC** (Lr-Cr series only, operated at resonance).
+real split-cap switching half-bridge — they agree to ~2–2.5 %. The family includes **LLC** (Lr-Cr-Lm) and **SRC** (Lr-Cr series only, operated at resonance). **CLLC** (bidirectional, active bridges on
+*both* sides + dual resonant tanks Cr1-Lr1 / Lr2-Cr2) is the exception: its bridges are real switches so
+it matches at the tight 2 %, but its series resonant caps make the cold DC operating point singular and
+its active synchronous rectifier cannot start into a 0 V output — so it uses the optional
+`simulation.initialConditions` field (the assembler precharges the output node and runs the transient
+with use-initial-conditions / UIC). Initial-condition support lives entirely in the Kirchhoff TAS
+assembler; CIAS, which only emits component cards, is untouched.
 
 Current agreement: **boost** Vout/Iout 0.2 %, η 0.2 %; **flyback** Vout/Iout 1.9 %, η 2.5 %; **PSFB**
 Vout/Iout ~0.9 % (efficiency directional — Kirchhoff's ideal switches beat MKF's lossy rectifier diodes).
