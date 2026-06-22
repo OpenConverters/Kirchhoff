@@ -1,0 +1,31 @@
+[submodule "deps/PEAS"]
+	path = deps/PEAS
+	url = git@github.com:Power-Supply-Manufacturers-Association/PEAS.git
+[submodule "deps/RAS"]
+	path = deps/RAS
+	url = git@github.com:Power-Supply-Manufacturers-Association/RAS.git
+[submodule "deps/CAS"]
+	path = deps/CAS
+	url = git@github.com:Power-Supply-Manufacturers-Association/CAS.git
+[submodule "deps/SAS"]
+	path = deps/SAS
+	url = git@github.com:Power-Supply-Manufacturers-Association/SAS.git
+[submodule "deps/MAS"]
+	path = deps/MAS
+	url = git@github.com:Power-Supply-Manufacturers-Association/MAS.git
+[submodule "deps/CIAS"]
+	path = deps/CIAS
+	url = git@github.com:Power-Supply-Manufacturers-Association/CIAS.git
+	branch = main
+[submodule "deps/TAS"]
+	path = deps/TAS
+	url = git@github.com:Power-Supply-Manufacturers-Association/TAS.git
+[submodule "deps/AAS"]
+	path = deps/AAS
+	url = git@github.com:Power-Supply-Manufacturers-Association/AAS.git
+[submodule "deps/CONAS"]
+	path = deps/CONAS
+	url = git@github.com:Power-Supply-Manufacturers-Association/CONAS.git
+[submodule "deps/CTAS"]
+	path = deps/CTAS
+	url = git@github.com:Power-Supply-Manufacturers-Association/CTAS.git

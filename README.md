@@ -30,20 +30,28 @@ TAS inputs ──► Kirchhoff::design_flyback ──► CIAS atom-brick ──�
 
 ## Build & run
 
+The PSMA-org dependency repos (PEAS/RAS/CAS/SAS/MAS/CIAS + the schema repos
+TAS/AAS/CONAS/CTAS used by the validation test) are git **submodules** under
+`deps/`. Clone with them, then build:
+
 ```bash
-# one family (native + pybind)
-cmake -S /home/alf/PSMA/RAS -B /home/alf/PSMA/RAS/build -G Ninja -DPython_EXECUTABLE=$(which python3)
-cmake --build /home/alf/PSMA/RAS/build -j4 && /home/alf/PSMA/RAS/build/ras_tests
+git clone --recurse-submodules git@github.com:OpenConverters/Kirchhoff.git
+# (or, in an existing clone)  git submodule update --init
 
-# WASM target for a family
-source /home/alf/emsdk/emsdk_env.sh
-emcmake cmake -S /home/alf/PSMA/RAS -B /home/alf/PSMA/RAS/build-wasm -G Ninja
-cmake --build /home/alf/PSMA/RAS/build-wasm -j4    # -> libRAS.wasm.{js,wasm}
+cd Kirchhoff
+cmake -S . -B build -G Ninja
+cmake --build build -j4
+ctest --test-dir build            # 13-topology MKF-equivalence gate + schema checks
 
-# end-to-end flyback (links all family + CIAS libs, runs ngspice)
-cmake -S /home/alf/OpenConverters/Kirchhoff -B build -G Ninja
+# a single end-to-end demo:
 cmake --build build -j4 --target flyback_demo && ./build/flyback_demo
 ```
+
+The build pulls each family lib from `deps/<repo>` (override the location with
+`-DPSMA_ROOT=<dir>` if you keep the repos elsewhere). The MKF reference-fixture
+generator under `tests/reference/` additionally links `libMKF.so` from an
+external OpenMagnetics/MKF checkout (`MKF_ROOT`); it is a one-off, not part of
+the normal build.
 
 Requirements: cmake≥3.15, ninja, a C++17 compiler, `quicktype` (Node) on PATH, `ngspice`, and (for
 WASM) emsdk at `/home/alf/emsdk`. All builds use Ninja with `-j4`.

@@ -7,12 +7,13 @@ if (NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 endif()
 
-# Sibling PSMA-org repos (dev: referenced from /home/alf/PSMA; Phase 7 makes these git submodules).
-set(PSMA_ROOT "/home/alf/PSMA" CACHE PATH "Directory holding the PSMA-org sibling repos")
+# PSMA-org sibling repos (PEAS/RAS/CAS/SAS/MAS/CIAS) are git submodules under deps/.
+# After cloning Kirchhoff: `git submodule update --init` to fetch them.
+set(PSMA_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/deps" CACHE PATH "Directory holding the PSMA-org sibling repos (submodules)")
 
 # Pull in the per-family converter libs + the CIAS circuit converter (tests/pybind off here).
 foreach(opt RAS_BUILD_TESTS RAS_BUILD_PYBIND CAS_BUILD_TESTS CAS_BUILD_PYBIND
-            SAS_BUILD_TESTS SAS_BUILD_PYBIND MAS_BUILD_PYBIND CIAS_BUILD_TESTS)
+            SAS_BUILD_TESTS SAS_BUILD_PYBIND MAS_BUILD_PYBIND CIAS_BUILD_TESTS CIAS_BUILD_PYBIND)
     set(${opt} OFF CACHE BOOL "" FORCE)
 endforeach()
 
