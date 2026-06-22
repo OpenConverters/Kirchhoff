@@ -41,6 +41,7 @@
 #include "converter_models/PhaseShiftedHalfBridge.h"
 #include "converter_models/Dab.h"
 #include "converter_models/IsolatedBuck.h"
+#include "converter_models/IsolatedBuckBoost.h"
 
 using namespace MAS;
 using namespace OpenMagnetics;
@@ -91,6 +92,7 @@ constexpr size_t kFsbbSettlingPeriods    = 2400;
 constexpr size_t kPshbSettlingPeriods    = 2400;
 constexpr size_t kDabSettlingPeriods     = 2400;
 constexpr size_t kIBuckSettlingPeriods   = 7200;   // Cpri=100µF/24Ω -> RC=2.4ms -> ~30·RC at 100kHz
+constexpr size_t kIBBSettlingPeriods     = 4000;   // Cpri=100µF/12Ω -> RC=1.2ms -> ~30·RC at 100kHz
 
 struct SimRead {
     double voutMean = 0, ioutMean = 0, vinMean = 0, iinMean = 0;
@@ -924,6 +926,58 @@ void gen_isolated_buck(const std::string& outPath) {
               << " Vpri=" << r.voutMean << " Ipri=" << r.ioutMean << " eff=" << r.efficiency << "\n";
 }
 
+// ── Isolated Buck-Boost (inverting Fly-Buck-Boost) ─────────────────────
+void gen_isolated_buck_boost(const std::string& outPath) {
+    // 24V in; INVERTING primary buck-boost rail |V_pri|=12V/1A (compared output[0], settles negative)
+    // + one ISOLATED secondary 5V/0.5A (output[1], internal). D=0.333, N=2.4. Flyback-style: a single
+    // switch charges the coupled inductor; during OFF the energy splits between the inverting primary
+    // rail (via Dpri) and the flyback secondary.
+    const double Vin = 24.0, Vpri = 12.0, Ipri = 1.0, Vsec = 5.0, Isec = 0.5, Fs = 100e3, ripple = 0.4;
+
+    OpenMagnetics::IsolatedBuckBoost p;
+    DimensionWithTolerance iv;
+    iv.set_nominal(Vin); iv.set_minimum(Vin * 0.95); iv.set_maximum(Vin * 1.05);
+    p.set_input_voltage(iv);
+    p.set_efficiency(1.0);
+    p.set_diode_voltage_drop(0.0);
+    p.set_current_ripple_ratio(ripple);
+    IsolatedBuckBoostOperatingPoint op;
+    op.set_output_voltages({Vpri, Vsec});
+    op.set_output_currents({Ipri, Isec});
+    op.set_switching_frequency(Fs);
+    op.set_ambient_temperature(25.0);
+    p.set_operating_points(std::vector<IsolatedBuckBoostOperatingPoint>{op});
+
+    auto dr = p.process_design_requirements();
+    const double Lm = dr.get_magnetizing_inductance().get_minimum().value();
+    std::vector<double> tr;
+    for (const auto& t : dr.get_turns_ratios()) tr.push_back(t.get_nominal().value());
+
+    p.set_num_steady_state_periods(kIBBSettlingPeriods);
+    p.set_num_periods_to_extract(1);
+    const std::string deck = p.generate_ngspice_circuit(tr, Lm, 0, 0);
+    auto wfs = p.simulate_and_extract_topology_waveforms(tr, Lm, 1);
+    SimRead r = read_waveforms(wfs.at(0));   // output[0] = inverting primary rail (negative)
+
+    json fx;
+    fx["topology"] = "isolated_buck_boost";
+    fx["inputs"]   = {{"inputVoltage", Vin}, {"outputVoltage", Vpri}, {"outputCurrent", Ipri},
+                      {"outputPower", Vpri * Ipri}, {"switchingFrequency", Fs}, {"currentRippleRatio", ripple}};
+    fx["design"]   = {{"magnetizingInductance", Lm}, {"turnsRatios", tr}, {"dutyCycle", Vpri / (Vin + Vpri)},
+                      {"secondaryVoltage", Vsec}, {"secondaryPower", Vsec * Isec},
+                      {"loadResistance", Vpri / Ipri}};
+    fx["sim"]      = {{"voutMean", r.voutMean}, {"ioutMean", r.ioutMean}, {"vinMean", r.vinMean},
+                      {"iinMean", r.iinMean}, {"pin", r.pin}, {"pout", r.pout},
+                      {"efficiency", r.efficiency}, {"voutRipplePkPk", r.voutRipplePkPk}};
+    const double fT = 1.0 / Fs;
+    fx["probes"]   = {{"voutNode", "vpri_out"}, {"measFrom", kIBBSettlingPeriods * fT},
+                      {"measTo", (kIBBSettlingPeriods + 1) * fT}};
+    fx["deck"] = deck;
+    write_fixture(outPath, fx);
+    std::cout << "  isolated_buck_boost: n=" << (tr.empty()?0.0:tr[0]) << " Lmag=" << Lm*1e6 << "uH"
+              << " Vpri=" << r.voutMean << " Ipri=" << r.ioutMean << " eff=" << r.efficiency << " (inverting)\n";
+}
+
 }  // namespace
 
 // Optional topology-name filter: `gen_mkf_reference <dir> [name1 name2 ...]` regenerates only the
@@ -951,6 +1005,7 @@ int main(int argc, char** argv) {
         if (want("pshb"))               gen_pshb(dir + "/pshb.mkf.json");
         if (want("dab"))                gen_dab(dir + "/dab.mkf.json");
         if (want("isolated_buck"))      gen_isolated_buck(dir + "/isolated_buck.mkf.json");
+        if (want("isolated_buck_boost")) gen_isolated_buck_boost(dir + "/isolated_buck_boost.mkf.json");
     } catch (const std::exception& e) {
         std::cerr << "MKF reference generation FAILED: " << e.what() << "\n";
         return 1;

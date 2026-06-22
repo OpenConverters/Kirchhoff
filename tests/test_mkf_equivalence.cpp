@@ -34,6 +34,7 @@
 #include "Pshb.hpp"
 #include "Dab.hpp"
 #include "IsolatedBuck.hpp"
+#include "IsolatedBuckBoost.hpp"
 #include "Flyback.hpp"
 #include "TasAssembler.hpp"
 #include "Fidelity.hpp"
@@ -614,6 +615,51 @@ TEST_CASE("IsolatedBuck: Kirchhoff design+simulation matches MKF ideal reference
     // sub-unity ceiling still catches a gross energy-balance bug.
     const double mkfEff = sim.at("efficiency").get<double>();
     INFO("isolated_buck efficiency: Kirchhoff=" << r.eff << " vs MKF=" << mkfEff);
+    CHECK(r.eff >= mkfEff);
+    CHECK(r.eff <= 1.05);
+}
+
+TEST_CASE("IsolatedBuckBoost: Kirchhoff design+simulation matches MKF ideal reference", "[equivalence][isolated_buck_boost]") {
+    // Isolated buck-boost (inverting Fly-Buck-Boost): a flyback-style single-switch converter whose
+    // compared output is the INVERTING primary buck-boost rail V_pri = -Vin·D/(1-D) (output[0],
+    // negative — compared on magnitude like Ćuk); an isolated SECONDARY rail (output[1]) is present
+    // internally, flyback-rectified off the coupled inductor and loaded by an explicit internal
+    // resistor. New piece vs IsolatedBuck: the inverting primary rail + flyback (no synchronous side).
+    json fx = load_fixture("isolated_buck_boost");
+    const json& in = fx.at("inputs");
+    const json& des = fx.at("design");
+    const json& sim = fx.at("sim");
+
+    double mkfVout = rerun_mkf_vout(fx, "isolated_buck_boost");
+    check_close("MKF deck reproducibility (Vpri)", mkfVout, sim.at("voutMean").get<double>(), kReproTol);
+
+    const double vin = in.at("inputVoltage").get<double>();
+    json di;
+    di["designRequirements"]["efficiency"] = 1.0;
+    di["designRequirements"]["inputVoltage"]["nominal"] = vin;
+    di["designRequirements"]["inputVoltage"]["minimum"] = vin * 0.95;
+    di["designRequirements"]["inputVoltage"]["maximum"] = vin * 1.05;
+    di["designRequirements"]["switchingFrequency"]["nominal"] = in.at("switchingFrequency").get<double>();
+    { json op; op["name"] = "vpri"; op["voltage"]["nominal"] = in.at("outputVoltage").get<double>();
+      json os; os["name"] = "vsec"; os["voltage"]["nominal"] = des.at("secondaryVoltage").get<double>();
+      di["designRequirements"]["outputs"] = json::array({op, os}); }
+    { json op; op["inputVoltage"] = vin;
+      json op0; op0["power"] = in.at("outputPower").get<double>();
+      json op1; op1["power"] = des.at("secondaryPower").get<double>();
+      op["outputs"] = json::array({op0, op1});
+      di["operatingPoints"] = json::array({op}); }
+    di["simStimulusFsw"] = json::array({in.at("switchingFrequency").get<double>()});
+
+    Kirchhoff::IsolatedBuckBoostDesign d = Kirchhoff::design_isolated_buck_boost(di);
+    json tas = Kirchhoff::build_isolated_buck_boost_tas(d);
+    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "isolated_buck_boost");
+
+    check_close("Vpri (inverting)", r.vout, sim.at("voutMean").get<double>(), kVoutTol);
+    check_close("Ipri (inverting)", r.iout, sim.at("ioutMean").get<double>(), kIoutTol);
+    // Efficiency directional: MKF senses input current at S1's channel and the rectifiers are real-ish
+    // diodes; Kirchhoff's net-source efficiency is the cleaner figure -> >= MKF's.
+    const double mkfEff = sim.at("efficiency").get<double>();
+    INFO("isolated_buck_boost efficiency: Kirchhoff=" << r.eff << " vs MKF=" << mkfEff);
     CHECK(r.eff >= mkfEff);
     CHECK(r.eff <= 1.05);
 }

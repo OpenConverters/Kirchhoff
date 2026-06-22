@@ -153,6 +153,7 @@
  * | Phase-shifted half-bridge | `design_pshb`           / `build_pshb_tas`                | isolated, 3-level NPC leg, phase-shift control |
  * | Dual active bridge        | `design_dab`            / `build_dab_tas`                 | isolated bidirectional, 8 switches, SPS phase-shift |
  * | Isolated buck (Flybuck)   | `design_isolated_buck`  / `build_isolated_buck_tas`      | coupled-inductor buck + isolated secondary rail |
+ * | Isolated buck-boost       | `design_isolated_buck_boost` / `build_isolated_buck_boost_tas` | inverting Fly-Buck-Boost + isolated secondary |
  *
  * @section fidelity Component fidelity
  *
@@ -198,3 +199,4 @@
 #include "Pshb.hpp"
 #include "Dab.hpp"
 #include "IsolatedBuck.hpp"
+#include "IsolatedBuckBoost.hpp"
