@@ -1,0 +1,37 @@
+{
+  "deck": "* Asymmetric Half Bridge (AHB) — Imbertson-Mohan / TI SLUP223 / ON-Semi AN-4153\n* Vin=4.800000e+01 V, Vo=1.200000e+01 V, Io=2.000000e+00 A, fsw=1.000000e+02 kHz, D=4.500000e-01, n=1.710000e+00, rect=3\n* Lm=5.332635e+02 uH, Llk=1.000000e+00 uH, Lo=1.010000e+02 uH, Cb=4.385965e+00 uF, Co=6.250000e+00 uF\n* IC: V_Cb=2.640000e+01 V, i_Lm=5.569479e-03 A, i_Lo=2.000000e+00 A, V_Co=1.200000e+01 V\n\n.model SW1 SW VT=2.500000e+00 VH=8.000000e-01 RON=1.000000e-03 ROFF=1.000000e+06\n.model DIDEAL D(IS=1.000000e-12 RS=1.000000e-03 BV=1000 IBV=1e-12)\n\nVdc vin_dc 0 4.800000e+01\n\nVpwm_Q1 g1 0 PULSE(0 5.000000e+00 0 1.000000e-08 1.000000e-08 4.450000e-06 1.000000e-05)\nVpwm_Q2 g2 0 PULSE(0 5.000000e+00 4.550000e-06 1.000000e-08 1.000000e-08 5.450000e-06 1.000000e-05)\n\nVq1_sense vin_dc q1_drain 0\nS1 q1_drain sw g1 0 SW1\nD1 sw vin_dc DIDEAL\nRsnub_Q1 vin_dc sw 1.000000e+03\nCsnub_Q1 vin_dc sw 1.000000e-09\nS2 sw 0 g2 0 SW1\nD2 0 sw DIDEAL\nRsnub_Q2 sw 0 1.000000e+03\nCsnub_Q2 sw 0 1.000000e-09\n\nVcb_sense vin_dc cb_lo 0\nC_b cb_lo pri_top 4.385965e-06 IC=2.640000e+01\nR_cb_esr pri_top pri_top_esr 1m\nL_lk pri_top_esr pri_lk 1.000000e-06\nEvab vab 0 sw pri_top 1\nVpri_sense pri_lk pri_dot 0\nL_pri pri_dot sw 5.332635e-04 IC=5.569479e-03\n\nL_sec sec_a sec_b 1.823684e-04\nK1 L_pri L_sec 9.990000e-01\nVsec_a_sense sec_a sec_a_d 0\nVsec_b_sense sec_b sec_b_d 0\nD_r1 sec_a_d out_rect DIDEAL\nD_r2 sec_b_d out_rect DIDEAL\nD_r3 out_gnd sec_a_d DIDEAL\nD_r4 out_gnd sec_b_d DIDEAL\nL_o out_rect out_node 1.010000e-04 IC=2.000000e+00\nR_lo_dcr out_node out_node_after_dcr 1m\nR_co_esr out_node_after_dcr co_top 1m\nC_o co_top out_gnd 6.250000e-06 IC=1.200000e+01\nR_load co_top out_gnd 6.000000e+00\nVout_sense out_gnd 0 0\n\nEvpri_w vpri_w 0 sw pri_dot 1\nEvsec_w vsec_w 0 sec_a sec_b 1\n.tran 5.000000e-08 2.401000e-02 2.400000e-02 uic\n\n.save v(vab) v(sw) v(pri_top) v(out_node) v(vin_dc) v(vpri_w) v(vsec_w) i(Vpri_sense) i(Vcb_sense) i(Vsec_a_sense) i(Vsec_b_sense) i(Vout_sense) i(Vdc) i(Vq1_sense)\n\n.options RELTOL=1.000000e-02 ABSTOL=1.000000e-07 VNTOL=1.000000e-04 ITL1=500 ITL4=500\n.options METHOD=GEAR TRTOL=7.000000e+00\n.nodeset v(co_top)=1.200000e+01 v(pri_top)=2.160000e+01 v(out_rect)=1.270000e+01 v(sec_a_d)=1.270000e+01 v(sec_b_d)=1.270000e+01\n\n.end\n",
+  "design": {
+    "dcBlockingCapacitance": 4.385964912280701e-06,
+    "dutyCycle": 0.45,
+    "loadResistance": 6.0,
+    "magnetizingInductance": 0.0005332635000000002,
+    "outputInductance": 0.00010099999999999997,
+    "turnsRatios": [
+      1.71
+    ]
+  },
+  "inputs": {
+    "currentRippleRatio": 0.3,
+    "inputVoltage": 48.0,
+    "outputCurrent": 2.0,
+    "outputPower": 24.0,
+    "outputVoltage": 12.0,
+    "switchingFrequency": 100000.0
+  },
+  "probes": {
+    "measFrom": 0.024,
+    "measTo": 0.024010000000000004,
+    "voutNode": "out_node"
+  },
+  "sim": {
+    "efficiency": 0.8627846931226565,
+    "iinMean": 0.5604455005498572,
+    "ioutMean": 1.9668120869834964,
+    "pin": 26.901384026393174,
+    "pout": 23.21010236178637,
+    "vinMean": 48.0,
+    "voutMean": 11.800872521900995,
+    "voutRipplePkPk": 0.012776952580891177
+  },
+  "topology": "ahb"
+}

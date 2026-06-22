@@ -1,0 +1,98 @@
+cmake_minimum_required(VERSION 3.15)
+project(Kirchhoff LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if (NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
+
+# Sibling PSMA-org repos (dev: referenced from /home/alf/PSMA; Phase 7 makes these git submodules).
+set(PSMA_ROOT "/home/alf/PSMA" CACHE PATH "Directory holding the PSMA-org sibling repos")
+
+# Pull in the per-family converter libs + the CIAS circuit converter (tests/pybind off here).
+foreach(opt RAS_BUILD_TESTS RAS_BUILD_PYBIND CAS_BUILD_TESTS CAS_BUILD_PYBIND
+            SAS_BUILD_TESTS SAS_BUILD_PYBIND MAS_BUILD_PYBIND CIAS_BUILD_TESTS)
+    set(${opt} OFF CACHE BOOL "" FORCE)
+endforeach()
+
+add_subdirectory("${PSMA_ROOT}/RAS"      "${CMAKE_BINARY_DIR}/RAS")
+add_subdirectory("${PSMA_ROOT}/CAS"      "${CMAKE_BINARY_DIR}/CAS")
+add_subdirectory("${PSMA_ROOT}/SAS"      "${CMAKE_BINARY_DIR}/SAS")
+add_subdirectory("${PSMA_ROOT}/MAS/kirchhoff" "${CMAKE_BINARY_DIR}/MAS")
+add_subdirectory("${PSMA_ROOT}/CIAS"     "${CMAKE_BINARY_DIR}/CIAS")
+
+add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/TasAssembler.cpp)
+target_include_directories(kirchhoff PUBLIC
+    src
+    "${PSMA_ROOT}/PEAS/src"
+    "${PSMA_ROOT}/RAS/src" "${PSMA_ROOT}/CAS/src" "${PSMA_ROOT}/SAS/src"
+    "${PSMA_ROOT}/MAS/src" "${PSMA_ROOT}/CIAS/src")
+target_link_libraries(kirchhoff PUBLIC RAS CAS SAS MAS_kirchhoff CIAS nlohmann_json::nlohmann_json)
+
+add_executable(flyback_demo examples/flyback_demo.cpp)
+target_link_libraries(flyback_demo PRIVATE kirchhoff)
+
+add_executable(tas_flyback_demo examples/tas_flyback_demo.cpp)
+target_link_libraries(tas_flyback_demo PRIVATE kirchhoff)
+
+add_executable(boost_demo examples/boost_demo.cpp)
+target_link_libraries(boost_demo PRIVATE kirchhoff)
+
+add_executable(psfb_demo examples/psfb_demo.cpp)
+target_link_libraries(psfb_demo PRIVATE kirchhoff)
+
+add_executable(ahb_demo examples/ahb_demo.cpp)
+target_link_libraries(ahb_demo PRIVATE kirchhoff)
+
+add_executable(acf_demo examples/acf_demo.cpp)
+target_link_libraries(acf_demo PRIVATE kirchhoff)
+
+add_executable(fsbb_demo examples/fsbb_demo.cpp)
+target_link_libraries(fsbb_demo PRIVATE kirchhoff)
+
+# Catch2 (house test framework) — shared by all Kirchhoff C++ tests.
+include(FetchContent)
+FetchContent_Declare(Catch2
+    GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+    GIT_TAG v3.8.1)
+FetchContent_MakeAvailable(Catch2)
+
+add_executable(test_mkf_equivalence tests/test_mkf_equivalence.cpp)
+target_compile_definitions(test_mkf_equivalence PRIVATE KIRCHHOFF_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests")
+target_link_libraries(test_mkf_equivalence PRIVATE kirchhoff Catch2::Catch2WithMain)
+
+add_executable(test_real_fidelity tests/test_real_fidelity.cpp)
+target_link_libraries(test_real_fidelity PRIVATE kirchhoff Catch2::Catch2WithMain)
+
+add_executable(test_real_magnetic tests/test_real_magnetic.cpp)
+target_link_libraries(test_real_magnetic PRIVATE kirchhoff Catch2::Catch2WithMain)
+
+enable_testing()
+# Tests are Catch2 (house standard). The *_demo executables above are illustrative EXAMPLES, not
+# tests — they stay buildable (so an API break fails the build) but are NOT registered with ctest;
+# their behavior (boost/flyback design -> assemble -> simulate) is covered with tighter assertions by
+# the Catch2 mkf_equivalence suite. (tas_schema_valid below is intentionally Python — it uses jsonschema.)
+add_test(NAME mkf_equivalence COMMAND test_mkf_equivalence)
+add_test(NAME real_fidelity COMMAND test_real_fidelity)
+add_test(NAME real_magnetic COMMAND test_real_magnetic)
+
+# --- PyKirchhoff: pybind11 module for the orchestrator ---
+option(KIRCHHOFF_BUILD_PYBIND "Build the PyKirchhoff pybind11 module" ON)
+if (KIRCHHOFF_BUILD_PYBIND AND NOT EMSCRIPTEN)
+    include(FetchContent)
+    FetchContent_Declare(pybind11
+        GIT_REPOSITORY https://github.com/pybind/pybind11.git GIT_TAG v2.13.6)
+    FetchContent_Declare(pybind11_json
+        GIT_REPOSITORY https://github.com/pybind/pybind11_json.git)
+    FetchContent_MakeAvailable(pybind11 pybind11_json)
+    pybind11_add_module(PyKirchhoff src/bindings.cpp)
+    target_include_directories(PyKirchhoff PRIVATE "${pybind11_json_SOURCE_DIR}/include")
+    target_link_libraries(PyKirchhoff PRIVATE kirchhoff)
+
+    # Schema-conformance of Kirchhoff's generated TAS docs (needs jsonschema + referencing).
+    add_test(NAME tas_schema_valid
+             COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_tas_schema.py)
+    set_tests_properties(tas_schema_valid PROPERTIES
+        ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR};KIRCHHOFF_PSMA_ROOT=${PSMA_ROOT}")
+endif()

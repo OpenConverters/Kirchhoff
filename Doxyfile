@@ -1,0 +1,29 @@
+# Doxygen configuration for the Kirchhoff user/API documentation.
+#
+# Generate the docs with:
+#     doxygen Doxyfile
+# then open docs/html/index.html — the landing page is the user guide from
+# src/Kirchhoff.hpp (@mainpage), followed by the per-topology API reference.
+
+PROJECT_NAME           = "Kirchhoff"
+PROJECT_BRIEF          = "Design & simulate any power converter from a spec"
+OUTPUT_DIRECTORY       = docs
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+
+INPUT                  = src
+FILE_PATTERNS          = *.hpp
+RECURSIVE              = YES
+
+# Document the public API only (the headers carry user-facing doc comments;
+# the .cpp files are implementation detail).
+EXTRACT_ALL            = YES
+EXTRACT_STATIC         = NO
+JAVADOC_AUTOBRIEF      = YES
+QT_AUTOBRIEF           = YES
+MARKDOWN_SUPPORT       = YES
+SOURCE_BROWSER         = NO
+ALPHABETICAL_INDEX     = YES
+SORT_MEMBER_DOCS       = NO
+QUIET                  = YES
+WARN_IF_UNDOCUMENTED   = NO

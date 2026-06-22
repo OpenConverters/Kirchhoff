@@ -1,0 +1,29 @@
+# CMake build tree (configured + fetched dependencies + binaries)
+build/
+cmake-build-*/
+
+# Doxygen-generated API docs (regenerate with `doxygen Doxyfile`)
+docs/
+
+# Compiled artifacts
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+
+# Generated SPICE decks / scratch
+*.cir
+
+# tests/reference holds MKF-linked generator/spike SOURCES + golden .mkf.json fixtures. The compiled
+# binaries (gen_mkf_reference, gen_real_magnetic, find_bad_core, …) are build products — track only
+# the sources and the fixtures.
+tests/reference/*
+!tests/reference/*.cpp
+!tests/reference/*.sh
+!tests/reference/*.json
+!tests/reference/*.py
+
+# Editor / OS noise
+.DS_Store
+*.swp
