@@ -152,6 +152,7 @@
  * | Four-switch buck-boost    | `design_fsbb`           / `build_fsbb_tas`                | non-isolated H-bridge buck-boost       |
  * | Phase-shifted half-bridge | `design_pshb`           / `build_pshb_tas`                | isolated, 3-level NPC leg, phase-shift control |
  * | Dual active bridge        | `design_dab`            / `build_dab_tas`                 | isolated bidirectional, 8 switches, SPS phase-shift |
+ * | Isolated buck (Flybuck)   | `design_isolated_buck`  / `build_isolated_buck_tas`      | coupled-inductor buck + isolated secondary rail |
  *
  * @section fidelity Component fidelity
  *
@@ -196,3 +197,4 @@
 #include "Fsbb.hpp"
 #include "Pshb.hpp"
 #include "Dab.hpp"
+#include "IsolatedBuck.hpp"

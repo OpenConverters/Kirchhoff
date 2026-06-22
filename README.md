@@ -41,7 +41,7 @@ git clone --recurse-submodules git@github.com:OpenConverters/Kirchhoff.git
 cd Kirchhoff
 cmake -S . -B build -G Ninja
 cmake --build build -j4
-ctest --test-dir build            # 15-topology MKF-equivalence gate + schema checks
+ctest --test-dir build            # 16-topology MKF-equivalence gate + schema checks
 
 # a single end-to-end demo:
 cmake --build build -j4 --target flyback_demo && ./build/flyback_demo
@@ -75,7 +75,7 @@ To make Kirchhoff match MKF, Kirchhoff's **ideal device models are pinned to MKF
 transformer `K=0.9999`) and each topology's design math is a faithful port of MKF's
 `process_design_requirements()`.
 
-**15 topologies** are MKF-equivalence-verified: flyback, boost, buck, forward, two-switch-forward,
+**16 topologies** are MKF-equivalence-verified: flyback, boost, buck, forward, two-switch-forward,
 SEPIC, Cuk, Zeta, push-pull, **phase-shifted full bridge (PSFB)** (first phase-shift-modulated bridge —
 4 switches, leg-to-leg phase, series resonant Lr, full-bridge rectifier), **asymmetric half-bridge
 (AHB)** (2-switch complementary-duty isolated bridge with a DC-blocking cap; gain 2·D·(1−D)·Vin/n),
@@ -83,9 +83,12 @@ SEPIC, Cuk, Zeta, push-pull, **phase-shifted full bridge (PSFB)** (first phase-s
 demag winding), **four-switch buck-boost (4SBB)** (non-isolated H-bridge buck-boost, single
 inductor, four synchronous switches; buck-boost transition region, M=D/(1−D)), **phase-shifted
 half-bridge (PSHB)** (3-level NPC leg with split caps + clamp diodes, phase-shift control, bus=Vin/2),
-and **dual active bridge (DAB)** (isolated bidirectional, two actively-driven full bridges coupled by a
+**dual active bridge (DAB)** (isolated bidirectional, two actively-driven full bridges coupled by a
 series inductor + transformer; SPS inter-bridge phase D3 sets the transferred power — no output
-inductor, so Vout floats to the power-transfer balance).
+inductor, so Vout floats to the power-transfer balance), and **isolated buck / Flybuck** (a synchronous
+buck whose filter inductor is a coupled inductor — regulated non-isolated primary rail V_pri=D·Vin plus
+a flyback-rectified isolated secondary bias rail; the asserted output is the primary, the secondary
+loads the coupled inductor internally).
 
 Current agreement: **boost** Vout/Iout 0.2 %, η 0.2 %; **flyback** Vout/Iout 1.9 %, η 2.5 %; **PSFB**
 Vout/Iout ~0.9 % (efficiency directional — Kirchhoff's ideal switches beat MKF's lossy rectifier diodes).
