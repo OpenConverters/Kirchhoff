@@ -37,6 +37,7 @@
 #include "IsolatedBuckBoost.hpp"
 #include "Weinberg.hpp"
 #include "Llc.hpp"
+#include "Src.hpp"
 #include "Flyback.hpp"
 #include "TasAssembler.hpp"
 #include "Fidelity.hpp"
@@ -732,6 +733,32 @@ TEST_CASE("LLC: Kirchhoff design+simulation matches MKF ideal reference", "[equi
     // vin_dc carries ~no current and its reported efficiency is not a physical converter efficiency.
     // Just sanity-check Kirchhoff's (real-bridge) figure is below the unity ceiling.
     INFO("llc efficiency (Kirchhoff real bridge): " << r.eff);
+    CHECK(r.eff <= 1.05);
+}
+
+TEST_CASE("SRC: Kirchhoff design+simulation matches MKF ideal reference", "[equivalence][src]") {
+    // Series resonant converter (half-bridge, center-tapped rectifier): a two-element Lr+Cr series tank
+    // (no resonant Lm — the transformer magnetizing is made large) operated at fsw=fr (series
+    // resonance, unity tank gain). New piece vs LLC: the tank has no parallel resonant Lm branch.
+    // Resonant-family 3% tolerance (same ideal-bridge / near-ideal-diode caveat as LLC).
+    constexpr double kResTol = 0.03;
+    json fx = load_fixture("src");
+    const json& in = fx.at("inputs");
+    const json& sim = fx.at("sim");
+
+    double mkfVout = rerun_mkf_vout(fx, "src");
+    check_close("MKF deck reproducibility (Vout)", mkfVout, sim.at("voutMean").get<double>(), kReproTol);
+
+    json di = kirchhoff_inputs(in);
+    di["simStimulusFsw"] = json::array({in.at("switchingFrequency").get<double>()});
+    Kirchhoff::SrcDesign d = Kirchhoff::design_src(di);
+    json tas = Kirchhoff::build_src_tas(d);
+    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "src");
+
+    check_close("Vout", r.vout, sim.at("voutMean").get<double>(), kResTol);
+    check_close("Iout", r.iout, sim.at("ioutMean").get<double>(), kResTol);
+    // Efficiency not compared (MKF's ideal-bipolar-source bridge draws ~no vin_dc current); sanity only.
+    INFO("src efficiency (Kirchhoff real bridge): " << r.eff);
     CHECK(r.eff <= 1.05);
 }
 

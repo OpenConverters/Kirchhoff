@@ -156,6 +156,7 @@
  * | Isolated buck-boost       | `design_isolated_buck_boost` / `build_isolated_buck_boost_tas` | inverting Fly-Buck-Boost + isolated secondary |
  * | Weinberg                  | `design_weinberg`       / `build_weinberg_tas`           | current-fed push-pull, input coupled inductor, boost-capable |
  * | LLC resonant              | `design_llc`            / `build_llc_tas`                | half-bridge Lr-Cr-Lm resonant tank, CT rectifier, freq gain |
+ * | SRC series resonant       | `design_src`            / `build_src_tas`                | half-bridge Lr-Cr series tank (no resonant Lm), step-down |
  *
  * @section fidelity Component fidelity
  *
@@ -204,3 +205,4 @@
 #include "IsolatedBuckBoost.hpp"
 #include "Weinberg.hpp"
 #include "Llc.hpp"
+#include "Src.hpp"

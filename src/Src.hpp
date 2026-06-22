@@ -1,0 +1,47 @@
+#pragma once
+
+// Kirchhoff::Src — Series Resonant Converter (20th topology). Like the LLC but the tank is a TWO-element
+// series Lr+Cr only (no parallel resonant Lm branch); the transformer magnetizing inductance is made
+// large (≈10·Lr) so it does not participate in the resonance. A half-bridge drives the Lr-Cr tank into
+// the transformer + center-tapped rectifier. Gain M ≤ 1 (step-down only); operated at fsw = fr where
+// the series resonance gives unity tank gain. Port of MKF Src (Series Resonant; Steigerwald 1988).
+//
+// Reuses the LLC half-bridge + tank + CT-rectifier structure (same fidelity caveat: MKF abstracts the
+// bridge to an ideal ±Vbus/2 source + near-ideal diode, Kirchhoff builds the real switching bridge +
+// N=1 diode, so the resonant family is compared at a documented 3% tolerance). The only design
+// difference vs LLC is the tank: Q=2 (vs 0.4), an explicit fr, and a large non-resonant Lm.
+
+#include <nlohmann/json.hpp>
+#include "Fidelity.hpp"
+
+namespace Kirchhoff {
+
+struct SrcDesign {
+    double inputVoltage, inputVoltageMin, inputVoltageMax;
+    double outputVoltage, outputPower, switchingFrequency, efficiency;
+    double turnsRatio;                // n = (k_bridge·Vin_nom) / Vout, per CT half-winding
+    double resonantInductance;        // Lr
+    double resonantCapacitance;       // Cr
+    double magnetizingInductance;     // Lm ≈ 10·Lr (large, non-resonant)
+    double resonantFrequency;         // fr (= fsw here: operate at series resonance)
+    double switchDuty;                // per-switch on-fraction (~0.45, complementary with dead time)
+    double loadResistance;
+    double outputCapacitance;
+};
+
+/**
+ * @brief Design a half-bridge series-resonant converter (center-tapped rectifier).
+ * @param tasInputs Single-output spec (designRequirements + operatingPoints[0]). Quality factor 2.0
+ *        and the half-bridge match MKF's Src defaults; the converter is designed/operated at series
+ *        resonance (fr = the operating-point switching frequency).
+ * @return A design struct (turns ratio, Lr, Cr, large Lm, resonant frequency, load, output cap).
+ */
+SrcDesign design_src(const nlohmann::json& tasInputs);
+/**
+ * @brief Assemble an SRC design into a full TAS topology document.
+ * @param d A design returned by design_src().
+ * @return A TAS document (JSON); pass it to Kirchhoff::tas_to_ngspice() for a runnable deck.
+ */
+nlohmann::json build_src_tas(const SrcDesign& d);
+
+} // namespace Kirchhoff

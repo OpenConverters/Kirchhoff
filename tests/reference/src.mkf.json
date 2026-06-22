@@ -1,0 +1,37 @@
+{
+  "deck": "* SRC Series Resonant Converter v0.1 (Behavioural PULSE bridge, separate Lr)\n* Half-Bridge, full-bridge diode rectifier\n* Vin=400V  fsw=100kHz  outputs=1\n* Lr=215.01uH  Cr=11.781nF  Lpri=2150.1uH\n*   output 0: Vout=48V Iout=10A n=4.17\n\nVdc_supply vdc_supply 0 400\nRdc_supply_dummy vdc_supply 0 1Meg\n\nVbridge sw_node mid_point PULSE(-200 200 0 5.000000e-08 5.000000e-08 4.950000e-06 1.000000e-05)\nVmid       mid_point 0 0\nVpri_sense sw_node   cr_in 0\n\n* Resonant tank (separate Lr)\nCr cr_in cr_lr  1.178097e-08\nLr cr_lr pri_top 2.150102e-04\n\nLpri pri_top pri_bot 2.150102e-03\nLsec1_o1 sec_top_sec_o1 sec_ct_o1 1.236480e-04\nLsec2_o1 sec_ct_o1 sec_bot_sec_o1 1.236480e-04\nK1 Lpri Lsec1_o1 9.990000e-01\nK2 Lpri Lsec2_o1 9.990000e-01\nK3 Lsec1_o1 Lsec2_o1 9.990000e-01\n\nRpri_ret pri_bot mid_point 0.001\n\n.model DRECT D(Is=1e-8 N=0.01 RS=0.01)\n* Output 1 (CT diode rectifier, Vout=4.800000e+01V Rload=4.800000e+00)\nD1_o1 sec_top_o1 vout_pos_o1 DRECT\nD2_o1 sec_bot_o1 vout_pos_o1 DRECT\nRsn1_o1 sec_top_o1 vout_pos_o1 100\nCsn1_o1 sec_top_o1 vout_pos_o1 100p\nRsn2_o1 sec_bot_o1 vout_pos_o1 100\nCsn2_o1 sec_bot_o1 vout_pos_o1 100p\nVsec1_sense_o1 sec_top_sec_o1 sec_top_o1 0\nVsec2_sense_o1 sec_bot_sec_o1 sec_bot_o1 0\nVsec_sense_o1 sec_ct_o1 vout_neg_o1 0\nVgnd_o1 vout_neg_o1 0 0\nResr_o1 vout_pos_o1 vout_cap_o1 0.05\nCout_o1 vout_cap_o1 vout_neg_o1 4.700000e-05\nRload_o1 vout_cap_o1 vout_neg_o1 4.800000e+00\n\n.ic v(vout_cap_o1)=4.800000e+01 v(cr_lr)=0\n\n.options RELTOL=1.000000e-02 ABSTOL=1.000000e-07 VNTOL=1.000000e-04 ITL1=500 ITL4=500\n.options METHOD=GEAR TRTOL=7.000000\n\n.tran 5.000000e-08 2.001000e-02 2.000000e-02 5.000000e-08 UIC\n\n.save v(vdc_supply) i(Vdc_supply) v(pri_top) v(pri_bot) i(Vpri_sense) v(sw_node) v(mid_point) v(sec_top_o1) v(sec_bot_o1) v(vout_pos_o1) v(vout_cap_o1) i(Vsec1_sense_o1) i(Vsec2_sense_o1) i(Vsec_sense_o1)\n\n.end\n",
+  "design": {
+    "loadResistance": 4.8,
+    "magnetizingInductance": 0.0021501023,
+    "resonantCapacitance": 1.1780972450961725e-08,
+    "resonantInductance": 0.00021501022955466333,
+    "turnsRatios": [
+      4.17,
+      4.17
+    ]
+  },
+  "inputs": {
+    "currentRippleRatio": 0.0,
+    "inputVoltage": 400.0,
+    "outputCurrent": 10.0,
+    "outputPower": 480.0,
+    "outputVoltage": 48.0,
+    "switchingFrequency": 100000.0
+  },
+  "probes": {
+    "measFrom": 0.02,
+    "measTo": 0.02001,
+    "voutNode": "vout_cap_o1"
+  },
+  "sim": {
+    "efficiency": 0.9638459784266176,
+    "iinMean": 1.2000000000000044,
+    "ioutMean": 9.817547335343276,
+    "pin": 480.0,
+    "pout": 462.64606964477645,
+    "vinMean": 399.9999999999999,
+    "voutMean": 47.12422720964773,
+    "voutRipplePkPk": 0.2544615843303859
+  },
+  "topology": "src"
+}
