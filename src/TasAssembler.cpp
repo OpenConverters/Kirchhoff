@@ -27,14 +27,33 @@ bool contains_ci(const std::string& s, const std::string& sub) {
     return a.find(b) != std::string::npos;
 }
 
+// Minimal AAS comparator -> CIAS leaf. Lives here for now; belongs in an AAS converter lib
+// (aas_to_cias) once one exists, exactly like ras_to_cias / sas_to_cias. The leaf is one comparator
+// atom with its three pins (inPlus/inMinus/out) exposed as ports; the CIAS->ngspice converter realises
+// the atom as a behavioural comparator. Ideal by construction (output rails + optional hysteresis),
+// passed through verbatim — there is no "real part" resolution step for a behavioural block.
+json aas_comparator_leaf(const json& data) {
+    json atom; atom["analog"]["comparator"] = data.at("analog").at("comparator");
+    json leaf;
+    leaf["name"] = "cmp";
+    leaf["ports"] = json::array({json{{"name","inPlus"}}, json{{"name","inMinus"}}, json{{"name","out"}}});
+    leaf["components"] = json::array({json{{"name","C"}, {"data", atom}}});
+    auto pp = [](const char* port, const char* pin) {
+        return json{{"name", port}, {"endpoints", json::array({
+            json{{"component","C"},{"pin",pin}}, json{{"port",port}} })}}; };
+    leaf["connections"] = json::array({pp("inPlus","inPlus"), pp("inMinus","inMinus"), pp("out","out")});
+    return leaf;
+}
+
 // Dispatch a PEAS component to its family to_cias generator (decision 5: the orchestrator expands).
 json component_to_leaf(const json& data, const PEAS::Fidelity& f) {
     if (data.contains("resistor"))      return RAS::ras_to_cias(data, f);
     if (data.contains("capacitor"))     return CAS::cas_to_cias(data, f);
     if (data.contains("semiconductor")) return SAS::sas_to_cias(data, f);
     if (data.contains("magnetic"))      return MAS::mas_to_cias(data, f);
+    if (data.contains("analog"))        return aas_comparator_leaf(data);   // AAS (control/analog block)
     throw std::runtime_error("TasAssembler: component data has no PEAS discriminator "
-                             "(resistor/capacitor/semiconductor/magnetic)");
+                             "(resistor/capacitor/semiconductor/magnetic/analog)");
 }
 
 double op_input_voltage(const json& inputs) {

@@ -23,7 +23,7 @@ add_subdirectory("${PSMA_ROOT}/SAS"      "${CMAKE_BINARY_DIR}/SAS")
 add_subdirectory("${PSMA_ROOT}/MAS/kirchhoff" "${CMAKE_BINARY_DIR}/MAS")
 add_subdirectory("${PSMA_ROOT}/CIAS"     "${CMAKE_BINARY_DIR}/CIAS")
 
-add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/Dab.cpp src/IsolatedBuck.cpp src/IsolatedBuckBoost.cpp src/Weinberg.cpp src/Llc.cpp src/Src.cpp src/Cllc.cpp src/TasAssembler.cpp)
+add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/Dab.cpp src/IsolatedBuck.cpp src/IsolatedBuckBoost.cpp src/Weinberg.cpp src/Llc.cpp src/Src.cpp src/Cllc.cpp src/Clllc.cpp src/TasAssembler.cpp)
 target_include_directories(kirchhoff PUBLIC
     src
     "${PSMA_ROOT}/PEAS/src"
@@ -100,3 +100,9 @@ if (KIRCHHOFF_BUILD_PYBIND AND NOT EMSCRIPTEN)
     set_tests_properties(tas_schema_valid PROPERTIES
         ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR};KIRCHHOFF_PSMA_ROOT=${PSMA_ROOT}")
 endif()
+
+add_executable(clllc_demo examples/clllc_demo.cpp)
+target_link_libraries(clllc_demo PRIVATE kirchhoff)
+
+add_executable(test_control_stage tests/test_control_stage.cpp)
+target_link_libraries(test_control_stage PRIVATE kirchhoff Catch2::Catch2WithMain)
