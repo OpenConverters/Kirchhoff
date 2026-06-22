@@ -39,6 +39,7 @@
 #include "converter_models/ActiveClampForward.h"
 #include "converter_models/FourSwitchBuckBoost.h"
 #include "converter_models/PhaseShiftedHalfBridge.h"
+#include "converter_models/Dab.h"
 
 using namespace MAS;
 using namespace OpenMagnetics;
@@ -87,6 +88,7 @@ constexpr size_t kAhbSettlingPeriods     = 2400;
 constexpr size_t kAcfSettlingPeriods     = 2400;
 constexpr size_t kFsbbSettlingPeriods    = 2400;
 constexpr size_t kPshbSettlingPeriods    = 2400;
+constexpr size_t kDabSettlingPeriods     = 2400;
 
 struct SimRead {
     double voutMean = 0, ioutMean = 0, vinMean = 0, iinMean = 0;
@@ -818,6 +820,57 @@ void gen_pshb(const std::string& outPath) {
               << " Iout=" << r.ioutMean << " eff=" << r.efficiency << "\n";
 }
 
+// ── Dual Active Bridge (SPS) ───────────────────────────────────────────
+void gen_dab(const std::string& outPath) {
+    // 48->12V/24W, Fs=100kHz, SPS modulation (D1=D2=0); MKF picks D3≈25° and solves L. Two ACTIVE
+    // bridges (8 switches) phase-shifted by D3; no output inductor, so the settled Vout (~10.56V)
+    // droops below the lossless 12V target by the deck's snubber/switch conduction loss.
+    const double Vin = 48.0, Vout = 12.0, Iout = 2.0, Fs = 100e3;
+
+    OpenMagnetics::Dab p;
+    DimensionWithTolerance iv;
+    iv.set_nominal(Vin); iv.set_minimum(Vin * 0.95); iv.set_maximum(Vin * 1.05);
+    p.set_input_voltage(iv);
+    p.set_efficiency(1.0);
+    DabOperatingPoint op;
+    op.set_output_voltages({Vout});
+    op.set_output_currents({Iout});
+    op.set_switching_frequency(Fs);
+    op.set_ambient_temperature(25.0);
+    op.set_modulation_type(MAS::ModulationType::SPS);
+    p.set_operating_points(std::vector<DabOperatingPoint>{op});
+
+    auto dr = p.process_design_requirements();
+    const double Lm = dr.get_magnetizing_inductance().get_minimum().value();
+    std::vector<double> tr;
+    for (const auto& t : dr.get_turns_ratios()) tr.push_back(t.get_nominal().value());
+
+    p.set_num_steady_state_periods(kDabSettlingPeriods);
+    p.set_num_periods_to_extract(1);
+    const std::string deck = p.generate_ngspice_circuit(tr, Lm, 0, 0);
+    auto wfs = p.simulate_and_extract_topology_waveforms(tr, Lm, 1);
+    SimRead r = read_waveforms(wfs.at(0));
+
+    json fx;
+    fx["topology"] = "dab";
+    fx["inputs"]   = {{"inputVoltage", Vin}, {"outputVoltage", Vout}, {"outputCurrent", Iout},
+                      {"outputPower", Vout * Iout}, {"switchingFrequency", Fs}, {"currentRippleRatio", 0.3}};
+    fx["design"]   = {{"magnetizingInductance", Lm}, {"turnsRatios", tr},
+                      {"seriesInductance", p.get_computed_series_inductance()},
+                      {"phaseShiftDeg", p.get_computed_d3_rad() * 180.0 / M_PI},
+                      {"loadResistance", Vout / Iout}};
+    fx["sim"]      = {{"voutMean", r.voutMean}, {"ioutMean", r.ioutMean}, {"vinMean", r.vinMean},
+                      {"iinMean", r.iinMean}, {"pin", r.pin}, {"pout", r.pout},
+                      {"efficiency", r.efficiency}, {"voutRipplePkPk", r.voutRipplePkPk}};
+    const double fT = 1.0 / Fs;
+    fx["probes"]   = {{"voutNode", "vout_cap_o1"}, {"measFrom", kDabSettlingPeriods * fT},
+                      {"measTo", (kDabSettlingPeriods + 1) * fT}};
+    fx["deck"] = deck;
+    write_fixture(outPath, fx);
+    std::cout << "  dab: n=" << (tr.empty()?0.0:tr[0]) << " D3=" << p.get_computed_d3_rad()*180.0/M_PI
+              << "deg Vout=" << r.voutMean << " Iout=" << r.ioutMean << " eff=" << r.efficiency << "\n";
+}
+
 }  // namespace
 
 // Optional topology-name filter: `gen_mkf_reference <dir> [name1 name2 ...]` regenerates only the
@@ -843,6 +896,7 @@ int main(int argc, char** argv) {
         if (want("acf"))                gen_acf(dir + "/acf.mkf.json");
         if (want("fsbb"))               gen_fsbb(dir + "/fsbb.mkf.json");
         if (want("pshb"))               gen_pshb(dir + "/pshb.mkf.json");
+        if (want("dab"))                gen_dab(dir + "/dab.mkf.json");
     } catch (const std::exception& e) {
         std::cerr << "MKF reference generation FAILED: " << e.what() << "\n";
         return 1;

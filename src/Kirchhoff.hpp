@@ -150,6 +150,8 @@
  * | Asymmetric half-bridge    | `design_ahb`            / `build_ahb_tas`                 | isolated, 2 switches, complementary duty |
  * | Active-clamp forward      | `design_acf`            / `build_acf_tas`                 | isolated forward, active-clamp reset   |
  * | Four-switch buck-boost    | `design_fsbb`           / `build_fsbb_tas`                | non-isolated H-bridge buck-boost       |
+ * | Phase-shifted half-bridge | `design_pshb`           / `build_pshb_tas`                | isolated, 3-level NPC leg, phase-shift control |
+ * | Dual active bridge        | `design_dab`            / `build_dab_tas`                 | isolated bidirectional, 8 switches, SPS phase-shift |
  *
  * @section fidelity Component fidelity
  *
@@ -192,3 +194,5 @@
 #include "Ahb.hpp"
 #include "Acf.hpp"
 #include "Fsbb.hpp"
+#include "Pshb.hpp"
+#include "Dab.hpp"

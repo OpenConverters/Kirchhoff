@@ -32,6 +32,7 @@
 #include "Acf.hpp"
 #include "Fsbb.hpp"
 #include "Pshb.hpp"
+#include "Dab.hpp"
 #include "Flyback.hpp"
 #include "TasAssembler.hpp"
 #include "Fidelity.hpp"
@@ -538,6 +539,35 @@ TEST_CASE("PSHB: Kirchhoff design+simulation matches MKF ideal reference", "[equ
     INFO("pshb efficiency: Kirchhoff=" << r.eff << " vs MKF=" << mkfEff);
     CHECK(r.eff >= mkfEff);
     CHECK(r.eff <= 1.05);
+}
+
+TEST_CASE("DAB: Kirchhoff design+simulation matches MKF ideal reference", "[equivalence][dab]") {
+    // Dual active bridge: TWO actively-driven full bridges (8 switches) coupled through a series
+    // inductor Lr + transformer. The secondary bridge is phase-shifted by D3 (=25°, SPS) vs the
+    // primary; that inter-bridge phase sets the transferred power P=N·V1·V2·D3·(π-D3)/(2π²·Fs·L).
+    // Unlike PSFB there is no output inductor and no passive rectifier — Vout floats to the
+    // power-transfer balance and is loss-sensitive, so the deck mirrors MKF's per-switch 100Ω∥100pF
+    // snubbers on all 8 switches to reproduce the settled operating point (~10.56V, below the 12V
+    // lossless target). New piece vs PSFB: the second active bridge driven at phase D3.
+    json fx = load_fixture("dab");
+    const json& in = fx.at("inputs");
+    const json& sim = fx.at("sim");
+
+    double mkfVout = rerun_mkf_vout(fx, "dab");
+    check_close("MKF deck reproducibility (Vout)", mkfVout, sim.at("voutMean").get<double>(), kReproTol);
+
+    json di = kirchhoff_inputs(in);
+    di["simStimulusFsw"] = json::array({in.at("switchingFrequency").get<double>()});
+    Kirchhoff::DabDesign d = Kirchhoff::design_dab(di);
+    json tas = Kirchhoff::build_dab_tas(d);
+    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "dab");
+
+    check_close("Vout", r.vout, sim.at("voutMean").get<double>(), kVoutTol);
+    check_close("Iout", r.iout, sim.at("ioutMean").get<double>(), kIoutTol);
+    // Efficiency EQUALITY-compared: both decks carry the same per-switch 100Ω snubbers (the dominant
+    // loss, replicated here), so the two efficiencies track. (If they ever diverge it signals a
+    // snubber/topology mismatch, not an ideal-vs-lossy difference like the rectifier topologies.)
+    check_close("efficiency", r.eff, sim.at("efficiency").get<double>(), kEffTol);
 }
 
 }  // namespace
