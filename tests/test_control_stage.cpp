@@ -66,24 +66,25 @@ TEST_CASE("CLLLC closed-loop SR: control stage expressed in CIAS drives the rect
     json tas = Kirchhoff::build_clllc_tas(d);
 
     // The TAS carries TWO stages — a power switchingCell and a separate "control" stage — and the
-    // control stage's brick contains AAS comparators (the control/analog block lives in CIAS).
-    bool hasControlStage = false, hasComparator = false;
+    // control stage's brick holds ONE CTAS `controller` component (the controller lives in CIAS).
+    bool hasControlStage = false, hasController = false;
     for (const auto& st : tas.at("topology").at("stages")) {
         if (st.value("role", "") == "control") {
             hasControlStage = true;
             for (const auto& c : st.at("circuit").at("components"))
-                if (c.at("data").contains("analog") && c.at("data").at("analog").contains("comparator"))
-                    hasComparator = true;
+                if (c.at("data").contains("controller"))
+                    hasController = true;
         }
     }
     CHECK(hasControlStage);
-    CHECK(hasComparator);
+    CHECK(hasController);
 
-    // Assemble -> deck. The CIAS->ngspice converter must realise the comparator (it threw on `analog`
-    // before this work); the deck carries .ic + uic for the resonant start.
+    // Assemble -> deck. The controller lowers (ctas_to_cias) to AAS comparators, which the CIAS->ngspice
+    // converter realises as behavioural sources (it threw on `analog`/`controller` before this work).
+    // The deck carries .ic + uic for the resonant start.
     PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
     std::string deck = Kirchhoff::tas_to_ngspice(tas, ideal);
-    REQUIRE(deck.find("BCmpE") != std::string::npos);   // a comparator behavioural source got emitted
+    REQUIRE(deck.find("BSR_CmpE") != std::string::npos); // a controller -> comparator source got emitted
     REQUIRE(deck.find(" uic") != std::string::npos);     // initial-condition transient
 
     // Run to steady state (the 100µF LV bus + resonant loop; output precharged so it settles quickly).

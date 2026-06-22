@@ -77,16 +77,12 @@ json build_clllc_tas(const ClllcDesign& d) {
         json c; c["name"] = name; c["kind"] = kind; if (dir[0]) c["direction"] = dir; c["endpoints"] = eps; return c; };
     auto mosfet = []() { json j; j["semiconductor"]["mosfet"] = json::object(); return j; };
     auto diode  = []() { json j; j["semiconductor"]["diode"] = json::object(); return j; };
-    auto comparator = [](double hyst) { json j; j["analog"]["comparator"]["electrical"]["hysteresis"] = hyst; return j; };
     auto capBrick = [&](double c, double vr) { json j; j["capacitor"] = json::object();
         j["inputs"]["designRequirements"]["capacitance"]["nominal"] = c;
         j["inputs"]["designRequirements"]["ratedVoltage"] = vr; return j; };
     auto indBrick = [&](double L) { json j; j["magnetic"] = json::object();
         j["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"] = L;
         j["inputs"]["designRequirements"]["turnsRatios"] = json::array(); return j; };
-    auto resBrick = [&](double r) { json j; j["resistor"] = json::object();
-        j["inputs"]["designRequirements"]["deviceType"] = "resistor";
-        j["inputs"]["designRequirements"]["resistance"]["nominal"] = r; return j; };
 
     const double n = d.turnsRatio;
     json t1; t1["magnetic"] = json::object();
@@ -139,25 +135,25 @@ json build_clllc_tas(const ClllcDesign& d) {
         conn("gH_net", {pin("QH","gate"), prt("gH")})});
 
     // ──────────────────── CONTROL stage (swappable) ────────────────────
-    // Diode-emulating synchronous rectifier: one comparator per SR switch senses that switch's
-    // drain-source and turns it on while its body diode would conduct (forward), off when its current
-    // reverses (Vds with a small hysteresis band around 0). That makes each SR switch a true rectifier
-    // (Vout follows the resonant tank gain) instead of an imposed half-bridge. Sense points:
-    //   QE: node_c vs vout   QF: gnd vs node_c   QG: node_d vs vout   QH: gnd vs node_d
+    // ONE CTAS `controller` component — a full-bridge synchronous-rectifier controller — placed as a
+    // single part. Its ctas_to_cias lowering expands it to four diode-emulating comparators (each SR
+    // switch gated while its body diode would conduct). Logical 8-pin interface: the two SR bridge
+    // midpoints (nodeC/nodeD), the output rails (vSense/gSense), and the four SR gates. Swap this whole
+    // stage for a different controller without touching the power topology.
+    auto syncRect = [&](double hyst) { json j; j["controller"]["type"] = "synchronousRectifier";
+        j["controller"]["topology"] = "fullBridge";
+        j["controller"]["electrical"]["hysteresis"] = hyst; return j; };
     json ccell; ccell["name"] = "clllc-sr-control";
     ccell["ports"] = json::array({port("nodeC"), port("nodeD"), port("vSense"), port("gSense"),
                                   port("gE"), port("gF"), port("gG"), port("gH")});
-    ccell["components"] = json::array({comp("CmpE", comparator(kVdsHysteresis)), comp("CmpF", comparator(kVdsHysteresis)),
-                                       comp("CmpG", comparator(kVdsHysteresis)), comp("CmpH", comparator(kVdsHysteresis))});
+    ccell["components"] = json::array({comp("SR", syncRect(kVdsHysteresis))});
     ccell["connections"] = json::array({
-        conn("nodeC",  {pin("CmpE","inPlus"), pin("CmpF","inMinus"), prt("nodeC")}),
-        conn("nodeD",  {pin("CmpG","inPlus"), pin("CmpH","inMinus"), prt("nodeD")}),
-        conn("vSense", {pin("CmpE","inMinus"), pin("CmpG","inMinus"), prt("vSense")}),
-        conn("gSense", {pin("CmpF","inPlus"), pin("CmpH","inPlus"), prt("gSense")}),
-        conn("gE", {pin("CmpE","out"), prt("gE")}),
-        conn("gF", {pin("CmpF","out"), prt("gF")}),
-        conn("gG", {pin("CmpG","out"), prt("gG")}),
-        conn("gH", {pin("CmpH","out"), prt("gH")})});
+        conn("nodeC",  {pin("SR","nodeC"), prt("nodeC")}),
+        conn("nodeD",  {pin("SR","nodeD"), prt("nodeD")}),
+        conn("vSense", {pin("SR","vSense"), prt("vSense")}),
+        conn("gSense", {pin("SR","gSense"), prt("gSense")}),
+        conn("gE", {pin("SR","gE"), prt("gE")}), conn("gF", {pin("SR","gF"), prt("gF")}),
+        conn("gG", {pin("SR","gG"), prt("gG")}), conn("gH", {pin("SR","gH"), prt("gH")})});
 
     json tas;
     json& dreq = tas["inputs"]["designRequirements"];

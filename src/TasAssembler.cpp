@@ -45,15 +45,51 @@ json aas_comparator_leaf(const json& data) {
     return leaf;
 }
 
+// Minimal CTAS controller -> CIAS leaf. The PEAS `controller` discriminator (CTAS), whose schema
+// literally lists "sync-rectifier", is the "controller as one part" route: a single component the
+// topology places, lowered here to a sub-network of AAS comparators. This is a full-bridge
+// synchronous-rectifier controller — four comparators, one per SR switch, each doing diode emulation
+// (sense that switch's drain-source, gate it while forward). Logical 8-pin interface: nodeC/nodeD (the
+// two SR bridge midpoints), vSense/gSense (the output rails), and gE/gF/gG/gH (the four SR gates). The
+// two midpoint senses each fan out to two comparators (supported by the multi-pin port mapping above).
+// Belongs in a CTAS converter lib (ctas_to_cias) eventually; inline here like aas_comparator_leaf.
+json ctas_sync_rectifier_leaf(const json& data) {
+    const json& ctrl = data.at("controller");
+    double hyst = 1e-3;
+    if (ctrl.contains("electrical") && ctrl.at("electrical").is_object()
+        && ctrl.at("electrical").contains("hysteresis"))
+        hyst = ctrl.at("electrical").at("hysteresis").get<double>();
+    auto cmp = [&]() { json j; j["analog"]["comparator"]["electrical"]["hysteresis"] = hyst; return j; };
+    auto C  = [](const char* nm, const char* pin) { return json{{"component",nm},{"pin",pin}}; };
+    auto P  = [](const char* nm) { return json{{"port",nm}}; };
+    auto cn = [](const char* nm, std::vector<json> eps) { return json{{"name",nm},{"endpoints",eps}}; };
+    json leaf;
+    leaf["name"] = "syncrect";
+    leaf["ports"] = json::array({json{{"name","nodeC"}}, json{{"name","nodeD"}},
+                                 json{{"name","vSense"}}, json{{"name","gSense"}},
+                                 json{{"name","gE"}}, json{{"name","gF"}}, json{{"name","gG"}}, json{{"name","gH"}}});
+    leaf["components"] = json::array({json{{"name","CmpE"},{"data",cmp()}}, json{{"name","CmpF"},{"data",cmp()}},
+                                      json{{"name","CmpG"},{"data",cmp()}}, json{{"name","CmpH"},{"data",cmp()}}});
+    leaf["connections"] = json::array({
+        cn("nodeC",  {C("CmpE","inPlus"),  C("CmpF","inMinus"), P("nodeC")}),
+        cn("nodeD",  {C("CmpG","inPlus"),  C("CmpH","inMinus"), P("nodeD")}),
+        cn("vSense", {C("CmpE","inMinus"), C("CmpG","inMinus"), P("vSense")}),
+        cn("gSense", {C("CmpF","inPlus"),  C("CmpH","inPlus"),  P("gSense")}),
+        cn("gE", {C("CmpE","out"), P("gE")}), cn("gF", {C("CmpF","out"), P("gF")}),
+        cn("gG", {C("CmpG","out"), P("gG")}), cn("gH", {C("CmpH","out"), P("gH")})});
+    return leaf;
+}
+
 // Dispatch a PEAS component to its family to_cias generator (decision 5: the orchestrator expands).
 json component_to_leaf(const json& data, const PEAS::Fidelity& f) {
     if (data.contains("resistor"))      return RAS::ras_to_cias(data, f);
     if (data.contains("capacitor"))     return CAS::cas_to_cias(data, f);
     if (data.contains("semiconductor")) return SAS::sas_to_cias(data, f);
     if (data.contains("magnetic"))      return MAS::mas_to_cias(data, f);
-    if (data.contains("analog"))        return aas_comparator_leaf(data);   // AAS (control/analog block)
+    if (data.contains("analog"))        return aas_comparator_leaf(data);     // AAS analog block
+    if (data.contains("controller"))    return ctas_sync_rectifier_leaf(data); // CTAS controller
     throw std::runtime_error("TasAssembler: component data has no PEAS discriminator "
-                             "(resistor/capacitor/semiconductor/magnetic/analog)");
+                             "(resistor/capacitor/semiconductor/magnetic/analog/controller)");
 }
 
 double op_input_voltage(const json& inputs) {
@@ -228,7 +264,10 @@ std::string tas_to_ngspice(const json& tasDoc, const PEAS::Fidelity& fidelity) {
         // the component's pins; its internal nets become "<comp>__<net>"; its atoms become "<comp>"
         // (single-atom, deck unchanged) or "<comp>_<atom>" (multi-atom equivalent circuit, e.g. a real
         // capacitor = C + series ESR). Fidelity is inferred per component (bound part -> real model).
-        std::map<std::string, std::map<std::string, std::pair<std::string, std::string>>> portToAtomPin;
+        // leaf port -> the atom pin(s) it exposes. A vector (not a single pin) so one leaf port can fan
+        // out to several atom pins — e.g. a controller leaf whose `nodeC` sense port feeds two
+        // comparators. Single-atom leaves (every passive/switch) map a port to exactly one pin.
+        std::map<std::string, std::map<std::string, std::vector<std::pair<std::string, std::string>>>> portToAtomPin;
         for (const auto& comp : brick.at("components")) {
             const std::string cname = comp.at("name").get<std::string>();
             const json& data = comp.at("data");
@@ -262,7 +301,7 @@ std::string tas_to_ngspice(const json& tasDoc, const PEAS::Fidelity& fidelity) {
                                         ep.at("pin").get<std::string>()});
                 }
                 if (!lport.empty() && !pins.empty()) {
-                    portToAtomPin[cname][lport] = pins.front();    // leaf port -> the atom pin it exposes
+                    portToAtomPin[cname][lport] = pins;            // leaf port -> all atom pins it exposes
                 } else {                                            // internal net of the equivalent circuit
                     json ic; ic["name"] = cname + "__" + lconn.at("name").get<std::string>();
                     ic["endpoints"] = json::array();
@@ -290,8 +329,8 @@ std::string tas_to_ngspice(const json& tasDoc, const PEAS::Fidelity& fidelity) {
                     if (cit == portToAtomPin.end() || !cit->second.count(pn))
                         throw std::runtime_error("TasAssembler: pin '" + pn + "' of " + sname + "." + cn +
                                                  " is not exposed by its component leaf");
-                    const auto& ap = cit->second.at(pn);
-                    c["endpoints"].push_back(json{{"component", ap.first}, {"pin", ap.second}});
+                    for (const auto& ap : cit->second.at(pn))   // fan-out: one brick pin -> ≥1 atom pin
+                        c["endpoints"].push_back(json{{"component", ap.first}, {"pin", ap.second}});
                     if (!exposedPort.empty()) pinPort[{sname, cn, pn}] = exposedPort;
                 } else if (ep.contains("port")) {
                     c["endpoints"].push_back(json{{"port", sanitize(ep.at("port").get<std::string>())}});
