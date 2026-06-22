@@ -16,6 +16,7 @@
 // models change. The Kirchhoff test (tests/test_mkf_equivalence.cpp) re-runs the
 // stored MKF deck through the same ngspice and compares Kirchhoff against it.
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <iostream>
@@ -37,6 +38,7 @@
 #include "converter_models/AsymmetricHalfBridge.h"
 #include "converter_models/ActiveClampForward.h"
 #include "converter_models/FourSwitchBuckBoost.h"
+#include "converter_models/PhaseShiftedHalfBridge.h"
 
 using namespace MAS;
 using namespace OpenMagnetics;
@@ -84,6 +86,7 @@ constexpr size_t kPsfbSettlingPeriods    = 2400;
 constexpr size_t kAhbSettlingPeriods     = 2400;
 constexpr size_t kAcfSettlingPeriods     = 2400;
 constexpr size_t kFsbbSettlingPeriods    = 2400;
+constexpr size_t kPshbSettlingPeriods    = 2400;
 
 struct SimRead {
     double voutMean = 0, ioutMean = 0, vinMean = 0, iinMean = 0;
@@ -779,24 +782,67 @@ void gen_fsbb(const std::string& outPath) {
               << " Iout=" << r.ioutMean << " eff=" << r.efficiency << "\n";
 }
 
+// ── Phase-Shifted Half-Bridge (3-level NPC) ────────────────────────────
+void gen_pshb(const std::string& outPath) {
+    const double Vin = 48.0, Vout = 12.0, Iout = 2.0, Fs = 100e3, phi = 126.0;
+    OpenMagnetics::Pshb p;
+    DimensionWithTolerance iv;
+    iv.set_nominal(Vin); iv.set_minimum(Vin * 0.95); iv.set_maximum(Vin * 1.05);
+    p.set_input_voltage(iv);
+    p.set_rectifier_type(BRectifierType::FULL_BRIDGE);
+    PshbOperatingPoint op;
+    op.set_output_voltages({Vout}); op.set_output_currents({Iout});
+    op.set_switching_frequency(Fs); op.set_phase_shift(phi); op.set_ambient_temperature(25.0);
+    p.set_operating_points(std::vector<PshbOperatingPoint>{op});
+    auto dr = p.process_design_requirements();
+    const double Lm = dr.get_magnetizing_inductance().get_nominal().value();
+    std::vector<double> tr; for (const auto& t : dr.get_turns_ratios()) tr.push_back(t.get_nominal().value());
+    p.set_num_steady_state_periods(kPshbSettlingPeriods); p.set_num_periods_to_extract(1);
+    const std::string deck = p.generate_ngspice_circuit(tr, Lm, 0, 0);
+    auto wfs = p.simulate_and_extract_topology_waveforms(tr, Lm, 1);
+    SimRead r = read_waveforms(wfs.at(0));
+    json fx;
+    fx["topology"] = "pshb";
+    fx["inputs"]   = {{"inputVoltage", Vin}, {"outputVoltage", Vout}, {"outputCurrent", Iout},
+                      {"outputPower", Vout * Iout}, {"switchingFrequency", Fs}, {"currentRippleRatio", 0.3}};
+    fx["design"]   = {{"magnetizingInductance", Lm}, {"turnsRatios", tr}, {"loadResistance", Vout / Iout}};
+    fx["sim"]      = {{"voutMean", r.voutMean}, {"ioutMean", r.ioutMean}, {"vinMean", r.vinMean},
+                      {"iinMean", r.iinMean}, {"pin", r.pin}, {"pout", r.pout},
+                      {"efficiency", r.efficiency}, {"voutRipplePkPk", r.voutRipplePkPk}};
+    const double fT = 1.0 / Fs;
+    fx["probes"]   = {{"voutNode", "out_node_o1"}, {"measFrom", kPshbSettlingPeriods * fT},
+                      {"measTo", (kPshbSettlingPeriods + 1) * fT}};
+    fx["deck"] = deck;
+    write_fixture(outPath, fx);
+    std::cout << "  pshb: n=" << (tr.empty()?0.0:tr[0]) << " Vout=" << r.voutMean
+              << " Iout=" << r.ioutMean << " eff=" << r.efficiency << "\n";
+}
+
 }  // namespace
 
+// Optional topology-name filter: `gen_mkf_reference <dir> [name1 name2 ...]` regenerates only the
+// named fixtures (so a single new topology doesn't require re-running the whole multi-minute suite).
 int main(int argc, char** argv) {
     std::string dir = argc > 1 ? argv[1] : ".";
+    std::vector<std::string> only(argv + std::min(argc, 2), argv + argc);  // names after <dir>
+    auto want = [&](const std::string& name) {
+        return only.empty() || std::find(only.begin(), only.end(), name) != only.end();
+    };
     try {
-        gen_boost(dir + "/boost.mkf.json");
-        gen_flyback(dir + "/flyback.mkf.json");
-        gen_buck(dir + "/buck.mkf.json");
-        gen_forward(dir + "/forward.mkf.json");
-        gen_tsf(dir + "/two_switch_forward.mkf.json");
-        gen_sepic(dir + "/sepic.mkf.json");
-        gen_cuk(dir + "/cuk.mkf.json");
-        gen_zeta(dir + "/zeta.mkf.json");
-        gen_push_pull(dir + "/push_pull.mkf.json");
-        gen_psfb(dir + "/psfb.mkf.json");
-        gen_ahb(dir + "/ahb.mkf.json");
-        gen_acf(dir + "/acf.mkf.json");
-        gen_fsbb(dir + "/fsbb.mkf.json");
+        if (want("boost"))              gen_boost(dir + "/boost.mkf.json");
+        if (want("flyback"))            gen_flyback(dir + "/flyback.mkf.json");
+        if (want("buck"))               gen_buck(dir + "/buck.mkf.json");
+        if (want("forward"))            gen_forward(dir + "/forward.mkf.json");
+        if (want("two_switch_forward")) gen_tsf(dir + "/two_switch_forward.mkf.json");
+        if (want("sepic"))              gen_sepic(dir + "/sepic.mkf.json");
+        if (want("cuk"))                gen_cuk(dir + "/cuk.mkf.json");
+        if (want("zeta"))               gen_zeta(dir + "/zeta.mkf.json");
+        if (want("push_pull"))          gen_push_pull(dir + "/push_pull.mkf.json");
+        if (want("psfb"))               gen_psfb(dir + "/psfb.mkf.json");
+        if (want("ahb"))                gen_ahb(dir + "/ahb.mkf.json");
+        if (want("acf"))                gen_acf(dir + "/acf.mkf.json");
+        if (want("fsbb"))               gen_fsbb(dir + "/fsbb.mkf.json");
+        if (want("pshb"))               gen_pshb(dir + "/pshb.mkf.json");
     } catch (const std::exception& e) {
         std::cerr << "MKF reference generation FAILED: " << e.what() << "\n";
         return 1;

@@ -31,6 +31,7 @@
 #include "Ahb.hpp"
 #include "Acf.hpp"
 #include "Fsbb.hpp"
+#include "Pshb.hpp"
 #include "Flyback.hpp"
 #include "TasAssembler.hpp"
 #include "Fidelity.hpp"
@@ -511,6 +512,32 @@ TEST_CASE("4SBB: Kirchhoff design+simulation matches MKF ideal reference", "[equ
     // decks are near-lossless (~0.98) — Kirchhoff's body-diode/snubber dead-time loss vs MKF's snubber
     // loss differ only marginally.
     check_close("efficiency", r.eff, sim.at("efficiency").get<double>(), kEffTol);
+}
+
+TEST_CASE("PSHB: Kirchhoff design+simulation matches MKF ideal reference", "[equivalence][pshb]") {
+    // Phase-shifted half-bridge, 3-level NPC: a single stacked leg (S1..S4 + 2 clamp diodes + split
+    // caps -> mid_cap = Vin/2) produces a 3-level (+Vin/2, 0, -Vin/2) phase-shift-modulated primary,
+    // a series Lr feeds the transformer, full-bridge secondary rectifier + Lout/Cout. Bus = Vin/2.
+    json fx = load_fixture("pshb");
+    const json& in = fx.at("inputs");
+    const json& sim = fx.at("sim");
+
+    double mkfVout = rerun_mkf_vout(fx, "pshb");
+    check_close("MKF deck reproducibility (Vout)", mkfVout, sim.at("voutMean").get<double>(), kReproTol);
+
+    json di = kirchhoff_inputs(in);
+    di["simStimulusFsw"] = json::array({in.at("switchingFrequency").get<double>()});
+    Kirchhoff::PshbDesign d = Kirchhoff::design_pshb(di);
+    json tas = Kirchhoff::build_pshb_tas(d);
+    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "pshb");
+
+    check_close("Vout", r.vout, sim.at("voutMean").get<double>(), kVoutTol);
+    check_close("Iout", r.iout, sim.at("ioutMean").get<double>(), kIoutTol);
+    // Efficiency directional (like PSFB): Kirchhoff ideal switches/diodes >= MKF's lossy rectifier.
+    const double mkfEff = sim.at("efficiency").get<double>();
+    INFO("pshb efficiency: Kirchhoff=" << r.eff << " vs MKF=" << mkfEff);
+    CHECK(r.eff >= mkfEff);
+    CHECK(r.eff <= 1.05);
 }
 
 }  // namespace

@@ -1,0 +1,34 @@
+{
+  "deck": "* Phase-Shifted Half Bridge (PSHB) — three-level Pinheiro-Barbi NPC\n* Vin=48V (primary swings +Vin/2 / 0 / -Vin/2 via 3-level NPC), Vo=12V, Fs=100kHz, Deff=0.7, outputs=1\n* n=1.21, Lr=0.750212uH, Lm=247.356uH, Lo=64.1176uH, rect=2\n* Bridge: single 3-level NPC leg (4 stacked S-switches + 2 NPC clamp diodes\n* + per-switch RC snubbers). Same modeling approach as DAB/PSFB (real S-switches\n* with PWM gates and DIDEAL antiparallel body diodes). DC1/DC2 anchor the inner\n* nodes to mid_cap (Vin/2) during the freewheel intervals when only one inner\n* switch conducts. Transformer primary connects between point 'a' (leg midpoint)\n* and 'b' (split-cap midpoint), so vab swings +Vin/2 / 0 / -Vin/2 / 0.\n* Reference: Pinheiro & Barbi, IEEE TPE 8(4) 1993; Barbi & Pottker, Springer 2018.\n\n.model DIDEAL D(IS=1e-12 RS=0.005 CJO=1n BV=1000 IBV=1e-12)\n.model SW1 SW VT=2.5 VH=0.8 RON=0.01 ROFF=1e+06\n\nVdc vin_dc 0 48\n\nC_split_hi vin_dc mid_cap 470u ic=24\nC_split_lo mid_cap 0 470u ic=24\n\nVpwm_S1 pwm_S1 0 PULSE(0 5 0.000000e+00 2.000000e-07 2.000000e-07 3.500000e-06 1.000000e-05)\nVpwm_S2 pwm_S2 0 PULSE(0 5 0.000000e+00 2.000000e-07 2.000000e-07 5.000000e-06 1.000000e-05)\nVpwm_S3 pwm_S3 0 PULSE(0 5 5.000000e-06 2.000000e-07 2.000000e-07 5.000000e-06 1.000000e-05)\nVpwm_S4 pwm_S4 0 PULSE(0 5 5.000000e-06 2.000000e-07 2.000000e-07 3.500000e-06 1.000000e-05)\nVq1_sense vin_dc qa_drain 0\nS1 qa_drain nH pwm_S1 0 SW1\nS2 nH bridge_a pwm_S2 0 SW1\nS3 bridge_a nL pwm_S3 0 SW1\nS4 nL 0 pwm_S4 0 SW1\nDC1 mid_cap nH DIDEAL\nDC2 nL mid_cap DIDEAL\n\nVpri_sense bridge_a pri_lr 0\nEvab vab 0 bridge_a mid_cap 1\n\nL_series pri_lr trafo_pri 7.502116e-07 IC=4.132231e-01\n\nL_pri trafo_pri mid_cap 2.473557e-04\nL_sec_o1 sec_a_o1 sec_b_o1 1.689473e-04\nK1 L_pri L_sec_o1 9.999000e-01\n\nEvpri_w vpri_w 0 trafo_pri mid_cap 1\nEvsec_w_o1 vsec_w_o1 0 sec_a_o1 sec_b_o1 1\n\nVsec1_sense_o1 sec_a_o1 rec_a_o1 0\nVsec2_sense_o1 sec_b_o1 rec_b_o1 0\nD_r1_o1 rec_a_o1 out_rect_o1 DIDEAL\nD_r2_o1 rec_b_o1 out_rect_o1 DIDEAL\nD_r3_o1 out_gnd_o1 rec_a_o1 DIDEAL\nD_r4_o1 out_gnd_o1 rec_b_o1 DIDEAL\nL_out_o1 out_rect_o1 out_node_o1 6.411765e-05 IC=2.000000e+00\nC_out_o1 out_node_o1 out_gnd_o1 1.000000e-04 IC=1.200000e+01\nR_load_o1 out_node_o1 out_gnd_o1 6.000000\nVout_sense_o1 out_gnd_o1 0 0\n\n.tran 5.000000e-08 2.401000e-02 2.400000e-02\n\n.save v(vin_dc) v(vab) v(bridge_a) v(mid_cap) v(nH) v(nL) v(vpri_w) i(Vpri_sense) i(Vdc) i(Vq1_sense) v(out_node_o1) v(vsec_w_o1) i(Vsec1_sense_o1) i(Vsec2_sense_o1) i(Vout_sense_o1)\n\n.options RELTOL=1.000000e-02 ABSTOL=1.000000e-07 VNTOL=1.000000e-04 ITL1=500 ITL4=500\n.options METHOD=GEAR TRTOL=7.000000e+00\n.ic v(mid_cap)=2.400000e+01 v(out_node_o1)=1.200000e+01\n.nodeset v(rec_a_o1)=1.270000e+01 v(rec_b_o1)=1.270000e+01 v(out_rect_o1)=1.200000e+01 v(sec_a_o1)=1.270000e+01 v(sec_b_o1)=1.270000e+01\n\n.end\n",
+  "design": {
+    "loadResistance": 6.0,
+    "magnetizingInductance": 0.0002473557,
+    "turnsRatios": [
+      1.21
+    ]
+  },
+  "inputs": {
+    "currentRippleRatio": 0.3,
+    "inputVoltage": 48.0,
+    "outputCurrent": 2.0,
+    "outputPower": 24.0,
+    "outputVoltage": 12.0,
+    "switchingFrequency": 100000.0
+  },
+  "probes": {
+    "measFrom": 0.024,
+    "measTo": 0.024010000000000004,
+    "voutNode": "out_node_o1"
+  },
+  "sim": {
+    "efficiency": 0.7918598562301632,
+    "iinMean": 0.6828642517997469,
+    "ioutMean": 2.0798707394075637,
+    "pin": 32.7774840863879,
+    "pout": 25.955173836233584,
+    "vinMean": 48.0,
+    "voutMean": 12.479224436445374,
+    "voutRipplePkPk": 0.0019629559412468467
+  },
+  "topology": "pshb"
+}

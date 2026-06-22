@@ -75,7 +75,7 @@ To make Kirchhoff match MKF, Kirchhoff's **ideal device models are pinned to MKF
 transformer `K=0.9999`) and each topology's design math is a faithful port of MKF's
 `process_design_requirements()`.
 
-**13 topologies** are MKF-equivalence-verified: flyback, boost, buck, forward, two-switch-forward,
+**14 topologies** are MKF-equivalence-verified: flyback, boost, buck, forward, two-switch-forward,
 SEPIC, Cuk, Zeta, push-pull, **phase-shifted full bridge (PSFB)** (first phase-shift-modulated bridge —
 4 switches, leg-to-leg phase, series resonant Lr, full-bridge rectifier), **asymmetric half-bridge
 (AHB)** (2-switch complementary-duty isolated bridge with a DC-blocking cap; gain 2·D·(1−D)·Vin/n), and

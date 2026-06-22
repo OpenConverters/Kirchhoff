@@ -23,7 +23,7 @@ add_subdirectory("${PSMA_ROOT}/SAS"      "${CMAKE_BINARY_DIR}/SAS")
 add_subdirectory("${PSMA_ROOT}/MAS/kirchhoff" "${CMAKE_BINARY_DIR}/MAS")
 add_subdirectory("${PSMA_ROOT}/CIAS"     "${CMAKE_BINARY_DIR}/CIAS")
 
-add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/TasAssembler.cpp)
+add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/TasAssembler.cpp)
 target_include_directories(kirchhoff PUBLIC
     src
     "${PSMA_ROOT}/PEAS/src"
@@ -51,6 +51,9 @@ target_link_libraries(acf_demo PRIVATE kirchhoff)
 
 add_executable(fsbb_demo examples/fsbb_demo.cpp)
 target_link_libraries(fsbb_demo PRIVATE kirchhoff)
+
+add_executable(pshb_demo examples/pshb_demo.cpp)
+target_link_libraries(pshb_demo PRIVATE kirchhoff)
 
 # Catch2 (house test framework) — shared by all Kirchhoff C++ tests.
 include(FetchContent)
