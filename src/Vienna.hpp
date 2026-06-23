@@ -7,11 +7,14 @@
 // bus is split symmetric ±Vdc/2 about ground. Switch ON clamps X to M and charges the inductor; OFF
 // lets the inductor current flow to the rail it is heading for → three voltage levels (+bus, M, −bus).
 //
-// Status: the POWER topology + 3-phase source assemble and simulate (open-loop fixed-duty switching
-// boosts the split bus). The full closed-loop Vienna control — polarity-dependent per-phase current
-// shaping (the gating polarity flips with the sign of the phase voltage) plus midpoint balancing — is a
-// substantial refinement and is NOT yet implemented (it needs a difference/summer block in CIAS on top
-// of the multiplier/integrator/comparator already there). See [[kirchhoff-ac-topologies]].
+// Control: CLOSED-LOOP, per-phase current shaping (the proper Vienna PFC). Each phase has a current
+// reference ∝ its phase voltage; the bidirectional switch is gated so the inductor current tracks it →
+// the input currents follow the three phase voltages → near-unity 3-phase power factor. The Vienna
+// subtlety is that the gating POLARITY flips with the sign of the phase voltage; this is handled by
+// gating on V(phase)·(iref − iL) > 0 (same sign as sign(v)·error). Expressed in CIAS (summer +
+// multiplier + comparator analog blocks) as a swappable control stage. Midpoint balancing is left to the
+// natural symmetry of the balanced 3-phase load (active balancing is a further refinement).
+// See [[kirchhoff-ac-topologies]].
 
 #include <nlohmann/json.hpp>
 #include "Fidelity.hpp"
@@ -25,10 +28,12 @@ struct ViennaDesign {
     double outputPower;
     double switchingFrequency;
     double efficiency;
-    double switchDuty;          // open-loop boost duty (per switch)
     double boostInductance;     // per-phase L
     double busCapacitance;      // each half of the split bus
     double loadResistance;      // across the full bus
+    double senseResistance;     // Rsense in series with each phase inductor
+    double referenceGain;       // kref: i_ref voltage = kref·V(phase); emulates R = Rsense/kref
+    double currentHysteresis;   // hysteresis on the gating signal V(phase)·(iref − iL·Rsense)
 };
 
 /** Design a three-phase Vienna rectifier (open-loop boost; see header on control status). */

@@ -15,8 +15,8 @@ double nominal(const json& j) {
         return 0.5 * (j.at("minimum").get<double>() + j.at("maximum").get<double>());
     throw std::runtime_error("vienna design: no nominal");
 }
-constexpr double kSwitchDuty      = 0.5;
 constexpr double kBusCapacitance  = 470e-6;
+constexpr double kSenseResistance = 0.1;
 } // namespace
 
 ViennaDesign design_vienna(const json& tasInputs) {
@@ -32,12 +32,17 @@ ViennaDesign design_vienna(const json& tasInputs) {
     else
         d.outputPower = nominal(dr.at("outputs").at(0).at("power"));
 
-    d.switchDuty = kSwitchDuty;
-    // Per-phase boost inductor: ~20 % ripple at the line peak, at the target switching frequency.
+    const double pin   = d.outputPower / std::max(d.efficiency, 1e-6);
     const double vpeak = d.inputVoltageRms * std::sqrt(2.0);
-    const double iPeak = (2.0 / 3.0) * d.outputPower / vpeak;   // per-phase peak (3φ, unity PF)
-    const double dIL = 0.2 * std::max(iPeak, 1e-3);
+    const double iPeak = pin * std::sqrt(2.0) / (3.0 * d.inputVoltageRms);  // per-phase peak (3φ, unity PF)
+    const double dIL   = 0.3 * std::max(iPeak, 1e-3);
+    d.senseResistance = kSenseResistance;
+    // i_ref voltage = kref·V(phase) must equal iL·Rsense for iL = V(phase)/rEmul; per phase Pin/3 into
+    // rEmul = (Vrms²)/(Pin/3): kref = Rsense·Pin/(3·Vrms²).
+    d.referenceGain = d.senseResistance * pin / (3.0 * d.inputVoltageRms * d.inputVoltageRms);
     d.boostInductance = (d.outputVoltage * 0.5) / (4.0 * d.switchingFrequency * dIL);
+    // Hysteresis on m = V(phase)·(iref − iL·Rsense): a ±dIL/2 band at the line peak (m-band ∝ |v|).
+    d.currentHysteresis = 0.5 * dIL * d.senseResistance * vpeak;
     d.busCapacitance = kBusCapacitance;
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
     return d;
@@ -50,7 +55,7 @@ json build_vienna_tas(const ViennaDesign& d) {
     auto conn = [](const std::string& name, std::vector<json> eps) { json c; c["name"]=name; c["endpoints"]=eps; return c; };
     auto comp = [](const std::string& name, json data) { json c; c["name"]=name; c["data"]=data; return c; };
     auto bind = [](const char* p, const char* t) { json b; b["port"]=p; b["type"]=t; return b; };
-    auto sp = [](const char* st, const char* po) { json e; e["stage"]=st; e["port"]=po; return e; };
+    auto sp = [](const std::string& st, const std::string& po) { json e; e["stage"]=st; e["port"]=po; return e; };
     auto isc = [](const std::string& name, const char* kind, const char* dir, std::vector<json> eps) {
         json c; c["name"]=name; c["kind"]=kind; if (dir[0]) c["direction"]=dir; c["endpoints"]=eps; return c; };
     auto mosfet = []() { json j; j["semiconductor"]["mosfet"] = json::object(); return j; };
@@ -79,28 +84,62 @@ json build_vienna_tas(const ViennaDesign& d) {
     conns.push_back(conn("rload_p", {pin("Rload","1"), prt("busP")}));
     conns.push_back(conn("rload_n", {pin("Rload","2"), prt("busN")}));
 
-    // Per-phase Vienna leg: phase -> L -> X ; D+ (X->busP), D- (busN->X) ; bidirectional switch X<->gnd.
+    // Per-phase Vienna leg: phase -> Rsense -> nL -> L -> X ; D+ (X->busP), D- (busN->X) ; bidirectional
+    // switch X<->gnd. V(phase)-V(nL) = iL·Rsense is the inductor-current sense.
     const char* ph[3] = {"a", "b", "c"};
-    std::vector<std::string> gateNames;
     for (int i = 0; i < 3; ++i) {
         const std::string p = ph[i];
-        const std::string L="L"+p, SW="SW"+p, DP="Dp"+p, DN="Dn"+p, X="x"+p, G="g"+p;
+        const std::string RS="Rs"+p, L="L"+p, SW="SW"+p, DP="Dp"+p, DN="Dn"+p, X="x"+p, G="g"+p, NL="nl"+p;
+        comps.push_back(comp(RS, resBrick(d.senseResistance)));
         comps.push_back(comp(L, indBrick(d.boostInductance)));
         comps.push_back(comp(SW, mosfet()));
         comps.push_back(comp(DP, diode()));
         comps.push_back(comp(DN, diode()));
-        conns.push_back(conn("phin_"+p, {pin(L,"primary_start"), prt(p)}));        // phase source -> L
+        conns.push_back(conn("phin_"+p, {pin(RS,"1"), prt(p)}));                   // phase source -> Rsense
+        conns.push_back(conn(NL, {pin(RS,"2"), pin(L,"primary_start"), prt(NL)})); // sense node -> L
         conns.push_back(conn(X, {pin(L,"primary_end"), pin(SW,"drain"),
                                  pin(DP,"anode"), pin(DN,"cathode")}));            // node X
         conns.push_back(conn("swret_"+p, {pin(SW,"source"), prt("gnd")}));         // switch -> midpoint
         conns.push_back(conn("dp_"+p, {pin(DP,"cathode"), prt("busP")}));          // X -> +bus
         conns.push_back(conn("dn_"+p, {pin(DN,"anode"), prt("busN")}));            // -bus -> X
         conns.push_back(conn(G+"_net", {pin(SW,"gate"), prt(G)}));
-        gateNames.push_back(G);
     }
-    // expose the three gate ports
+    ports.push_back(port("nla")); ports.push_back(port("nlb")); ports.push_back(port("nlc"));
     ports.push_back(port("ga")); ports.push_back(port("gb")); ports.push_back(port("gc"));
     pcell["ports"] = ports; pcell["components"] = comps; pcell["connections"] = conns;
+
+    // ──────────── CONTROL stage (swappable): per-phase current shaping ────────────
+    // For each phase, gate the switch on V(phase)·(iref − iL·Rsense) > 0 — same sign as
+    // sign(v)·error, which handles the Vienna polarity flip. The current error folds into ONE weighted
+    // difference: err = V(nL) − (1−kref)·V(phase) = iref − iL·Rsense (a summer); multiply by V(phase)
+    // (a multiplier); a hysteretic comparator gates the switch. Holds iL ≈ V(phase)/rEmul → unity PF.
+    auto comparator = [&](double hyst) { json j; json& e = j["analog"]["comparator"]["behavioral"];
+        e["outputHigh"] = 5.0; e["outputLow"] = 0.0; e["threshold"] = 0.0; e["hysteresis"] = hyst; return j; };
+    auto multiplier = [&]() { json j; j["analog"]["multiplier"]["behavioral"]["gain"] = 1.0; return j; };
+    auto summer = [&](double gA, double gB) { json j; json& e = j["analog"]["summer"]["behavioral"];
+        e["gainA"] = gA; e["gainB"] = gB; return j; };
+    const double oneMinusKref = 1.0 - d.referenceGain;
+    json ccell; ccell["name"] = "vienna-current-control";
+    json cports = json::array({port("gnd")});
+    json ccomps = json::array();
+    json cconns = json::array();
+    json gndEps = json::array({prt("gnd")});
+    for (int i = 0; i < 3; ++i) {
+        const std::string p = ph[i];
+        const std::string SUM="Sum"+p, MUL="Mul"+p, CMP="Cmp"+p, NL="nl"+p, ERR="err"+p, M="m"+p, G="g"+p;
+        ccomps.push_back(comp(SUM, summer(1.0, -oneMinusKref)));   // err = V(nL) − (1−kref)·V(phase)
+        ccomps.push_back(comp(MUL, multiplier()));                 // m = V(phase)·err
+        ccomps.push_back(comp(CMP, comparator(d.currentHysteresis)));
+        cports.push_back(port(p)); cports.push_back(port(NL)); cports.push_back(port(G));
+        cconns.push_back(conn(p,   {pin(SUM,"inB"), pin(MUL,"inA"), prt(p)}));      // V(phase)
+        cconns.push_back(conn(NL,  {pin(SUM,"inA"), prt(NL)}));                     // V(nL)
+        cconns.push_back(conn(ERR, {pin(SUM,"out"), pin(MUL,"inB")}));
+        cconns.push_back(conn(M,   {pin(MUL,"out"), pin(CMP,"inPlus")}));
+        cconns.push_back(conn(G,   {pin(CMP,"out"), prt(G)}));
+        gndEps.push_back(pin(CMP,"inMinus"));
+    }
+    cconns.push_back(json{{"name","gnd"},{"endpoints",gndEps}});
+    ccell["ports"] = cports; ccell["components"] = ccomps; ccell["connections"] = cconns;
 
     json tas;
     json& dreq = tas["inputs"]["designRequirements"];
@@ -115,30 +154,30 @@ json build_vienna_tas(const ViennaDesign& d) {
       json o; o["name"]="out"; o["power"]=d.outputPower; op["outputs"]=json::array({o});
       tas["inputs"]["operatingPoints"]=json::array({op}); }
 
-    tas["topology"]["stages"] = json::array({ [&]{ json s; s["name"]="viennaPower"; s["role"]="switchingCell";
-        s["circuit"]=pcell; s["inputPort"]=bind("a","acInput"); s["outputPort"]=bind("busP","dcOutput"); return s; }() });
-    // a/b/c are the three input phases; gnd is the source neutral = split-bus midpoint.
-    tas["topology"]["interStageConnections"] = json::array({
-        isc("PhaseA","externalPort","input",{sp("viennaPower","a")}),
-        isc("PhaseB","externalPort","input",{sp("viennaPower","b")}),
-        isc("PhaseC","externalPort","input",{sp("viennaPower","c")}),
-        isc("GND","externalPort","input",{sp("viennaPower","gnd")}),
-        // expose the split-bus rails as named nodes (no auto-load; the load is in the cell)
+    auto pstage = [&](const char* name, const char* role, json brick, json inb, json outb) {
+        json s; s["name"]=name; s["role"]=role; s["circuit"]=brick; s["inputPort"]=inb; s["outputPort"]=outb; return s; };
+    tas["topology"]["stages"] = json::array({
+        pstage("viennaPower", "switchingCell", pcell, bind("a","acInput"), bind("busP","dcOutput")),
+        pstage("viennaControl", "control", ccell, bind("a","sense"), bind("ga","drive"))});
+    // a/b/c are the three input phases (also tapped by the control); gnd = source neutral = midpoint.
+    json interStage = json::array({
+        isc("PhaseA","externalPort","input",{sp("viennaPower","a"), sp("viennaControl","a")}),
+        isc("PhaseB","externalPort","input",{sp("viennaPower","b"), sp("viennaControl","b")}),
+        isc("PhaseC","externalPort","input",{sp("viennaPower","c"), sp("viennaControl","c")}),
+        isc("GND","externalPort","input",{sp("viennaPower","gnd"), sp("viennaControl","gnd")}),
         isc("busP","wire","",{sp("viennaPower","busP")}),
         isc("busN","wire","",{sp("viennaPower","busN")})});
+    for (int i = 0; i < 3; ++i) {
+        const std::string p = ph[i];
+        interStage.push_back(isc("nl"+p,"wire","",{sp("viennaPower","nl"+p), sp("viennaControl","nl"+p)}));
+        interStage.push_back(isc("drive"+p,"wire","",{sp("viennaControl","g"+p), sp("viennaPower","g"+p)}));
+    }
+    tas["topology"]["interStageConnections"] = interStage;
 
     json an; an["type"]="transient"; an["stopTime"]=0.04; an["maximumTimeStep"]=5e-7;
     tas["simulation"]["analyses"] = json::array({an});
-    // Open-loop: PWM the three switches at the target frequency (current shaping / regulation is the
-    // documented refinement). Precharge each half-bus to ±Vdc/2 about the grounded midpoint.
-    json stim = json::array();
-    for (int i = 0; i < 3; ++i) {
-        json st; st["stage"]="viennaPower"; st["component"]=std::string("SW")+ph[i]; st["signal"]="gate";
-        st["waveform"]["type"]="pwm"; st["waveform"]["frequency"]=d.switchingFrequency;
-        st["waveform"]["dutyCycle"]=d.switchDuty; st["waveform"]["phaseDeg"]=0.0;
-        stim.push_back(st);
-    }
-    tas["simulation"]["stimulus"] = stim;
+    // Closed loop — the control stage drives the switches (no open-loop stimulus). Precharge each
+    // half-bus to ±Vdc/2 about the grounded midpoint.
     json ics = json::array();
     { json ic; ic["node"]="busP"; ic["voltage"]= 0.5*d.outputVoltage; ics.push_back(ic); }
     { json ic; ic["node"]="busN"; ic["voltage"]=-0.5*d.outputVoltage; ics.push_back(ic); }
