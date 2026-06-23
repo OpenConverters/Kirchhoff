@@ -118,26 +118,45 @@ json build_vienna_tas(const ViennaDesign& d) {
     auto multiplier = [&]() { json j; j["analog"]["multiplier"]["behavioral"]["gain"] = 1.0; return j; };
     auto summer = [&](double gA, double gB) { json j; json& e = j["analog"]["summer"]["behavioral"];
         e["gainA"] = gA; e["gainB"] = gB; return j; };
+    auto integrator = [&](double gain, double init, double ref, double lo, double hi) {
+        json j; json& e = j["analog"]["integrator"]["behavioral"];
+        e["gain"]=gain; e["initial"]=init; e["reference"]=ref; e["outputLow"]=lo; e["outputHigh"]=hi; return j; };
     const double oneMinusKref = 1.0 - d.referenceGain;
-    json ccell; ccell["name"] = "vienna-current-control";
-    json cports = json::array({port("gnd")});
+    json ccell; ccell["name"] = "vienna-control";
+    json cports = json::array({port("gnd"), port("busP"), port("busN")});
     json ccomps = json::array();
     json cconns = json::array();
     json gndEps = json::array({prt("gnd")});
+    // ACTIVE midpoint/rail balancing: bal = ∫(−kbal·(busP+busN)) is added to EVERY phase current
+    // reference (a common, zero-sequence term). When the top rail sags (busP+busN<0), bal rises -> the
+    // positive half of each phase draws more (charging C+) and the negative half less (sparing C−),
+    // restoring busP ≈ −busN under an unbalanced half-load. (The grounded neutral fixes the midpoint
+    // node; this balances the two RAIL voltages.)
+    ccomps.push_back(comp("Simb", summer(1.0, 1.0)));                          // imb = busP + busN
+    ccomps.push_back(comp("Ibal", integrator(-2.0, 0.0, 0.0, -0.05, 0.05)));   // bal
+    cconns.push_back(conn("busP", {pin("Simb","inA"), prt("busP")}));
+    cconns.push_back(conn("busN", {pin("Simb","inB"), prt("busN")}));
+    cconns.push_back(conn("imb",  {pin("Simb","out"), pin("Ibal","in")}));
+    json balEps = json::array({pin("Ibal","out")});
     for (int i = 0; i < 3; ++i) {
         const std::string p = ph[i];
-        const std::string SUM="Sum"+p, MUL="Mul"+p, CMP="Cmp"+p, NL="nl"+p, ERR="err"+p, M="m"+p, G="g"+p;
+        const std::string SUM="Sum"+p, ADD="Add"+p, MUL="Mul"+p, CMP="Cmp"+p,
+                          NL="nl"+p, ERR="err"+p, ERP="errp"+p, M="m"+p, G="g"+p;
         ccomps.push_back(comp(SUM, summer(1.0, -oneMinusKref)));   // err = V(nL) − (1−kref)·V(phase)
-        ccomps.push_back(comp(MUL, multiplier()));                 // m = V(phase)·err
+        ccomps.push_back(comp(ADD, summer(1.0, 1.0)));             // err' = err + bal  (balancing)
+        ccomps.push_back(comp(MUL, multiplier()));                 // m = V(phase)·err'
         ccomps.push_back(comp(CMP, comparator(d.currentHysteresis)));
         cports.push_back(port(p)); cports.push_back(port(NL)); cports.push_back(port(G));
         cconns.push_back(conn(p,   {pin(SUM,"inB"), pin(MUL,"inA"), prt(p)}));      // V(phase)
         cconns.push_back(conn(NL,  {pin(SUM,"inA"), prt(NL)}));                     // V(nL)
-        cconns.push_back(conn(ERR, {pin(SUM,"out"), pin(MUL,"inB")}));
+        cconns.push_back(conn(ERR, {pin(SUM,"out"), pin(ADD,"inA")}));
+        cconns.push_back(conn(ERP, {pin(ADD,"out"), pin(MUL,"inB")}));
         cconns.push_back(conn(M,   {pin(MUL,"out"), pin(CMP,"inPlus")}));
         cconns.push_back(conn(G,   {pin(CMP,"out"), prt(G)}));
         gndEps.push_back(pin(CMP,"inMinus"));
+        balEps.push_back(pin(ADD,"inB"));
     }
+    cconns.push_back(json{{"name","bal"},{"endpoints",balEps}});
     cconns.push_back(json{{"name","gnd"},{"endpoints",gndEps}});
     ccell["ports"] = cports; ccell["components"] = ccomps; ccell["connections"] = cconns;
 
@@ -165,8 +184,8 @@ json build_vienna_tas(const ViennaDesign& d) {
         isc("PhaseB","externalPort","input",{sp("viennaPower","b"), sp("viennaControl","b")}),
         isc("PhaseC","externalPort","input",{sp("viennaPower","c"), sp("viennaControl","c")}),
         isc("GND","externalPort","input",{sp("viennaPower","gnd"), sp("viennaControl","gnd")}),
-        isc("busP","wire","",{sp("viennaPower","busP")}),
-        isc("busN","wire","",{sp("viennaPower","busN")})});
+        isc("busP","wire","",{sp("viennaPower","busP"), sp("viennaControl","busP")}),
+        isc("busN","wire","",{sp("viennaPower","busN"), sp("viennaControl","busN")})});
     for (int i = 0; i < 3; ++i) {
         const std::string p = ph[i];
         interStage.push_back(isc("nl"+p,"wire","",{sp("viennaPower","nl"+p), sp("viennaControl","nl"+p)}));

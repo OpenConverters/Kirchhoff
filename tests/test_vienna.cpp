@@ -7,12 +7,15 @@
 // handles the Vienna polarity flip (the gating polarity follows the sign of the phase voltage), so each
 // phase current tracks its phase voltage → near-unity 3-phase power factor.
 //
+// An ACTIVE balancing loop (an integrator on busP+busN injecting a common term into the phase
+// references) keeps the two rail voltages equal under unbalanced half-loads.
+//
 // We assert: (1) genuinely 3-phase AC + closed-loop (three SIN sources, a control stage, no DC source,
 // no PWM stimulus); (2) a BOOSTED (above the line-to-line peak), BALANCED (busP ≈ −busN) split DC bus at
-// NEAR-UNITY 3-phase power factor.
+// NEAR-UNITY 3-phase power factor; (3) ACTIVE balancing — under an asymmetric (top-rail-only) load the
+// balancing loop holds busP ≈ −busN far tighter than with the loop disabled.
 //
-// Midpoint balancing relies on the natural symmetry of the balanced 3-phase load (active balancing is a
-// further refinement). Runs at 400 Hz mains (fast); the mechanism is identical at 50 Hz. No MKF ref.
+// Runs at 400 Hz mains (fast); the mechanism is identical at 50 Hz. No MKF ref.
 //
 // Run directly:  ./build/test_vienna
 #include "Vienna.hpp"
@@ -81,6 +84,7 @@ TEST_CASE("three-phase Vienna rectifier: closed-loop -> boosted balanced bus at 
     REQUIRE(deck.find("Vstim") == std::string::npos);
 
     // (2) run to ~steady state (bus precharged) and measure over one 400 Hz line cycle.
+    const std::string base = deck;   // unmodified deck, reused by the balancing checks below
     const double tstop = 10e-3, tstep = 5e-7, t0 = 7.5e-3, t1 = 10e-3;
     deck = std::regex_replace(deck, std::regex(R"(\.tran\s+\S+\s+\S+\s+\S+\s+\S+)"),
                               ".tran " + fmt(tstep) + " " + fmt(tstop) + " 0 " + fmt(tstep));
@@ -120,4 +124,32 @@ TEST_CASE("three-phase Vienna rectifier: closed-loop -> boosted balanced bus at 
     CHECK(pin > 400.0);
     CHECK(pf > 0.95);
     CHECK(pf <= 1.02);
+
+    // (3) ACTIVE balancing — add an asymmetric (top-rail-only) load and compare the rail imbalance
+    // |busP+busN| WITH the balancing loop vs WITH it disabled (bal forced to 0). The loop should hold
+    // the rails markedly tighter.
+    auto rail_imbalance = [&](bool balancingOn) {
+        std::string dk = base;
+        dk = std::regex_replace(dk, std::regex(R"(\.tran\s+\S+\s+\S+\s+\S+\s+\S+)"),
+                                ".tran " + fmt(tstep) + " 12e-3 0 " + fmt(tstep));
+        auto cp = dk.rfind("\n.control");
+        if (cp != std::string::npos) dk = dk.substr(0, cp);
+        dk += "\nRasym busP 0 600\n";                                  // top-rail-only load
+        if (!balancingOn)                                              // force the balancing term to 0
+            dk = std::regex_replace(dk, std::regex(R"(BIbal bal 0 V=[^\n]*)"), "BIbal bal 0 V=0");
+        dk += "\n.control\nrun\n"
+              "meas tran bp AVG v(busP) from=9.5e-3 to=12e-3\n"
+              "meas tran bn AVG v(busN) from=9.5e-3 to=12e-3\n"
+              "print bp bn\n.endc\n.end\n";
+        std::string o = run_ngspice(dk);
+        double bp=0, bn=0;
+        REQUIRE(meas(o, "bp", bp));
+        REQUIRE(meas(o, "bn", bn));
+        return std::abs(bp + bn);
+    };
+    const double imbOn  = rail_imbalance(true);
+    const double imbOff = rail_imbalance(false);
+    INFO("rail imbalance |busP+busN|: balancing ON=" << imbOn << " V, OFF=" << imbOff << " V");
+    CHECK(imbOn < 3.0);             // tightly balanced with the loop
+    CHECK(imbOn < 0.5 * imbOff);    // and markedly tighter than with the loop disabled
 }
