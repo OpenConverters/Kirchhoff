@@ -20,6 +20,8 @@ endforeach()
 add_subdirectory("${PSMA_ROOT}/RAS"      "${CMAKE_BINARY_DIR}/RAS")
 add_subdirectory("${PSMA_ROOT}/CAS"      "${CMAKE_BINARY_DIR}/CAS")
 add_subdirectory("${PSMA_ROOT}/SAS"      "${CMAKE_BINARY_DIR}/SAS")
+add_subdirectory("${PSMA_ROOT}/AAS"      "${CMAKE_BINARY_DIR}/AAS")
+add_subdirectory("${PSMA_ROOT}/CTAS"     "${CMAKE_BINARY_DIR}/CTAS")
 add_subdirectory("${PSMA_ROOT}/MAS/kirchhoff" "${CMAKE_BINARY_DIR}/MAS")
 add_subdirectory("${PSMA_ROOT}/CIAS"     "${CMAKE_BINARY_DIR}/CIAS")
 
@@ -28,8 +30,9 @@ target_include_directories(kirchhoff PUBLIC
     src
     "${PSMA_ROOT}/PEAS/src"
     "${PSMA_ROOT}/RAS/src" "${PSMA_ROOT}/CAS/src" "${PSMA_ROOT}/SAS/src"
+    "${PSMA_ROOT}/AAS/src" "${PSMA_ROOT}/CTAS/src"
     "${PSMA_ROOT}/MAS/src" "${PSMA_ROOT}/CIAS/src")
-target_link_libraries(kirchhoff PUBLIC RAS CAS SAS MAS_kirchhoff CIAS nlohmann_json::nlohmann_json)
+target_link_libraries(kirchhoff PUBLIC RAS CAS SAS AAS CTAS MAS_kirchhoff CIAS nlohmann_json::nlohmann_json)
 
 add_executable(flyback_demo examples/flyback_demo.cpp)
 target_link_libraries(flyback_demo PRIVATE kirchhoff)

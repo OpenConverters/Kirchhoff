@@ -5,11 +5,14 @@
 //   AAS comparator (CIAS analog atom) --> CIAS->ngspice behavioural source -->
 //   a separate, swappable TAS "control" stage --> drives the SR switches of the power stage.
 //
-// The demonstrator is CLLLC with a diode-emulating synchronous rectifier: four comparators sense each
-// SR switch's drain-source and gate it like its body diode. We assert (1) the converter settles to a
-// stable, sensible output (symmetric CLLLC at resonance ~ unity-gain DC transformer), and (2) the SR
-// gates are ACTIVELY switching (the comparators are doing real work, not idle) — which is the actual
-// thing under test: control/analog living in CIAS and driving the power stage from a control stage.
+// The demonstrator is CLLLC with a CURRENT-SENSED synchronous rectifier: a CTAS controller lowers to
+// two comparators that read the secondary tank-current sign (across an in-line sense resistor) and gate
+// the two rectifying diagonals — the approach real resonant-converter SR controllers use, and which has
+// no Vds self-feedback so it does not mis-commutate. We assert (1) the converter settles to a stable,
+// sensible output (symmetric CLLLC at resonance ~ unity-gain DC transformer, FHA M(fn=1)=1 -> ~400 V),
+// and (2) the SR gates are ACTIVELY switching (the comparators are doing real work, not idle) — the
+// actual thing under test: control/analog living in CIAS and driving the power stage from a control
+// stage. We deliberately diverge from MKF's solver-timed-SR 187 V (an artifact); 399 V is correct.
 //
 // Run directly:  ./build/test_control_stage
 
@@ -84,7 +87,7 @@ TEST_CASE("CLLLC closed-loop SR: control stage expressed in CIAS drives the rect
     // The deck carries .ic + uic for the resonant start.
     PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
     std::string deck = Kirchhoff::tas_to_ngspice(tas, ideal);
-    REQUIRE(deck.find("BSR_CmpE") != std::string::npos); // a controller -> comparator source got emitted
+    REQUIRE(deck.find("SSR_CmpA") != std::string::npos); // controller -> comparator (controlled switch)
     REQUIRE(deck.find(" uic") != std::string::npos);     // initial-condition transient
 
     // Run to steady state (the 100µF LV bus + resonant loop; output precharged so it settles quickly).
@@ -96,8 +99,8 @@ TEST_CASE("CLLLC closed-loop SR: control stage expressed in CIAS drives the rect
     if (cpos != std::string::npos) deck = deck.substr(0, cpos);
     deck += "\n.control\nrun\n"
             "meas tran vo AVG v(Vout) from=" + fmt(tstop - period) + " to=" + fmt(tstop) + "\n"
-            "meas tran ge_avg AVG v(driveE) from=" + fmt(tstop - period) + " to=" + fmt(tstop) + "\n"
-            "meas tran ge_hi MAX v(driveE) from=" + fmt(tstop - 2*period) + " to=" + fmt(tstop) + "\n"
+            "meas tran ge_avg AVG v(driveA) from=" + fmt(tstop - period) + " to=" + fmt(tstop) + "\n"
+            "meas tran ge_hi MAX v(driveA) from=" + fmt(tstop - 2*period) + " to=" + fmt(tstop) + "\n"
             "print vo ge_avg ge_hi\n.endc\n.end\n";
 
     std::string out = run_ngspice(deck, "clllc");

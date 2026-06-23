@@ -2,6 +2,8 @@
 #include "RasConverter.hpp"
 #include "CasConverter.hpp"
 #include "SasConverter.hpp"
+#include "AasConverter.hpp"
+#include "CtasConverter.hpp"
 #include "MasConverter.hpp"
 #include "CiasConverter.hpp"
 #include "CiasCircuitConverter.hpp"
@@ -27,67 +29,15 @@ bool contains_ci(const std::string& s, const std::string& sub) {
     return a.find(b) != std::string::npos;
 }
 
-// Minimal AAS comparator -> CIAS leaf. Lives here for now; belongs in an AAS converter lib
-// (aas_to_cias) once one exists, exactly like ras_to_cias / sas_to_cias. The leaf is one comparator
-// atom with its three pins (inPlus/inMinus/out) exposed as ports; the CIAS->ngspice converter realises
-// the atom as a behavioural comparator. Ideal by construction (output rails + optional hysteresis),
-// passed through verbatim — there is no "real part" resolution step for a behavioural block.
-json aas_comparator_leaf(const json& data) {
-    json atom; atom["analog"]["comparator"] = data.at("analog").at("comparator");
-    json leaf;
-    leaf["name"] = "cmp";
-    leaf["ports"] = json::array({json{{"name","inPlus"}}, json{{"name","inMinus"}}, json{{"name","out"}}});
-    leaf["components"] = json::array({json{{"name","C"}, {"data", atom}}});
-    auto pp = [](const char* port, const char* pin) {
-        return json{{"name", port}, {"endpoints", json::array({
-            json{{"component","C"},{"pin",pin}}, json{{"port",port}} })}}; };
-    leaf["connections"] = json::array({pp("inPlus","inPlus"), pp("inMinus","inMinus"), pp("out","out")});
-    return leaf;
-}
-
-// Minimal CTAS controller -> CIAS leaf. The PEAS `controller` discriminator (CTAS), whose schema
-// literally lists "sync-rectifier", is the "controller as one part" route: a single component the
-// topology places, lowered here to a sub-network of AAS comparators. This is a full-bridge
-// synchronous-rectifier controller — four comparators, one per SR switch, each doing diode emulation
-// (sense that switch's drain-source, gate it while forward). Logical 8-pin interface: nodeC/nodeD (the
-// two SR bridge midpoints), vSense/gSense (the output rails), and gE/gF/gG/gH (the four SR gates). The
-// two midpoint senses each fan out to two comparators (supported by the multi-pin port mapping above).
-// Belongs in a CTAS converter lib (ctas_to_cias) eventually; inline here like aas_comparator_leaf.
-json ctas_sync_rectifier_leaf(const json& data) {
-    const json& ctrl = data.at("controller");
-    double hyst = 1e-3;
-    if (ctrl.contains("electrical") && ctrl.at("electrical").is_object()
-        && ctrl.at("electrical").contains("hysteresis"))
-        hyst = ctrl.at("electrical").at("hysteresis").get<double>();
-    auto cmp = [&]() { json j; j["analog"]["comparator"]["electrical"]["hysteresis"] = hyst; return j; };
-    auto C  = [](const char* nm, const char* pin) { return json{{"component",nm},{"pin",pin}}; };
-    auto P  = [](const char* nm) { return json{{"port",nm}}; };
-    auto cn = [](const char* nm, std::vector<json> eps) { return json{{"name",nm},{"endpoints",eps}}; };
-    json leaf;
-    leaf["name"] = "syncrect";
-    leaf["ports"] = json::array({json{{"name","nodeC"}}, json{{"name","nodeD"}},
-                                 json{{"name","vSense"}}, json{{"name","gSense"}},
-                                 json{{"name","gE"}}, json{{"name","gF"}}, json{{"name","gG"}}, json{{"name","gH"}}});
-    leaf["components"] = json::array({json{{"name","CmpE"},{"data",cmp()}}, json{{"name","CmpF"},{"data",cmp()}},
-                                      json{{"name","CmpG"},{"data",cmp()}}, json{{"name","CmpH"},{"data",cmp()}}});
-    leaf["connections"] = json::array({
-        cn("nodeC",  {C("CmpE","inPlus"),  C("CmpF","inMinus"), P("nodeC")}),
-        cn("nodeD",  {C("CmpG","inPlus"),  C("CmpH","inMinus"), P("nodeD")}),
-        cn("vSense", {C("CmpE","inMinus"), C("CmpG","inMinus"), P("vSense")}),
-        cn("gSense", {C("CmpF","inPlus"),  C("CmpH","inPlus"),  P("gSense")}),
-        cn("gE", {C("CmpE","out"), P("gE")}), cn("gF", {C("CmpF","out"), P("gF")}),
-        cn("gG", {C("CmpG","out"), P("gG")}), cn("gH", {C("CmpH","out"), P("gH")})});
-    return leaf;
-}
-
 // Dispatch a PEAS component to its family to_cias generator (decision 5: the orchestrator expands).
+// AAS (analog) and CTAS (controller) now have real converter libs, exactly like RAS/CAS/SAS/MAS.
 json component_to_leaf(const json& data, const PEAS::Fidelity& f) {
     if (data.contains("resistor"))      return RAS::ras_to_cias(data, f);
     if (data.contains("capacitor"))     return CAS::cas_to_cias(data, f);
     if (data.contains("semiconductor")) return SAS::sas_to_cias(data, f);
     if (data.contains("magnetic"))      return MAS::mas_to_cias(data, f);
-    if (data.contains("analog"))        return aas_comparator_leaf(data);     // AAS analog block
-    if (data.contains("controller"))    return ctas_sync_rectifier_leaf(data); // CTAS controller
+    if (data.contains("analog"))        return AAS::aas_to_cias(data, f);    // AAS analog block
+    if (data.contains("controller"))    return CTAS::ctas_to_cias(data, f);  // CTAS controller
     throw std::runtime_error("TasAssembler: component data has no PEAS discriminator "
                              "(resistor/capacitor/semiconductor/magnetic/analog/controller)");
 }
