@@ -48,6 +48,8 @@ PfcDesign design_pfc(const json& tasInputs) {
     d.currentHysteresis = 0.5 * dIL * d.senseResistance;   // half-band on the i·Rsense signal
     d.outputCapacitance = kOutputCapacitance;
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
+    d.integralGain = 3.0;        // outer voltage loop (tuned for stable ~few-line-cycle settling)
+    d.outputDividerGain = 0.01;  // V(voutScaled) = 0.01·V(vout) -> ~4 V at a 400 V bus
     return d;
 }
 
@@ -77,6 +79,11 @@ json build_pfc_tas(const PfcDesign& d) {
         j["inputs"]["designRequirements"]["resistance"]["nominal"] = r; return j; };
     auto comparator = [&](double hyst) { json j; json& e = j["analog"]["comparator"]["behavioral"];
         e["outputHigh"] = 5.0; e["outputLow"] = 0.0; e["threshold"] = 0.0; e["hysteresis"] = hyst; return j; };
+    auto multiplier = [&]() { json j; j["analog"]["multiplier"]["behavioral"]["gain"] = 1.0; return j; };
+    auto integrator = [&](double gain, double initial, double ref, double lo, double hi) {
+        json j; json& e = j["analog"]["integrator"]["behavioral"];
+        e["gain"] = gain; e["initial"] = initial; e["reference"] = ref;
+        e["outputLow"] = lo; e["outputHigh"] = hi; return j; };
 
     // ───────────── POWER stage: diode bridge + boost + inductor-current sense ─────────────
     // Rsense is in SERIES with the inductor (busP -> Rsense -> nL -> L), so V(busP)-V(nL) = iL·Rsense is
@@ -104,24 +111,33 @@ json build_pfc_tas(const PfcDesign& d) {
         conn("vout_net",{pin("D5","cathode"), pin("Cout","1"), prt("vout")}),
         conn("g_net",   {pin("SW","gate"), prt("g")})});
 
-    // ──────────────────── CONTROL stage (swappable): current-mode controller ────────────────────
-    // Threshold node vth = V(busP)·(1−kref). The comparator gates on V(nL)−V(vth) = kref·V(busP) −
-    // iL·Rsense, so the hysteretic loop holds iL ≈ (kref/Rsense)·V(busP) = V(busP)/rEmul: the inductor
-    // current tracks the rectified line → unity PF. Common mode (busP) cancels in the differential
-    // comparator. Divider: Rd1 (busP→vth) and Rd2 (vth→gnd) with Rd2/(Rd1+Rd2) = 1−kref.
-    const double rd2 = 100e3;
-    const double rd1 = rd2 * d.referenceGain / (1.0 - d.referenceGain);
-    json ccell; ccell["name"] = "pfc-current-control";
-    ccell["ports"] = json::array({port("busP"), port("nL"), port("gnd"), port("g")});
+    // ──────────────── CONTROL stage (swappable): current loop + outer VOLTAGE loop ────────────────
+    // INNER current loop: the comparator gates the switch on V(nL)−V(vth), where vth = V(busP)·gv. That
+    // holds iL ≈ V(busP)·(1−gv)/Rsense ∝ |Vac| → unity PF (the differential sense cancels the busP common
+    // mode). OUTER voltage loop: an integrator drives gv from the bus error so the drawn power regulates
+    // the bus to its target — gv is the current-loop gain the voltage loop trims (a multiplier forms
+    // vth = busP·gv). Bus low -> gv falls -> more current; bus high -> gv rises -> less current.
+    //   voutScaled = kv·V(vout);  gv = clamp(g0 + ki·∫(voutScaled − kv·Vout_target)dt)
+    const double kref = d.referenceGain;
+    const double g0   = 1.0 - kref;                                  // nominal current-loop gain
+    const double vrefScaled = d.outputDividerGain * d.outputVoltage; // bus setpoint, scaled
+    const double rv2 = 1e3, rv1 = rv2 * (1.0 - d.outputDividerGain) / d.outputDividerGain;
+    json ccell; ccell["name"] = "pfc-voltage-current-control";
+    ccell["ports"] = json::array({port("busP"), port("nL"), port("vout"), port("gnd"), port("g")});
     ccell["components"] = json::array({
-        comp("Rd1", resBrick(rd1)), comp("Rd2", resBrick(rd2)),
+        comp("Rv1", resBrick(rv1)), comp("Rv2", resBrick(rv2)),
+        comp("Iv", integrator(d.integralGain, g0, vrefScaled, 0.99, 0.99995)),
+        comp("Mv", multiplier()),
         comp("Cmp", comparator(d.currentHysteresis))});
     ccell["connections"] = json::array({
-        conn("busP",  {pin("Rd1","1"), prt("busP")}),
-        conn("vth",   {pin("Rd1","2"), pin("Rd2","1"), pin("Cmp","inMinus")}),
-        conn("gnd",   {pin("Rd2","2"), prt("gnd")}),
-        conn("nL",    {pin("Cmp","inPlus"), prt("nL")}),
-        conn("g",     {pin("Cmp","out"), prt("g")})});
+        conn("vout",      {pin("Rv1","1"), prt("vout")}),
+        conn("voutScaled",{pin("Rv1","2"), pin("Rv2","1"), pin("Iv","in")}),
+        conn("gnd",       {pin("Rv2","2"), prt("gnd")}),
+        conn("gv",        {pin("Iv","out"), pin("Mv","inB")}),
+        conn("busP",      {pin("Mv","inA"), prt("busP")}),
+        conn("vth",       {pin("Mv","out"), pin("Cmp","inMinus")}),
+        conn("nL",        {pin("Cmp","inPlus"), prt("nL")}),
+        conn("g",         {pin("Cmp","out"), prt("g")})});
 
     json tas;
     json& dreq = tas["inputs"]["designRequirements"];
@@ -143,7 +159,7 @@ json build_pfc_tas(const PfcDesign& d) {
         isc("AcLine", "externalPort", "input", {sp("pfcPower", "acLine")}),
         isc("AcNeutral", "externalPort", "input", {sp("pfcPower", "acNeutral")}),
         isc("GND", "externalPort", "input", {sp("pfcPower", "gnd"), sp("pfcControl", "gnd")}),
-        isc("Vout", "externalPort", "output", {sp("pfcPower", "vout")}),
+        isc("Vout", "externalPort", "output", {sp("pfcPower", "vout"), sp("pfcControl", "vout")}),
         isc("busP", "wire", "", {sp("pfcPower", "busP"), sp("pfcControl", "busP")}),
         isc("nL", "wire", "", {sp("pfcPower", "nL"), sp("pfcControl", "nL")}),
         isc("drive", "wire", "", {sp("pfcControl", "g"), sp("pfcPower", "g")})});

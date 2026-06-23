@@ -34,9 +34,11 @@ struct PfcDesign {
     double boostInductance;     // L (CCM, current tracks the reference)
     double outputCapacitance;   // bus cap (smooths the 2·line-frequency ripple)
     double loadResistance;
-    double senseResistance;     // Rsense in the bridge return (input-current sense)
-    double referenceGain;       // kref: i_ref voltage = kref·V(busP); emulates R = Rsense/kref
+    double senseResistance;     // Rsense in series with L (inductor-current sense)
+    double referenceGain;       // kref: nominal current-loop gain; emulates R = Rsense/kref
     double currentHysteresis;   // comparator hysteresis on the (i_ref − i_sense) signal [V]
+    double integralGain;        // outer voltage-loop integral gain (ki)
+    double outputDividerGain;   // kv: V(voutScaled) = kv·V(vout) (output-voltage sense)
 };
 
 /** Design a single-phase current-mode (hysteretic) boost PFC. */
