@@ -18,6 +18,8 @@
 
 #include "Clllc.hpp"
 #include "TasAssembler.hpp"
+#include "CtasConverter.hpp"
+#include "CiasCircuitConverter.hpp"
 #include "Fidelity.hpp"
 
 #include <nlohmann/json.hpp>
@@ -28,6 +30,7 @@
 #include <fstream>
 #include <regex>
 #include <string>
+#include <vector>
 
 using nlohmann::json;
 
@@ -120,4 +123,68 @@ TEST_CASE("CLLLC closed-loop SR: control stage expressed in CIAS drives the rect
     CHECK(geHi > 4.0);
     CHECK(geAvg > 0.5);
     CHECK(geAvg < 4.5);
+}
+
+namespace {
+json sr_controller(const std::string& sensing) {
+    json j; json& b = j["controller"]["behavioral"];
+    b["controlScheme"] = "synchronousRectifier"; b["topology"] = "fullBridge"; b["sensing"] = sensing;
+    b["hysteresis"] = 0.005; b["driveHigh"] = 5.0; b["driveLow"] = 0.0; b["threshold"] = 0.0;
+    return j;
+}
+std::vector<std::string> names(const json& leaf) {
+    std::vector<std::string> n; for (const auto& c : leaf.at("components")) n.push_back(c.at("name"));
+    return n;
+}
+bool has_port(const json& leaf, const std::string& p) {
+    for (const auto& q : leaf.at("ports")) if (q.at("name") == p) return true;
+    return false;
+}
+bool all_have_behavioral(const json& leaf) {
+    for (const auto& c : leaf.at("components")) {
+        const json& e = c.at("data").at("analog").at("comparator").at("behavioral");
+        if (!e.contains("outputHigh") || !e.contains("outputLow")
+            || !e.contains("threshold") || !e.contains("hysteresis")) return false;
+    }
+    return true;
+}
+}  // namespace
+
+// ctas_to_cias lowers the SR controller two ways. `current` is the one CLLLC uses (and the one that is
+// stable / FHA-correct). `drainSource` (per-switch Vds, body-diode emulation) is offered for
+// completeness — it is a tight self-feedback loop that mis-commutates in a closed loop, so this test
+// does NOT run a converter with it; it asserts the lowering PRODUCES the documented 4-comparator network
+// and that the whole lib -> CIAS -> ngspice path realises it (four comparator switches, right Vds senses).
+TEST_CASE("CTAS sync-rectifier lowering: current (2-comparator) and drainSource (4-comparator) modes",
+          "[control][ctas][cias]") {
+    PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
+
+    SECTION("current sensing -> two comparators, senseP/senseM -> gA/gB") {
+        json leaf = CTAS::ctas_to_cias(sr_controller("current"), ideal, "SR");
+        CHECK(names(leaf) == std::vector<std::string>{"CmpA", "CmpB"});
+        for (const char* p : {"senseP", "senseM", "gA", "gB"}) CHECK(has_port(leaf, p));
+        CHECK(has_port(leaf, "gE") == false);   // current mode has no per-switch gates
+        CHECK(all_have_behavioral(leaf));
+    }
+
+    SECTION("drainSource sensing -> four per-switch comparators, 8-pin interface") {
+        json leaf = CTAS::ctas_to_cias(sr_controller("drainSource"), ideal, "SR");
+        CHECK(names(leaf) == std::vector<std::string>{"CmpE", "CmpF", "CmpG", "CmpH"});
+        for (const char* p : {"nodeC", "nodeD", "vSense", "gSense", "gE", "gF", "gG", "gH"})
+            CHECK(has_port(leaf, p));
+        CHECK(all_have_behavioral(leaf));
+
+        // Realise the leaf through CIAS -> ngspice: four comparator switches with the right Vds senses
+        // (CmpE: nodeC vs vSense; CmpF: gSense vs nodeC; CmpG: nodeD vs vSense; CmpH: gSense vs nodeD).
+        CIAS::CiasToNgspiceConverter conv;
+        std::string sub = conv.to_subckt(CIAS::CiasCircuit::from_json(leaf));
+        for (const char* s : {"SCmpE", "SCmpF", "SCmpG", "SCmpH"})
+            CHECK(sub.find(s) != std::string::npos);
+        CHECK(sub.find("SCmpE gE CmpE__vh nodeC vSense") != std::string::npos);
+        CHECK(sub.find("SCmpH gH CmpH__vh gSense nodeD") != std::string::npos);
+    }
+
+    SECTION("unsupported sensing mode throws (no silent fallback)") {
+        CHECK_THROWS(CTAS::ctas_to_cias(sr_controller("magic"), ideal, "SR"));
+    }
 }
