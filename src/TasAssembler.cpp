@@ -308,18 +308,38 @@ std::string tas_to_ngspice(const json& tasDoc, const PEAS::Fidelity& fidelity) {
     os << instances.str();
 
     const double vin = op_input_voltage(tasDoc.at("inputs"));
+    const json& dreq = tasDoc.at("inputs").at("designRequirements");
+    const std::string inputType = dreq.value("inputType", "dc");
     std::string outputNode;
+    std::vector<std::string> acInputNodes;   // collected for a single floating AC source (acSinglePhase)
     for (const auto& [g, kind] : groupKind) {
         if (kind != "externalPort") continue;
         const std::string node = group_node(g);
         if (node == "0") continue;
-        if (groupDir[g] == "input")  os << "V" << g << " " << node << " 0 DC " << vin << "\n";
+        if (groupDir[g] == "input") {
+            if (inputType == "acSinglePhase") acInputNodes.push_back(node);   // emit one SIN below
+            else os << "V" << g << " " << node << " 0 DC " << vin << "\n";
+        }
         if (groupDir[g] == "output") {
             outputNode = node;
             // Synthesize the load from the per-OP outputs condition (boundary condition, not a
             // converter stage — the dual of the input source above). loadType picks R / I-sink / CPL.
             os << emit_load_card(node, tasDoc.at("inputs"), 0);
         }
+    }
+    // Single-phase AC input: ONE sinusoidal source. `inputVoltage` is RMS line voltage (schema), so the
+    // SIN amplitude is vin·√2; lineFrequency is required for AC. The source FLOATS across the two input
+    // terminals (line, neutral) feeding a diode bridge whose DC return is ground — exactly the
+    // non-isolated boost-PFC front end. (Falls back to source-to-ground if only one input node exists.)
+    if (inputType == "acSinglePhase") {
+        if (!dreq.contains("lineFrequency"))
+            throw std::runtime_error("TasAssembler: acSinglePhase input requires designRequirements.lineFrequency");
+        const json& lf = dreq.at("lineFrequency");
+        const double lineFreq = lf.is_number() ? lf.get<double>() : lf.at("nominal").get<double>();
+        const double vpeak = vin * std::sqrt(2.0);
+        const std::string nL = acInputNodes.empty() ? "acLine" : acInputNodes[0];
+        const std::string nN = acInputNodes.size() >= 2 ? acInputNodes[1] : std::string("0");
+        os << "Vac " << nL << " " << nN << " SIN(0 " << vpeak << " " << lineFreq << ")\n";
     }
 
     double fsw = 100000, dmax = 0.5;
