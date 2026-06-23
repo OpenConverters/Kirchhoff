@@ -317,7 +317,8 @@ std::string tas_to_ngspice(const json& tasDoc, const PEAS::Fidelity& fidelity) {
         const std::string node = group_node(g);
         if (node == "0") continue;
         if (groupDir[g] == "input") {
-            if (inputType == "acSinglePhase") acInputNodes.push_back(node);   // emit one SIN below
+            if (inputType == "acSinglePhase" || inputType == "acThreePhase")
+                acInputNodes.push_back(node);   // emit AC source(s) below
             else os << "V" << g << " " << node << " 0 DC " << vin << "\n";
         }
         if (groupDir[g] == "output") {
@@ -340,6 +341,25 @@ std::string tas_to_ngspice(const json& tasDoc, const PEAS::Fidelity& fidelity) {
         const std::string nL = acInputNodes.empty() ? "acLine" : acInputNodes[0];
         const std::string nN = acInputNodes.size() >= 2 ? acInputNodes[1] : std::string("0");
         os << "Vac " << nL << " " << nN << " SIN(0 " << vpeak << " " << lineFreq << ")\n";
+    }
+    // Three-phase AC input: THREE sinusoidal sources, 120° apart, each from a phase node to ground
+    // (neutral = ground = the converter's DC midpoint — a 4-wire connection that keeps every node
+    // referenced, vs a floating star). `inputVoltage` is the per-phase (line-to-neutral) RMS, so each
+    // amplitude is vin·√2. Phase nodes are taken in sorted group order as A, B, C (0°, −120°, −240°).
+    if (inputType == "acThreePhase") {
+        if (!dreq.contains("lineFrequency"))
+            throw std::runtime_error("TasAssembler: acThreePhase input requires designRequirements.lineFrequency");
+        if (acInputNodes.size() < 3)
+            throw std::runtime_error("TasAssembler: acThreePhase input needs 3 phase nodes (got "
+                                     + std::to_string(acInputNodes.size()) + ")");
+        const json& lf = dreq.at("lineFrequency");
+        const double lineFreq = lf.is_number() ? lf.get<double>() : lf.at("nominal").get<double>();
+        const double vpeak = vin * std::sqrt(2.0);
+        const char* names[3] = {"Vpha", "Vphb", "Vphc"};
+        const double phase[3] = {0.0, -120.0, -240.0};
+        for (int i = 0; i < 3; ++i)
+            os << names[i] << " " << acInputNodes[i] << " 0 SIN(0 " << vpeak << " " << lineFreq
+               << " 0 0 " << phase[i] << ")\n";
     }
 
     double fsw = 100000, dmax = 0.5;
