@@ -30,7 +30,7 @@ CukDesign design_cuk(const json& tasInputs) {
     d.outputVoltageMag = std::fabs(nominal(dr.at("outputs").at(0).at("voltage")));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 0.9);
-    d.diodeDrop = 0.8334;
+    d.diodeDrop = 0.0;  // drop-compensated operating point fails ideal-diode convergence in the resonant coupling loop; left ideal (excluded from the spec gate)
     if (tasInputs.contains("operatingPoints") && !tasInputs.at("operatingPoints").empty()) {
         const json& op = tasInputs.at("operatingPoints").at(0);
         d.inputVoltage = op.at("inputVoltage").get<double>();

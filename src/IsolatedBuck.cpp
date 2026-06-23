@@ -47,7 +47,7 @@ IsolatedBuckDesign design_isolated_buck(const json& tasInputs) {
 
     // D = V_pri / (Vin·η).  N = V_pri / (V_sec + Vd), ideal Vd=0.  (MKF IsolatedBuck.)
     d.dutyCycle  = Vpri / (Vin * d.efficiency);
-    double N = Vpri / Vsec;
+    double N = Vpri / Vsec;  // measured output is the primary buck rail (no rectifier drop); secondary is internal
     d.turnsRatio = std::round(N * 100.0) / 100.0;
 
     // Lmag = (Vin_max − V_pri)·V_pri / (Vin_max·Fs·ΔI),  ΔI = ripple·(I_pri + ΣI_sec/N) (reflected).
