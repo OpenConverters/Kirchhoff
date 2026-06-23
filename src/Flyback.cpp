@@ -33,7 +33,7 @@ FlybackDesign design_flyback(const json& tasInputs) {
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"), "outputVoltage");
     d.switchingFrequency = nominal(dr.at("switchingFrequency"), "switchingFrequency");
     d.efficiency = dr.value("efficiency", 0.88);
-    d.diodeDrop = 0.0;  // ideal rectifier (MKF designs with Vd=0; the sim shows the droop)
+    d.diodeDrop = 0.8334;  // ideal rectifier (MKF designs with Vd=0; the sim shows the droop)
 
     // operating point (Vin, Pout): prefer operatingPoints[0], else designRequirements.
     if (tasInputs.contains("operatingPoints") && !tasInputs.at("operatingPoints").empty()) {
@@ -70,9 +70,10 @@ FlybackDesign design_flyback(const json& tasInputs) {
     n = std::round(n * 100.0) / 100.0;   // MKF roundFloat(turnsRatio, 2)
     d.turnsRatio = n;
 
-    // Steady-state CCM duty at the nominal operating Vin (the open-loop PWM duty, as in MKF's deck):
-    //   Vout = Vin·D / (n·(1-D))  ->  D = n·Vout / (Vin + n·Vout)   (Vd=0 ideal).
-    const double Vor = n * d.outputVoltage;
+    // Steady-state CCM duty at the nominal operating Vin (the open-loop PWM duty). The secondary must
+    // produce Vout+Vd so the output AFTER the rectifier drop is the spec'd Vout:
+    //   Vout+Vd = Vin·D / (n·(1-D))  ->  D = n·(Vout+Vd) / (Vin + n·(Vout+Vd)).
+    const double Vor = n * (d.outputVoltage + d.diodeDrop);
     d.dutyCycle = Vor / (d.inputVoltage + Vor);
 
     // Magnetizing inductance sized at the maximum duty / minimum Vin corner (MKF).

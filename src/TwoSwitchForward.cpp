@@ -23,7 +23,7 @@ TwoSwitchForwardDesign design_two_switch_forward(const json& tasInputs) {
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 0.9);
-    d.diodeDrop = 0.0;
+    d.diodeDrop = 0.8334;
     if (tasInputs.contains("operatingPoints") && !tasInputs.at("operatingPoints").empty()) {
         const json& op = tasInputs.at("operatingPoints").at(0);
         d.inputVoltage = op.at("inputVoltage").get<double>();

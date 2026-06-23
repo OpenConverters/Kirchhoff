@@ -115,9 +115,21 @@ target_link_libraries(pfc_demo PRIVATE kirchhoff)
 
 add_executable(test_pfc tests/test_pfc.cpp)
 target_link_libraries(test_pfc PRIVATE kirchhoff Catch2::Catch2WithMain)
+# Lets the test locate the independent Python averaged-model oracle (tests/averaged_model.py).
+target_compile_definitions(test_pfc PRIVATE KIRCHHOFF_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests")
 
 add_executable(vienna_demo examples/vienna_demo.cpp)
 target_link_libraries(vienna_demo PRIVATE kirchhoff)
 
 add_executable(test_vienna tests/test_vienna.cpp)
 target_link_libraries(test_vienna PRIVATE kirchhoff Catch2::Catch2WithMain)
+target_compile_definitions(test_vienna PRIVATE KIRCHHOFF_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests")
+
+# Second-backend (#2): CIAS -> LTspice dialect, structural + (Wine-gated) execution cross-check.
+add_executable(test_ltspice_backend tests/test_ltspice_backend.cpp)
+target_link_libraries(test_ltspice_backend PRIVATE kirchhoff Catch2::Catch2WithMain)
+
+# Requirements-conformance gate: every topology must deliver its spec'd output voltage + power.
+add_executable(test_requirements tests/test_requirements.cpp)
+target_link_libraries(test_requirements PRIVATE kirchhoff Catch2::Catch2WithMain)
+target_compile_definitions(test_requirements PRIVATE KIRCHHOFF_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests")

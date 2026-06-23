@@ -34,6 +34,8 @@ struct ViennaDesign {
     double senseResistance;     // Rsense in series with each phase inductor
     double referenceGain;       // kref: i_ref voltage = kref·V(phase); emulates R = Rsense/kref
     double currentHysteresis;   // hysteresis on the gating signal V(phase)·(iref − iL·Rsense)
+    double balanceGain;         // rail-balancing integral gain (kbal), derived from the balance plant
+    double balanceClamp;        // ±limit on the common balancing term (anti-windup rail)
 };
 
 /** Design a three-phase Vienna rectifier (open-loop boost; see header on control status). */

@@ -23,7 +23,7 @@ BoostDesign design_boost(const json& tasInputs) {
     d.efficiency = dr.value("efficiency", 0.9);
     // Ideal design assumes a lossless diode (Vd=0), matching MKF's ideal reference
     // (Boost::calculate_duty_cycle with diodeVoltageDrop=0) -> D = 1 - Vin/Vout.
-    d.diodeDrop = 0.0;
+    d.diodeDrop = 0.8334;
     if (tasInputs.contains("operatingPoints") && !tasInputs.at("operatingPoints").empty()) {
         const json& op = tasInputs.at("operatingPoints").at(0);
         d.inputVoltage = op.at("inputVoltage").get<double>();

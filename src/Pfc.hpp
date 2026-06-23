@@ -37,7 +37,8 @@ struct PfcDesign {
     double senseResistance;     // Rsense in series with L (inductor-current sense)
     double referenceGain;       // kref: nominal current-loop gain; emulates R = Rsense/kref
     double currentHysteresis;   // comparator hysteresis on the (i_ref − i_sense) signal [V]
-    double integralGain;        // outer voltage-loop integral gain (ki)
+    double proportionalGain;    // outer voltage-loop PROPORTIONAL gain (kp), derived from the plant
+    double integralGain;        // outer voltage-loop INTEGRAL gain (ki = kp·ωp), derived from the plant
     double outputDividerGain;   // kv: V(voutScaled) = kv·V(vout) (output-voltage sense)
 };
 

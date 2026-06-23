@@ -17,6 +17,7 @@ double nominal(const json& j) {
 constexpr double kSenseResistance   = 0.1;     // input-current sense [Ω]
 constexpr double kRippleFraction    = 0.30;    // hysteretic current ripple as a fraction of peak iL
 constexpr double kOutputCapacitance = 220e-6;  // bus cap
+constexpr double kPi                = 3.14159265358979323846;
 } // namespace
 
 PfcDesign design_pfc(const json& tasInputs) {
@@ -48,8 +49,25 @@ PfcDesign design_pfc(const json& tasInputs) {
     d.currentHysteresis = 0.5 * dIL * d.senseResistance;   // half-band on the i·Rsense signal
     d.outputCapacitance = kOutputCapacitance;
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
-    d.integralGain = 3.0;        // outer voltage loop (tuned for stable ~few-line-cycle settling)
-    d.outputDividerGain = 0.01;  // V(voutScaled) = 0.01·V(vout) -> ~4 V at a 400 V bus
+
+    // ── Outer voltage loop: a DESIGNED PI compensator (derived from the plant, not hand-tuned). ──
+    // The inner hysteretic current loop makes the stage emulate a conductance Ge = (1−gv)/Rsense, so the
+    // small-signal plant from the control gv to the bus voltage is a SINGLE pole — the bus cap loaded by
+    // Rload:   P(s) = −K0/(s+ωp),  K0 = Vrms²/(Rsense·C·Vbus),  ωp = 2/(Rload·C)  (the load pole).
+    // A PI controller gv = g0 + kp·e + ki·∫e dt  (e = kv·(Vout−Vtarget)) places its zero ωz = ki/kp at the
+    // load pole ωp, cancelling it and leaving a clean single-integrator loop → ~90° phase margin, robust
+    // across line and load. Crossover ωc is set a DECADE BELOW the line frequency so the voltage loop does
+    // not fight the inherent 2·fline bus ripple (which would distort the |Vac| current reference and spoil
+    // the power factor). Unity loop gain at ωc fixes kp; ki = kp·ωp closes the pole/zero cancellation:
+    //     kp = ωc·Rsense·C·Vbus / (kv·Vrms²) = ωc/(kv·K0),   ki = kp·ωp.
+    d.outputDividerGain = 0.01;                                   // kv: V(voutScaled)=kv·Vout (~4 V at 400 V)
+    const double kv = d.outputDividerGain;
+    const double K0 = d.inputVoltageRms * d.inputVoltageRms
+                      / (d.senseResistance * d.outputCapacitance * d.outputVoltage);
+    const double wp = 2.0 / (d.loadResistance * d.outputCapacitance);   // load pole
+    const double wc = 2.0 * kPi * d.lineFrequency / 10.0;               // crossover (ripple-safe)
+    d.proportionalGain = wc / (kv * K0);
+    d.integralGain     = d.proportionalGain * wp;
     return d;
 }
 
@@ -80,6 +98,8 @@ json build_pfc_tas(const PfcDesign& d) {
     auto comparator = [&](double hyst) { json j; json& e = j["analog"]["comparator"]["behavioral"];
         e["outputHigh"] = 5.0; e["outputLow"] = 0.0; e["threshold"] = 0.0; e["hysteresis"] = hyst; return j; };
     auto multiplier = [&]() { json j; j["analog"]["multiplier"]["behavioral"]["gain"] = 1.0; return j; };
+    auto summer = [&](double gA, double gB) { json j; json& e = j["analog"]["summer"]["behavioral"];
+        e["gainA"] = gA; e["gainB"] = gB; return j; };
     auto integrator = [&](double gain, double initial, double ref, double lo, double hi) {
         json j; json& e = j["analog"]["integrator"]["behavioral"];
         e["gain"] = gain; e["initial"] = initial; e["reference"] = ref;
@@ -114,26 +134,35 @@ json build_pfc_tas(const PfcDesign& d) {
     // ──────────────── CONTROL stage (swappable): current loop + outer VOLTAGE loop ────────────────
     // INNER current loop: the comparator gates the switch on V(nL)−V(vth), where vth = V(busP)·gv. That
     // holds iL ≈ V(busP)·(1−gv)/Rsense ∝ |Vac| → unity PF (the differential sense cancels the busP common
-    // mode). OUTER voltage loop: an integrator drives gv from the bus error so the drawn power regulates
-    // the bus to its target — gv is the current-loop gain the voltage loop trims (a multiplier forms
-    // vth = busP·gv). Bus low -> gv falls -> more current; bus high -> gv rises -> less current.
-    //   voutScaled = kv·V(vout);  gv = clamp(g0 + ki·∫(voutScaled − kv·Vout_target)dt)
+    // mode). OUTER voltage loop: a DESIGNED PI compensator drives gv from the bus error (see design_pfc):
+    //     gv = Iv + kp·voutScaled,   Iv = clamp(ivInit + ki·∫(voutScaled − vref)dt)
+    // The integrator Iv is the integral path (ki, zero placed at the load pole); the summer Sgv adds the
+    // proportional path kp·voutScaled. The constant kp·vref is folded into the integrator's initial so gv
+    // starts at g0, and the integrator clamp is the anti-windup rail (gv held to ~0.1×–4× the design
+    // conductance). A multiplier forms vth = busP·gv. Bus low → gv falls → more current; high → less.
     const double kref = d.referenceGain;
     const double g0   = 1.0 - kref;                                  // nominal current-loop gain
-    const double vrefScaled = d.outputDividerGain * d.outputVoltage; // bus setpoint, scaled
-    const double rv2 = 1e3, rv1 = rv2 * (1.0 - d.outputDividerGain) / d.outputDividerGain;
+    const double kv   = d.outputDividerGain;
+    const double kp   = d.proportionalGain;
+    const double vref = kv * d.outputVoltage;                        // scaled bus setpoint
+    const double ivInit = g0 - kp * vref;                            // so gv(0)=g0 at the precharge point
+    const double gvLo = 1.0 - 4.0 * kref, gvHi = 1.0 - 0.1 * kref;   // gv draw-range rails (0.1×–4× design)
+    const double ivLo = gvLo - kp * vref, ivHi = gvHi - kp * vref;   // integrator clamp = gv rail − offset
+    const double rv2 = 1e3, rv1 = rv2 * (1.0 - kv) / kv;
     json ccell; ccell["name"] = "pfc-voltage-current-control";
     ccell["ports"] = json::array({port("busP"), port("nL"), port("vout"), port("gnd"), port("g")});
     ccell["components"] = json::array({
         comp("Rv1", resBrick(rv1)), comp("Rv2", resBrick(rv2)),
-        comp("Iv", integrator(d.integralGain, g0, vrefScaled, 0.99, 0.99995)),
+        comp("Iv", integrator(d.integralGain, ivInit, vref, ivLo, ivHi)),
+        comp("Sgv", summer(1.0, kp)),     // gv = Iv + kp·voutScaled (PI: integral + proportional paths)
         comp("Mv", multiplier()),
         comp("Cmp", comparator(d.currentHysteresis))});
     ccell["connections"] = json::array({
         conn("vout",      {pin("Rv1","1"), prt("vout")}),
-        conn("voutScaled",{pin("Rv1","2"), pin("Rv2","1"), pin("Iv","in")}),
+        conn("voutScaled",{pin("Rv1","2"), pin("Rv2","1"), pin("Iv","in"), pin("Sgv","inB")}),
         conn("gnd",       {pin("Rv2","2"), prt("gnd")}),
-        conn("gv",        {pin("Iv","out"), pin("Mv","inB")}),
+        conn("ivout",     {pin("Iv","out"), pin("Sgv","inA")}),
+        conn("gv",        {pin("Sgv","out"), pin("Mv","inB")}),
         conn("busP",      {pin("Mv","inA"), prt("busP")}),
         conn("vth",       {pin("Mv","out"), pin("Cmp","inMinus")}),
         conn("nL",        {pin("Cmp","inPlus"), prt("nL")}),

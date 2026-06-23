@@ -17,6 +17,12 @@ double nominal(const json& j) {
 }
 constexpr double kBusCapacitance  = 470e-6;
 constexpr double kSenseResistance = 0.1;
+constexpr double kPi              = 3.14159265358979323846;
+// Zero-sequence modulation factor α: the dimensionless transconductance (gm = α/Rsense) of the Vienna
+// hysteretic rail-balancing path. The switched zero-sequence current injection has no clean closed form,
+// so α is identified ONCE from the validated 400 Hz / 600 W operating point and held; the balancing gain
+// then scales correctly with C, Rsense and line frequency for every other design (see design_vienna).
+constexpr double kBalanceModulation = 4.0;
 } // namespace
 
 ViennaDesign design_vienna(const json& tasInputs) {
@@ -45,6 +51,20 @@ ViennaDesign design_vienna(const json& tasInputs) {
     d.currentHysteresis = 0.5 * dIL * d.senseResistance * vpeak;
     d.busCapacitance = kBusCapacitance;
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
+
+    // ── Active rail-balancing loop (DERIVED, not a fixed magic gain). The loop bal = −kbal·∫(busP+busN)dt
+    // adds a common (zero-sequence) term to every phase current reference. Model: the common term bal [V]
+    // offsets each phase's sensed-current reference by bal/Rsense [A]; its zero-sequence part charges the
+    // rail-pair imbalance δ=(busP+busN)/2 across the rail caps C — a second-order (cap × integrator)
+    // balance plant whose natural frequency is ω_bal = √(kbal·gm/C), gm = α/Rsense the zero-sequence
+    // modulation transconductance. Placing ω_bal a few times BELOW the line frequency (so the slow
+    // balancing does not distort the per-phase current shaping or fight the 2·fline ripple) gives
+    //     kbal = ω_bal²·C·Rsense/α,   ω_bal = 2π·fline/6.
+    // Everything scales with the design; only the dimensionless α is empirically identified (see above).
+    // The common term is bounded to ±50% of the per-phase current-reference peak (anti-windup rail).
+    const double wBal = 2.0 * kPi * d.lineFrequency / 6.0;
+    d.balanceGain  = wBal * wBal * d.busCapacitance * d.senseResistance / kBalanceModulation;
+    d.balanceClamp = 0.5 * d.referenceGain * vpeak;
     return d;
 }
 
@@ -133,7 +153,8 @@ json build_vienna_tas(const ViennaDesign& d) {
     // restoring busP ≈ −busN under an unbalanced half-load. (The grounded neutral fixes the midpoint
     // node; this balances the two RAIL voltages.)
     ccomps.push_back(comp("Simb", summer(1.0, 1.0)));                          // imb = busP + busN
-    ccomps.push_back(comp("Ibal", integrator(-2.0, 0.0, 0.0, -0.05, 0.05)));   // bal
+    ccomps.push_back(comp("Ibal", integrator(-d.balanceGain, 0.0, 0.0,        // bal (derived gain + clamp)
+                                             -d.balanceClamp, d.balanceClamp)));
     cconns.push_back(conn("busP", {pin("Simb","inA"), prt("busP")}));
     cconns.push_back(conn("busN", {pin("Simb","inB"), prt("busN")}));
     cconns.push_back(conn("imb",  {pin("Simb","out"), pin("Ibal","in")}));

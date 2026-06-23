@@ -42,4 +42,15 @@ namespace Kirchhoff {
  */
 std::string tas_to_ngspice(const nlohmann::json& tasDoc, const PEAS::Fidelity& fidelity);
 
+/**
+ * @brief The SAME assembly rendered in the LTspice dialect (a second SPICE backend).
+ *
+ * Identical circuit, different simulator target — this demonstrates that the CIAS intermediate
+ * representation is simulator-AGNOSTIC and the lowering is not ngspice-specific. Almost every card is
+ * byte-identical; the dialect-specific pieces are the behavioural ternary (`if()` vs `?:`) and the
+ * batch/measurement convention (deck-level `.meas` vs an ngspice `.control` block). Run with
+ * `wine LTspice.exe -b -Run <file>`; see tests/test_ltspice_backend.cpp for the cross-simulator check.
+ */
+std::string tas_to_ltspice(const nlohmann::json& tasDoc, const PEAS::Fidelity& fidelity);
+
 } // namespace Kirchhoff

@@ -151,7 +151,9 @@ std::string sanitize(const std::string& s) {
 
 } // namespace
 
-std::string tas_to_ngspice(const json& tasDoc, const PEAS::Fidelity& fidelity) {
+static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fidelity,
+                                CIAS::SpiceDialect dialect) {
+    const bool lt = (dialect == CIAS::SpiceDialect::Ltspice);
     const json& topo = tasDoc.at("topology");
     const json& stages = topo.at("stages");
     const json interStage = topo.value("interStageConnections", json::array());
@@ -289,7 +291,7 @@ std::string tas_to_ngspice(const json& tasDoc, const PEAS::Fidelity& fidelity) {
             sub["connections"].push_back(c);
         }
 
-        subckts << conv.to_subckt(CIAS::CiasCircuit::from_json(sub)) << "\n";
+        subckts << conv.to_subckt(CIAS::CiasCircuit::from_json(sub), dialect) << "\n";
 
         // instance: X<stage> <node per port, in declaration order> <subcktName>
         instances << "X" << sanitize(sname);
@@ -411,16 +413,36 @@ std::string tas_to_ngspice(const json& tasDoc, const PEAS::Fidelity& fidelity) {
         os << ".ic v(" << group_node(ic.at("node").get<std::string>()) << ")="
            << ic.at("voltage").get<double>() << "\n";
 
+    // Gear integration + tight tolerances tame the stiff ideal diodes; both ngspice and LTspice accept
+    // these option names + the Gear method.
     os << ".options reltol=1e-3 abstol=1e-9 vntol=1e-6 method=gear\n";
     os << ".tran " << maxStep << " " << stopTime << " 0 " << maxStep << (useIc ? " uic" : "") << "\n";
-    os << ".control\nrun\n";
-    if (!outputNode.empty()) {
-        const double from = stopTime - 50 * period;
-        os << "meas tran vout AVG v(" << outputNode << ") from=" << from << " to=" << stopTime << "\n";
-        os << "print vout\n";
+    const double from = stopTime - 50 * period;
+    if (lt) {
+        // LTspice (-b batch) auto-runs the .tran and evaluates deck-level .meas directives — no ngspice
+        // .control/interactive block. The same measurement, in LTspice's .meas dialect.
+        if (!outputNode.empty())
+            os << ".meas tran vout AVG V(" << outputNode << ") from=" << from << " to=" << stopTime << "\n";
+        os << ".end\n";
+    } else {
+        os << ".control\nrun\n";
+        if (!outputNode.empty()) {
+            os << "meas tran vout AVG v(" << outputNode << ") from=" << from << " to=" << stopTime << "\n";
+            os << "print vout\n";
+        }
+        os << ".endc\n.end\n";
     }
-    os << ".endc\n.end\n";
     return os.str();
+}
+
+std::string tas_to_ngspice(const json& tasDoc, const PEAS::Fidelity& fidelity) {
+    return tas_to_spice(tasDoc, fidelity, CIAS::SpiceDialect::Ngspice);
+}
+
+// Second backend: the SAME assembled circuit rendered in the LTspice dialect. Proves the CIAS→backend
+// boundary is simulator-agnostic, not ngspice-shaped (see tests/test_ltspice_backend.cpp).
+std::string tas_to_ltspice(const json& tasDoc, const PEAS::Fidelity& fidelity) {
+    return tas_to_spice(tasDoc, fidelity, CIAS::SpiceDialect::Ltspice);
 }
 
 } // namespace Kirchhoff
