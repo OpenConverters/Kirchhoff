@@ -1,17 +1,23 @@
 #pragma once
 
-// Kirchhoff::Pfc — single-phase boost Power-Factor-Correction front end. The FIRST AC-input topology:
+// Kirchhoff::Pfc — single-phase boost Power-Factor-Correction front end. The first AC-input topology:
 // a floating mains source feeds a diode bridge whose DC return is ground, then a boost stage pumps the
-// rectified |Vac| up to a regulated high-voltage DC bus.
+// rectified |Vac| up to a high-voltage DC bus.
 //
-// Control: fixed-frequency, fixed-duty, DISCONTINUOUS conduction mode (DCM). A DCM boost has INHERENT
-// power-factor correction — each switching cycle the peak inductor current is Vac(t)·D·Tsw/L, so the
-// cycle-averaged input current is proportional to the instantaneous line voltage, with NO current
-// controller. (CCM PFC needs an average-current controller; that would be a CTAS controller stage on
-// top, the natural next step — see [[control-in-cias]].)
+// Control: CLOSED-LOOP, current-mode (the proper PFC). A current-sense resistor in the bridge return
+// measures the input current; a reference proportional to the rectified line voltage (a divider off the
+// rectified bus) sets the target; a HYSTERETIC comparator gates the boost switch so the inductor current
+// tracks that reference. Because the reference ∝ |Vac|, the input current follows the line voltage →
+// near-unity power factor (the boost emulates a resistor). This is expressed entirely in CIAS (the
+// comparator is an AAS analog block, the sense/reference are R's), so it stays a swappable control stage
+// and portable to any simulator — see [[control-in-cias]].
 //
-// There is no MKF reference for PFC, so this is validated standalone (regulated DC bus + power factor),
-// not by the MKF-equivalence suite.
+// The reference gain is matched to the design load so the bus settles at its target (a fixed-gain,
+// power-balanced regulation). Adding an outer voltage loop (an analog multiplier scaling the reference
+// by a bus-voltage error integrator) for ACTIVE regulation against load changes is the next refinement.
+//
+// There is no MKF reference for PFC, so it is validated standalone (near-unity power factor + boosted
+// DC bus), not by the MKF-equivalence suite.
 
 #include <nlohmann/json.hpp>
 #include "Fidelity.hpp"
@@ -21,19 +27,21 @@ namespace Kirchhoff {
 struct PfcDesign {
     double inputVoltageRms;     // mains RMS line voltage
     double lineFrequency;       // mains frequency (Hz)
-    double outputVoltage;       // boosted DC bus (must exceed the line peak)
+    double outputVoltage;       // boosted DC bus
     double outputPower;
-    double switchingFrequency;
+    double switchingFrequency;  // TARGET average switching frequency (sizes L for the hysteretic band)
     double efficiency;
-    double switchDuty;          // fixed boost duty (chosen for DCM across the line cycle)
-    double boostInductance;     // L, sized for DCM at the target power
+    double boostInductance;     // L (CCM, current tracks the reference)
     double outputCapacitance;   // bus cap (smooths the 2·line-frequency ripple)
     double loadResistance;
+    double senseResistance;     // Rsense in the bridge return (input-current sense)
+    double referenceGain;       // kref: i_ref voltage = kref·V(busP); emulates R = Rsense/kref
+    double currentHysteresis;   // comparator hysteresis on the (i_ref − i_sense) signal [V]
 };
 
-/** Design a single-phase DCM boost PFC. */
+/** Design a single-phase current-mode (hysteretic) boost PFC. */
 PfcDesign design_pfc(const nlohmann::json& tasInputs);
-/** Assemble a PFC design into a single-stage TAS document (bridge + boost, AC input). */
+/** Assemble a PFC design into a TWO-stage TAS document: a power stage + a swappable current controller. */
 nlohmann::json build_pfc_tas(const PfcDesign& d);
 
 } // namespace Kirchhoff

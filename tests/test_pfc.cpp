@@ -1,19 +1,19 @@
 // PFC capability test (NOT an MKF-equivalence test — there is no MKF reference for PFC). Validates the
-// FIRST AC-input topology end to end: a single-phase boost PFC front end. The assembler emits a
-// FLOATING mains SIN source (the new acSinglePhase path); a diode bridge whose DC return is ground +
-// a DCM boost pump |Vac| up to a boosted DC bus. We assert the solid, robust facts:
-//   (1) the deck is genuinely AC-input (a sinusoidal source across two floating terminals, not DC), and
-//   (2) running it converts AC -> a BOOSTED DC bus (Vout well above the line peak) while drawing real,
-//       largely-in-phase power from the mains (the fundamental input current emulates a resistor — the
-//       PFC mechanism).
+// first AC-input topology end to end: a single-phase CLOSED-LOOP boost PFC. The assembler emits a
+// FLOATING mains SIN source (the acSinglePhase path); a diode bridge whose DC return is ground + a boost
+// stage feed a HV DC bus; and a CURRENT-MODE control stage (expressed in CIAS — a hysteretic AAS
+// comparator + an inductor-current sense + a |Vac|-shaped reference divider) gates the boost switch so
+// the input current tracks the rectified line. We assert the real PFC result:
+//   (1) the deck is genuinely AC-input (a floating sinusoidal source, no DC source), driven CLOSED-LOOP
+//       (no open-loop PWM stimulus — the controller drives the switch), and
+//   (2) running it converts AC -> a regulated, boosted DC bus at NEAR-UNITY power factor (the current
+//       loop makes the boost emulate a resistor across the line).
 //
-// Notes on what is and isn't claimed: a fixed-duty DCM boost has INHERENT (open-loop) power-factor
-// correction, but (a) its power factor is ratio-dependent and sub-unity, and (b) the *raw* line-current
-// RMS here includes the 20 kHz DCM switching ripple (a real PFC's input EMI filter removes it), so the
-// measured PF understates the true line-frequency PF. Unity PF + a regulated bus need an average-current
-// PFC controller — a CTAS controller stage on top (control-in-CIAS), the documented next step. We run at
-// 400 Hz mains (a real aircraft-power line) purely so a line cycle is 2.5 ms and the stiff-diode sim is
-// fast; the DCM shaping mechanism is identical at 50/60 Hz (see pfc_demo, which uses 50 Hz).
+// The current loop forces unity PF; the bus regulates to its target because the reference gain is matched
+// to the design load (a fixed-gain power balance). An outer voltage loop (analog multiplier scaling the
+// reference by a bus-error integrator) for active regulation against load steps is the next refinement.
+// Runs at 400 Hz mains (real aircraft power, identical control mechanism) purely so a line cycle is
+// 2.5 ms and the stiff-diode sim is fast; the demo uses a realistic 50 Hz line.
 //
 // Run directly:  ./build/test_pfc
 #include "Pfc.hpp"
@@ -23,6 +23,7 @@
 #include <nlohmann/json.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <regex>
@@ -51,7 +52,7 @@ bool meas(const std::string& out, const std::string& name, double& v) {
 }
 }  // namespace
 
-TEST_CASE("single-phase boost PFC: floating AC input -> boosted DC bus, real-power draw", "[pfc][ac]") {
+TEST_CASE("single-phase closed-loop boost PFC: AC input -> regulated bus at near-unity PF", "[pfc][ac]") {
     json di;
     di["designRequirements"]["efficiency"] = 1.0;
     di["designRequirements"]["inputType"] = "acSinglePhase";
@@ -65,14 +66,19 @@ TEST_CASE("single-phase boost PFC: floating AC input -> boosted DC bus, real-pow
     Kirchhoff::PfcDesign d = Kirchhoff::design_pfc(di);
     json tas = Kirchhoff::build_pfc_tas(d);
 
-    // (1) genuinely AC-input: the TAS declares acSinglePhase + lineFrequency, and the deck carries a
-    //     FLOATING sinusoidal source across two terminals (not a DC source to ground).
+    // (1) genuinely AC-input AND closed-loop: floating SIN source, a `control`-role stage, no DC source,
+    //     and no open-loop PWM stimulus (the controller drives the switch).
     CHECK(tas.at("inputs").at("designRequirements").at("inputType") == "acSinglePhase");
-    CHECK(tas.at("inputs").at("designRequirements").contains("lineFrequency"));
+    bool hasControl = false;
+    for (const auto& st : tas.at("topology").at("stages"))
+        if (st.value("role", "") == "control") hasControl = true;
+    CHECK(hasControl);
+    CHECK(tas.at("simulation").contains("stimulus") == false);   // no open-loop gate drive
     PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
     std::string deck = Kirchhoff::tas_to_ngspice(tas, ideal);
     REQUIRE(deck.find("Vac AcLine AcNeutral SIN(") != std::string::npos);
-    REQUIRE(deck.find(" DC ") == std::string::npos);     // no DC input source
+    REQUIRE(deck.find(" DC ") == std::string::npos);
+    REQUIRE(deck.find("Vstim") == std::string::npos);
 
     // (2) run a few line cycles (bus precharged so it settles fast) and measure over one 400 Hz cycle.
     const double tstop = 7.5e-3, tstep = 1e-6, t0 = 5e-3, t1 = 7.5e-3;
@@ -100,14 +106,13 @@ TEST_CASE("single-phase boost PFC: floating AC input -> boosted DC bus, real-pow
     const double pf = pavg / (vrms * irms);
 
     INFO("PFC: Vout=" << voavg << " V (Vpeak=" << vpeak << "), Vrms=" << vrms << " Irms=" << irms
-         << " Pavg=" << pavg << " W, raw PF=" << pf);
-    // AC -> a genuinely BOOSTED DC bus, well above the line peak (active boost, not mere rectification).
+         << " Pavg=" << pavg << " W, PF=" << pf);
+    // regulated, boosted DC bus near the design target (400 V), well above the line peak.
     CHECK(voavg > 1.5 * vpeak);
-    CHECK(voavg < 520.0);
-    // real power is drawn from the mains and delivered (a working converter, not a reactive/idle load).
-    CHECK(pavg > 150.0);
-    // the fundamental input current emulates a resistor (in phase): raw PF is sub-unity (switching ripple
-    // is unfiltered here) but well above ~0 — the current is NOT purely reactive/random.
-    CHECK(pf > 0.40);
+    CHECK(voavg > 370.0);
+    CHECK(voavg < 430.0);
+    // the current loop draws ~the design power and emulates a resistor across the line: NEAR-UNITY PF.
+    CHECK(pavg > 250.0);
+    CHECK(pf > 0.95);
     CHECK(pf <= 1.01);
 }
