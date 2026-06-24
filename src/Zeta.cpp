@@ -28,7 +28,6 @@ ZetaDesign design_zeta(const json& tasInputs) {
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 0.9);
-    d.diodeDrop = 0.8334;
     if (tasInputs.contains("operatingPoints") && !tasInputs.at("operatingPoints").empty()) {
         const json& op = tasInputs.at("operatingPoints").at(0);
         d.inputVoltage = op.at("inputVoltage").get<double>();
@@ -47,6 +46,7 @@ ZetaDesign design_zeta(const json& tasInputs) {
     d.inputVoltageMax = vinMax;
 
     const double iout = d.outputPower / d.outputVoltage, fsw = d.switchingFrequency;
+    d.diodeDrop = req::dideal_diode_drop(d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
     d.dutyCycle = duty(d.inputVoltage, d.outputVoltage, d.diodeDrop, d.efficiency);
 
     // L1 sized at the worst corner (max Vin) for its current-ripple target (MKF).

@@ -1,4 +1,5 @@
 #include "TwoSwitchForward.hpp"
+#include "ComponentRequirements.hpp"
 #include <cmath>
 #include <vector>
 
@@ -23,7 +24,6 @@ TwoSwitchForwardDesign design_two_switch_forward(const json& tasInputs) {
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 0.9);
-    d.diodeDrop = 0.8334;
     if (tasInputs.contains("operatingPoints") && !tasInputs.at("operatingPoints").empty()) {
         const json& op = tasInputs.at("operatingPoints").at(0);
         d.inputVoltage = op.at("inputVoltage").get<double>();
@@ -42,6 +42,7 @@ TwoSwitchForwardDesign design_two_switch_forward(const json& tasInputs) {
     d.inputVoltageMax = vinMax;
 
     const double iout = d.outputPower / d.outputVoltage;
+    d.diodeDrop = req::dideal_diode_drop(d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
     double n = vinMin * kMaxDuty / (d.outputVoltage + d.diodeDrop);
     n = std::round(n * 100.0) / 100.0;
     d.turnsRatio = n;

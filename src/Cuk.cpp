@@ -30,7 +30,6 @@ CukDesign design_cuk(const json& tasInputs) {
     d.outputVoltageMag = std::fabs(nominal(dr.at("outputs").at(0).at("voltage")));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 0.9);
-    d.diodeDrop = 0.8334;  // DIDEAL rectifier drop compensated so |Vout| meets spec; the sim deck adds a tiny cshunt for ideal-diode convergence
     if (tasInputs.contains("operatingPoints") && !tasInputs.at("operatingPoints").empty()) {
         const json& op = tasInputs.at("operatingPoints").at(0);
         d.inputVoltage = op.at("inputVoltage").get<double>();
@@ -49,6 +48,7 @@ CukDesign design_cuk(const json& tasInputs) {
     d.inputVoltageMax = vinMax;
 
     const double iout = d.outputPower / d.outputVoltageMag, fsw = d.switchingFrequency;
+    d.diodeDrop = req::dideal_diode_drop(iout);  // DIDEAL Vf at the operating rectifier current
     d.dutyCycle = duty(d.inputVoltage, d.outputVoltageMag, d.diodeDrop, d.efficiency);
 
     // L1 sized at the worst corner (max Vin) for its current-ripple target (MKF).
@@ -113,17 +113,31 @@ json build_cuk_tas(const CukDesign& d) {
     md["inputs"]["designRequirements"] = req::diode(vSwing / req::V_DERATE, iout / 0.7,
                                                     (vSwing < 100.0) ? 0.6 : 1.2, 0.05 / fsw);
 
+    // RC snubber across the freewheel diode — a REAL component (the DAB cell snubs its switches the same
+    // way). It damps the ideal-diode commutation dV/dt so the Cuk's resonant coupling loop converges in
+    // ngspice (otherwise "timestep too small" at startup). 100 Ω · 1 nF is negligible at the power-stage
+    // scale (RC = 100 ns « the switching period; bleed « the amperes of inductor current), so it does not
+    // shift the operating point — it just makes the emitted deck simulable for any consumer.
+    json rsnub; rsnub["resistor"] = json::object();
+    rsnub["inputs"]["designRequirements"]["deviceType"] = "resistor";
+    rsnub["inputs"]["designRequirements"]["resistance"]["nominal"] = 100.0;
+    json csnub; csnub["capacitor"] = json::object();
+    csnub["inputs"]["designRequirements"]["capacitance"]["nominal"] = 1e-9;
+    csnub["inputs"]["designRequirements"]["ratedVoltage"] = vSwing / req::V_DERATE;
+
     // Cuk cell — inverting. Dot/orientation mirror MKF: D1 anode at nodeB, cathode at gnd; L2 nodeB->vout(neg).
     json cell; cell["name"] = "cuk-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate")});
     cell["components"] = json::array({comp("L1", L1), comp("Q1", mq), comp("C1", c1),
-                                      comp("D1", md), comp("L2", L2)});
+                                      comp("D1", md), comp("L2", L2),
+                                      comp("Rsnub", rsnub), comp("Csnub", csnub)});
     cell["connections"] = json::array({
         conn("vin_net", {pin("L1", "primary_start"), prt("vin")}),
         conn("nodeA",   {pin("L1", "primary_end"), pin("Q1", "drain"), pin("C1", "1")}),
-        // node B: coupling cap -> freewheel diode (anode) + output inductor
-        conn("nodeB",   {pin("C1", "2"), pin("D1", "anode"), pin("L2", "primary_start")}),
-        conn("gnd_net", {pin("Q1", "source"), pin("D1", "cathode"), prt("gnd")}),
+        // node B: coupling cap -> freewheel diode (anode) + output inductor + diode RC snubber
+        conn("nodeB",   {pin("C1", "2"), pin("D1", "anode"), pin("L2", "primary_start"), pin("Rsnub", "1")}),
+        conn("snub",    {pin("Rsnub", "2"), pin("Csnub", "1")}),
+        conn("gnd_net", {pin("Q1", "source"), pin("D1", "cathode"), pin("Csnub", "2"), prt("gnd")}),
         conn("vout_net",{pin("L2", "primary_end"), prt("vout")}),     // negative output
         conn("gate_net",{pin("Q1", "gate"), prt("gate")})});
 

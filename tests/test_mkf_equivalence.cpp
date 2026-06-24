@@ -129,11 +129,6 @@ KirchhoffResult run_kirchhoff(const json& tasInputs, const json& tas, double loa
                     double outputCapacitance, double vin, const std::string& tag) {
     PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
     std::string deck = Kirchhoff::tas_to_ngspice(tas, ideal);
-    // Cuk needs a tiny node shunt cap for ideal-diode startup convergence at the drop-compensated point
-    // (negligible vs the µF power caps); Cuk only — a global cshunt would detune the resonant tanks.
-    if (tag.find("cuk") != std::string::npos)
-        deck = std::regex_replace(deck, std::regex(R"((\.options [^\n]*method=gear))"), "$1 cshunt=1e-9");
-
     // fsw from the stimulus (period sets the timestep + measurement window).
     double fsw = 100000.0;
     for (const auto& st : tasInputs.value("simStimulusFsw", json::array())) fsw = st.get<double>();

@@ -46,7 +46,8 @@ IsolatedBuckBoostDesign design_isolated_buck_boost(const json& tasInputs) {
     const double Ipri = d.primaryPower / Vpri, Isec = d.secondaryPower / Vsec;
 
     // Flyback duty D = V_pri / (Vin·η + V_pri).  N = V_pri/(V_sec + Vd), ideal Vd=0.
-    d.dutyCycle  = (Vpri + 0.8334) / (Vin * d.efficiency + Vpri + 0.8334);  // +Vd: primary buck-boost rectifier drop (was MKF Vd=0)
+const double Vd = req::dideal_diode_drop(Ipri);  // DIDEAL Vf at the primary rectifier current
+    d.dutyCycle  = (Vpri + Vd) / (Vin * d.efficiency + Vpri + Vd);
     double N = Vpri / Vsec;  // measured output is the primary buck rail (no rectifier drop); secondary is internal
     d.turnsRatio = std::round(N * 100.0) / 100.0;
 

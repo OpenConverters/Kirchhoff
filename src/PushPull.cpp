@@ -24,7 +24,6 @@ PushPullDesign design_push_pull(const json& tasInputs) {
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 0.9);
-    d.diodeDrop = 0.8334;
     d.maxDutyCycle = kMaxDuty;
     if (tasInputs.contains("operatingPoints") && !tasInputs.at("operatingPoints").empty()) {
         const json& op = tasInputs.at("operatingPoints").at(0);
@@ -45,6 +44,7 @@ PushPullDesign design_push_pull(const json& tasInputs) {
 
     const double iout = d.outputPower / d.outputVoltage, fsw = d.switchingFrequency, T = 1.0 / fsw;
     // Turns ratio (MKF): N = D_max * 2 * Vin_min / (Vout + Vd). Rounded to 2 dp.
+    d.diodeDrop = req::dideal_diode_drop(d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
     double N = d.maxDutyCycle * 2.0 * vinMin / (d.outputVoltage + d.diodeDrop);
     N = std::round(N * 100.0) / 100.0;
     d.turnsRatio = N;

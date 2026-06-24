@@ -108,11 +108,6 @@ double simulate_vout(const json& tasInputs, const json& tas, double loadResistan
                      double settleCap, const std::string& tag) {
     PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
     std::string deck = Kirchhoff::tas_to_ngspice(tas, ideal);
-    // Cuk's resonant coupling loop fails ideal-diode startup convergence ("timestep too small") at the
-    // drop-compensated operating point; a tiny node-to-ground shunt cap fixes it (negligible vs the µF
-    // power-stage caps). Cuk ONLY — a global cshunt would detune the resonant tanks (LLC/SRC).
-    if (tag == "cuk")
-        deck = std::regex_replace(deck, std::regex(R"((\.options [^\n]*method=gear))"), "$1 cshunt=1e-9");
     double fsw = 100000.0;
     for (const auto& st : tasInputs.value("simStimulusFsw", json::array())) fsw = st.get<double>();
     const double period = 1.0 / fsw;

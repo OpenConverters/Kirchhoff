@@ -18,6 +18,8 @@
 #include <string>
 #include <vector>
 #include <optional>
+#include <cmath>
+#include <algorithm>
 
 namespace Kirchhoff {
 namespace req {
@@ -26,6 +28,15 @@ using nlohmann::json;
 
 constexpr double V_DERATE = 0.8;   // operate at <= 80% of the device voltage rating
 constexpr double ESR_RIPPLE_FRACTION = 0.005;  // ESR ripple-voltage budget = 0.5% of Vout
+
+// Forward drop of the IDEAL ("DIDEAL") rectifier diode the CIAS converter emits — IS=1e-14, N=1, so
+// Vf = Vt·ln(I/IS), Vt = 25.852 mV. NOT a constant: a design that targets its spec'd output THROUGH such
+// a diode adds this current-dependent drop to the design target. (Vf(1 A) = 0.8336 V, which is why the
+// old hardcoded 0.8334 looked right — but it's only exact at 1 A; this tracks the real operating current.)
+inline double dideal_diode_drop(double current) {
+    constexpr double Vt = 0.025852, IS = 1e-14;   // matches CiasCircuitConverter's ideal-diode model
+    return Vt * std::log(std::max(current, 1e-12) / IS);
+}
 
 // --- semiconductor: MOSFET main switch ---
 inline json mosfet(const std::string& role, double ratedVds, double ratedId,

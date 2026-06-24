@@ -33,7 +33,6 @@ FlybackDesign design_flyback(const json& tasInputs) {
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"), "outputVoltage");
     d.switchingFrequency = nominal(dr.at("switchingFrequency"), "switchingFrequency");
     d.efficiency = dr.value("efficiency", 0.88);
-    d.diodeDrop = 0.8334;  // compensate for the DIDEAL rectifier drop so Vout meets spec (diverges from MKF Vd=0)
 
     // operating point (Vin, Pout): prefer operatingPoints[0], else designRequirements.
     if (tasInputs.contains("operatingPoints") && !tasInputs.at("operatingPoints").empty()) {
@@ -73,6 +72,7 @@ FlybackDesign design_flyback(const json& tasInputs) {
     // Steady-state CCM duty at the nominal operating Vin (the open-loop PWM duty). The secondary must
     // produce Vout+Vd so the output AFTER the rectifier drop is the spec'd Vout:
     //   Vout+Vd = Vin·D / (n·(1-D))  ->  D = n·(Vout+Vd) / (Vin + n·(Vout+Vd)).
+    d.diodeDrop = req::dideal_diode_drop(d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
     const double Vor = n * (d.outputVoltage + d.diodeDrop);
     d.dutyCycle = Vor / (d.inputVoltage + Vor);
 

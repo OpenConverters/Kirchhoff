@@ -52,12 +52,13 @@ WeinbergDesign design_weinberg(const json& tasInputs) {
 
     // Turns ratio sized at MAX Vin to keep D ≥ 0.55 (boost regime) across the input range:
     //   n = 1 / (2·M·(1−D_target)),  M = Vo/(Vin_max·η).   (MKF process_design_requirements)
-    const double Mmax = (Vo + 0.8334) / (vinMax * eta);  // +Vd rectifier drop
+const double Vd = req::dideal_diode_drop(d.outputPower / Vo);  // DIDEAL Vf at the rectifier current
+    const double Mmax = (Vo + Vd) / (vinMax * eta);
     double n = 1.0 / (2.0 * Mmax * (1.0 - kDTarget));
     d.turnsRatio = std::round(n * 1000.0) / 1000.0;
 
     // Boost-regime duty at nominal Vin (the deck simulates at nominal Vin).
-    d.dutyCycle = duty_boost(Vin, Vo + 0.8334, d.turnsRatio, eta);  // +Vd rectifier drop
+d.dutyCycle = duty_boost(Vin, Vo + Vd, d.turnsRatio, eta);
     d.switchDuty = d.dutyCycle;
 
     // L1 sized at MIN Vin (worst case): ΔI_L1 = ripple·I_L1perWinding, I_L1perWinding = Iin/2,
