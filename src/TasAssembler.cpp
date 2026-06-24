@@ -208,6 +208,7 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
     std::set<std::string> seenMagRefs;
     // (stage,component,pin) -> the stage port it is exposed on (for the stimulus to reach it).
     std::map<std::tuple<std::string, std::string, std::string>, std::string> pinPort;
+    bool deckHasRealSemi = false;   // any DATASHEET semiconductor -> a real deck that gets the cshunt aid
 
     for (const auto& stage : stages) {
         if (!stage.contains("circuit") || !stage.at("circuit").is_object()) continue;  // control stages
@@ -261,6 +262,7 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
             if (!cd.is_object() || !cd.contains("semiconductor")) continue;
             hasSemi = true;
             if (infer_fidelity(cd, fidelity).origin != PEAS::Fidelity::Origin::DATASHEET) { allRealAdequate = false; continue; }
+            deckHasRealSemi = true;
             const json& semi = cd.at("semiconductor");
             if (semi.contains("mosfet") &&
                 numAt(semi.at("mosfet"), {"manufacturerInfo", "datasheetInfo", "electrical", "outputCapacitance"}) < maxSnubberCap)
@@ -506,8 +508,14 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
            << ic.at("voltage").get<double>() << "\n";
 
     // Gear integration + tight tolerances tame the stiff ideal diodes; both ngspice and LTspice accept
-    // these option names + the Gear method.
-    os << ".options reltol=1e-3 abstol=1e-9 vntol=1e-6 method=gear\n";
+    // these option names + the Gear method. For a REAL deck only, append cshunt — a tiny capacitance from
+    // every node to ground that gives each node a defined dV/dt, so a stiff resonant tank whose switch body
+    // diode was stripped (llc/src) no longer goes singular ("timestep too small"). It is gated on real
+    // semiconductors because, applied to the pinned IDEAL decks, even 1e-12 F detunes them past the 5 %
+    // requirements/MKF-equivalence tolerance; on a real deck the looser real-loss bands absorb it (verified
+    // psfb/dab/llc/src Vout shift < 0.1 %). Like reltol/abstol it is a fixed numerical-solver setting.
+    os << ".options reltol=1e-3 abstol=1e-9 vntol=1e-6 method=gear"
+       << (deckHasRealSemi ? " cshunt=1e-12" : "") << "\n";
     os << ".tran " << maxStep << " " << stopTime << " 0 " << maxStep << (useIc ? " uic" : "") << "\n";
     const double from = stopTime - 50 * period;
     if (lt) {

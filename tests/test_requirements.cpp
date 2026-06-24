@@ -215,10 +215,10 @@ const std::set<std::string> kNotPinned = {};  // NO exclusions: every topology i
 // isolated secondary) output spec, taken from the fixture's design section.
 const std::set<std::string> kDualOutput = {"isolated_buck", "isolated_buck_boost"};
 // Real-deck sweep: topologies whose full-converter deck does NOT converge once the ideal numerical aids are
-// stripped, because the strip that the OTHER families need conflicts with their structure. llc/src are
-// resonant half-bridges whose tank + real rectifier diodes go singular once the switch body diode is
-// stripped (which the full-bridge floating midpoints REQUIRE). Documented, not gated — see check_real_deck.
-const std::set<std::string> kRealDeckKnownHard = {"llc", "src"};
+// stripped. EMPTY since the .options cshunt=1e-13 solver aid (TasAssembler) keeps the stripped resonant
+// half-bridge tanks (llc/src) non-singular without detuning — they now converge too. Kept as the mechanism
+// for honestly recording any future hold-out rather than silencing it. See check_real_deck.
+const std::set<std::string> kRealDeckKnownHard = {};
 
 void check_meets_requirements(const std::string& name) {
     json fx = load_fixture(name);
