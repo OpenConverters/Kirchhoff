@@ -32,6 +32,8 @@ constexpr double kSwitchDuty  = 0.499;
 DabDesign design_dab(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     DabDesign d{};
+    const json config = cfg::object_of(tasInputs);
+    const double d3deg = cfg::get(config, "dabPhaseShiftDeg", kD3Deg);
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 0.9);
@@ -54,7 +56,7 @@ DabDesign design_dab(const json& tasInputs) {
 
     const double Vin = d.inputVoltage, Vo = d.outputVoltage, Fs = d.switchingFrequency;
     const double P = d.outputPower;
-    const double D3 = kD3Deg * M_PI / 180.0;
+    const double D3 = d3deg * M_PI / 180.0;
 
     // 1. Turns ratio N = V1_nom / V2_nom (MKF rounds to 2 decimals).
     double N = Vin / Vo;
@@ -70,11 +72,11 @@ DabDesign design_dab(const json& tasInputs) {
     double LmFromCurrent = Vin * Vin / (1.2 * Fs * P);
     d.magnetizingInductance = std::max(LmFromCurrent, 10.0 * d.seriesInductance);
 
-    d.phaseShiftDeg = kD3Deg;
-    d.switchDuty = kSwitchDuty;
+    d.phaseShiftDeg = d3deg;
+    d.switchDuty = cfg::get(config, "switchDutyFraction", kSwitchDuty);
     d.loadResistance = Vo * Vo / P;
-    d.config = cfg::object_of(tasInputs);
-    d.outputCapacitance = cfg::get(d.config, "outputCapacitance", 100e-6);  // DAB has no output L; MKF uses 100u
+    d.config = config;
+    d.outputCapacitance = cfg::get(config, "outputCapacitance", 100e-6);  // DAB has no output L; MKF uses 100u
     return d;
 }
 
