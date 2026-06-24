@@ -207,6 +207,59 @@ void check_meets_requirements(const std::string& name) {
     CHECK(pErr <= kPowerTol);   // ...and the required POWER
 }
 
+// --- MULTI-POINT: each topology validated at SEVERAL real reference-design operating points (the operating
+// points lifted from MKF's Test*ReferenceDesignsPtp.cpp suites — real EVMs/app-notes), validated OUR way:
+// design from {Vin, Vout, Pout, Fs}, simulate, assert the delivered Vout + power match. We copy the
+// operating POINTS, not MKF's internal analytical comparison. ---
+struct PtpPoint { const char* topo; double vin, vout, iout, fs; };
+json point_inputs(double vin, double vout, double pout, double fs) {
+    json d;
+    d["designRequirements"]["efficiency"] = 1.0;
+    d["designRequirements"]["inputVoltage"]["nominal"] = vin;
+    d["designRequirements"]["inputVoltage"]["minimum"] = vin * 0.95;
+    d["designRequirements"]["inputVoltage"]["maximum"] = vin * 1.05;
+    d["designRequirements"]["switchingFrequency"]["nominal"] = fs;
+    json o; o["name"] = "out"; o["voltage"]["nominal"] = vout;
+    d["designRequirements"]["outputs"] = json::array({o});
+    json op; op["inputVoltage"] = vin; json oo; oo["power"] = pout; op["outputs"] = json::array({oo});
+    d["operatingPoints"] = json::array({op});
+    d["simStimulusFsw"] = json::array({fs});
+    return d;
+}
+const std::vector<PtpPoint>& ptpPoints() {
+    static const std::vector<PtpPoint> pts = {
+        {"buck", 12.0, 5.0, 2.0, 500e3}, {"buck", 12.0, 5.0, 3.0, 400e3}, {"buck", 24.0, 12.0, 8.0, 400e3},
+        {"boost", 5.0, 9.0, 2.0, 400e3}, {"boost", 7.2, 16.0, 2.0, 300e3}, {"boost", 12.0, 24.0, 4.5, 250e3},
+        {"flyback", 24.0, 6.0, 0.2, 250e3}, {"flyback", 24.0, 15.0, 0.2, 200e3}, {"flyback", 120.0, 12.0, 2.75, 70e3},
+        {"sepic", 5.0, 12.0, 0.5, 600e3}, {"sepic", 3.3, 5.0, 1.0, 250e3}, {"sepic", 12.0, 12.0, 1.0, 250e3},
+        {"zeta", 12.0, 5.0, 1.0, 600e3}, {"zeta", 12.0, 12.0, 1.0, 300e3}, {"zeta", 5.0, 12.0, 0.5, 600e3},
+        {"push_pull", 5.0, 3.3, 0.35, 410e3}, {"push_pull", 5.0, 3.3, 1.0, 420e3}, {"push_pull", 12.0, 5.0, 1.0, 200e3},
+        {"acf", 48.0, 3.3, 30.0, 250e3}, {"acf", 28.0, 5.0, 10.0, 200e3}, {"acf", 48.0, 12.0, 16.0, 250e3},
+        {"weinberg", 50.0, 150.0, 10.0, 50e3}, {"weinberg", 42.0, 100.0, 5.0, 100e3}, {"weinberg", 24.0, 50.0, 5.0, 100e3},
+    };
+    return pts;
+}
+void check_topo_points(const std::string& topo) {
+    int idx = 0, n = 0;
+    for (const auto& p : ptpPoints()) {
+        if (topo == p.topo) {
+            json di = point_inputs(p.vin, p.vout, p.vout * p.iout, p.fs);
+            Built b;
+            for (const auto& t : topologies()) if (t.name == p.topo) { b = t.build(di); break; }
+            const double vout = std::fabs(simulate_vout(di, b.tas, b.loadR, b.settleCap,
+                                          std::string(p.topo) + "_pt" + std::to_string(idx)));
+            const double pout = vout * vout / b.loadR, vReq = p.vout, pReq = p.vout * p.iout;
+            INFO(p.topo << " @ Vin=" << p.vin << " -> " << p.vout << " V " << p.iout << " A: Vout=" << vout
+                 << " (err " << 100.0 * std::fabs(vout - vReq) / vReq << " %), Pout=" << pout << "/" << pReq);
+            CHECK(std::fabs(vout - vReq) / vReq <= kReqTol);
+            CHECK(std::fabs(pout - pReq) / pReq <= kPowerTol);
+            n++;
+        }
+        idx++;
+    }
+    REQUIRE(n >= 1);
+}
+
 }  // namespace
 
 // One TEST_CASE per topology (each tagged) so a failure names the offending converter directly.
@@ -231,3 +284,13 @@ TEST_CASE("Weinberg meets requirements", "[requirements][weinberg]")            
 TEST_CASE("LLC meets requirements", "[requirements][llc]")                         { check_meets_requirements("llc"); }
 TEST_CASE("SRC meets requirements", "[requirements][src]")                         { check_meets_requirements("src"); }
 TEST_CASE("CLLC meets requirements", "[requirements][cllc]")                       { check_meets_requirements("cllc"); }
+
+// Multi-point: each topology at its MKF PtP reference-design operating points (validated our way).
+TEST_CASE("Buck PtP reference designs deliver spec", "[requirements][ptp][buck]")           { check_topo_points("buck"); }
+TEST_CASE("Boost PtP reference designs deliver spec", "[requirements][ptp][boost]")         { check_topo_points("boost"); }
+TEST_CASE("Flyback PtP reference designs deliver spec", "[requirements][ptp][flyback]")     { check_topo_points("flyback"); }
+TEST_CASE("SEPIC PtP reference designs deliver spec", "[requirements][ptp][sepic]")         { check_topo_points("sepic"); }
+TEST_CASE("Zeta PtP reference designs deliver spec", "[requirements][ptp][zeta]")           { check_topo_points("zeta"); }
+TEST_CASE("Push-pull PtP reference designs deliver spec", "[requirements][ptp][pushpull]")  { check_topo_points("push_pull"); }
+TEST_CASE("ACF PtP reference designs deliver spec", "[requirements][ptp][acf]")             { check_topo_points("acf"); }
+TEST_CASE("Weinberg PtP reference designs deliver spec", "[requirements][ptp][weinberg]")   { check_topo_points("weinberg"); }
