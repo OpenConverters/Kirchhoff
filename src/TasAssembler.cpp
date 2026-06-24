@@ -232,33 +232,86 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
         // out to several atom pins — e.g. a controller leaf whose `nodeC` sense port feeds two
         // comparators. Single-atom leaves (every passive/switch) map a port to exactly one pin.
         std::map<std::string, std::map<std::string, std::vector<std::pair<std::string, std::string>>>> portToAtomPin;
-        // Strip this brick's numerical dV/dt snubbers iff EVERY semiconductor in it is a real part carrying
-        // the parasitic that physically replaces them (mosfet Coss / diode Cj). Any ideal seed, or a real
-        // part missing its parasitic, and we keep the snubbers (the ideal switch still needs them to
-        // converge). Per-component, so a librarian round-trip that fully sources a brick strips its snubbers
-        // even with the deck's base fidelity still REQUIREMENTS.
-        auto hasParasitic = [](const json& dev, const char* field) {
-            return dev.contains("manufacturerInfo") && dev.at("manufacturerInfo").contains("datasheetInfo")
-                && dev.at("manufacturerInfo").at("datasheetInfo").contains("electrical")
-                && dev.at("manufacturerInfo").at("datasheetInfo").at("electrical").contains(field)
-                && !dev.at("manufacturerInfo").at("datasheetInfo").at("electrical").at(field).is_null();
+        // Strip this brick's numerical dV/dt snubbers iff EVERY semiconductor is a real part whose parasitic
+        // (mosfet Coss / diode Cj) is at least as large as the LARGEST snubber cap in the brick — i.e. the
+        // device can actually REPLACE that snubber for convergence. A real part missing its parasitic, OR
+        // whose parasitic is SMALLER than the snubber (a small-Coss HV switch can't tame the dV/dt the 2.2 nF
+        // node snubber was handling at the coarse period/200 timestep), keeps the snubbers — the deck stays
+        // convergent, just slightly over-damped. Any ideal seed keeps them too. Per-component, so a librarian
+        // round-trip that fully sources a brick can strip even with the deck's base still REQUIREMENTS. (This
+        // magnitude gate is why stripping a 2.2 nF node snubber needs Coss>=2.2 nF, while an energy-sized DAB
+        // (~600 pF) or a 100 pF rectifier snubber strips with an ordinary nF-scale parasitic.)
+        auto numAt = [](const json& obj, std::initializer_list<const char*> path) -> double {
+            const json* cur = &obj;
+            for (const char* k : path) { if (!cur->is_object() || !cur->contains(k)) return 0.0; cur = &cur->at(k); }
+            if (cur->is_number()) return cur->get<double>();
+            if (cur->is_object() && cur->contains("nominal") && cur->at("nominal").is_number())
+                return cur->at("nominal").get<double>();
+            return 0.0;
         };
-        bool hasSemi = false, allRealWithParasitic = true;
+        double maxSnubberCap = 0.0;
+        for (const auto& comp : brick.at("components"))
+            if (is_numerical_snubber(comp.at("name").get<std::string>())) {
+                const double c = numAt(comp.at("data"), {"inputs", "designRequirements", "capacitance"});
+                if (c > maxSnubberCap) maxSnubberCap = c;
+            }
+        bool hasSemi = false, allRealAdequate = true;
         for (const auto& comp : brick.at("components")) {
             const json& cd = comp.at("data");
             if (!cd.is_object() || !cd.contains("semiconductor")) continue;
             hasSemi = true;
-            if (infer_fidelity(cd, fidelity).origin != PEAS::Fidelity::Origin::DATASHEET) { allRealWithParasitic = false; continue; }
+            if (infer_fidelity(cd, fidelity).origin != PEAS::Fidelity::Origin::DATASHEET) { allRealAdequate = false; continue; }
             const json& semi = cd.at("semiconductor");
-            if (semi.contains("mosfet") && !hasParasitic(semi.at("mosfet"), "outputCapacitance")) allRealWithParasitic = false;
-            if (semi.contains("diode")  && !hasParasitic(semi.at("diode"),  "junctionCapacitance")) allRealWithParasitic = false;
+            if (semi.contains("mosfet") &&
+                numAt(semi.at("mosfet"), {"manufacturerInfo", "datasheetInfo", "electrical", "outputCapacitance"}) < maxSnubberCap)
+                allRealAdequate = false;
+            if (semi.contains("diode") &&
+                numAt(semi.at("diode"), {"manufacturerInfo", "datasheetInfo", "electrical", "junctionCapacitance"}) < maxSnubberCap)
+                allRealAdequate = false;
         }
-        const bool stripSnubbers = hasSemi && allRealWithParasitic;
+        const bool stripSnubbers = hasSemi && allRealAdequate;
 
-        std::set<std::string> strippedSnubbers;        // numerical snubbers dropped for a fully-real brick
+        // A topology supplies an ideal anti-parallel BODY DIODE across each ideal switch (dead-time freewheel
+        // / clamp). When the switch becomes REAL it carries its OWN body diode (the SAS multi-atom leaf), so
+        // the topology one is a duplicate — two ideal diodes in parallel across the same node pair is a
+        // SINGULAR mesh ngspice can't solve ("timestep too small; trouble with node ..."). Strip the topology
+        // body diode iff it is anti-parallel to a REAL switch (its anode/cathode nets are that switch's
+        // source/drain). Detected structurally from the brick wiring, so it needs no per-topology marker and
+        // never touches a rectifier diode (those don't sit across a switch). Independent of the snubber gate.
+        std::map<std::pair<std::string, std::string>, std::string> pinNet;
+        for (const auto& conn : brick.at("connections")) {
+            const std::string net = conn.at("name").get<std::string>();
+            for (const auto& ep : conn.at("endpoints"))
+                if (ep.contains("component"))
+                    pinNet[{ep.at("component").get<std::string>(), ep.at("pin").get<std::string>()}] = net;
+        }
+        auto netOf = [&](const std::string& c, const std::string& p) -> std::string {
+            auto it = pinNet.find({c, p}); return it == pinNet.end() ? std::string() : it->second;
+        };
+        std::vector<std::pair<std::string, std::string>> realSwitchDS;   // {drain net, source net} per real mosfet
+        for (const auto& comp : brick.at("components")) {
+            const json& cd = comp.at("data");
+            if (cd.is_object() && cd.contains("semiconductor") && cd.at("semiconductor").contains("mosfet")
+                && infer_fidelity(cd, fidelity).origin == PEAS::Fidelity::Origin::DATASHEET) {
+                const std::string n = comp.at("name").get<std::string>();
+                realSwitchDS.push_back({netOf(n, "drain"), netOf(n, "source")});
+            }
+        }
+        auto isRedundantBodyDiode = [&](const std::string& dn, const json& dd) -> bool {
+            if (!dd.is_object() || !dd.contains("semiconductor") || !dd.at("semiconductor").contains("diode"))
+                return false;
+            const std::string a = netOf(dn, "anode"), k = netOf(dn, "cathode");
+            if (a.empty() || k.empty()) return false;
+            for (const auto& ds : realSwitchDS)
+                if ((a == ds.second && k == ds.first) || (a == ds.first && k == ds.second)) return true;
+            return false;
+        };
+
+        std::set<std::string> strippedNumericalAids;   // snubbers + redundant body diodes dropped for a real brick
         for (const auto& comp : brick.at("components")) {
             const std::string cname = comp.at("name").get<std::string>();
-            if (stripSnubbers && is_numerical_snubber(cname)) { strippedSnubbers.insert(cname); continue; }
+            if (stripSnubbers && is_numerical_snubber(cname)) { strippedNumericalAids.insert(cname); continue; }
+            if (isRedundantBodyDiode(cname, comp.at("data"))) { strippedNumericalAids.insert(cname); continue; }
             const json& data = comp.at("data");
             // Hoist a real magnetic's MKF subcircuit to the deck top level (once per reference); the
             // stage body (below) only emits the X instance that references it.
@@ -313,7 +366,7 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
             for (const auto& ep : conn.at("endpoints")) {
                 if (ep.contains("component")) {
                     const std::string cn = ep.at("component").get<std::string>();
-                    if (strippedSnubbers.count(cn)) continue;   // endpoint of a stripped numerical snubber
+                    if (strippedNumericalAids.count(cn)) continue;   // endpoint of a stripped snubber / body diode
                     const std::string pn = ep.at("pin").get<std::string>();
                     auto cit = portToAtomPin.find(cn);
                     if (cit == portToAtomPin.end() || !cit->second.count(pn))
