@@ -1,5 +1,6 @@
 #include "Dab.hpp"
 #include "ComponentRequirements.hpp"
+#include "KirchhoffConfig.hpp"
 #include <cmath>
 #include <algorithm>
 #include <vector>
@@ -72,7 +73,8 @@ DabDesign design_dab(const json& tasInputs) {
     d.phaseShiftDeg = kD3Deg;
     d.switchDuty = kSwitchDuty;
     d.loadResistance = Vo * Vo / P;
-    d.outputCapacitance = 100e-6;    // matches MKF DAB (cfg.outputCapacitance = 100u)
+    d.config = cfg::object_of(tasInputs);
+    d.outputCapacitance = cfg::get(d.config, "outputCapacitance", 100e-6);  // DAB has no output L; MKF uses 100u
     return d;
 }
 
@@ -109,18 +111,19 @@ json build_dab_tas(const DabDesign& d) {
     capd["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;
     capd["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage * 2;
 
-    // Per-switch RC snubber: 1 kΩ ∥ 1 nF across every switch's two power terminals — MKF's DAB deck
-    // carries exactly these on all eight switches (its DAB SpiceSimulationConfig overrides the family
-    // default to snubR=1000, snubC=1n). They damp the floating-midpoint dV/dt at every switching /
-    // dead-time event (ngspice convergence) AND set the conduction droop that pulls the settled Vout
-    // below the lossless SPS target; since DAB has no output inductor to clamp Vout, matching these
-    // values (not the 100 Ω / 100 pF family default) is required to match MKF's settled Vout AND its
-    // input current / efficiency. (Physically real: device Coss + a bleed/damping resistor.)
+    // Per-switch R∥C snubber across every switch's two power terminals (8 switches). The C tames the
+    // floating-midpoint dV/dt at every switching/dead-time event (ngspice convergence); the R provides the
+    // DC path that DEFINES the floating midpoint during the dead time. Both DERIVED, not literals:
+    //   C = energy-budget rule at V_block = Vin (snubber processes <= snubberEnergyFrac of throughput);
+    //   R = bias-loss rule (dissipates <= biasLossFrac of rated P at Vin) — a small R here would bleed
+    //       Vin^2/R when a switch drives the midpoint to a rail (~kW at 800 V), starving Vout.
+    const double snubCval = cfg::snubber_cap(d.config, d.outputPower, d.inputVoltage, d.switchingFrequency);
+    const double snubRval = cfg::bias_res(d.config, d.inputVoltage, d.outputPower);
     auto snubR = [&]() { json c; c["resistor"] = json::object();
         c["inputs"]["designRequirements"]["deviceType"] = "resistor";
-        c["inputs"]["designRequirements"]["resistance"]["nominal"] = 100000.0; return c; };
+        c["inputs"]["designRequirements"]["resistance"]["nominal"] = snubRval; return c; };
     auto snubC = [&]() { json c; c["capacitor"] = json::object();
-        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = 1e-9;
+        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = snubCval;
         c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) * 3;
         return c; };
 

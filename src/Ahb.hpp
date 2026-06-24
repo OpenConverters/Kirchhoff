@@ -29,7 +29,8 @@ struct AhbDesign {
     double dcBlockingCapacitance; // Cb
     double outputInductance;      // Lo
     double loadResistance;
-    double outputCapacitance;     // Cout (output filter)
+    double outputCapacitance;
+    nlohmann::json config;     // Cout (output filter)
 };
 
 /**

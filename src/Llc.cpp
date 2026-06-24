@@ -1,4 +1,5 @@
 #include "Llc.hpp"
+#include "KirchhoffConfig.hpp"
 #include "ComponentRequirements.hpp"
 #include <cmath>
 #include <algorithm>
@@ -72,6 +73,7 @@ LlcDesign design_llc(const json& tasInputs) {
     d.switchDuty = kSwitchDuty;
     d.loadResistance = Rload;
     d.outputCapacitance = 47e-6;    // matches MKF LLC (Cout=47u)
+    d.config = cfg::object_of(tasInputs);
     return d;
 }
 
@@ -118,11 +120,11 @@ json build_llc_tas(const LlcDesign& d) {
 
     // Rectifier-diode RC snubbers (100Ω ∥ 100pF), as in MKF's LLC deck.
     auto snubC = [&]() { json c; c["capacitor"] = json::object();
-        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = 100e-12;
+        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::rectifier_snubber_cap(d.config);
         c["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage * 3; return c; };
     auto snubR = [&]() { json c; c["resistor"] = json::object();
         c["inputs"]["designRequirements"]["deviceType"] = "resistor";
-        c["inputs"]["designRequirements"]["resistance"]["nominal"] = 100.0; return c; };
+        c["inputs"]["designRequirements"]["resistance"]["nominal"] = cfg::snubber_res(d.config, d.switchingFrequency, cfg::rectifier_snubber_cap(d.config)); return c; };
 
     json cell; cell["name"] = "llc-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("g1"), port("g2")});

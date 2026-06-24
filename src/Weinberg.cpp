@@ -1,4 +1,5 @@
 #include "Weinberg.hpp"
+#include "KirchhoffConfig.hpp"
 #include "ComponentRequirements.hpp"
 #include <cmath>
 #include <algorithm>
@@ -74,6 +75,7 @@ d.dutyCycle = duty_boost(Vin, Vo + Vd, d.turnsRatio, eta);
     // Output cap from the 1% ripple target: Co = Iout·D/(ΔVo·Fs), ΔVo = coRipplePct·Vo.
     d.outputCapacitance = Iout * d.dutyCycle / (kCoRipplePct * Vo * Fs);
     d.loadResistance = Vo / Iout;
+    d.config = cfg::object_of(tasInputs);
     return d;
 }
 
@@ -123,7 +125,7 @@ json build_weinberg_tas(const WeinbergDesign& d) {
     // boost-reset voltage starved the output ~7%, dropping efficiency to ~57%). Intended divergence from
     // MKF's lossy R∥C: Kirchhoff delivers spec open-loop.
     auto snubC = [&]() { json c; c["capacitor"] = json::object();
-        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = 100e-12;
+        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::rectifier_snubber_cap(d.config);
         c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage * 6 + d.outputVoltage); return c; };
 
     json cell; cell["name"] = "weinberg-cell";
@@ -134,13 +136,13 @@ json build_weinberg_tas(const WeinbergDesign& d) {
         // loop-breaker for the otherwise-singular all-inductor mesh (coupled L1 + coupled T1 primary), not a
         // physical DCR. 1 mΩ is the minimum that converges; the old 0.05 Ω was an arbitrary lossy value that
         // burned ~2.5% of the output at the high-current corner (150 V/10 A: 4.5%→2.0% once shrunk to ideal).
-        comp("Rdcra", res(1e-3)), comp("Rdcrb", res(1e-3)),
+        comp("Rdcra", res(cfg::loop_breaker_res(d.config, d.loadResistance))), comp("Rdcrb", res(cfg::loop_breaker_res(d.config, d.loadResistance))),
         comp("S1", mosfet()), comp("S2", mosfet()),
         comp("Dpos", diode()), comp("Dneg", diode()), comp("Cout", cout),
-        comp("RsnS1", res(100.0)), comp("CsnS1", snubC()),
-        comp("RsnS2", res(100.0)), comp("CsnS2", snubC()),
-        comp("RsnDp", res(100.0)), comp("CsnDp", snubC()),
-        comp("RsnDn", res(100.0)), comp("CsnDn", snubC())});
+        comp("RsnS1", res(cfg::snubber_res(d.config, d.switchingFrequency, cfg::rectifier_snubber_cap(d.config)))), comp("CsnS1", snubC()),
+        comp("RsnS2", res(cfg::snubber_res(d.config, d.switchingFrequency, cfg::rectifier_snubber_cap(d.config)))), comp("CsnS2", snubC()),
+        comp("RsnDp", res(cfg::snubber_res(d.config, d.switchingFrequency, cfg::rectifier_snubber_cap(d.config)))), comp("CsnDp", snubC()),
+        comp("RsnDn", res(cfg::snubber_res(d.config, d.switchingFrequency, cfg::rectifier_snubber_cap(d.config)))), comp("CsnDn", snubC())});
     cell["connections"] = json::array({
         // Input: both L1 windings fed from vin (current-fed front end).
         conn("vin_net",  {pin("L1", "primary_start"), pin("L1", "secondary1_start"), prt("vin")}),

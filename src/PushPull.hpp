@@ -20,6 +20,7 @@ struct PushPullDesign {
     double outputInductance;       // Lout
     double loadResistance;
     double outputCapacitance;
+    nlohmann::json config;
 };
 
 /**

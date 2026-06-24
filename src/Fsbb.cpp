@@ -1,4 +1,5 @@
 #include "Fsbb.hpp"
+#include "KirchhoffConfig.hpp"
 #include "ComponentRequirements.hpp"
 #include <cmath>
 #include <algorithm>
@@ -56,7 +57,8 @@ FsbbDesign design_fsbb(const json& tasInputs) {
     d.inductance = std::max(Lbuck, Lboost);
 
     d.loadResistance = Vo * Vo / d.outputPower;
-    d.outputCapacitance = 100e-6;
+    d.config = cfg::object_of(tasInputs);
+    d.outputCapacitance = cfg::get(d.config, "outputCapacitance", 100e-6);
     return d;
 }
 
@@ -86,7 +88,7 @@ json build_fsbb_tas(const FsbbDesign& d) {
     capd["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage * 2;
 
     auto snub = [&]() { json c; c["capacitor"] = json::object();
-        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = 2.2e-9;
+        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::node_snubber_cap(d.config);
         c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) * 3;
         return c; };
 

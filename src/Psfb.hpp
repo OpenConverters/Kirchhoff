@@ -33,6 +33,7 @@ struct PsfbDesign {
     double outputInductance;       // Lo
     double loadResistance;
     double outputCapacitance;
+    nlohmann::json config;         // tasInputs["config"] — user overrides for otherwise-derived values
 };
 
 /**

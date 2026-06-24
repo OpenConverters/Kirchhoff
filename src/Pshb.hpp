@@ -30,6 +30,7 @@ struct PshbDesign {
     double splitCapacitance;       // split-cap each (sets mid_cap = Vin/2)
     double loadResistance;
     double outputCapacitance;
+    nlohmann::json config;
 };
 
 PshbDesign design_pshb(const nlohmann::json& tasInputs);

@@ -32,6 +32,7 @@ struct DabDesign {
     double magnetizingInductance;  // Lm
     double loadResistance;
     double outputCapacitance;
+    nlohmann::json config;         // tasInputs["config"] — user overrides for otherwise-derived values
 };
 
 /**

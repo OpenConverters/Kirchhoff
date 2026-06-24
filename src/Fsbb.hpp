@@ -25,6 +25,7 @@ struct FsbbDesign {
     double inductance;      // single inductor L (worst-case of buck@Vinmax / boost@Vinmin)
     double loadResistance;
     double outputCapacitance;
+    nlohmann::json config;
 };
 
 /**

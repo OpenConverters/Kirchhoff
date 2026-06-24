@@ -1,4 +1,5 @@
 #include "Cuk.hpp"
+#include "KirchhoffConfig.hpp"
 #include "ComponentRequirements.hpp"
 #include <cmath>
 #include <vector>
@@ -65,6 +66,7 @@ CukDesign design_cuk(const json& tasInputs) {
     const double dVo = kCoRipplePct * d.outputVoltageMag;
     d.outputCapacitance = dIL2 / (8.0 * fsw * dVo);
     d.loadResistance = d.outputVoltageMag * d.outputVoltageMag / d.outputPower;
+    d.config = cfg::object_of(tasInputs);
     return d;
 }
 
@@ -120,9 +122,9 @@ json build_cuk_tas(const CukDesign& d) {
     // shift the operating point — it just makes the emitted deck simulable for any consumer.
     json rsnub; rsnub["resistor"] = json::object();
     rsnub["inputs"]["designRequirements"]["deviceType"] = "resistor";
-    rsnub["inputs"]["designRequirements"]["resistance"]["nominal"] = 100.0;
+    rsnub["inputs"]["designRequirements"]["resistance"]["nominal"] = cfg::snubber_res(d.config, d.switchingFrequency, cfg::diode_snubber_cap(d.config));
     json csnub; csnub["capacitor"] = json::object();
-    csnub["inputs"]["designRequirements"]["capacitance"]["nominal"] = 1e-9;
+    csnub["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::diode_snubber_cap(d.config);
     csnub["inputs"]["designRequirements"]["ratedVoltage"] = vSwing / req::V_DERATE;
 
     // Cuk cell — inverting. Dot/orientation mirror MKF: D1 anode at nodeB, cathode at gnd; L2 nodeB->vout(neg).

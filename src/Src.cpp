@@ -1,4 +1,5 @@
 #include "Src.hpp"
+#include "KirchhoffConfig.hpp"
 #include "ComponentRequirements.hpp"
 #include <cmath>
 #include <algorithm>
@@ -64,6 +65,7 @@ SrcDesign design_src(const json& tasInputs) {
     d.switchDuty = kSwitchDuty;
     d.loadResistance = Rload;
     d.outputCapacitance = 47e-6;
+    d.config = cfg::object_of(tasInputs);
     return d;
 }
 
@@ -107,11 +109,11 @@ json build_src_tas(const SrcDesign& d) {
     cout["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage * 2;
 
     auto snubC = [&]() { json c; c["capacitor"] = json::object();
-        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = 100e-12;
+        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::rectifier_snubber_cap(d.config);
         c["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage * 3; return c; };
     auto snubR = [&]() { json c; c["resistor"] = json::object();
         c["inputs"]["designRequirements"]["deviceType"] = "resistor";
-        c["inputs"]["designRequirements"]["resistance"]["nominal"] = 100.0; return c; };
+        c["inputs"]["designRequirements"]["resistance"]["nominal"] = cfg::snubber_res(d.config, d.switchingFrequency, cfg::rectifier_snubber_cap(d.config)); return c; };
 
     json cell; cell["name"] = "src-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("g1"), port("g2")});

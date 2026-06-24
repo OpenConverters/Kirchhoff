@@ -1,4 +1,5 @@
 #include "Ahb.hpp"
+#include "KirchhoffConfig.hpp"
 #include "ComponentRequirements.hpp"
 #include <cmath>
 #include <algorithm>
@@ -81,7 +82,8 @@ AhbDesign design_ahb(const json& tasInputs) {
     d.dcBlockingCapacitance = IpriPk * D / (Fs * dVCb);
 
     d.loadResistance = Vo * Vo / d.outputPower;
-    d.outputCapacitance = 100e-6;   // matches MKF AHB (Cout=100u)
+    d.config = cfg::object_of(tasInputs);
+    d.outputCapacitance = cfg::get(d.config, "outputCapacitance", 100e-6);
     return d;
 }
 
@@ -126,7 +128,7 @@ json build_ahb_tas(const AhbDesign& d) {
     // (float when all four rectifier diodes are off). Body diodes clamp the midpoint; the small
     // node-to-gnd caps tame dV/dt — physically real device/winding capacitance. (PSFB template.)
     auto snub = [&]() { json c; c["capacitor"] = json::object();
-        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = 2.2e-9;
+        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::node_snubber_cap(d.config);
         c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) * 3;
         return c; };
 

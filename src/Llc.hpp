@@ -32,6 +32,7 @@ struct LlcDesign {
     double switchDuty;                // per-switch on-fraction (~0.45, complementary with dead time)
     double loadResistance;
     double outputCapacitance;
+    nlohmann::json config;
 };
 
 /**

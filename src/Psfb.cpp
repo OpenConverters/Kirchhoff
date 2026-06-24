@@ -1,5 +1,6 @@
 #include "Psfb.hpp"
 #include "ComponentRequirements.hpp"
+#include "KirchhoffConfig.hpp"
 #include <cmath>
 #include <algorithm>
 #include <vector>
@@ -106,6 +107,7 @@ PsfbDesign design_psfb(const json& tasInputs) {
     d.phaseDeg = 180.0 * Dcmd;
     d.loadResistance = Vo * Vo / d.outputPower;
     d.outputCapacitance = 100e-6;    // matches MKF PSFB (Cout=100u)
+    d.config = cfg::object_of(tasInputs);
     return d;
 }
 
@@ -154,7 +156,7 @@ json build_psfb_tas(const PsfbDesign& d) {
     // the dV/dt at every switching/commutation instant. Physically real (device Coss + winding capac.);
     // 2.2 nF leaves Vout within ~1%. (Same technique as push-pull / MKF's reference snubbers.)
     auto snub = [&]() { json c; c["capacitor"] = json::object();
-        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = 2.2e-9;
+        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::node_snubber_cap(d.config);  // bridge midpoint node cap
         c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) * 3;
         return c; };
 

@@ -31,6 +31,7 @@ struct WeinbergDesign {
     double magnetizingInductance;     // Lpri_half (each primary-half winding of the main transformer)
     double loadResistance;
     double outputCapacitance;
+    nlohmann::json config;
 };
 
 /**

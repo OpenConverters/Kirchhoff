@@ -1,4 +1,5 @@
 #include "PushPull.hpp"
+#include "KirchhoffConfig.hpp"
 #include "ComponentRequirements.hpp"
 #include <cmath>
 #include <vector>
@@ -61,7 +62,8 @@ PushPullDesign design_push_pull(const json& tasInputs) {
     // Operating per-switch duty at nominal Vin: Vout = 2*D*Vin/N  ->  D = N*Vout/(2*Vin).
     d.dutyCycle = N * (d.outputVoltage + d.diodeDrop) / (2.0 * d.inputVoltage);
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
-    d.outputCapacitance = 100e-6;   // matches MKF push-pull (Cout=100u)
+    d.config = cfg::object_of(tasInputs);
+    d.outputCapacitance = cfg::get(d.config, "outputCapacitance", 100e-6);
     return d;
 }
 
@@ -103,7 +105,7 @@ json build_push_pull_tas(const PushPullDesign& d) {
     // in any push-pull, and small enough (2.2 nF) to leave Vout within ~2% (energy is reactive, ~no
     // loss). MKF's reference deck uses the same technique (switch + rectifier snubbers).
     auto snub = [&]() { json c; c["capacitor"] = json::object();
-        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = 2.2e-9;
+        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::node_snubber_cap(d.config);
         c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) * 3;
         return c; };
 

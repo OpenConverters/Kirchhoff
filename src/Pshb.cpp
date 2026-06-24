@@ -1,4 +1,5 @@
 #include "Pshb.hpp"
+#include "KirchhoffConfig.hpp"
 #include <cmath>
 #include <algorithm>
 #include <vector>
@@ -74,7 +75,8 @@ PshbDesign design_pshb(const json& tasInputs) {
     d.switchDuty = 0.5;
     d.deadFraction = kDeadFrac;
     d.loadResistance = Vo * Vo / d.outputPower;
-    d.outputCapacitance = 100e-6;
+    d.config = cfg::object_of(tasInputs);
+    d.outputCapacitance = cfg::get(d.config, "outputCapacitance", 100e-6);
     return d;
 }
 
@@ -108,7 +110,7 @@ json build_pshb_tas(const PshbDesign& d) {
         j["inputs"]["designRequirements"]["ratedVoltage"]=v; return j; };
     json csplit = cap(d.splitCapacitance, d.inputVoltage * 2);
     json capd   = cap(d.outputCapacitance, d.outputVoltage * 2);
-    json snub   = cap(2.2e-9, (d.inputVoltage + d.outputVoltage) * 3);
+    json snub   = cap(cfg::node_snubber_cap(d.config), (d.inputVoltage + d.outputVoltage) * 3);
 
     json cell; cell["name"]="pshb-cell";
     cell["ports"]=json::array({port("vin"),port("gnd"),port("vout"),port("g1"),port("g2"),port("g3"),port("g4")});

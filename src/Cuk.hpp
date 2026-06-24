@@ -19,6 +19,7 @@ struct CukDesign {
     double couplingCapacitance;  // C1 (F), holds ~Vin+|Vo|
     double loadResistance;       // |Vo|^2 / Pout
     double outputCapacitance;
+    nlohmann::json config;
 };
 
 /**
