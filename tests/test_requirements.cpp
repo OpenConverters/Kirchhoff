@@ -64,11 +64,21 @@ namespace {
 const std::string kRefDir = std::string(KIRCHHOFF_TEST_DIR) + "/reference";
 constexpr double kReqTol = 0.05;    // 5 % on Vout
 constexpr double kPowerTol = 0.10;  // ~2x on power (P proportional V^2, so a 5% Vout band IS a 10% power band)
-// Per-simulation walltime ceiling (mirrors MKF PtP `tol_walltime`). A sim that meets spec but takes too
-// long is still a regression — the deck/timestep must stay tractable. The slowest legitimate case is the
-// stiff resonant LLC at full load (~50 s of tiny adaptive steps over its 400-period settle floor); this
-// ceiling clears it with headroom for CI noise and would have caught the pre-fix 118 s high-RC settles.
-constexpr double kMaxSimSeconds = 75.0;
+// Per-TOPOLOGY walltime budget (mirrors MKF PtP's per-design `tol_walltime` instead of one loose global
+// ceiling): ~2x each converter's measured worst-case sim, so a regression specific to ONE converter is
+// caught tightly rather than hiding under the slow resonant cases' headroom. A sim that meets spec but
+// takes too long is still a regression — the deck/timestep must stay tractable.
+double walltime_budget(const std::string& tag) {
+    std::string topo = tag;                       // strip the multi-point "_ptN" suffix to get the topology
+    const auto p = topo.find("_pt");
+    if (p != std::string::npos) topo = topo.substr(0, p);
+    if (topo == "llc")           return 85.0;     // stiff resonant tank @ full load, 400-period floor (~52 s)
+    if (topo == "isolated_buck") return 65.0;     // low-current / high-R output-cap settle (~35 s)
+    if (topo == "push_pull")     return 28.0;     // 410-420 kHz light load (~13 s)
+    if (topo == "dab")           return 22.0;     // 8-switch 800 V bridge (~10 s)
+    if (topo == "weinberg")      return 18.0;     // current-fed coupled magnetics (~8 s)
+    return 15.0;                                  // every other topology measured < 7 s (3x headroom)
+}
 
 std::string fmt(double v) { std::ostringstream os; os.precision(12); os << v; return os.str(); }
 
@@ -146,9 +156,10 @@ double sim_and_gate(const json& tasInputs, const json& tas, double loadResistanc
     const auto t0 = std::chrono::steady_clock::now();
     const double v = simulate_vout(tasInputs, tas, loadResistance, settleCap, tag);
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    std::cout << "    [runtime] " << tag << " = " << secs << " s\n";
-    INFO(tag << " sim walltime = " << secs << " s (ceiling " << kMaxSimSeconds << " s)");
-    CHECK(secs <= kMaxSimSeconds);
+    const double budget = walltime_budget(tag);
+    std::cout << "    [runtime] " << tag << " = " << secs << " s  (budget " << budget << " s)\n";
+    INFO(tag << " sim walltime = " << secs << " s exceeds the " << budget << " s budget for this topology");
+    CHECK(secs <= budget);
     return v;
 }
 
