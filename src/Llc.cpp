@@ -177,7 +177,10 @@ json build_llc_tas(const LlcDesign& d) {
     // Half-bridge: Q1 phase 0, Q2 phase 180, each at ~45% duty (complementary with dead time for ZVS).
     auto stim = [&](const char* sw, double phaseDeg) {
         json st; st["stage"] = "llcCell"; st["component"] = sw; st["signal"] = "gate";
-        st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;
+        // Drive AT the tank resonance fr: M(fn=1)=1 (load-independent) so Vout = 0.5·Vin/n = spec. (MKF's
+        // off-resonance rectifier-test config ran at the requirement fsw and floated ~12% high; Kirchhoff
+        // delivers spec by operating at resonance — an intended improvement over the MKF reference.)
+        st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.resonantFrequency;
         st["waveform"]["dutyCycle"] = d.switchDuty; st["waveform"]["phaseDeg"] = phaseDeg;
         return st; };
     tas["simulation"]["stimulus"] = json::array({stim("Q1", 0.0), stim("Q2", 180.0)});

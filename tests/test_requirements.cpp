@@ -108,6 +108,11 @@ double simulate_vout(const json& tasInputs, const json& tas, double loadResistan
                      double settleCap, const std::string& tag) {
     PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
     std::string deck = Kirchhoff::tas_to_ngspice(tas, ideal);
+    // Cuk's resonant coupling loop fails ideal-diode startup convergence ("timestep too small") at the
+    // drop-compensated operating point; a tiny node-to-ground shunt cap fixes it (negligible vs the µF
+    // power-stage caps). Cuk ONLY — a global cshunt would detune the resonant tanks (LLC/SRC).
+    if (tag == "cuk")
+        deck = std::regex_replace(deck, std::regex(R"((\.options [^\n]*method=gear))"), "$1 cshunt=1e-9");
     double fsw = 100000.0;
     for (const auto& st : tasInputs.value("simStimulusFsw", json::array())) fsw = st.get<double>();
     const double period = 1.0 / fsw;
@@ -170,7 +175,7 @@ const std::vector<Topology>& topologies() {
 //  • cuk — the drop-compensated operating point is CORRECT but won't converge with ideal diodes in its
 //    resonant coupling loop (the design is right; the ngspice sim isn't). Left at Vd=0 (matches MKF).
 // These are REPORTED loudly (WARN), never silently dropped, but not asserted.
-const std::set<std::string> kNotPinned = {"llc", "dab", "cuk"};
+const std::set<std::string> kNotPinned = {};  // NO exclusions: every topology is gated to its spec
 // Flybuck-family: the MEASURED output is the primary buck rail; the design needs a second (internal
 // isolated secondary) output spec, taken from the fixture's design section.
 const std::set<std::string> kDualOutput = {"isolated_buck", "isolated_buck_boost"};
