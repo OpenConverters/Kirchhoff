@@ -20,6 +20,7 @@
 #include <optional>
 #include <cmath>
 #include <algorithm>
+#include "SasConverter.hpp"   // SAS::ideal_diode_drop — single source for the DIDEAL forward drop
 
 namespace Kirchhoff {
 namespace req {
@@ -29,18 +30,12 @@ using nlohmann::json;
 constexpr double V_DERATE = 0.8;   // operate at <= 80% of the device voltage rating
 constexpr double ESR_RIPPLE_FRACTION = 0.005;  // ESR ripple-voltage budget = 0.5% of Vout
 
-// Forward drop of the DIDEAL rectifier diode the CIAS converter emits. SINGLE SOURCE OF TRUTH for the
-// ideal-diode forward characteristic: CiasCircuitConverter renders the model as IS = I_ref·exp(-Vf_ref/Vt),
-// so its drop is exactly Vf(I) = Vf_ref + Vt·ln(I/I_ref). We anchor to the SAME (Vf_ref, I_ref, Vt) here, so
-// the design-time compensation and the emitted .model agree to the bit — no more 1e-14-vs-9.988e-15 drift,
-// and no duplicated kVt/kIdealDiodeIS scattered across topologies. (NB: this is the IDEAL-fidelity diode; a
-// real sourced diode carries its own datasheet Vf@I — drop compensation for a real rectifier must use that.)
-constexpr double kDidealVt    = 0.025852;   // thermal voltage kT/q at 300 K (== CiasCircuitConverter Vt)
-constexpr double kDidealVfRef = 0.8334;     // forward drop at the reference current (MKF DIDEAL)
-constexpr double kDidealIRef  = 1.0;        // reference current the drop is rated at [A]
-inline double dideal_diode_drop(double current) {
-    return kDidealVfRef + kDidealVt * std::log(std::max(current, 1e-9) / kDidealIRef);
-}
+// Forward drop of the DIDEAL rectifier the deck emits, for a converter that must COMPENSATE for it when
+// sizing turns ratios etc. This DELEGATES to SAS::ideal_diode_drop — SAS owns the ideal-diode model (it
+// stamps the leaf's forwardVoltage, which the CIAS emitter turns into the ngspice IS), so the design-time
+// compensation here and the emitted .model share ONE definition and cannot drift. (NB: the IDEAL-fidelity
+// diode; a real sourced diode carries its own datasheet Vf@I — real-rectifier compensation must use that.)
+inline double dideal_diode_drop(double current) { return SAS::ideal_diode_drop(current); }
 
 // --- semiconductor: MOSFET main switch ---
 inline json mosfet(const std::string& role, double ratedVds, double ratedId,
