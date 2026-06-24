@@ -113,15 +113,18 @@ json build_dab_tas(const DabDesign& d) {
     capd["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;
     capd["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage * 2;
 
-    // Per-switch R∥C snubber across every switch's two power terminals (8 switches). The C tames the
-    // floating-midpoint dV/dt at every switching/dead-time event (ngspice convergence); the R provides the
-    // DC path that DEFINES the floating midpoint during the dead time. Both DERIVED, not literals:
-    //   C = energy-budget rule at V_block = Vin (snubber processes <= snubberEnergyFrac of throughput);
-    //   R = bias-loss rule (dissipates <= biasLossFrac of rated P at Vin) — a small R here would bleed
-    //       Vin^2/R when a switch drives the midpoint to a rail (~kW at 800 V), starving Vout.
+    // Per-switch R∥C across every switch's two power terminals (8 switches) — but the R and C play DIFFERENT
+    // roles, so they're named (and handled) differently:
+    //   Csn* = a dV/dt SNUBBER: tames the floating-midpoint dV/dt at each switching/dead-time event. C =
+    //          energy-budget rule at V_block=Vin. The deck's real-fidelity path STRIPS it (a real switch's
+    //          Coss does this physically) — hence the "Csn" snubber name.
+    //   Rbias* = a FUNCTIONAL bias resistor: the DC path that DEFINES the floating midpoint during the dead
+    //          time. R = bias-loss rule (<= biasLossFrac of rated P at Vin); a small R would bleed Vin²/R
+    //          (~kW at 800 V), starving Vout. A switch's Coss does NOT provide a DC bias path, so this is
+    //          NOT a snubber — named "Rbias" precisely so the snubber strip never removes it.
     const double snubCval = cfg::snubber_cap(d.config, d.outputPower, d.inputVoltage, d.switchingFrequency);
     const double snubRval = cfg::bias_res(d.config, d.inputVoltage, d.outputPower);
-    auto snubR = [&]() { json c; c["resistor"] = json::object();
+    auto biasR = [&]() { json c; c["resistor"] = json::object();
         c["inputs"]["designRequirements"]["deviceType"] = "resistor";
         c["inputs"]["designRequirements"]["resistance"]["nominal"] = snubRval; return c; };
     auto snubC = [&]() { json c; c["capacitor"] = json::object();
@@ -142,49 +145,49 @@ json build_dab_tas(const DabDesign& d) {
         comp("DE", diode()),  comp("DF", diode()),  comp("DG", diode()),  comp("DH", diode()),
         comp("Lr", lr), comp("T1", xfmr), comp("Cout", capd),
         // per-switch RC snubbers (hi = across top switch, lo = across bottom switch)
-        comp("RsnA_hi", snubR()), comp("CsnA_hi", snubC()), comp("RsnA_lo", snubR()), comp("CsnA_lo", snubC()),
-        comp("RsnC_hi", snubR()), comp("CsnC_hi", snubC()), comp("RsnC_lo", snubR()), comp("CsnC_lo", snubC()),
-        comp("RsnE_hi", snubR()), comp("CsnE_hi", snubC()), comp("RsnE_lo", snubR()), comp("CsnE_lo", snubC()),
-        comp("RsnG_hi", snubR()), comp("CsnG_hi", snubC()), comp("RsnG_lo", snubR()), comp("CsnG_lo", snubC())});
+        comp("RbiasA_hi", biasR()), comp("CsnA_hi", snubC()), comp("RbiasA_lo", biasR()), comp("CsnA_lo", snubC()),
+        comp("RbiasC_hi", biasR()), comp("CsnC_hi", snubC()), comp("RbiasC_lo", biasR()), comp("CsnC_lo", snubC()),
+        comp("RbiasE_hi", biasR()), comp("CsnE_hi", snubC()), comp("RbiasE_lo", biasR()), comp("CsnE_lo", snubC()),
+        comp("RbiasG_hi", biasR()), comp("CsnG_hi", snubC()), comp("RbiasG_lo", biasR()), comp("CsnG_lo", snubC())});
     cell["connections"] = json::array({
         // ── Primary full bridge. QA/QC high-side (vin->mid), QB/QD low-side (mid->gnd); anti-parallel
         // body diodes DA..DD freewheel/clamp the floating midpoints during the leg dead time.
         conn("vin_net",  {pin("QA", "drain"), pin("QC", "drain"),
                           pin("DA", "cathode"), pin("DC", "cathode"),
-                          pin("RsnA_hi", "1"), pin("CsnA_hi", "1"),
-                          pin("RsnC_hi", "1"), pin("CsnC_hi", "1"), prt("vin")}),
+                          pin("RbiasA_hi", "1"), pin("CsnA_hi", "1"),
+                          pin("RbiasC_hi", "1"), pin("CsnC_hi", "1"), prt("vin")}),
         conn("midA_net", {pin("QA", "source"), pin("QB", "drain"),
                           pin("DA", "anode"), pin("DB", "cathode"), pin("Lr", "primary_start"),
-                          pin("RsnA_hi", "2"), pin("CsnA_hi", "2"),
-                          pin("RsnA_lo", "1"), pin("CsnA_lo", "1")}),
+                          pin("RbiasA_hi", "2"), pin("CsnA_hi", "2"),
+                          pin("RbiasA_lo", "1"), pin("CsnA_lo", "1")}),
         conn("midC_net", {pin("QC", "source"), pin("QD", "drain"),
                           pin("DC", "anode"), pin("DD", "cathode"), pin("T1", "primary_end"),
-                          pin("RsnC_hi", "2"), pin("CsnC_hi", "2"),
-                          pin("RsnC_lo", "1"), pin("CsnC_lo", "1")}),
+                          pin("RbiasC_hi", "2"), pin("CsnC_hi", "2"),
+                          pin("RbiasC_lo", "1"), pin("CsnC_lo", "1")}),
         conn("pri_x",    {pin("Lr", "primary_end"), pin("T1", "primary_start")}),
         // ── Secondary active bridge. QE/QG high-side (vout->sec), QF/QH low-side (sec->gnd); body
         // diodes DE..DH freewheel during the secondary leg dead time. The bridge is driven (not a
         // passive rectifier): the D3 phase shift vs the primary sets the transferred power.
         conn("sec_a",    {pin("T1", "secondary1_start"), pin("QE", "source"), pin("QF", "drain"),
                           pin("DE", "anode"), pin("DF", "cathode"),
-                          pin("RsnE_hi", "2"), pin("CsnE_hi", "2"),
-                          pin("RsnE_lo", "1"), pin("CsnE_lo", "1")}),
+                          pin("RbiasE_hi", "2"), pin("CsnE_hi", "2"),
+                          pin("RbiasE_lo", "1"), pin("CsnE_lo", "1")}),
         conn("sec_b",    {pin("T1", "secondary1_end"), pin("QG", "source"), pin("QH", "drain"),
                           pin("DG", "anode"), pin("DH", "cathode"),
-                          pin("RsnG_hi", "2"), pin("CsnG_hi", "2"),
-                          pin("RsnG_lo", "1"), pin("CsnG_lo", "1")}),
+                          pin("RbiasG_hi", "2"), pin("CsnG_hi", "2"),
+                          pin("RbiasG_lo", "1"), pin("CsnG_lo", "1")}),
         conn("vout_net", {pin("QE", "drain"), pin("QG", "drain"),
                           pin("DE", "cathode"), pin("DG", "cathode"), pin("Cout", "1"),
-                          pin("RsnE_hi", "1"), pin("CsnE_hi", "1"),
-                          pin("RsnG_hi", "1"), pin("CsnG_hi", "1"), prt("vout")}),
+                          pin("RbiasE_hi", "1"), pin("CsnE_hi", "1"),
+                          pin("RbiasG_hi", "1"), pin("CsnG_hi", "1"), prt("vout")}),
         // ── Shared ground: all four low-side switch sources + their body-diode anodes + Cout return +
         // all low-side snubber returns. Secondary return tied to primary gnd (sim convenience; the
         // transformer provides isolation — MKF also references both bridges to 0).
         conn("gnd_net",  {pin("QB", "source"), pin("QD", "source"), pin("QF", "source"), pin("QH", "source"),
                           pin("DB", "anode"), pin("DD", "anode"), pin("DF", "anode"), pin("DH", "anode"),
                           pin("Cout", "2"),
-                          pin("RsnA_lo", "2"), pin("CsnA_lo", "2"), pin("RsnC_lo", "2"), pin("CsnC_lo", "2"),
-                          pin("RsnE_lo", "2"), pin("CsnE_lo", "2"), pin("RsnG_lo", "2"), pin("CsnG_lo", "2"),
+                          pin("RbiasA_lo", "2"), pin("CsnA_lo", "2"), pin("RbiasC_lo", "2"), pin("CsnC_lo", "2"),
+                          pin("RbiasE_lo", "2"), pin("CsnE_lo", "2"), pin("RbiasG_lo", "2"), pin("CsnG_lo", "2"),
                           prt("gnd")}),
         conn("gateA_net", {pin("QA", "gate"), prt("gateA")}),
         conn("gateB_net", {pin("QB", "gate"), prt("gateB")}),

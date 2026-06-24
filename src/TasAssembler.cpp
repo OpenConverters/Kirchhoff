@@ -153,8 +153,10 @@ std::string sanitize(const std::string& s) {
 // ngspice converges. When the switch becomes a REAL model carrying its output capacitance Coss (and the
 // rectifier diode its junction cap Cj), THAT parasitic does the dV/dt limiting physically, so the numerical
 // snubber is redundant and would over-damp (skew ZVS/loss). We strip it then — but ONLY when every
-// semiconductor in the brick is real-and-carries-its-parasitic (else an ideal switch still needs it). The
-// Rdcr* loop-breakers are NOT here: they resolve the coupled-inductor mesh singularity in every fidelity.
+// semiconductor in the brick is real-and-carries-its-parasitic (else an ideal switch still needs it).
+// NOT stripped (these are FUNCTIONAL, not dV/dt snubbers — Coss can't replace them): the Rdcr* loop-
+// breakers (coupled-inductor mesh singularity, every fidelity) and the DAB's Rbias* (the DC path that
+// defines its floating midpoint). Those carry deliberately non-"snubber" names so this never catches them.
 bool is_numerical_snubber(const std::string& n) {
     return n.rfind("Csn", 0) == 0 || n.rfind("Rsn", 0) == 0 || n.rfind("Csw", 0) == 0;
 }

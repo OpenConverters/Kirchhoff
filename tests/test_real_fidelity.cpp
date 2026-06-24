@@ -7,6 +7,8 @@
 
 #include "Flyback.hpp"
 #include "Psfb.hpp"
+#include "Dab.hpp"
+#include "Llc.hpp"
 #include "TasAssembler.hpp"
 #include "Fidelity.hpp"
 
@@ -40,6 +42,33 @@ json flyback_inputs() {
         "operatingPoints": [ { "name": "full", "inputVoltage": 48, "ambientTemperature": 25,
             "outputs": [ { "name": "12V", "power": 24 } ] } ]
     })");
+}
+
+// Bind a schema-valid real MOSFET (Coss + body diode) into every switch and a real diode (Cj) into every
+// diode of a TAS. Returns {nfet, ndio}. Form per deps/SAS/tests/test_sas.cpp.
+std::pair<int,int> bind_real_semiconductors(json& tas, double coss = 1e-9) {
+    json realMosfet = json::parse(R"({
+        "semiconductor": { "mosfet": { "manufacturerInfo": { "name": "T", "datasheetInfo": {
+            "part": { "partNumber": "TESTFET", "technology": "Si" },
+            "electrical": { "drainSourceVoltage": 650, "onResistance": 0.02,
+                "continuousDrainCurrent": 30, "gateThresholdVoltage": { "nominal": 3.0 },
+                "totalGateCharge": 1.5e-7, "outputCapacitance": 1e-9,
+                "bodyDiodeForwardVoltage": 0.9 } } } } } })");
+    realMosfet["semiconductor"]["mosfet"]["manufacturerInfo"]["datasheetInfo"]["electrical"]["outputCapacitance"] = coss;
+    json realDiode = json::parse(R"({
+        "semiconductor": { "diode": { "manufacturerInfo": { "name": "T", "datasheetInfo": {
+            "part": { "partNumber": "TESTDIODE", "technology": "SiC" },
+            "electrical": { "reverseVoltage": 650, "forwardVoltage": 0.8, "forwardCurrent": 10,
+                "junctionCapacitance": 1e-9 } } } } } })");
+    int nfet = 0, ndio = 0;
+    for (auto& st : tas["topology"]["stages"])
+        if (st.contains("circuit") && st["circuit"].is_object())
+            for (auto& c : st["circuit"]["components"])
+                if (c["data"].is_object() && c["data"].contains("semiconductor")) {
+                    if (c["data"]["semiconductor"].contains("mosfet")) { c["data"] = realMosfet; ++nfet; }
+                    else if (c["data"]["semiconductor"].contains("diode")) { c["data"] = realDiode; ++ndio; }
+                }
+    return {nfet, ndio};
 }
 }  // namespace
 
@@ -138,4 +167,66 @@ TEST_CASE("A real-MOSFET bridge deck (Coss + body diode + real rectifier) conver
     INFO("real-deck vout = " << v);
     CHECK(v > 8.0);                                // delivers spec (real Ron/Vf cause some droop; not 0/blown up)
     CHECK(v < 14.0);
+}
+
+// DAB real deck: the strip MUST keep the functional Rbias* (DC midpoint bias — Coss can't replace it) while
+// stripping the Csn* dV/dt caps. Proves the fix for the bug where Rsn-named bias resistors were wrongly
+// stripped. All 8 switches real -> Csn stripped, Rbias kept, Coss present, and it still converges + delivers.
+TEST_CASE("Real-MOSFET DAB keeps its bias resistor, strips the dV/dt cap, converges + delivers",
+          "[real][fidelity][realdeck]") {
+    json dab = json::parse(R"({
+        "designRequirements": { "efficiency": 1.0,
+            "inputVoltage": { "minimum": 380, "nominal": 400, "maximum": 420 },
+            "switchingFrequency": { "nominal": 100000 },
+            "outputs": [ { "name": "out", "voltage": { "nominal": 48 } } ] },
+        "operatingPoints": [ { "inputVoltage": 400, "outputs": [ { "power": 1920 } ] } ]
+    })");
+    json tas = Kirchhoff::build_dab_tas(Kirchhoff::design_dab(dab));
+    auto [nfet, ndio] = bind_real_semiconductors(tas);
+    REQUIRE(nfet == 8);                            // DAB = two active full bridges, no rectifier diodes
+
+    const std::string deck = Kirchhoff::tas_to_ngspice(tas, PEAS::Fidelity(PEAS::Fidelity::Origin::REQUIREMENTS));
+    CHECK(deck.find("Csn") == std::string::npos);  // dV/dt snubber caps stripped (Coss replaces them)
+    CHECK(deck.find("Rbias") != std::string::npos);// FUNCTIONAL midpoint bias resistor KEPT (the bug fix)
+    const bool hasCoss = deck.find("CQ") != std::string::npos || deck.find("Coss") != std::string::npos;
+    CHECK(hasCoss);
+    std::string out = run_ngspice(deck);
+    std::smatch m;
+    const bool got = std::regex_search(out, m, std::regex(R"(vout\s*=\s*([-0-9.eE+]+))"));
+    INFO("DAB real-deck tail:\n" << out.substr(out.size() > 800 ? out.size() - 800 : 0));
+    REQUIRE(got);
+    const double v = std::stod(m[1].str());
+    INFO("DAB real-deck vout = " << v << " (spec 48)");
+    CHECK(v > 40.0);
+    CHECK(v < 54.0);
+}
+
+// LLC real deck (resonant): the rectifier R∥C snubber (Rsn1/Csn1) is a damping snubber -> stripped, with the
+// real diode's Cj providing the damping instead. Switches get Coss. Proves the strip on a resonant topology.
+TEST_CASE("Real-MOSFET LLC (resonant) strips the rectifier snubber, converges + delivers",
+          "[real][fidelity][realdeck]") {
+    json llc = json::parse(R"({
+        "designRequirements": { "efficiency": 1.0,
+            "inputVoltage": { "minimum": 380, "nominal": 400, "maximum": 420 },
+            "switchingFrequency": { "nominal": 100000 },
+            "outputs": [ { "name": "out", "voltage": { "nominal": 48 } } ] },
+        "operatingPoints": [ { "inputVoltage": 400, "outputs": [ { "power": 960 } ] } ]
+    })");
+    json tas = Kirchhoff::build_llc_tas(Kirchhoff::design_llc(llc));
+    auto [nfet, ndio] = bind_real_semiconductors(tas);
+    REQUIRE(nfet > 0);
+    REQUIRE(ndio > 0);
+
+    const std::string deck = Kirchhoff::tas_to_ngspice(tas, PEAS::Fidelity(PEAS::Fidelity::Origin::REQUIREMENTS));
+    CHECK(deck.find("Csn") == std::string::npos);  // rectifier snubber stripped (diode Cj replaces it)
+    CHECK(deck.find("Rsn") == std::string::npos);
+    std::string out = run_ngspice(deck);
+    std::smatch m;
+    const bool got = std::regex_search(out, m, std::regex(R"(vout\s*=\s*([-0-9.eE+]+))"));
+    INFO("LLC real-deck tail:\n" << out.substr(out.size() > 800 ? out.size() - 800 : 0));
+    REQUIRE(got);
+    const double v = std::stod(m[1].str());
+    INFO("LLC real-deck vout = " << v << " (spec 48)");
+    CHECK(v > 40.0);
+    CHECK(v < 54.0);
 }
