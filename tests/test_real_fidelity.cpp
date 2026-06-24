@@ -124,15 +124,18 @@ TEST_CASE("A real-MOSFET bridge deck (Coss + body diode + real rectifier) conver
     REQUIRE(ndio > 0);
 
     const std::string deck = Kirchhoff::tas_to_ngspice(tas, PEAS::Fidelity(PEAS::Fidelity::Origin::REQUIREMENTS));
+    // Every semiconductor is now real-with-parasitic, so the numerical dV/dt snubbers are STRIPPED and the
+    // device Coss (+ body diodes + rectifier Cj) provide the damping instead.
+    CHECK(deck.find("Csn") == std::string::npos);  // numerical snubbers gone
     const bool hasCoss = deck.find("CQ") != std::string::npos || deck.find("Coss") != std::string::npos;
-    CHECK(hasCoss);  // device Coss present
+    CHECK(hasCoss);                                // device Coss present
     std::string out = run_ngspice(deck);
     std::smatch m;
     const bool got = std::regex_search(out, m, std::regex(R"(vout\s*=\s*([-0-9.eE+]+))"));
     INFO("real-deck ngspice tail:\n" << out.substr(out.size() > 800 ? out.size() - 800 : 0));
-    REQUIRE(got);                                  // it CONVERGED (the thing that failed before)
+    REQUIRE(got);                                  // CONVERGES on Coss alone (snubbers stripped)
     const double v = std::stod(m[1].str());
     INFO("real-deck vout = " << v);
-    CHECK(v > 8.0);                                // sane (real Ron/Vf cause some droop; not 0, not blown up)
+    CHECK(v > 8.0);                                // delivers spec (real Ron/Vf cause some droop; not 0/blown up)
     CHECK(v < 14.0);
 }

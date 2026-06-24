@@ -149,6 +149,15 @@ std::string sanitize(const std::string& s) {
     return r;
 }
 
+// Numerical dV/dt convergence snubbers (Csn*/Rsn*/Csw*) tame the infinite dV/dt of an IDEAL switch so
+// ngspice converges. When the switch becomes a REAL model carrying its output capacitance Coss (and the
+// rectifier diode its junction cap Cj), THAT parasitic does the dV/dt limiting physically, so the numerical
+// snubber is redundant and would over-damp (skew ZVS/loss). We strip it then — but ONLY when every
+// semiconductor in the brick is real-and-carries-its-parasitic (else an ideal switch still needs it). The
+// Rdcr* loop-breakers are NOT here: they resolve the coupled-inductor mesh singularity in every fidelity.
+bool is_numerical_snubber(const std::string& n) {
+    return n.rfind("Csn", 0) == 0 || n.rfind("Rsn", 0) == 0 || n.rfind("Csw", 0) == 0;
+}
 
 } // namespace
 
@@ -221,8 +230,33 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
         // out to several atom pins — e.g. a controller leaf whose `nodeC` sense port feeds two
         // comparators. Single-atom leaves (every passive/switch) map a port to exactly one pin.
         std::map<std::string, std::map<std::string, std::vector<std::pair<std::string, std::string>>>> portToAtomPin;
+        // Strip this brick's numerical dV/dt snubbers iff EVERY semiconductor in it is a real part carrying
+        // the parasitic that physically replaces them (mosfet Coss / diode Cj). Any ideal seed, or a real
+        // part missing its parasitic, and we keep the snubbers (the ideal switch still needs them to
+        // converge). Per-component, so a librarian round-trip that fully sources a brick strips its snubbers
+        // even with the deck's base fidelity still REQUIREMENTS.
+        auto hasParasitic = [](const json& dev, const char* field) {
+            return dev.contains("manufacturerInfo") && dev.at("manufacturerInfo").contains("datasheetInfo")
+                && dev.at("manufacturerInfo").at("datasheetInfo").contains("electrical")
+                && dev.at("manufacturerInfo").at("datasheetInfo").at("electrical").contains(field)
+                && !dev.at("manufacturerInfo").at("datasheetInfo").at("electrical").at(field).is_null();
+        };
+        bool hasSemi = false, allRealWithParasitic = true;
+        for (const auto& comp : brick.at("components")) {
+            const json& cd = comp.at("data");
+            if (!cd.is_object() || !cd.contains("semiconductor")) continue;
+            hasSemi = true;
+            if (infer_fidelity(cd, fidelity).origin != PEAS::Fidelity::Origin::DATASHEET) { allRealWithParasitic = false; continue; }
+            const json& semi = cd.at("semiconductor");
+            if (semi.contains("mosfet") && !hasParasitic(semi.at("mosfet"), "outputCapacitance")) allRealWithParasitic = false;
+            if (semi.contains("diode")  && !hasParasitic(semi.at("diode"),  "junctionCapacitance")) allRealWithParasitic = false;
+        }
+        const bool stripSnubbers = hasSemi && allRealWithParasitic;
+
+        std::set<std::string> strippedSnubbers;        // numerical snubbers dropped for a fully-real brick
         for (const auto& comp : brick.at("components")) {
             const std::string cname = comp.at("name").get<std::string>();
+            if (stripSnubbers && is_numerical_snubber(cname)) { strippedSnubbers.insert(cname); continue; }
             const json& data = comp.at("data");
             // Hoist a real magnetic's MKF subcircuit to the deck top level (once per reference); the
             // stage body (below) only emits the X instance that references it.
@@ -277,6 +311,7 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
             for (const auto& ep : conn.at("endpoints")) {
                 if (ep.contains("component")) {
                     const std::string cn = ep.at("component").get<std::string>();
+                    if (strippedSnubbers.count(cn)) continue;   // endpoint of a stripped numerical snubber
                     const std::string pn = ep.at("pin").get<std::string>();
                     auto cit = portToAtomPin.find(cn);
                     if (cit == portToAtomPin.end() || !cit->second.count(pn))
@@ -289,7 +324,8 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
                     c["endpoints"].push_back(json{{"port", sanitize(ep.at("port").get<std::string>())}});
                 }
             }
-            sub["connections"].push_back(c);
+            // A private snubber node whose every endpoint was stripped becomes empty — drop it (no floating node).
+            if (!c.at("endpoints").empty()) sub["connections"].push_back(c);
         }
 
         subckts << conv.to_subckt(CIAS::CiasCircuit::from_json(sub), dialect) << "\n";
