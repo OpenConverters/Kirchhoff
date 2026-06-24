@@ -1,4 +1,5 @@
 #include "Vienna.hpp"
+#include "KirchhoffConfig.hpp"
 #include <cmath>
 #include <vector>
 #include <string>
@@ -28,6 +29,7 @@ constexpr double kBalanceModulation = 4.0;
 ViennaDesign design_vienna(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     ViennaDesign d{};
+    d.config = cfg::object_of(tasInputs);
     d.inputVoltageRms    = nominal(dr.at("inputVoltage"));
     d.lineFrequency      = nominal(dr.at("lineFrequency"));
     d.outputVoltage      = nominal(dr.at("outputs").at(0).at("voltage"));
@@ -42,14 +44,14 @@ ViennaDesign design_vienna(const json& tasInputs) {
     const double vpeak = d.inputVoltageRms * std::sqrt(2.0);
     const double iPeak = pin * std::sqrt(2.0) / (3.0 * d.inputVoltageRms);  // per-phase peak (3φ, unity PF)
     const double dIL   = 0.3 * std::max(iPeak, 1e-3);
-    d.senseResistance = kSenseResistance;
+    d.senseResistance = cfg::get(d.config, "senseResistance", kSenseResistance);
     // i_ref voltage = kref·V(phase) must equal iL·Rsense for iL = V(phase)/rEmul; per phase Pin/3 into
     // rEmul = (Vrms²)/(Pin/3): kref = Rsense·Pin/(3·Vrms²).
     d.referenceGain = d.senseResistance * pin / (3.0 * d.inputVoltageRms * d.inputVoltageRms);
     d.boostInductance = (d.outputVoltage * 0.5) / (4.0 * d.switchingFrequency * dIL);
     // Hysteresis on m = V(phase)·(iref − iL·Rsense): a ±dIL/2 band at the line peak (m-band ∝ |v|).
     d.currentHysteresis = 0.5 * dIL * d.senseResistance * vpeak;
-    d.busCapacitance = kBusCapacitance;
+    d.busCapacitance = cfg::get(d.config, "busCapacitance", kBusCapacitance);
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
 
     // ── Active rail-balancing loop (DERIVED, not a fixed magic gain). The loop bal = −kbal·∫(busP+busN)dt
@@ -63,7 +65,7 @@ ViennaDesign design_vienna(const json& tasInputs) {
     // Everything scales with the design; only the dimensionless α is empirically identified (see above).
     // The common term is bounded to ±50% of the per-phase current-reference peak (anti-windup rail).
     const double wBal = 2.0 * kPi * d.lineFrequency / 6.0;
-    d.balanceGain  = wBal * wBal * d.busCapacitance * d.senseResistance / kBalanceModulation;
+    d.balanceGain  = wBal * wBal * d.busCapacitance * d.senseResistance / cfg::get(d.config, "balanceModulation", kBalanceModulation);
     d.balanceClamp = 0.5 * d.referenceGain * vpeak;
     return d;
 }

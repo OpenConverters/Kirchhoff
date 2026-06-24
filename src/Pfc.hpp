@@ -34,6 +34,7 @@ struct PfcDesign {
     double boostInductance;     // L (CCM, current tracks the reference)
     double outputCapacitance;   // bus cap (smooths the 2·line-frequency ripple)
     double loadResistance;
+    nlohmann::json config;
     double senseResistance;     // Rsense in series with L (inductor-current sense)
     double referenceGain;       // kref: nominal current-loop gain; emulates R = Rsense/kref
     double currentHysteresis;   // comparator hysteresis on the (i_ref − i_sense) signal [V]

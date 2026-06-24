@@ -30,7 +30,8 @@ struct ViennaDesign {
     double efficiency;
     double boostInductance;     // per-phase L
     double busCapacitance;      // each half of the split bus
-    double loadResistance;      // across the full bus
+    double loadResistance;
+    nlohmann::json config;      // across the full bus
     double senseResistance;     // Rsense in series with each phase inductor
     double referenceGain;       // kref: i_ref voltage = kref·V(phase); emulates R = Rsense/kref
     double currentHysteresis;   // hysteresis on the gating signal V(phase)·(iref − iL·Rsense)

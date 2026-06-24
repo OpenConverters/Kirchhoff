@@ -1,4 +1,5 @@
 #include "Pfc.hpp"
+#include "KirchhoffConfig.hpp"
 #include <cmath>
 #include <vector>
 #include <stdexcept>
@@ -23,6 +24,7 @@ constexpr double kPi                = 3.14159265358979323846;
 PfcDesign design_pfc(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     PfcDesign d{};
+    d.config = cfg::object_of(tasInputs);
     d.inputVoltageRms    = nominal(dr.at("inputVoltage"));
     d.lineFrequency      = nominal(dr.at("lineFrequency"));
     d.outputVoltage      = nominal(dr.at("outputs").at(0).at("voltage"));
@@ -38,16 +40,16 @@ PfcDesign design_pfc(const json& tasInputs) {
     const double rEmul = d.inputVoltageRms * d.inputVoltageRms / pin;  // emulated input resistance
     const double iPeak = vpeak / rEmul;                                // peak inductor/line current
 
-    d.senseResistance = kSenseResistance;
+    d.senseResistance = cfg::get(d.config, "senseResistance", kSenseResistance);
     // i_ref voltage = kref·V(busP) must equal the target sense voltage iL·Rsense = (V(busP)/rEmul)·Rsense.
     d.referenceGain = d.senseResistance / rEmul;
     // CCM ripple ΔiL = fraction·iPeak; size L for the target switching frequency at the line peak:
     //   f_peak = Vpk·(Vout−Vpk) / (ΔiL·L·Vout)  =>  L = Vpk·(Vout−Vpk) / (ΔiL·f·Vout).
-    const double dIL = kRippleFraction * iPeak;
+    const double dIL = cfg::get(d.config, "currentRippleFraction", kRippleFraction) * iPeak;
     d.boostInductance = vpeak * (d.outputVoltage - vpeak)
                         / (dIL * d.switchingFrequency * d.outputVoltage);
     d.currentHysteresis = 0.5 * dIL * d.senseResistance;   // half-band on the i·Rsense signal
-    d.outputCapacitance = kOutputCapacitance;
+    d.outputCapacitance = cfg::get(d.config, "outputCapacitance", kOutputCapacitance);
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
 
     // ── Outer voltage loop: a DESIGNED PI compensator (derived from the plant, not hand-tuned). ──
