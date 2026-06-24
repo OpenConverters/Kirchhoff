@@ -139,10 +139,10 @@ json build_weinberg_tas(const WeinbergDesign& d) {
         comp("Rdcra", res(cfg::loop_breaker_res(d.config, d.loadResistance))), comp("Rdcrb", res(cfg::loop_breaker_res(d.config, d.loadResistance))),
         comp("S1", mosfet()), comp("S2", mosfet()),
         comp("Dpos", diode()), comp("Dneg", diode()), comp("Cout", cout),
-        comp("RsnS1", res(cfg::snubber_res(d.config, d.switchingFrequency, cfg::rectifier_snubber_cap(d.config)))), comp("CsnS1", snubC()),
-        comp("RsnS2", res(cfg::snubber_res(d.config, d.switchingFrequency, cfg::rectifier_snubber_cap(d.config)))), comp("CsnS2", snubC()),
-        comp("RsnDp", res(cfg::snubber_res(d.config, d.switchingFrequency, cfg::rectifier_snubber_cap(d.config)))), comp("CsnDp", snubC()),
-        comp("RsnDn", res(cfg::snubber_res(d.config, d.switchingFrequency, cfg::rectifier_snubber_cap(d.config)))), comp("CsnDn", snubC())});
+        comp("RsnS1", res(cfg::snubber_res(d.config))), comp("CsnS1", snubC()),
+        comp("RsnS2", res(cfg::snubber_res(d.config))), comp("CsnS2", snubC()),
+        comp("RsnDp", res(cfg::snubber_res(d.config))), comp("CsnDp", snubC()),
+        comp("RsnDn", res(cfg::snubber_res(d.config))), comp("CsnDn", snubC())});
     cell["connections"] = json::array({
         // Input: both L1 windings fed from vin (current-fed front end).
         conn("vin_net",  {pin("L1", "primary_start"), pin("L1", "secondary1_start"), prt("vin")}),

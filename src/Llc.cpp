@@ -124,7 +124,7 @@ json build_llc_tas(const LlcDesign& d) {
         c["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage * 3; return c; };
     auto snubR = [&]() { json c; c["resistor"] = json::object();
         c["inputs"]["designRequirements"]["deviceType"] = "resistor";
-        c["inputs"]["designRequirements"]["resistance"]["nominal"] = cfg::snubber_res(d.config, d.switchingFrequency, cfg::rectifier_snubber_cap(d.config)); return c; };
+        c["inputs"]["designRequirements"]["resistance"]["nominal"] = cfg::snubber_res(d.config); return c; };
 
     json cell; cell["name"] = "llc-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("g1"), port("g2")});

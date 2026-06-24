@@ -122,7 +122,7 @@ json build_cuk_tas(const CukDesign& d) {
     // shift the operating point — it just makes the emitted deck simulable for any consumer.
     json rsnub; rsnub["resistor"] = json::object();
     rsnub["inputs"]["designRequirements"]["deviceType"] = "resistor";
-    rsnub["inputs"]["designRequirements"]["resistance"]["nominal"] = cfg::snubber_res(d.config, d.switchingFrequency, cfg::diode_snubber_cap(d.config));
+    rsnub["inputs"]["designRequirements"]["resistance"]["nominal"] = cfg::snubber_res(d.config);
     json csnub; csnub["capacitor"] = json::object();
     csnub["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::diode_snubber_cap(d.config);
     csnub["inputs"]["designRequirements"]["ratedVoltage"] = vSwing / cfg::v_derate(d.config);

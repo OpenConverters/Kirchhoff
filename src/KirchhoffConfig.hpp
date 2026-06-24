@@ -44,7 +44,10 @@ inline double get(const json& config, const char* key, double fallback) {
 // (These are the *rule* knobs. A user who wants a different policy sets them in config; nothing in a
 //  topology hardcodes them.)
 constexpr double kSnubberEnergyFrac = 5e-3;   // ACROSS-DEVICE snubber may store <= this fraction of throughput/cycle
-constexpr double kSnubberDampFrac   = 0.01;   // series-RC / R∥C reset time R*C = this fraction of the switching period
+constexpr double kSnubberRes        = 100.0;  // series-RC / R∥C snubber damping R [Ω] — like the snubber CAP, a
+                                              // numerical constant (a √(L/C) or RC-reset derivation gives different
+                                              // values per C and shifts the LLC tank's input-current/efficiency
+                                              // artifact); empirically 100 Ω damps the whole family. Overridable.
 // Numerical commutation-snubber caps (see kNodeSnubberCap note — solver constants, not formulas; a P/V²
 // derivation over-sizes them at the rectifier's low blocking voltage). Overridable per design via config.
 constexpr double kRectifierSnubberCap = 100e-12;  // R∥C across resonant/rectifier diodes (LLC/SRC/Weinberg)
@@ -76,12 +79,9 @@ inline double node_snubber_cap(const json& in)      { return get(in, "nodeSnubbe
 inline double rectifier_snubber_cap(const json& in) { return get(in, "rectifierSnubberCap", kRectifierSnubberCap); }
 inline double diode_snubber_cap(const json& in)     { return get(in, "diodeSnubberCap",     kDiodeSnubberCap); }
 
-// Series-RC (or R∥C) snubber resistance. The snubber's RC reset time is a small fraction `zeta` of the
-// switching period — long enough to damp the commutation transient, short enough to reset every cycle:
-//     R = zeta / (f_sw · C).   (Needs only the period and C, not an ill-defined ideal-deck parasitic L.)
-inline double snubber_res(const json& in, double fsw, double Csnub) {
-    const double zeta = get(in, "snubberDampFrac", kSnubberDampFrac);
-    return get(in, "snubberRes", zeta / (fsw * Csnub));
+// Series-RC / R∥C snubber damping resistance — the documented numerical constant above, overridable.
+inline double snubber_res(const json& in) {
+    return get(in, "snubberRes", kSnubberRes);
 }
 
 // DC-bias / bleed resistor (a node that needs a defined DC path — e.g. a DAB floating midpoint). Sized to
