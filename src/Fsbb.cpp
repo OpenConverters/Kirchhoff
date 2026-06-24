@@ -54,7 +54,18 @@ FsbbDesign design_fsbb(const json& tasInputs) {
     const double Lbuck  = (vinMax > Vo) ? Vo * (vinMax - Vo) / (kRippleRatio * Io * Fs * vinMax) : 0.0;
     const double Lboost = (vinMin < Vo) ? (vinMin * vinMin) * (Vo - vinMin)
                                           / (kRippleRatio * Io * Fs * Vo * Vo) : 0.0;
-    d.inductance = std::max(Lbuck, Lboost);
+    double L = std::max(Lbuck, Lboost);
+    if (L <= 0.0) {
+        // Exact-unity / single-point spec (Vin_min == Vin_max == Vo, e.g. a 12->12 V request with no input
+        // range): neither the buck (vinMax>Vo) nor the boost (vinMin<Vo) region's formula fires, leaving
+        // L = 0 — a broken deck (the inductor vanishes, output collapses to ~Vin·D ≈ 3.3 V). Size it
+        // directly for the 4-switch SIMULTANEOUS mode the design always runs: the charge phase applies Vin
+        // across L for D·T, with ΔIL targeted at kRippleRatio of the buck-boost current Io/(1-D):
+        //     L = Vin·D·(1-D) / (kRippleRatio·Io·Fs).   (ABT #26)
+        const double D = d.dutyCycle;
+        L = Vin * D * (1.0 - D) / (kRippleRatio * Io * Fs);
+    }
+    d.inductance = L;
 
     d.loadResistance = Vo * Vo / d.outputPower;
     d.config = cfg::object_of(tasInputs);
