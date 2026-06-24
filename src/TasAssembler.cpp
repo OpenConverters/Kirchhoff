@@ -149,26 +149,12 @@ std::string sanitize(const std::string& s) {
     return r;
 }
 
-// Numerical convergence snubbers (and the singular-mesh loop-breakers) are SIMULATION-ONLY aids for the
-// IDEAL-switch deck: they tame the infinite dV/dt at ideal commutation and pin floating midpoints so
-// ngspice converges. A REAL-device deck (DATASHEET fidelity) neither needs nor wants them — the sourced
-// switch's Coss and the diode's Cj/Qrr provide the actual dV/dt limiting and damping, and an extra
-// numerical cap on top would shift ZVS timing / switching loss / efficiency. So we strip them when the
-// caller requests a real-semiconductor deck. CONTRACT: every cell builder names such an element with one
-// of these prefixes (verified to match all-and-only the numerical snubbers); a real snubber a design
-// genuinely carries is a normally-named component and is never stripped.
-bool is_numerical_snubber(const std::string& n) {
-    return n.rfind("Csn", 0) == 0 || n.rfind("Rsn", 0) == 0 ||
-           n.rfind("Csw", 0) == 0 || n.rfind("Rdcr", 0) == 0;
-}
 
 } // namespace
 
 static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fidelity,
                                 CIAS::SpiceDialect dialect) {
     const bool lt = (dialect == CIAS::SpiceDialect::Ltspice);
-    // Real-semiconductor deck? Then drop the ideal-switch convergence snubbers (see is_numerical_snubber).
-    const bool stripSnubbers = (fidelity.origin == PEAS::Fidelity::Origin::DATASHEET);
     const json& topo = tasDoc.at("topology");
     const json& stages = topo.at("stages");
     const json interStage = topo.value("interStageConnections", json::array());
@@ -235,10 +221,8 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
         // out to several atom pins — e.g. a controller leaf whose `nodeC` sense port feeds two
         // comparators. Single-atom leaves (every passive/switch) map a port to exactly one pin.
         std::map<std::string, std::map<std::string, std::vector<std::pair<std::string, std::string>>>> portToAtomPin;
-        std::set<std::string> strippedSnubbers;        // numerical snubbers dropped for a real-device deck
         for (const auto& comp : brick.at("components")) {
             const std::string cname = comp.at("name").get<std::string>();
-            if (stripSnubbers && is_numerical_snubber(cname)) { strippedSnubbers.insert(cname); continue; }
             const json& data = comp.at("data");
             // Hoist a real magnetic's MKF subcircuit to the deck top level (once per reference); the
             // stage body (below) only emits the X instance that references it.
@@ -293,7 +277,6 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
             for (const auto& ep : conn.at("endpoints")) {
                 if (ep.contains("component")) {
                     const std::string cn = ep.at("component").get<std::string>();
-                    if (strippedSnubbers.count(cn)) continue;   // endpoint of a stripped numerical snubber
                     const std::string pn = ep.at("pin").get<std::string>();
                     auto cit = portToAtomPin.find(cn);
                     if (cit == portToAtomPin.end() || !cit->second.count(pn))
@@ -306,8 +289,7 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
                     c["endpoints"].push_back(json{{"port", sanitize(ep.at("port").get<std::string>())}});
                 }
             }
-            // A private snubber node whose every endpoint was stripped becomes empty — drop it (no floating node).
-            if (!c.at("endpoints").empty()) sub["connections"].push_back(c);
+            sub["connections"].push_back(c);
         }
 
         subckts << conv.to_subckt(CIAS::CiasCircuit::from_json(sub), dialect) << "\n";
