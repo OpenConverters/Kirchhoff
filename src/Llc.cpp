@@ -51,8 +51,11 @@ LlcDesign design_llc(const json& tasInputs) {
     const double Vin = d.inputVoltage, Vo = d.outputVoltage;
     const double Iout = d.outputPower / Vo;
 
-    // Turns ratio (per CT half-winding): n = Vo_fha/Vout, Vo_fha = k_bridge·Vin_nom.
-    double n = (kBridgeFactor * Vin) / Vo;
+    // Turns ratio (per CT half-winding): n = Vo_fha/(Vout+Vd), Vo_fha = k_bridge·Vin_nom. The +Vd
+    // compensates the center-tapped rectifier drop so the settled output (unity gain at fr) meets spec —
+    // a 0.85 V DIDEAL drop is ~7% of a 12 V rail but negligible at 48 V (diverges from MKF's Vd=0).
+    const double Vd = req::dideal_diode_drop(Iout);
+    double n = (kBridgeFactor * Vin) / (Vo + Vd);
     d.turnsRatio = std::round(n * 100.0) / 100.0;
 
     // Resonant tank (FHA / Runo Nielsen TDA): Rac = 8n²/π²·Rload, Zr = Q·Rac, fr = √(fmin·fmax),

@@ -7,9 +7,10 @@
 // MKF-equivalence suite uses), assembled, simulated to steady state in ngspice, and the measured Vout /
 // Pout are compared to the requirement.
 //
-// Scope = all 21 DC topologies. (MKF's "PtP" point-to-point reference designs are not replicated here —
-// they pin to MKF-internal analytical models we don't carry; this suite pins to the user-facing
-// requirements instead, which is the contract that matters.)
+// Scope = all 21 DC topologies, each gated at TWO levels: (1) its fixture operating point, and (2) THREE
+// real reference-design operating points lifted from MKF's Test*ReferenceDesignsPtp.cpp suites (real EVMs/
+// app-notes). We copy MKF's operating POINTS but pin to the user-facing requirements (delivered Vout/Pout),
+// NOT MKF's internal analytical models — the contract that matters. Each sim is also walltime-gated.
 //
 // Run directly:  ./build/test_requirements   (or a single one: ./build/test_requirements "[boost]")
 #include "Boost.hpp"
@@ -39,10 +40,12 @@
 #include <nlohmann/json.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <functional>
+#include <iostream>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -61,6 +64,11 @@ namespace {
 const std::string kRefDir = std::string(KIRCHHOFF_TEST_DIR) + "/reference";
 constexpr double kReqTol = 0.05;    // 5 % on Vout
 constexpr double kPowerTol = 0.10;  // ~2x on power (P proportional V^2, so a 5% Vout band IS a 10% power band)
+// Per-simulation walltime ceiling (mirrors MKF PtP `tol_walltime`). A sim that meets spec but takes too
+// long is still a regression — the deck/timestep must stay tractable. The slowest legitimate case is the
+// stiff resonant LLC at full load (~50 s of tiny adaptive steps over its 400-period settle floor); this
+// ceiling clears it with headroom for CI noise and would have caught the pre-fix 118 s high-RC settles.
+constexpr double kMaxSimSeconds = 75.0;
 
 std::string fmt(double v) { std::ostringstream os; os.precision(12); os << v; return os.str(); }
 
@@ -112,7 +120,12 @@ double simulate_vout(const json& tasInputs, const json& tas, double loadResistan
     for (const auto& st : tasInputs.value("simStimulusFsw", json::array())) fsw = st.get<double>();
     const double period = 1.0 / fsw;
     const double rc = loadResistance * settleCap;
-    const double settleTime = std::max(400.0 * period, std::ceil(30.0 * rc / period) * period);
+    // 10 output-RC time constants is e^-10 = 4.5e-5 settled — far inside the 5% gate. Was 30 (absurd
+    // overkill, e^-30 ≈ 1e-13) which made low-current/high-R settles take minutes; this 3x cut is pure
+    // headroom removal with no accuracy cost. 400-period floor still covers the switching-loop transient.
+    // (We keep the compute step = the fine print step; a coarser max-step breaks the stiff ACF/resonant
+    // decks' convergence, so the settle MULTIPLE is the only safe lever.)
+    const double settleTime = std::max(400.0 * period, std::ceil(10.0 * rc / period) * period);
     const double tstep = period / 200.0;
     deck = std::regex_replace(deck, std::regex(R"(\.tran\s+\S+\s+\S+\s+\S+\s+\S+)"),
                               ".tran " + fmt(tstep) + " " + fmt(settleTime) + " 0 " + fmt(tstep));
@@ -124,6 +137,19 @@ double simulate_vout(const json& tasInputs, const json& tas, double loadResistan
     double vout = 0;
     if (!parse_meas(out, "vout", vout)) throw std::runtime_error("could not parse Vout for " + tag);
     return vout;
+}
+
+// simulate_vout + a walltime measurement: always prints the per-simulation runtime (so each topology's
+// cost is visible), and gates it against kMaxSimSeconds (a correct-but-slow deck is still a regression).
+double sim_and_gate(const json& tasInputs, const json& tas, double loadResistance,
+                    double settleCap, const std::string& tag) {
+    const auto t0 = std::chrono::steady_clock::now();
+    const double v = simulate_vout(tasInputs, tas, loadResistance, settleCap, tag);
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::cout << "    [runtime] " << tag << " = " << secs << " s\n";
+    INFO(tag << " sim walltime = " << secs << " s (ceiling " << kMaxSimSeconds << " s)");
+    CHECK(secs <= kMaxSimSeconds);
+    return v;
 }
 
 // One topology: design-from-fixture builder -> {tas, loadResistance, settleCap, inputVoltage}.
@@ -198,7 +224,7 @@ void check_meets_requirements(const std::string& name) {
              "with ideal diodes (cuk) -- REPORTED, not gated (req " << vReq << " V).");
         return;
     }
-    const double vout = std::fabs(simulate_vout(di, b.tas, b.loadR, b.settleCap, name));  // |.| : Cuk/Zeta invert
+    const double vout = std::fabs(sim_and_gate(di, b.tas, b.loadR, b.settleCap, name));  // |.| : Cuk/Zeta invert
     const double pout = vout * vout / b.loadR;
     const double vErr = std::fabs(vout - vReq) / vReq, pErr = std::fabs(pout - pReq) / pReq;
     INFO(name << ": Vout=" << vout << " V (req " << vReq << ", err " << 100.0 * vErr << " %), "
@@ -236,6 +262,32 @@ const std::vector<PtpPoint>& ptpPoints() {
         {"push_pull", 5.0, 3.3, 0.35, 410e3}, {"push_pull", 5.0, 3.3, 1.0, 420e3}, {"push_pull", 12.0, 5.0, 1.0, 200e3},
         {"acf", 48.0, 3.3, 30.0, 250e3}, {"acf", 28.0, 5.0, 10.0, 200e3}, {"acf", 48.0, 12.0, 16.0, 250e3},
         {"weinberg", 50.0, 150.0, 10.0, 50e3}, {"weinberg", 42.0, 100.0, 5.0, 100e3}, {"weinberg", 24.0, 50.0, 5.0, 100e3},
+        // cuk (inverting; Vout is |Vo|) — Erickson §2.4, Bramble LT3757, synthetic 12->-24 V (skip the 1.4 MHz pt).
+        {"cuk", 25.0, 25.0, 1.0, 100e3}, {"cuk", 10.0, 5.0, 1.0, 300e3}, {"cuk", 12.0, 24.0, 1.0, 200e3},
+        // fsbb — TIDA-01411 buck, LM5176 boost, LM5176 buck-boost (4-switch buck-boost spans all 3 modes).
+        {"fsbb", 24.0, 12.0, 8.0, 350e3}, {"fsbb", 12.0, 24.0, 5.0, 200e3}, {"fsbb", 24.0, 24.0, 5.0, 200e3},
+        // forward (single-switch) — UC3845, NCP1252, Erickson §6.3.
+        {"forward", 48.0, 5.0, 10.0, 200e3}, {"forward", 48.0, 12.0, 8.0, 250e3}, {"forward", 24.0, 5.0, 5.0, 150e3},
+        // two-switch forward — SLUP089, UCC2897, Erickson §6.3.
+        {"two_switch_forward", 48.0, 12.0, 8.0, 250e3}, {"two_switch_forward", 48.0, 5.0, 10.0, 200e3}, {"two_switch_forward", 24.0, 5.0, 5.0, 150e3},
+        // ahb — SLUP223, AN4153, AN2852.
+        {"ahb", 100.0, 5.0, 20.0, 200e3}, {"ahb", 100.0, 12.0, 16.0, 100e3}, {"ahb", 90.0, 19.0, 4.7, 100e3},
+        // psfb — Telecom 600 W, Server 1.2 kW, EV-Aux 1 kW (all 400 V bus).
+        {"psfb", 400.0, 12.0, 50.0, 100e3}, {"psfb", 400.0, 24.0, 50.0, 100e3}, {"psfb", 400.0, 48.0, 21.0, 100e3},
+        // pshb — Telecom 600 W, Server 1.2 kW, EV-Aux 1 kW.
+        {"pshb", 400.0, 12.0, 50.0, 100e3}, {"pshb", 400.0, 24.0, 50.0, 100e3}, {"pshb", 400.0, 48.0, 21.0, 100e3},
+        // dab — TI 10 kW (800->500), ABB 5 kW (800->400), EV-Aux 2 kW (400->48).
+        {"dab", 800.0, 500.0, 20.0, 100e3}, {"dab", 800.0, 400.0, 12.5, 100e3}, {"dab", 400.0, 48.0, 40.0, 80e3},
+        // llc (at resonance, M=1) — Telecom 120 W, ATX 240 W, EV 1 kW.
+        {"llc", 400.0, 12.0, 10.0, 100e3}, {"llc", 400.0, 24.0, 10.0, 100e3}, {"llc", 400.0, 48.0, 20.0, 100e3},
+        // src — 400->48 V at 10 / 5 / 30 A (above-fr).
+        {"src", 400.0, 48.0, 10.0, 110e3}, {"src", 400.0, 48.0, 5.0, 110e3}, {"src", 400.0, 48.0, 30.0, 120e3},
+        // cllc — Telecom 500 W (above & below fr), Telecom 250 W.
+        {"cllc", 400.0, 48.0, 10.0, 200e3}, {"cllc", 400.0, 48.0, 10.0, 140e3}, {"cllc", 400.0, 24.0, 10.4, 250e3},
+        // isolated_buck (flybuck; measured = primary buck rail) — 24->12, 48->5, 60->12.
+        {"isolated_buck", 24.0, 12.0, 0.10, 350e3}, {"isolated_buck", 48.0, 5.0, 0.50, 200e3}, {"isolated_buck", 60.0, 12.0, 1.00, 350e3},
+        // isolated_buck_boost — 12->5, 24->12, 24->36.
+        {"isolated_buck_boost", 12.0, 5.0, 0.50, 250e3}, {"isolated_buck_boost", 24.0, 12.0, 1.00, 100e3}, {"isolated_buck_boost", 24.0, 36.0, 0.50, 100e3},
     };
     return pts;
 }
@@ -244,9 +296,15 @@ void check_topo_points(const std::string& topo) {
     for (const auto& p : ptpPoints()) {
         if (topo == p.topo) {
             json di = point_inputs(p.vin, p.vout, p.vout * p.iout, p.fs);
+            if (kDualOutput.count(topo)) {   // flybuck: design needs a second (isolated) output — mirror the primary
+                json os; os["name"] = "vsec"; os["voltage"]["nominal"] = p.vout;
+                di["designRequirements"]["outputs"].push_back(os);
+                json osp; osp["power"] = p.vout * p.iout;
+                di["operatingPoints"][0]["outputs"].push_back(osp);
+            }
             Built b;
             for (const auto& t : topologies()) if (t.name == p.topo) { b = t.build(di); break; }
-            const double vout = std::fabs(simulate_vout(di, b.tas, b.loadR, b.settleCap,
+            const double vout = std::fabs(sim_and_gate(di, b.tas, b.loadR, b.settleCap,
                                           std::string(p.topo) + "_pt" + std::to_string(idx)));
             const double pout = vout * vout / b.loadR, vReq = p.vout, pReq = p.vout * p.iout;
             INFO(p.topo << " @ Vin=" << p.vin << " -> " << p.vout << " V " << p.iout << " A: Vout=" << vout
@@ -294,3 +352,16 @@ TEST_CASE("Zeta PtP reference designs deliver spec", "[requirements][ptp][zeta]"
 TEST_CASE("Push-pull PtP reference designs deliver spec", "[requirements][ptp][pushpull]")  { check_topo_points("push_pull"); }
 TEST_CASE("ACF PtP reference designs deliver spec", "[requirements][ptp][acf]")             { check_topo_points("acf"); }
 TEST_CASE("Weinberg PtP reference designs deliver spec", "[requirements][ptp][weinberg]")   { check_topo_points("weinberg"); }
+TEST_CASE("Cuk PtP reference designs deliver spec", "[requirements][ptp][cuk]")             { check_topo_points("cuk"); }
+TEST_CASE("4SBB PtP reference designs deliver spec", "[requirements][ptp][fsbb]")           { check_topo_points("fsbb"); }
+TEST_CASE("Forward PtP reference designs deliver spec", "[requirements][ptp][forward]")     { check_topo_points("forward"); }
+TEST_CASE("Two-switch forward PtP reference designs deliver spec", "[requirements][ptp][tsf]") { check_topo_points("two_switch_forward"); }
+TEST_CASE("AHB PtP reference designs deliver spec", "[requirements][ptp][ahb]")             { check_topo_points("ahb"); }
+TEST_CASE("PSFB PtP reference designs deliver spec", "[requirements][ptp][psfb]")           { check_topo_points("psfb"); }
+TEST_CASE("PSHB PtP reference designs deliver spec", "[requirements][ptp][pshb]")           { check_topo_points("pshb"); }
+TEST_CASE("DAB PtP reference designs deliver spec", "[requirements][ptp][dab]")             { check_topo_points("dab"); }
+TEST_CASE("LLC PtP reference designs deliver spec", "[requirements][ptp][llc]")             { check_topo_points("llc"); }
+TEST_CASE("SRC PtP reference designs deliver spec", "[requirements][ptp][src]")             { check_topo_points("src"); }
+TEST_CASE("CLLC PtP reference designs deliver spec", "[requirements][ptp][cllc]")           { check_topo_points("cllc"); }
+TEST_CASE("IsolatedBuck PtP reference designs deliver spec", "[requirements][ptp][isolated_buck]") { check_topo_points("isolated_buck"); }
+TEST_CASE("IsolatedBuckBoost PtP reference designs deliver spec", "[requirements][ptp][isolated_buck_boost]") { check_topo_points("isolated_buck_boost"); }

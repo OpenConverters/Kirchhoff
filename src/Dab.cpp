@@ -118,7 +118,7 @@ json build_dab_tas(const DabDesign& d) {
     // input current / efficiency. (Physically real: device Coss + a bleed/damping resistor.)
     auto snubR = [&]() { json c; c["resistor"] = json::object();
         c["inputs"]["designRequirements"]["deviceType"] = "resistor";
-        c["inputs"]["designRequirements"]["resistance"]["nominal"] = 1000.0; return c; };
+        c["inputs"]["designRequirements"]["resistance"]["nominal"] = 100000.0; return c; };
     auto snubC = [&]() { json c; c["capacitor"] = json::object();
         c["inputs"]["designRequirements"]["capacitance"]["nominal"] = 1e-9;
         c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) * 3;

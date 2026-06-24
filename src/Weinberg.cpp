@@ -130,7 +130,11 @@ json build_weinberg_tas(const WeinbergDesign& d) {
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("g1"), port("g2")});
     cell["components"] = json::array({
         comp("L1", l1), comp("T1", t1),
-        comp("Rdcra", res(0.05)), comp("Rdcrb", res(0.05)),
+        // Tiny series R between each input-inductor winding and its transformer primary half: a NUMERICAL
+        // loop-breaker for the otherwise-singular all-inductor mesh (coupled L1 + coupled T1 primary), not a
+        // physical DCR. 1 mΩ is the minimum that converges; the old 0.05 Ω was an arbitrary lossy value that
+        // burned ~2.5% of the output at the high-current corner (150 V/10 A: 4.5%→2.0% once shrunk to ideal).
+        comp("Rdcra", res(1e-3)), comp("Rdcrb", res(1e-3)),
         comp("S1", mosfet()), comp("S2", mosfet()),
         comp("Dpos", diode()), comp("Dneg", diode()), comp("Cout", cout),
         comp("RsnS1", res(100.0)), comp("CsnS1", snubC()),
