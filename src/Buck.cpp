@@ -1,5 +1,6 @@
 #include "Buck.hpp"
 #include "ComponentRequirements.hpp"
+#include "KirchhoffConfig.hpp"
 #include <cmath>
 #include <vector>
 
@@ -19,6 +20,7 @@ double nominal(const json& j) {
 BuckDesign design_buck(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     BuckDesign d{};
+    d.config = cfg::object_of(tasInputs);
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 0.9);
@@ -83,7 +85,7 @@ json build_buck_tas(const BuckDesign& d) {
     const double IswRms = std::sqrt(Dmax) * IrmsL;
     const double IdiodeAvg = iout * (1.0 - Dmax);
     const double IcoutRms = dIL / (2.0 * std::sqrt(3.0));               // triangular ripple into Cout
-    const double ratedVds = d.inputVoltageMax / req::V_DERATE;          // switch + diode both block Vin
+    const double ratedVds = d.inputVoltageMax / cfg::v_derate(d.config);          // switch + diode both block Vin
     const double maxRdsOn = 0.01 * d.outputPower / (IswRms * IswRms);
     const double maxVf = (ratedVds < 100.0) ? 0.6 : 1.2;
 
@@ -102,7 +104,7 @@ json build_buck_tas(const BuckDesign& d) {
     diode["inputs"]["designRequirements"] = req::diode(ratedVds, IdiodeAvg / 0.7, maxVf, 0.05 * T);
     json capd; capd["capacitor"] = json::object();
     capd["inputs"]["designRequirements"] = req::capacitor(
-        d.outputCapacitance, d.outputVoltage / req::V_DERATE, IcoutRms,
+        d.outputCapacitance, d.outputVoltage / cfg::v_derate(d.config), IcoutRms,
         req::ESR_RIPPLE_FRACTION * d.outputVoltage / IpkL, "outputFilter");
 
     // --- switching cell brick (Q high-side + L + freewheeling D) ---

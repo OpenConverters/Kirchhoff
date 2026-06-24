@@ -16,6 +16,7 @@ struct BoostDesign {
     double inductance;      // boost inductor (H)
     double loadResistance;  // Vout^2/Pout
     double outputCapacitance;
+    nlohmann::json config;
 };
 
 /**

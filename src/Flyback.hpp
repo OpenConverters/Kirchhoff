@@ -30,7 +30,8 @@ struct FlybackDesign {
     double dutyCycle;          // D at the operating point
     double magnetizingInductance; // Lp (H)
     double loadResistance;     // R = Vout^2 / Pout
-    double outputCapacitance;  // F
+    double outputCapacitance;
+    nlohmann::json config;  // F
     double inputCapacitance;   // F
 };
 

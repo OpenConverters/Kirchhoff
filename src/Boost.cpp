@@ -1,5 +1,6 @@
 #include "Boost.hpp"
 #include "ComponentRequirements.hpp"
+#include "KirchhoffConfig.hpp"
 #include <vector>
 
 namespace Kirchhoff {
@@ -18,6 +19,7 @@ double nominal(const json& j) {
 BoostDesign design_boost(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     BoostDesign d{};
+    d.config = cfg::object_of(tasInputs);
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 0.9);
@@ -82,8 +84,8 @@ json build_boost_tas(const BoostDesign& d) {
     const double IdiodeRms = std::sqrt(1.0 - Dmax) * IrmsL;               // diode conducts during 1-D
     const double IcoutRms = std::sqrt(std::max(0.0, IdiodeRms * IdiodeRms - Iout * Iout));
     // VOLTAGES at Vin_max: switch and diode both block Vout.
-    const double ratedVds = d.outputVoltage / req::V_DERATE;
-    const double ratedVr  = d.outputVoltage / req::V_DERATE;
+    const double ratedVds = d.outputVoltage / cfg::v_derate(d.config);
+    const double ratedVr  = d.outputVoltage / cfg::v_derate(d.config);
     const double maxRdsOn = 0.01 * d.outputPower / (IswRms * IswRms);
     const double maxVf    = (ratedVr < 100.0) ? 0.6 : 1.2;
 
@@ -103,7 +105,7 @@ json build_boost_tas(const BoostDesign& d) {
     diode["inputs"]["designRequirements"] = req::diode(ratedVr, Iout / 0.7, maxVf, 0.05 * T);
     json capd; capd["capacitor"] = json::object();
     capd["inputs"]["designRequirements"] = req::capacitor(
-        d.outputCapacitance, d.outputVoltage / req::V_DERATE, IcoutRms,
+        d.outputCapacitance, d.outputVoltage / cfg::v_derate(d.config), IcoutRms,
         req::ESR_RIPPLE_FRACTION * d.outputVoltage / IpkL, "outputFilter");
 
     // The boost power stage is ONE functional block (the switching cell): inductor + switch + diode.

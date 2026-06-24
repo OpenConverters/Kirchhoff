@@ -1,5 +1,6 @@
 #include "IsolatedBuckBoost.hpp"
 #include "ComponentRequirements.hpp"
+#include "KirchhoffConfig.hpp"
 #include <cmath>
 #include <algorithm>
 #include <vector>
@@ -23,6 +24,7 @@ IsolatedBuckBoostDesign design_isolated_buck_boost(const json& tasInputs) {
     if (dr.at("outputs").size() < 2)
         throw std::runtime_error("isolated_buck_boost design: needs 2 outputs (primary + isolated secondary)");
     IsolatedBuckBoostDesign d{};
+    d.config = cfg::object_of(tasInputs);
     d.primaryVoltage   = nominal(dr.at("outputs").at(0).at("voltage"));   // magnitude (rail is inverting)
     d.secondaryVoltage = nominal(dr.at("outputs").at(1).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));

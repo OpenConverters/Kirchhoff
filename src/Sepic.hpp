@@ -18,6 +18,7 @@ struct SepicDesign {
     double couplingCapacitance;  // Cs (F)
     double loadResistance;
     double outputCapacitance;
+    nlohmann::json config;
 };
 
 /**

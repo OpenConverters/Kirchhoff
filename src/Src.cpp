@@ -98,10 +98,10 @@ json build_src_tas(const SrcDesign& d) {
     json t1; t1["magnetic"] = json::object();
     t1["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"] = d.magnetizingInductance;
     { json rn; rn["nominal"] = n; t1["inputs"]["designRequirements"]["turnsRatios"] = json::array({rn, rn}); }
-    t1["inputs"]["designRequirements"]["coupling"] = 0.999;
+    t1["inputs"]["designRequirements"]["coupling"] = cfg::get(d.config, "transformerCoupling", 0.999);
 
     auto busCap = [&]() { json c; c["capacitor"] = json::object();
-        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = 10e-6;
+        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::get(d.config, "busSplitCap", 10e-6);
         c["inputs"]["designRequirements"]["ratedVoltage"] = d.inputVoltage * 2; return c; };
 
     json cout; cout["capacitor"] = json::object();

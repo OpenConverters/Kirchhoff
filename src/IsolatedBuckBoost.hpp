@@ -29,7 +29,8 @@ struct IsolatedBuckBoostDesign {
     double magnetizingInductance;     // Lmag (the coupled flyback inductor)
     double loadResistance;            // primary load (synthesized at the output port)
     double secondaryLoadResistance;   // secondary load (explicit internal resistor)
-    double outputCapacitance;         // primary Cpri (sets the settling RC)
+    double outputCapacitance;
+    nlohmann::json config;         // primary Cpri (sets the settling RC)
     double secondaryCapacitance;      // secondary Cout
 };
 

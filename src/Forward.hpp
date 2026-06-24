@@ -19,6 +19,7 @@ struct ForwardDesign {
     double outputInductance;       // Lout (the buck-like output filter inductor)
     double loadResistance;
     double outputCapacitance;
+    nlohmann::json config;
 };
 
 /**

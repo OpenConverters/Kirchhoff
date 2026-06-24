@@ -1,5 +1,6 @@
 #include "TwoSwitchForward.hpp"
 #include "ComponentRequirements.hpp"
+#include "KirchhoffConfig.hpp"
 #include <cmath>
 #include <vector>
 
@@ -21,6 +22,7 @@ constexpr double kRippleRatio = 0.4;
 TwoSwitchForwardDesign design_two_switch_forward(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     TwoSwitchForwardDesign d{};
+    d.config = cfg::object_of(tasInputs);
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 0.9);

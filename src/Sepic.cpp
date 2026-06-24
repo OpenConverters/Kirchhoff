@@ -1,5 +1,6 @@
 #include "Sepic.hpp"
 #include "ComponentRequirements.hpp"
+#include "KirchhoffConfig.hpp"
 #include <cmath>
 #include <vector>
 
@@ -26,6 +27,7 @@ double duty(double vin, double vo, double vd, double eff) { return (vo + vd) / (
 SepicDesign design_sepic(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     SepicDesign d{};
+    d.config = cfg::object_of(tasInputs);
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 0.9);
@@ -102,16 +104,16 @@ json build_sepic_tas(const SepicDesign& d) {
     json L2 = inductor(d.inductanceL2, iout, dIL2);
     json cs; cs["capacitor"] = json::object();
     cs["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.couplingCapacitance;
-    cs["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) / req::V_DERATE;
+    cs["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) / cfg::v_derate(d.config);
     json capd; capd["capacitor"] = json::object();
     capd["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;
-    capd["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage / req::V_DERATE;
+    capd["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage / cfg::v_derate(d.config);
     json mq = mosfet();
-    mq["inputs"]["designRequirements"] = req::mosfet("mainSwitch", vSwing / req::V_DERATE,
+    mq["inputs"]["designRequirements"] = req::mosfet("mainSwitch", vSwing / cfg::v_derate(d.config),
                                                      iout + iout * d.dutyCycle / (1.0 - d.dutyCycle),
                                                      0.01 * d.outputPower, 125.0);
     json md = diode();
-    md["inputs"]["designRequirements"] = req::diode(vSwing / req::V_DERATE, iout / 0.7,
+    md["inputs"]["designRequirements"] = req::diode(vSwing / cfg::v_derate(d.config), iout / 0.7,
                                                     (vSwing < 100.0) ? 0.6 : 1.2, 0.05 / fsw);
 
     json cell; cell["name"] = "sepic-cell";

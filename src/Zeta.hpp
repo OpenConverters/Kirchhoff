@@ -18,6 +18,7 @@ struct ZetaDesign {
     double couplingCapacitance;  // Cc (F), holds ~Vo
     double loadResistance;
     double outputCapacitance;
+    nlohmann::json config;
 };
 
 /**

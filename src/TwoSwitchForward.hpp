@@ -18,6 +18,7 @@ struct TwoSwitchForwardDesign {
     double outputInductance;
     double loadResistance;
     double outputCapacitance;
+    nlohmann::json config;
 };
 
 /**

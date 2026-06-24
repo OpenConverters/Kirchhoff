@@ -27,6 +27,7 @@ struct AcfDesign {
     double outputInductance;      // Lo
     double loadResistance;
     double outputCapacitance;
+    nlohmann::json config;
 };
 
 /**

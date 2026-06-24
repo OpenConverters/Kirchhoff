@@ -1,5 +1,6 @@
 #include "IsolatedBuck.hpp"
 #include "ComponentRequirements.hpp"
+#include "KirchhoffConfig.hpp"
 #include <cmath>
 #include <algorithm>
 #include <vector>
@@ -23,6 +24,7 @@ IsolatedBuckDesign design_isolated_buck(const json& tasInputs) {
     if (dr.at("outputs").size() < 2)
         throw std::runtime_error("isolated_buck design: needs 2 outputs (primary + isolated secondary)");
     IsolatedBuckDesign d{};
+    d.config = cfg::object_of(tasInputs);
     d.primaryVoltage   = nominal(dr.at("outputs").at(0).at("voltage"));
     d.secondaryVoltage = nominal(dr.at("outputs").at(1).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));

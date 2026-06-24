@@ -6,6 +6,7 @@
 #include "CiasConverter.hpp"
 #include "CiasCircuitConverter.hpp"
 #include "ComponentRequirements.hpp"
+#include "KirchhoffConfig.hpp"
 
 #include <sstream>
 #include <vector>
@@ -30,6 +31,7 @@ double nominal(const json& j, const std::string& what) {
 FlybackDesign design_flyback(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     FlybackDesign d{};
+    d.config = cfg::object_of(tasInputs);
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"), "outputVoltage");
     d.switchingFrequency = nominal(dr.at("switchingFrequency"), "switchingFrequency");
     d.efficiency = dr.value("efficiency", 0.88);
@@ -223,8 +225,8 @@ json build_flyback_tas(const FlybackDesign& d) {
     const double VdsStress = d.inputVoltageMax + n * d.outputVoltage;
     const double VrStress  = d.outputVoltage + d.inputVoltageMax / n;
 
-    const double ratedVds = VdsStress / req::V_DERATE;
-    const double ratedVr  = VrStress  / req::V_DERATE;
+    const double ratedVds = VdsStress / cfg::v_derate(d.config);
+    const double ratedVr  = VrStress  / cfg::v_derate(d.config);
     const double maxRdsOn = 0.01 * d.outputPower / (IrmsPri * IrmsPri);   // <=1% of Pout conduction
     const double maxVf    = (ratedVr < 100.0) ? 0.6 : 1.2;               // Schottky-class if low V_R
     const double maxTrr   = 0.05 * T;
@@ -257,11 +259,11 @@ json build_flyback_tas(const FlybackDesign& d) {
 
     json capCin; capCin["capacitor"] = json::object();
     capCin["inputs"]["designRequirements"] = req::capacitor(
-        d.inputCapacitance, d.inputVoltageMax / req::V_DERATE, IcinRms,
+        d.inputCapacitance, d.inputVoltageMax / cfg::v_derate(d.config), IcinRms,
         req::ESR_RIPPLE_FRACTION * d.inputVoltage / IpkPri, "inputFilter");
     json capCout; capCout["capacitor"] = json::object();
     capCout["inputs"]["designRequirements"] = req::capacitor(
-        d.outputCapacitance, d.outputVoltage / req::V_DERATE, IcoutRms,
+        d.outputCapacitance, d.outputVoltage / cfg::v_derate(d.config), IcoutRms,
         req::ESR_RIPPLE_FRACTION * d.outputVoltage / IpkSec, "outputFilter");
     // --- stage bricks ---
     json inv; inv["name"] = "primary-switch";
