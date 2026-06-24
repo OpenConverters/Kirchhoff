@@ -1,5 +1,6 @@
 #include "Pshb.hpp"
 #include "KirchhoffConfig.hpp"
+#include "ComponentRequirements.hpp"
 #include <cmath>
 #include <algorithm>
 #include <vector>
@@ -22,8 +23,6 @@ constexpr double kCommandedDuty = 0.7;   // sizes n at MKF's operating point (ph
 constexpr double kOuterTrim     = 0.01;
 constexpr double kRippleRatio   = 0.3;
 constexpr double kDeadFrac      = 0.01;
-constexpr double kVt = 0.025852, kIdealDiodeIS = 1e-14;
-double diode_drop(double I) { return kVt * std::log(std::max(I, 1e-9) / kIdealDiodeIS); }
 } // namespace
 
 PshbDesign design_pshb(const json& tasInputs) {
@@ -51,7 +50,7 @@ PshbDesign design_pshb(const json& tasInputs) {
     const double Vhb = 0.5 * d.inputVoltage;     // split-cap half bus
     const double Dcmd = cfg::get(d.config, "commandedDuty", kCommandedDuty);
     d.commandedDuty = Dcmd;
-    const double Vdtot = 2.0 * diode_drop(Io);   // full-bridge rectifier
+    const double Vdtot = 2.0 * req::dideal_diode_drop(Io);   // full-bridge rectifier
 
     double nSeed = Vhb * Dcmd / (Vo + Vdtot);
     double Lr = std::min(2e-6, (Io > 0) ? 0.02 * std::max(nSeed, 0.1) * Vhb / (4.0 * Io * Fs) : 2e-6);

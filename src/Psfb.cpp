@@ -29,9 +29,6 @@ constexpr double kRippleRatio   = 0.3;    // output-inductor current ripple (MKF
 // compensation the ideal-but-non-zero diode drop would pull Vout ~12% low. Vd here uses Kirchhoff's
 // OWN diode IS so the Kirchhoff deck delivers the target Vo; MKF's deck compensates for its own
 // (IS=1e-12 RS=0.005) drop and lands within tolerance.
-constexpr double kVt          = 0.025852;   // kT/q at ~27 C
-constexpr double kIdealDiodeIS = 1e-14;
-double diode_drop(double I) { return kVt * std::log(std::max(I, 1e-9) / kIdealDiodeIS); }
 
 // Per-switch on-fraction. The bridge runs at ~50% duty; a dead time (here via duty < 0.5) keeps the
 // ideal switches from shoot-through at the leg crossover (duty=0.5 exactly = a vin->gnd short for the
@@ -69,7 +66,7 @@ PsfbDesign design_psfb(const json& tasInputs) {
     const double Io = d.outputPower / Vo;
     const double Dcmd = cfg::get(d.config, "commandedDuty", kCommandedDuty);
     d.commandedDuty = Dcmd;
-    const double Vdtot = 2.0 * diode_drop(Io);   // full-bridge rectifier: two diodes in series
+    const double Vdtot = 2.0 * req::dideal_diode_drop(Io);   // full-bridge rectifier: two diodes in series
 
     // Series (resonant + leakage) inductor Lr: the smaller of a 2 uH default and the value giving
     // <= 2% duty loss at rated load (MKF Psfb::process_design_requirements).

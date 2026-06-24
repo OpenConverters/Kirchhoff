@@ -6,6 +6,7 @@
 // every still-seed component stays ideal. Fidelity is inferred per component from the data.
 
 #include "Flyback.hpp"
+#include "Psfb.hpp"
 #include "TasAssembler.hpp"
 #include "Fidelity.hpp"
 
@@ -80,4 +81,31 @@ TEST_CASE("A bound real capacitor becomes a C+ESR model; seeds stay ideal", "[re
     const double vout = std::stod(m[1].str());
     CHECK(vout > 9.0);
     CHECK(vout < 15.0);
+}
+
+// #1 fidelity-aware numerical snubbers: the ideal-switch deck carries small convergence snubbers
+// (Csn*/Rsn*/Csw*/Rdcr*) to tame infinite dV/dt at ideal commutation. A real-semiconductor (DATASHEET)
+// deck must NOT carry them — the sourced device's Coss/Cj/Qrr provide the real damping, and an extra
+// numerical cap would skew ZVS/efficiency. tas_to_ngspice strips them for a DATASHEET base fidelity.
+TEST_CASE("Numerical convergence snubbers are stripped in a real-semiconductor deck", "[real][fidelity][snubber]") {
+    json psfb = json::parse(R"({
+        "designRequirements": { "efficiency": 1.0,
+            "inputVoltage": { "minimum": 380, "nominal": 400, "maximum": 420 },
+            "switchingFrequency": { "nominal": 100000 },
+            "outputs": [ { "name": "out", "voltage": { "nominal": 12 } } ] },
+        "operatingPoints": [ { "inputVoltage": 400, "outputs": [ { "power": 600 } ] } ]
+    })");
+    Kirchhoff::PsfbDesign d = Kirchhoff::design_psfb(psfb);
+    json tas = Kirchhoff::build_psfb_tas(d);
+
+    const std::string idealDeck = Kirchhoff::tas_to_ngspice(tas, PEAS::Fidelity(PEAS::Fidelity::Origin::REQUIREMENTS));
+    const std::string realDeck  = Kirchhoff::tas_to_ngspice(tas, PEAS::Fidelity(PEAS::Fidelity::Origin::DATASHEET));
+
+    // Ideal deck carries the midpoint node snubbers; the real deck drops them.
+    CHECK(idealDeck.find("Csn") != std::string::npos);
+    CHECK(realDeck.find("Csn")  == std::string::npos);
+    // ...while the real power train (output inductor + cap + the bridge switches) stays intact.
+    CHECK(realDeck.find("Lout") != std::string::npos);
+    CHECK(realDeck.find("Cout") != std::string::npos);
+    CHECK(realDeck.find("SQ") != std::string::npos);   // bridge switches still present
 }

@@ -29,13 +29,17 @@ using nlohmann::json;
 constexpr double V_DERATE = 0.8;   // operate at <= 80% of the device voltage rating
 constexpr double ESR_RIPPLE_FRACTION = 0.005;  // ESR ripple-voltage budget = 0.5% of Vout
 
-// Forward drop of the IDEAL ("DIDEAL") rectifier diode the CIAS converter emits — IS=1e-14, N=1, so
-// Vf = Vt·ln(I/IS), Vt = 25.852 mV. NOT a constant: a design that targets its spec'd output THROUGH such
-// a diode adds this current-dependent drop to the design target. (Vf(1 A) = 0.8336 V, which is why the
-// old hardcoded 0.8334 looked right — but it's only exact at 1 A; this tracks the real operating current.)
+// Forward drop of the DIDEAL rectifier diode the CIAS converter emits. SINGLE SOURCE OF TRUTH for the
+// ideal-diode forward characteristic: CiasCircuitConverter renders the model as IS = I_ref·exp(-Vf_ref/Vt),
+// so its drop is exactly Vf(I) = Vf_ref + Vt·ln(I/I_ref). We anchor to the SAME (Vf_ref, I_ref, Vt) here, so
+// the design-time compensation and the emitted .model agree to the bit — no more 1e-14-vs-9.988e-15 drift,
+// and no duplicated kVt/kIdealDiodeIS scattered across topologies. (NB: this is the IDEAL-fidelity diode; a
+// real sourced diode carries its own datasheet Vf@I — drop compensation for a real rectifier must use that.)
+constexpr double kDidealVt    = 0.025852;   // thermal voltage kT/q at 300 K (== CiasCircuitConverter Vt)
+constexpr double kDidealVfRef = 0.8334;     // forward drop at the reference current (MKF DIDEAL)
+constexpr double kDidealIRef  = 1.0;        // reference current the drop is rated at [A]
 inline double dideal_diode_drop(double current) {
-    constexpr double Vt = 0.025852, IS = 1e-14;   // matches CiasCircuitConverter's ideal-diode model
-    return Vt * std::log(std::max(current, 1e-12) / IS);
+    return kDidealVfRef + kDidealVt * std::log(std::max(current, 1e-9) / kDidealIRef);
 }
 
 // --- semiconductor: MOSFET main switch ---

@@ -24,9 +24,6 @@ constexpr double kRippleRatio = 0.30;  // output-inductor current ripple
 // Kirchhoff's ideal rectifier diode drop (CIAS ideal-diode .model D(IS=1e-14); Vd=Vt*ln(I/IS)). The
 // full-bridge rectifier conducts through TWO diodes in series, so the design compensates the turns
 // ratio for 2*Vd at rated output current — mirrors MKF's compute_turns_ratio (FULL_BRIDGE uses 2*Vd).
-constexpr double kVt          = 0.025852;
-constexpr double kIdealDiodeIS = 1e-14;
-double diode_drop(double I) { return kVt * std::log(std::max(I, 1e-9) / kIdealDiodeIS); }
 } // namespace
 
 AhbDesign design_ahb(const json& tasInputs) {
@@ -58,7 +55,7 @@ AhbDesign design_ahb(const json& tasInputs) {
     const double D = cfg::get(d.config, "operatingDutyCycle", kDuty);
     d.dutyCycle = D;
     d.deadFraction = cfg::get(d.config, "deadTimeFraction", kDeadFrac);
-    const double Vdtot = 2.0 * diode_drop(Io);   // full-bridge rectifier: two diodes in series
+    const double Vdtot = 2.0 * req::dideal_diode_drop(Io);   // full-bridge rectifier: two diodes in series
 
     // Turns ratio sized at NOMINAL Vin (the operating point the open-loop deck runs at) so Kirchhoff
     // delivers the target Vo there. FULL_BRIDGE: Vo + 2*Vd = 2*D*(1-D)*Vin_nom/n. (MKF sizes at Vin_min
