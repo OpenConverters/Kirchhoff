@@ -25,7 +25,6 @@ AcfDesign design_acf(const json& tasInputs) {
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 0.9);
-    d.diodeDrop = 0.0;   // ideal reference (single forward diode; mirrors MKF set_diode_voltage_drop(0))
     if (tasInputs.contains("operatingPoints") && !tasInputs.at("operatingPoints").empty()) {
         const json& op = tasInputs.at("operatingPoints").at(0);
         d.inputVoltage = op.at("inputVoltage").get<double>();
@@ -44,12 +43,13 @@ AcfDesign design_acf(const json& tasInputs) {
     d.inputVoltageMax = vinMax;
 
     const double Vo = d.outputVoltage, Fs = d.switchingFrequency, Io = d.outputPower / Vo;
+    d.diodeDrop = req::dideal_diode_drop(Io);  // forward+freewheel ~ one DIDEAL drop at the rectifier current
     const double D = kDuty;
     d.dutyCycle = D;
     d.deadFraction = kDeadFrac;
 
     // Turns ratio n = Vin_min*D/(Vo+Vd) so the forward gain reaches Vo at min input (MKF). Vd=0.
-    double n = vinMin * D / (Vo + d.diodeDrop);
+    double n = d.inputVoltage * D / (Vo + d.diodeDrop);  // operating Vin (open-loop hits spec at the op point, not +5% at vinMin)
     d.turnsRatio = std::round(n * 100.0) / 100.0;
     n = d.turnsRatio;
 

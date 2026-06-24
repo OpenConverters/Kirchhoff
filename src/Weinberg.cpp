@@ -116,9 +116,12 @@ json build_weinberg_tas(const WeinbergDesign& d) {
     cout["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;
     cout["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage * 2;
 
-    // RC snubber (100Ω ∥ 100pF) — MKF puts one across each push-pull switch drain (which swings to
-    // 2·Vin/(1−D)) and each rectifier diode; they damp the leakage spike (no D3 recovery diodes) and
-    // set the conduction droop, so reproducing them is required to match MKF's settled Vout.
+    // SERIES-RC snubber (100Ω + 100pF) across each push-pull switch drain (which swings to 2·Vin/(1−D))
+    // and each rectifier diode, to damp the leakage spike (no D3 recovery diodes). The series C BLOCKS the
+    // DC blocking voltage, so the R (sized ≈√(L/C) for critical damping) dissipates only the switching
+    // transition — NOT the continuous V_drain²/R that a drain-to-ground R∥C bleeds (which at the high
+    // boost-reset voltage starved the output ~7%, dropping efficiency to ~57%). Intended divergence from
+    // MKF's lossy R∥C: Kirchhoff delivers spec open-loop.
     auto snubC = [&]() { json c; c["capacitor"] = json::object();
         c["inputs"]["designRequirements"]["capacitance"]["nominal"] = 100e-12;
         c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage * 6 + d.outputVoltage); return c; };
@@ -142,24 +145,23 @@ json build_weinberg_tas(const WeinbergDesign& d) {
         // Primary center-tap halves: each input-inductor winding feeds one primary half-winding.
         conn("priCT_a",  {pin("Rdcra", "2"), pin("T1", "primary_end")}),
         conn("priCT_b",  {pin("Rdcrb", "2"), pin("T1", "secondary1_start")}),
-        // Push-pull switch drains (dot ends of the primary halves) + snubbers.
-        conn("drainQ1",  {pin("T1", "primary_start"), pin("S1", "drain"),
-                          pin("RsnS1", "1"), pin("CsnS1", "1")}),
-        conn("drainQ2",  {pin("T1", "secondary1_end"), pin("S2", "drain"),
-                          pin("RsnS2", "1"), pin("CsnS2", "1")}),
+        // Push-pull switch drains (dot ends of the primary halves) + series-RC snubber (drain -> C -> R -> gnd).
+        conn("drainQ1",  {pin("T1", "primary_start"), pin("S1", "drain"), pin("CsnS1", "1")}),
+        conn("drainQ2",  {pin("T1", "secondary1_end"), pin("S2", "drain"), pin("CsnS2", "1")}),
+        conn("snS1",     {pin("CsnS1", "2"), pin("RsnS1", "1")}),
+        conn("snS2",     {pin("CsnS2", "2"), pin("RsnS2", "1")}),
         // Secondary CT-FW rectifier: each secondary half -> its diode -> out_node. Secondary CT = gnd.
-        conn("diodePos", {pin("T1", "secondary2_end"), pin("Dpos", "anode"),
-                          pin("RsnDp", "1"), pin("CsnDp", "1")}),
-        conn("diodeNeg", {pin("T1", "secondary3_start"), pin("Dneg", "anode"),
-                          pin("RsnDn", "1"), pin("CsnDn", "1")}),
+        // Series-RC snubber across each diode (anode -> C -> R -> cathode).
+        conn("diodePos", {pin("T1", "secondary2_end"), pin("Dpos", "anode"), pin("CsnDp", "1")}),
+        conn("diodeNeg", {pin("T1", "secondary3_start"), pin("Dneg", "anode"), pin("CsnDn", "1")}),
+        conn("snDp",     {pin("CsnDp", "2"), pin("RsnDp", "1")}),
+        conn("snDn",     {pin("CsnDn", "2"), pin("RsnDn", "1")}),
         conn("out_node", {pin("Dpos", "cathode"), pin("Dneg", "cathode"),
-                          pin("RsnDp", "2"), pin("CsnDp", "2"), pin("RsnDn", "2"), pin("CsnDn", "2"),
-                          pin("Cout", "1"), prt("vout")}),
-        // Ground: switch sources, secondary center-tap (both secondary-half gnd ends), snubber + cap
-        // returns.
+                          pin("RsnDp", "2"), pin("RsnDn", "2"), pin("Cout", "1"), prt("vout")}),
+        // Ground: switch sources, secondary center-tap (both secondary-half gnd ends), snubber-R returns.
         conn("gnd_net",  {pin("S1", "source"), pin("S2", "source"),
                           pin("T1", "secondary2_start"), pin("T1", "secondary3_end"),
-                          pin("RsnS1", "2"), pin("CsnS1", "2"), pin("RsnS2", "2"), pin("CsnS2", "2"),
+                          pin("RsnS1", "2"), pin("RsnS2", "2"),
                           pin("Cout", "2"), prt("gnd")}),
         conn("g1_net", {pin("S1", "gate"), prt("g1")}),
         conn("g2_net", {pin("S2", "gate"), prt("g2")})});
