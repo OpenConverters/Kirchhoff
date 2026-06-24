@@ -1,4 +1,5 @@
 #include "Cllc.hpp"
+#include "KirchhoffConfig.hpp"
 #include "ComponentRequirements.hpp"
 #include <cmath>
 #include <algorithm>
@@ -23,6 +24,7 @@ constexpr double kSwitchDuty      = 0.47;  // ~50% minus dead time
 CllcDesign design_cllc(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     CllcDesign d{};
+    d.config = cfg::object_of(tasInputs);
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 1.0);
@@ -56,13 +58,13 @@ CllcDesign design_cllc(const json& tasInputs) {
     const double Rload = Vo * Vo / d.outputPower;
     const double Ro = (8.0 * n * n / (M_PI * M_PI)) * Rload;
     const double wr = 2.0 * M_PI * fr;
-    d.primaryResonantCapacitance = 1.0 / (2.0 * M_PI * kQualityFactor * fr * Ro);
+    d.primaryResonantCapacitance = 1.0 / (2.0 * M_PI * cfg::get(d.config, "qualityFactor", kQualityFactor) * fr * Ro);
     d.primaryResonantInductance = 1.0 / (wr * wr * d.primaryResonantCapacitance);
-    d.magnetizingInductance = kInductanceRatio * d.primaryResonantInductance;
+    d.magnetizingInductance = cfg::get(d.config, "inductanceRatio", kInductanceRatio) * d.primaryResonantInductance;
     d.secondaryResonantInductance = d.primaryResonantInductance / (n * n);
     d.secondaryResonantCapacitance = n * n * d.primaryResonantCapacitance;
 
-    d.switchDuty = kSwitchDuty;
+    d.switchDuty = cfg::get(d.config, "switchDutyFraction", kSwitchDuty);
     d.loadResistance = Rload;
     d.outputCapacitance = 10e-6;    // matches MKF CLLC (Cout=10u)
     return d;

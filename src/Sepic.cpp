@@ -57,14 +57,14 @@ SepicDesign design_sepic(const json& tasInputs) {
     // L1 sized at the worst corner (max Vin) for its current-ripple target (MKF process_design_requirements).
     const double dMax = duty(vinMax, d.outputVoltage, d.diodeDrop, d.efficiency);
     const double iL1avg = iout * dMax / (1.0 - dMax);
-    const double dIL1 = kRippleRatioL1 * iL1avg;
+    const double dIL1 = cfg::get(d.config, "l1RippleRatio", kRippleRatioL1) * iL1avg;
     d.inductanceL1 = vinMax * dMax / (dIL1 * fsw);
     // L2, Cs, Cout sized at the operating point (MKF generate_ngspice_circuit).
-    const double dIL2 = kL2RipplePct * iout;
+    const double dIL2 = cfg::get(d.config, "l2RippleRatio", kL2RipplePct) * iout;
     d.inductanceL2 = d.inputVoltage * d.dutyCycle / (dIL2 * fsw);
-    const double dVcs = kCsRipplePct * d.inputVoltage;        // VCs = Vin
+    const double dVcs = cfg::get(d.config, "couplingCapRipple", kCsRipplePct) * d.inputVoltage;        // VCs = Vin
     d.couplingCapacitance = iout * d.dutyCycle / (dVcs * fsw);
-    const double dVo = kCoRipplePct * d.outputVoltage;
+    const double dVo = cfg::get(d.config, "outputCapRipple", kCoRipplePct) * d.outputVoltage;
     d.outputCapacitance = dIL2 / (8.0 * fsw * dVo);
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
     return d;
@@ -87,8 +87,8 @@ json build_sepic_tas(const SepicDesign& d) {
     auto diode  = []() { json j; j["semiconductor"]["diode"] = json::object(); return j; };
 
     const double fsw = d.switchingFrequency, iout = d.outputPower / d.outputVoltage;
-    const double dIL1 = kRippleRatioL1 * (iout * d.dutyCycle / (1.0 - d.dutyCycle));
-    const double dIL2 = kL2RipplePct * iout;
+    const double dIL1 = cfg::get(d.config, "l1RippleRatio", kRippleRatioL1) * (iout * d.dutyCycle / (1.0 - d.dutyCycle));
+    const double dIL2 = cfg::get(d.config, "l2RippleRatio", kL2RipplePct) * iout;
     const double vSwing = d.inputVoltage + d.outputVoltage;
 
     // Two single-winding inductors with full inputs (so they auto-bind to real magnetics).

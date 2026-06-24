@@ -22,10 +22,11 @@ constexpr double kRippleRatio = 0.4;  // output-inductor current ripple
 PushPullDesign design_push_pull(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     PushPullDesign d{};
+    d.config = cfg::object_of(tasInputs);
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 0.9);
-    d.maxDutyCycle = kMaxDuty;
+    d.maxDutyCycle = cfg::get(d.config, "maxDutyCycle", kMaxDuty);
     if (tasInputs.contains("operatingPoints") && !tasInputs.at("operatingPoints").empty()) {
         const json& op = tasInputs.at("operatingPoints").at(0);
         d.inputVoltage = op.at("inputVoltage").get<double>();
@@ -57,12 +58,11 @@ PushPullDesign design_push_pull(const json& tasInputs) {
     // Output inductor (MKF, worst case = max Vin): tOn_sec = (T/2)*(Vout+Vd)*N/Vin; ΔI = ripple*Iout;
     // Lout = (Vin/N - Vout) * tOn_sec / ΔI.
     const double tOnSec = (T / 2.0) * (d.outputVoltage + d.diodeDrop) * N / vinMax;
-    const double dILout = kRippleRatio * iout;
+    const double dILout = cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * iout;
     d.outputInductance = (vinMax / N - d.outputVoltage) * tOnSec / dILout;
     // Operating per-switch duty at nominal Vin: Vout = 2*D*Vin/N  ->  D = N*Vout/(2*Vin).
     d.dutyCycle = N * (d.outputVoltage + d.diodeDrop) / (2.0 * d.inputVoltage);
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
-    d.config = cfg::object_of(tasInputs);
     d.outputCapacitance = cfg::get(d.config, "outputCapacitance", 100e-6);
     return d;
 }

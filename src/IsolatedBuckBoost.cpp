@@ -55,7 +55,7 @@ const double Vd = req::dideal_diode_drop(Ipri);  // DIDEAL Vf at the primary rec
 
     // Lmag = V_pri·Vin_max / ((V_pri + Vin_max)·2·Fs·ΔI),  ΔI = ripple·(I_pri + ΣI_sec/N) (reflected).
     const double Imax = Ipri + Isec / d.turnsRatio;
-    const double dI = kRippleRatio * Imax;
+    const double dI = cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Imax;
     d.magnetizingInductance = Vpri * vinMax / ((Vpri + vinMax) * 2.0 * Fs * dI);
 
     d.loadResistance          = Vpri * Vpri / d.primaryPower;     // primary (synthesized at output port)

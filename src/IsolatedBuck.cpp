@@ -54,7 +54,7 @@ IsolatedBuckDesign design_isolated_buck(const json& tasInputs) {
 
     // Lmag = (Vin_max − V_pri)·V_pri / (Vin_max·Fs·ΔI),  ΔI = ripple·(I_pri + ΣI_sec/N) (reflected).
     const double Imax = Ipri + Isec / d.turnsRatio;
-    const double dI = kRippleRatio * Imax;
+    const double dI = cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Imax;
     d.magnetizingInductance = (vinMax - Vpri) * Vpri / (vinMax * Fs * dI);
 
     d.loadResistance          = Vpri * Vpri / d.primaryPower;     // primary (synthesized at output port)

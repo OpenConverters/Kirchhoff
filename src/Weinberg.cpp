@@ -31,6 +31,7 @@ double duty_boost(double Vin, double Vo, double n, double eta) {
 WeinbergDesign design_weinberg(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     WeinbergDesign d{};
+    d.config = cfg::object_of(tasInputs);
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 1.0);
@@ -55,7 +56,7 @@ WeinbergDesign design_weinberg(const json& tasInputs) {
     //   n = 1 / (2·M·(1−D_target)),  M = Vo/(Vin_max·η).   (MKF process_design_requirements)
 const double Vd = req::dideal_diode_drop(d.outputPower / Vo);  // DIDEAL Vf at the rectifier current
     const double Mmax = (Vo + Vd) / (vinMax * eta);
-    double n = 1.0 / (2.0 * Mmax * (1.0 - kDTarget));
+    double n = 1.0 / (2.0 * Mmax * (1.0 - cfg::get(d.config, "boostDutyTarget", kDTarget)));
     d.turnsRatio = std::round(n * 1000.0) / 1000.0;
 
     // Boost-regime duty at nominal Vin (the deck simulates at nominal Vin).
@@ -67,15 +68,14 @@ d.dutyCycle = duty_boost(Vin, Vo + Vd, d.turnsRatio, eta);
     const double Dmin = duty_boost(vinMin, Vo, d.turnsRatio, eta);
     const double Mboost = 1.0 / (2.0 * d.turnsRatio * (1.0 - Dmin));
     const double Iin = Iout / (eta * Mboost);
-    const double dIL1 = kRippleRatio * (Iin / 2.0);
+    const double dIL1 = cfg::get(d.config, "l1RippleRatio", kRippleRatio) * (Iin / 2.0);
     const double dEff = std::max(2.0 * Dmin - 1.0, Dmin);
     d.inputInductance = vinMin * dEff / (dIL1 * Fs);
     d.magnetizingInductance = d.inputInductance;   // Lpri_half ≈ L1 (MKF mirrors Lpri to the L1 magnitude)
 
     // Output cap from the 1% ripple target: Co = Iout·D/(ΔVo·Fs), ΔVo = coRipplePct·Vo.
-    d.outputCapacitance = Iout * d.dutyCycle / (kCoRipplePct * Vo * Fs);
+    d.outputCapacitance = Iout * d.dutyCycle / (cfg::get(d.config, "outputCapRipple", kCoRipplePct) * Vo * Fs);
     d.loadResistance = Vo / Iout;
-    d.config = cfg::object_of(tasInputs);
     return d;
 }
 

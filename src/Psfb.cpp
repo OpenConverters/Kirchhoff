@@ -44,6 +44,7 @@ constexpr double kSwitchDuty  = 0.48;   // 200ns dead time at Fs=100kHz (T=10us)
 PsfbDesign design_psfb(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     PsfbDesign d{};
+    d.config = cfg::object_of(tasInputs);
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 0.9);
@@ -66,7 +67,7 @@ PsfbDesign design_psfb(const json& tasInputs) {
 
     const double Vin = d.inputVoltage, Vo = d.outputVoltage, Fs = d.switchingFrequency;
     const double Io = d.outputPower / Vo;
-    const double Dcmd = kCommandedDuty;
+    const double Dcmd = cfg::get(d.config, "commandedDuty", kCommandedDuty);
     d.commandedDuty = Dcmd;
     const double Vdtot = 2.0 * diode_drop(Io);   // full-bridge rectifier: two diodes in series
 
@@ -92,14 +93,14 @@ PsfbDesign design_psfb(const json& tasInputs) {
     d.turnsRatio = std::round(n * 100.0) / 100.0;
 
     // Output inductor: Lo = Vo*(1 - Deff)/(Fs * ripple * Io).
-    d.outputInductance = Vo * (1.0 - Deff) / (Fs * kRippleRatio * Io);
+    d.outputInductance = Vo * (1.0 - Deff) / (Fs * cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Io);
 
     // Magnetizing inductance: Im_peak target = 10% of reflected load current; Lm = Vin*Deff/(4*Fs*Im).
     double ImTarget = 0.1 * Io / d.turnsRatio;
     double Lm = (ImTarget > 0) ? Vin * Deff / (4.0 * Fs * ImTarget) : 20.0 * Lr;
     d.magnetizingInductance = std::max(Lm, 20.0 * Lr);
 
-    d.switchDuty = kSwitchDuty;
+    d.switchDuty = cfg::get(d.config, "switchDutyFraction", kSwitchDuty);
     // Lagging-leg phase shift = 180*Deff_cmd (textbook PSFB phase-shift modulation: Deff = phi/180).
     // The dead time and the Lr commutation both nibble at the delivered duty, but the anti-parallel
     // body diodes carry the freewheel during dead time so the net effect is small; empirically the
@@ -107,7 +108,6 @@ PsfbDesign design_psfb(const json& tasInputs) {
     d.phaseDeg = 180.0 * Dcmd;
     d.loadResistance = Vo * Vo / d.outputPower;
     d.outputCapacitance = 100e-6;    // matches MKF PSFB (Cout=100u)
-    d.config = cfg::object_of(tasInputs);
     return d;
 }
 

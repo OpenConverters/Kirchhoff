@@ -38,6 +38,7 @@ struct ClllcDesign {
     double switchDuty;                 // primary per-switch on-fraction
     double loadResistance;
     double outputCapacitance;
+    nlohmann::json config;
 };
 
 /** Design a symmetric CLLLC (full bridge primary, current-aware synchronous-rectifier secondary). */

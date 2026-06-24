@@ -1,4 +1,5 @@
 #include "Clllc.hpp"
+#include "KirchhoffConfig.hpp"
 #include "ComponentRequirements.hpp"
 #include <cmath>
 #include <algorithm>
@@ -25,6 +26,7 @@ constexpr double kSenseHysteresis = 5e-3;  // SR comparator hysteresis on the iÂ
 ClllcDesign design_clllc(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     ClllcDesign d{};
+    d.config = cfg::object_of(tasInputs);
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 1.0);
@@ -52,12 +54,12 @@ ClllcDesign design_clllc(const json& tasInputs) {
     const double Rload = Vo * Vo / d.outputPower;
     const double Ro = (8.0 * n * n / (M_PI * M_PI)) * Rload;
     const double wr = 2.0 * M_PI * fr;
-    d.primaryResonantCapacitance = 1.0 / (2.0 * M_PI * kQualityFactor * fr * Ro);
+    d.primaryResonantCapacitance = 1.0 / (2.0 * M_PI * cfg::get(d.config, "qualityFactor", kQualityFactor) * fr * Ro);
     d.primaryResonantInductance = 1.0 / (wr * wr * d.primaryResonantCapacitance);
-    d.magnetizingInductance = kInductanceRatio * d.primaryResonantInductance;
+    d.magnetizingInductance = cfg::get(d.config, "inductanceRatio", kInductanceRatio) * d.primaryResonantInductance;
     d.secondaryResonantInductance = d.primaryResonantInductance / (n * n);
     d.secondaryResonantCapacitance = n * n * d.primaryResonantCapacitance;
-    d.switchDuty = kSwitchDuty;
+    d.switchDuty = cfg::get(d.config, "switchDutyFraction", kSwitchDuty);
     d.loadResistance = Rload;
     d.outputCapacitance = 100e-6;
     return d;
@@ -107,7 +109,7 @@ json build_clllc_tas(const ClllcDesign& d) {
         comp("Lr1", indBrick(d.primaryResonantInductance)), comp("T1", t1),
         comp("Lr2", indBrick(d.secondaryResonantInductance)),
         comp("Cr2", capBrick(d.secondaryResonantCapacitance, d.outputVoltage * 2)),
-        comp("Rsense", resBrick(kSenseResistance)),
+        comp("Rsense", resBrick(cfg::get(d.config, "senseResistance", kSenseResistance))),
         comp("QE", mosfet()), comp("QF", mosfet()), comp("QG", mosfet()), comp("QH", mosfet()),
         comp("DSE", diode()), comp("DSF", diode()), comp("DSG", diode()), comp("DSH", diode()),
         comp("Cout", capBrick(d.outputCapacitance, d.outputVoltage * 2))});
@@ -152,7 +154,7 @@ json build_clllc_tas(const ClllcDesign& d) {
         b["hysteresis"] = hyst; b["driveHigh"] = 5.0; b["driveLow"] = 0.0; b["threshold"] = 0.0; return j; };
     json ccell; ccell["name"] = "clllc-sr-control";
     ccell["ports"] = json::array({port("senseP"), port("senseM"), port("gA"), port("gB")});
-    ccell["components"] = json::array({comp("SR", syncRect(kSenseHysteresis))});
+    ccell["components"] = json::array({comp("SR", syncRect(cfg::get(d.config, "senseHysteresis", kSenseHysteresis)))});
     ccell["connections"] = json::array({
         conn("senseP", {pin("SR","senseP"), prt("senseP")}),
         conn("senseM", {pin("SR","senseM"), prt("senseM")}),

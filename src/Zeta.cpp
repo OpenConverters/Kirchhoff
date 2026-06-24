@@ -54,14 +54,14 @@ ZetaDesign design_zeta(const json& tasInputs) {
     // L1 sized at the worst corner (max Vin) for its current-ripple target (MKF).
     const double dMax = duty(vinMax, d.outputVoltage, d.diodeDrop, d.efficiency);
     const double iL1avg = iout * dMax / (1.0 - dMax);
-    const double dIL1 = kRippleRatioL1 * iL1avg;
+    const double dIL1 = cfg::get(d.config, "l1RippleRatio", kRippleRatioL1) * iL1avg;
     d.inductanceL1 = vinMax * dMax / (dIL1 * fsw);
     // L2, Cc, Cout at the operating point (both inductors see Vin·D during ON).
-    const double dIL2 = kL2RipplePct * iout;
+    const double dIL2 = cfg::get(d.config, "l2RippleRatio", kL2RipplePct) * iout;
     d.inductanceL2 = d.inputVoltage * d.dutyCycle / (dIL2 * fsw);
-    const double dVcc = kCcRipplePct * d.outputVoltage;       // VCc = Vout
+    const double dVcc = cfg::get(d.config, "couplingCapRipple", kCcRipplePct) * d.outputVoltage;       // VCc = Vout
     d.couplingCapacitance = iout * d.dutyCycle / (dVcc * fsw);
-    const double dVo = kCoRipplePct * d.outputVoltage;
+    const double dVo = cfg::get(d.config, "outputCapRipple", kCoRipplePct) * d.outputVoltage;
     d.outputCapacitance = dIL2 / (8.0 * fsw * dVo);
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
     return d;
@@ -84,8 +84,8 @@ json build_zeta_tas(const ZetaDesign& d) {
     auto diode  = []() { json j; j["semiconductor"]["diode"] = json::object(); return j; };
 
     const double fsw = d.switchingFrequency, iout = d.outputPower / d.outputVoltage;
-    const double dIL1 = kRippleRatioL1 * (iout * d.dutyCycle / (1.0 - d.dutyCycle));
-    const double dIL2 = kL2RipplePct * iout;
+    const double dIL1 = cfg::get(d.config, "l1RippleRatio", kRippleRatioL1) * (iout * d.dutyCycle / (1.0 - d.dutyCycle));
+    const double dIL2 = cfg::get(d.config, "l2RippleRatio", kL2RipplePct) * iout;
     const double vSwing = d.inputVoltage + d.outputVoltage;   // Cc holds ~Vo; switch/diode block Vin+Vo
 
     auto inductor = [&](double L, double iAvg, double iPkPk) {

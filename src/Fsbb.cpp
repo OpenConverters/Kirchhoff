@@ -23,6 +23,7 @@ constexpr double kDeadFrac    = 0.01;  // 100ns per-leg dead time at 100kHz
 FsbbDesign design_fsbb(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     FsbbDesign d{};
+    d.config = cfg::object_of(tasInputs);
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 0.9);
@@ -45,30 +46,29 @@ FsbbDesign design_fsbb(const json& tasInputs) {
 
     const double Vin = d.inputVoltage, Vo = d.outputVoltage, Fs = d.switchingFrequency;
     const double Io = d.outputPower / Vo;
-    d.deadFraction = kDeadFrac;
+    d.deadFraction = cfg::get(d.config, "deadTimeFraction", kDeadFrac);
     // Buck-boost simultaneous mode gain M = D/(1-D) = Vo/Vin  =>  D = Vo/(Vin+Vo).
     d.dutyCycle = Vo / (Vin + Vo);
 
     // Worst-case inductor: max(L_buck @ Vin_max, L_boost @ Vin_min). Each region's formula is only
     // valid on its side of Vo (returns 0 otherwise). (MKF compute_worst_case_inductance.)
-    const double Lbuck  = (vinMax > Vo) ? Vo * (vinMax - Vo) / (kRippleRatio * Io * Fs * vinMax) : 0.0;
+    const double Lbuck  = (vinMax > Vo) ? Vo * (vinMax - Vo) / (cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Io * Fs * vinMax) : 0.0;
     const double Lboost = (vinMin < Vo) ? (vinMin * vinMin) * (Vo - vinMin)
-                                          / (kRippleRatio * Io * Fs * Vo * Vo) : 0.0;
+                                          / (cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Io * Fs * Vo * Vo) : 0.0;
     double L = std::max(Lbuck, Lboost);
     if (L <= 0.0) {
         // Exact-unity / single-point spec (Vin_min == Vin_max == Vo, e.g. a 12->12 V request with no input
         // range): neither the buck (vinMax>Vo) nor the boost (vinMin<Vo) region's formula fires, leaving
         // L = 0 — a broken deck (the inductor vanishes, output collapses to ~Vin·D ≈ 3.3 V). Size it
         // directly for the 4-switch SIMULTANEOUS mode the design always runs: the charge phase applies Vin
-        // across L for D·T, with ΔIL targeted at kRippleRatio of the buck-boost current Io/(1-D):
+        // across L for D·T, with ΔIL targeted at kRippleRatio (config "inductorRippleRatio") of the buck-boost current Io/(1-D):
         //     L = Vin·D·(1-D) / (kRippleRatio·Io·Fs).   (ABT #26)
         const double D = d.dutyCycle;
-        L = Vin * D * (1.0 - D) / (kRippleRatio * Io * Fs);
+        L = Vin * D * (1.0 - D) / (cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Io * Fs);
     }
     d.inductance = L;
 
     d.loadResistance = Vo * Vo / d.outputPower;
-    d.config = cfg::object_of(tasInputs);
     d.outputCapacitance = cfg::get(d.config, "outputCapacitance", 100e-6);
     return d;
 }

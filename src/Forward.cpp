@@ -46,14 +46,14 @@ ForwardDesign design_forward(const json& tasInputs) {
     const double iout = d.outputPower / d.outputVoltage;
     // Turns ratio n = Vin_min*D_max/(Vout+Vd) so D(Vin_min)=D_max (MKF). Rounded to 2 dp.
     d.diodeDrop = req::dideal_diode_drop(d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
-    double n = vinMin * kMaxDuty / (d.outputVoltage + d.diodeDrop);
+    double n = vinMin * cfg::get(d.config, "maxDutyCycle", kMaxDuty) / (d.outputVoltage + d.diodeDrop);
     n = std::round(n * 100.0) / 100.0;
     d.turnsRatio = n;
     // Magnetizing inductance: Lm = Vin_min / (fsw * reflected secondary current), reflected = Iout/n.
     d.magnetizingInductance = vinMin * n / (d.switchingFrequency * iout);
     // Output inductor: Lout = (Vin_max/n - Vd - Vout) * tOn / rippleRatio,  tOn = D_max/fsw.
-    const double tOn = kMaxDuty / d.switchingFrequency;
-    d.outputInductance = (vinMax / n - d.diodeDrop - d.outputVoltage) * tOn / kRippleRatio;
+    const double tOn = cfg::get(d.config, "maxDutyCycle", kMaxDuty) / d.switchingFrequency;
+    d.outputInductance = (vinMax / n - d.diodeDrop - d.outputVoltage) * tOn / cfg::get(d.config, "inductorRippleRatio", kRippleRatio);
     // Operating (deck) duty at the nominal input.
     d.dutyCycle = n * (d.outputVoltage + d.diodeDrop) / d.inputVoltage;
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;

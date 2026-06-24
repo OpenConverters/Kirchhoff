@@ -32,6 +32,7 @@ double diode_drop(double I) { return kVt * std::log(std::max(I, 1e-9) / kIdealDi
 AhbDesign design_ahb(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     AhbDesign d{};
+    d.config = cfg::object_of(tasInputs);
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 0.9);
@@ -54,9 +55,9 @@ AhbDesign design_ahb(const json& tasInputs) {
 
     const double Vo = d.outputVoltage, Fs = d.switchingFrequency, Tsw = 1.0 / Fs;
     const double Io = d.outputPower / Vo;
-    const double D = kDuty;
+    const double D = cfg::get(d.config, "operatingDutyCycle", kDuty);
     d.dutyCycle = D;
-    d.deadFraction = kDeadFrac;
+    d.deadFraction = cfg::get(d.config, "deadTimeFraction", kDeadFrac);
     const double Vdtot = 2.0 * diode_drop(Io);   // full-bridge rectifier: two diodes in series
 
     // Turns ratio sized at NOMINAL Vin (the operating point the open-loop deck runs at) so Kirchhoff
@@ -72,7 +73,7 @@ AhbDesign design_ahb(const json& tasInputs) {
     d.magnetizingInductance = (1.0 - D) * vinMax * D * Tsw / (2.0 * ImTarget);
 
     // Output inductor (CCM): Lo = Vo*(1 - 2*D*(1-D))/(ripple*Io*Fs).
-    d.outputInductance = Vo * (1.0 - 2.0 * D * (1.0 - D)) / (kRippleRatio * Io * Fs);
+    d.outputInductance = Vo * (1.0 - 2.0 * D * (1.0 - D)) / (cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Io * Fs);
 
     // DC-blocking cap sized for <=5% ripple of V_Cb=(1-D)*Vin (Cb = Ipri_pk*D/(Fs*dVCb)).
     const double dILm = (1.0 - D) * vinMax * D * Tsw / d.magnetizingInductance;
@@ -82,7 +83,6 @@ AhbDesign design_ahb(const json& tasInputs) {
     d.dcBlockingCapacitance = IpriPk * D / (Fs * dVCb);
 
     d.loadResistance = Vo * Vo / d.outputPower;
-    d.config = cfg::object_of(tasInputs);
     d.outputCapacitance = cfg::get(d.config, "outputCapacitance", 100e-6);
     return d;
 }

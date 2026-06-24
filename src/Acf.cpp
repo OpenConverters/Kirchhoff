@@ -46,9 +46,9 @@ AcfDesign design_acf(const json& tasInputs) {
 
     const double Vo = d.outputVoltage, Fs = d.switchingFrequency, Io = d.outputPower / Vo;
     d.diodeDrop = req::dideal_diode_drop(Io);  // forward+freewheel ~ one DIDEAL drop at the rectifier current
-    const double D = kDuty;
+    const double D = cfg::get(d.config, "operatingDutyCycle", kDuty);
     d.dutyCycle = D;
-    d.deadFraction = kDeadFrac;
+    d.deadFraction = cfg::get(d.config, "deadTimeFraction", kDeadFrac);
 
     // Turns ratio n = Vin_min*D/(Vo+Vd) so the forward gain reaches Vo at min input (MKF). Vd=0.
     double n = d.inputVoltage * D / (Vo + d.diodeDrop);  // operating Vin (open-loop hits spec at the op point, not +5% at vinMin)
@@ -59,7 +59,7 @@ AcfDesign design_acf(const json& tasInputs) {
     d.magnetizingInductance = vinMin * n / (Fs * Io);
     // Output inductor: Lo = (Vin_max/n - Vd - Vo) * tOn / ripple,  tOn = D/Fs.
     const double tOn = D / Fs;
-    d.outputInductance = (vinMax / n - d.diodeDrop - Vo) * tOn / kRippleRatio;
+    d.outputInductance = (vinMax / n - d.diodeDrop - Vo) * tOn / cfg::get(d.config, "inductorRippleRatio", kRippleRatio);
 
     d.clampCapacitance = 10e-6;   // active-clamp capacitor (matches MKF; value sets reset ring, not Vo)
     d.loadResistance = Vo * Vo / d.outputPower;

@@ -29,6 +29,7 @@ constexpr double kSwitchDuty     = 0.45;  // ~50% minus dead time (MKF on-time 4
 LlcDesign design_llc(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     LlcDesign d{};
+    d.config = cfg::object_of(tasInputs);
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 1.0);
@@ -56,24 +57,23 @@ LlcDesign design_llc(const json& tasInputs) {
     // compensates the center-tapped rectifier drop so the settled output (unity gain at fr) meets spec —
     // a 0.85 V DIDEAL drop is ~7% of a 12 V rail but negligible at 48 V (diverges from MKF's Vd=0).
     const double Vd = req::dideal_diode_drop(Iout);
-    double n = (kBridgeFactor * Vin) / (Vo + Vd);
+    double n = (cfg::get(d.config, "bridgeFactor", kBridgeFactor) * Vin) / (Vo + Vd);
     d.turnsRatio = std::round(n * 100.0) / 100.0;
 
     // Resonant tank (FHA / Runo Nielsen TDA): Rac = 8n²/π²·Rload, Zr = Q·Rac, fr = √(fmin·fmax),
     // Lr = Zr/(2π·fr), Cr = 1/(2π·fr·Zr), Lm = Ln·Lr.   (MKF Llc::process_design_requirements)
     const double Rload = Vo / Iout;
     const double Rac = (8.0 * n * n) / (M_PI * M_PI) * Rload;
-    const double fr = std::sqrt(kFmin * kFmax);
-    const double Zr = kQualityFactor * Rac;
+    const double fr = std::sqrt(cfg::get(d.config, "resonantBandMin", kFmin) * cfg::get(d.config, "resonantBandMax", kFmax));
+    const double Zr = cfg::get(d.config, "qualityFactor", kQualityFactor) * Rac;
     d.resonantFrequency = fr;
     d.resonantInductance = Zr / (2.0 * M_PI * fr);
     d.resonantCapacitance = 1.0 / (2.0 * M_PI * fr * Zr);
-    d.magnetizingInductance = kInductanceRatio * d.resonantInductance;
+    d.magnetizingInductance = cfg::get(d.config, "inductanceRatio", kInductanceRatio) * d.resonantInductance;
 
-    d.switchDuty = kSwitchDuty;
+    d.switchDuty = cfg::get(d.config, "switchDutyFraction", kSwitchDuty);
     d.loadResistance = Rload;
     d.outputCapacitance = 47e-6;    // matches MKF LLC (Cout=47u)
-    d.config = cfg::object_of(tasInputs);
     return d;
 }
 

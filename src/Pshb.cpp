@@ -29,6 +29,7 @@ double diode_drop(double I) { return kVt * std::log(std::max(I, 1e-9) / kIdealDi
 PshbDesign design_pshb(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     PshbDesign d{};
+    d.config = cfg::object_of(tasInputs);
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 0.9);
@@ -48,7 +49,7 @@ PshbDesign design_pshb(const json& tasInputs) {
 
     const double Vo = d.outputVoltage, Fs = d.switchingFrequency, Io = d.outputPower / Vo;
     const double Vhb = 0.5 * d.inputVoltage;     // split-cap half bus
-    const double Dcmd = kCommandedDuty;
+    const double Dcmd = cfg::get(d.config, "commandedDuty", kCommandedDuty);
     d.commandedDuty = Dcmd;
     const double Vdtot = 2.0 * diode_drop(Io);   // full-bridge rectifier
 
@@ -67,15 +68,14 @@ PshbDesign design_pshb(const json& tasInputs) {
     }
     d.effectiveDuty = Deff;
     d.turnsRatio = std::round(n * 100.0) / 100.0;
-    d.outputInductance = Vo * (1.0 - Deff) / (Fs * kRippleRatio * Io);
+    d.outputInductance = Vo * (1.0 - Deff) / (Fs * cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Io);
     double ImTarget = 0.1 * Io / d.turnsRatio;
     d.magnetizingInductance = std::max((ImTarget > 0) ? Vhb * Deff / (4.0 * Fs * ImTarget) : 20.0 * Lr, 20.0 * Lr);
     d.splitCapacitance = 470e-6;
     d.phaseDeg = 180.0 * Dcmd;
     d.switchDuty = 0.5;
-    d.deadFraction = kDeadFrac;
+    d.deadFraction = cfg::get(d.config, "deadTimeFraction", kDeadFrac);
     d.loadResistance = Vo * Vo / d.outputPower;
-    d.config = cfg::object_of(tasInputs);
     d.outputCapacitance = cfg::get(d.config, "outputCapacitance", 100e-6);
     return d;
 }
@@ -169,7 +169,7 @@ json build_pshb_tas(const PshbDesign& d) {
     // 3-level NPC drive: inner pair S2/S3 ~50% complementary (S3 phase 180); outer pair S1/S4 narrower
     // (D_cmd/2 of the period) and in phase with S2/S4-leg, setting the +/-Vin/2 power-transfer width
     // (the phase-shift modulation). Dead time trims the inner pair.
-    const double D = d.commandedDuty, dt = d.deadFraction, outer = D / 2.0 + kOuterTrim;
+    const double D = d.commandedDuty, dt = d.deadFraction, outer = D / 2.0 + cfg::get(d.config, "outerTrim", kOuterTrim);
     auto stim = [&](const char* sw, double duty, double phaseDeg){
         json st; st["stage"]="pshbCell"; st["component"]=sw; st["signal"]="gate";
         st["waveform"]["type"]="pwm"; st["waveform"]["frequency"]=d.switchingFrequency;

@@ -26,6 +26,7 @@ double duty(double vin, double voMag, double vd, double eff) { return (voMag + v
 CukDesign design_cuk(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     CukDesign d{};
+    d.config = cfg::object_of(tasInputs);
     // Output voltage is stored as a magnitude (MKF treats Cuk Vout as |Vo|); take abs to be robust to
     // a negative setpoint in the TAS.
     d.outputVoltageMag = std::fabs(nominal(dr.at("outputs").at(0).at("voltage")));
@@ -55,18 +56,17 @@ CukDesign design_cuk(const json& tasInputs) {
     // L1 sized at the worst corner (max Vin) for its current-ripple target (MKF).
     const double dMax = duty(vinMax, d.outputVoltageMag, d.diodeDrop, d.efficiency);
     const double iL1avg = iout * dMax / (1.0 - dMax);
-    const double dIL1 = kRippleRatioL1 * iL1avg;
+    const double dIL1 = cfg::get(d.config, "l1RippleRatio", kRippleRatioL1) * iL1avg;
     d.inductanceL1 = vinMax * dMax / (dIL1 * fsw);
     // L2, C1, Cout at the operating point.
-    const double dIL2 = kL2RipplePct * iout;
+    const double dIL2 = cfg::get(d.config, "l2RippleRatio", kL2RipplePct) * iout;
     d.inductanceL2 = d.outputVoltageMag * (1.0 - d.dutyCycle) / (dIL2 * fsw);
     const double VC1 = d.inputVoltage / (1.0 - d.dutyCycle);   // = Vin + |Vo|
-    const double dVC1 = kC1RipplePct * VC1;
+    const double dVC1 = cfg::get(d.config, "couplingCapRipple", kC1RipplePct) * VC1;
     d.couplingCapacitance = iout * d.dutyCycle / (dVC1 * fsw);
-    const double dVo = kCoRipplePct * d.outputVoltageMag;
+    const double dVo = cfg::get(d.config, "outputCapRipple", kCoRipplePct) * d.outputVoltageMag;
     d.outputCapacitance = dIL2 / (8.0 * fsw * dVo);
     d.loadResistance = d.outputVoltageMag * d.outputVoltageMag / d.outputPower;
-    d.config = cfg::object_of(tasInputs);
     return d;
 }
 
@@ -87,8 +87,8 @@ json build_cuk_tas(const CukDesign& d) {
     auto diode  = []() { json j; j["semiconductor"]["diode"] = json::object(); return j; };
 
     const double fsw = d.switchingFrequency, iout = d.outputPower / d.outputVoltageMag;
-    const double dIL1 = kRippleRatioL1 * (iout * d.dutyCycle / (1.0 - d.dutyCycle));
-    const double dIL2 = kL2RipplePct * iout;
+    const double dIL1 = cfg::get(d.config, "l1RippleRatio", kRippleRatioL1) * (iout * d.dutyCycle / (1.0 - d.dutyCycle));
+    const double dIL2 = cfg::get(d.config, "l2RippleRatio", kL2RipplePct) * iout;
     const double vSwing = d.inputVoltage + d.outputVoltageMag;   // C1 holds ~Vin+|Vo|; switch/diode block it
 
     auto inductor = [&](double L, double iAvg, double iPkPk) {

@@ -25,6 +25,7 @@ constexpr double kSwitchDuty    = 0.45;
 SrcDesign design_src(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     SrcDesign d{};
+    d.config = cfg::object_of(tasInputs);
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 1.0);
@@ -48,7 +49,7 @@ SrcDesign design_src(const json& tasInputs) {
     const double Vin = d.inputVoltage, Vo = d.outputVoltage;
     const double Iout = d.outputPower / Vo;
 
-    double n = (kBridgeFactor * Vin) / Vo;
+    double n = (cfg::get(d.config, "bridgeFactor", kBridgeFactor) * Vin) / Vo;
     d.turnsRatio = std::round(n * 100.0) / 100.0;
 
     // Two-element series tank (no resonant Lm): Rac = 8n²/π²·Rload, Zr = Q·Rac, operate at fr = fsw,
@@ -56,16 +57,15 @@ SrcDesign design_src(const json& tasInputs) {
     const double Rload = Vo / Iout;
     const double Rac = (8.0 * n * n) / (M_PI * M_PI) * Rload;
     const double fr = d.switchingFrequency;   // designed/operated at series resonance
-    const double Zr = kQualityFactor * Rac;
+    const double Zr = cfg::get(d.config, "qualityFactor", kQualityFactor) * Rac;
     d.resonantFrequency = fr;
     d.resonantInductance = Zr / (2.0 * M_PI * fr);
     d.resonantCapacitance = 1.0 / (2.0 * M_PI * fr * Zr);
-    d.magnetizingInductance = kLmRatio * d.resonantInductance;
+    d.magnetizingInductance = cfg::get(d.config, "inductanceRatio", kLmRatio) * d.resonantInductance;
 
-    d.switchDuty = kSwitchDuty;
+    d.switchDuty = cfg::get(d.config, "switchDutyFraction", kSwitchDuty);
     d.loadResistance = Rload;
     d.outputCapacitance = 47e-6;
-    d.config = cfg::object_of(tasInputs);
     return d;
 }
 

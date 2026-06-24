@@ -45,12 +45,12 @@ TwoSwitchForwardDesign design_two_switch_forward(const json& tasInputs) {
 
     const double iout = d.outputPower / d.outputVoltage;
     d.diodeDrop = req::dideal_diode_drop(d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
-    double n = vinMin * kMaxDuty / (d.outputVoltage + d.diodeDrop);
+    double n = vinMin * cfg::get(d.config, "maxDutyCycle", kMaxDuty) / (d.outputVoltage + d.diodeDrop);
     n = std::round(n * 100.0) / 100.0;
     d.turnsRatio = n;
     d.magnetizingInductance = vinMin * n / (d.switchingFrequency * iout);
-    const double tOn = kMaxDuty / d.switchingFrequency;
-    d.outputInductance = (vinMax / n - d.diodeDrop - d.outputVoltage) * tOn / kRippleRatio;
+    const double tOn = cfg::get(d.config, "maxDutyCycle", kMaxDuty) / d.switchingFrequency;
+    d.outputInductance = (vinMax / n - d.diodeDrop - d.outputVoltage) * tOn / cfg::get(d.config, "inductorRippleRatio", kRippleRatio);
     d.dutyCycle = n * (d.outputVoltage + d.diodeDrop) / d.inputVoltage;
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
     d.outputCapacitance = 100e-6;
