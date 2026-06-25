@@ -67,7 +67,8 @@ AhbDesign design_ahb(const json& tasInputs) {
     // Magnetizing inductance for ZVS assist: target Im_pk = 10% of reflected load current, sized at
     // Vin_max. Lm = (1-D)*Vin_max*D*Tsw/(2*Im_target).
     const double ImTarget = std::max(0.10 * Io / n, 1e-3);
-    d.magnetizingInductance = (1.0 - D) * vinMax * D * Tsw / (2.0 * ImTarget);
+    d.magnetizingInductance = req::provided_inductance(dr).value_or(
+        (1.0 - D) * vinMax * D * Tsw / (2.0 * ImTarget));
 
     // Output inductor (CCM): Lo = Vo*(1 - 2*D*(1-D))/(ripple*Io*Fs).
     d.outputInductance = Vo * (1.0 - 2.0 * D * (1.0 - D)) / (cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Io * Fs);

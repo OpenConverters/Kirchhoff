@@ -53,8 +53,8 @@ BuckDesign design_buck(const json& tasInputs) {
     const double rippleRatio = 0.4;
     const double iout = d.outputPower / d.outputVoltage;
     const double maxCurrentRipple = rippleRatio * iout;
-    d.inductance = d.outputVoltage * (vinMax - d.outputVoltage)
-                 / (maxCurrentRipple * d.switchingFrequency * vinMax);
+    d.inductance = req::provided_inductance(dr).value_or(
+        d.outputVoltage * (vinMax - d.outputVoltage) / (maxCurrentRipple * d.switchingFrequency * vinMax));
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
     // Buck output ripple ΔV = ΔIL / (8*fsw*Cout); size Cout for ~1% ripple.
     d.outputCapacitance = maxCurrentRipple / (8.0 * d.switchingFrequency * 0.01 * d.outputVoltage);

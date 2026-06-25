@@ -66,7 +66,8 @@ FsbbDesign design_fsbb(const json& tasInputs) {
         const double D = d.dutyCycle;
         L = Vin * D * (1.0 - D) / (cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Io * Fs);
     }
-    d.inductance = L;
+    d.inductance = req::provided_inductance(dr).value_or(
+        L);
 
     d.loadResistance = Vo * Vo / d.outputPower;
     d.outputCapacitance = cfg::get(d.config, "outputCapacitance", 100e-6);

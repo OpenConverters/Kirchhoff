@@ -69,7 +69,8 @@ PshbDesign design_pshb(const json& tasInputs) {
     d.turnsRatio = std::round(n * 100.0) / 100.0;
     d.outputInductance = Vo * (1.0 - Deff) / (Fs * cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Io);
     double ImTarget = 0.1 * Io / d.turnsRatio;
-    d.magnetizingInductance = std::max((ImTarget > 0) ? Vhb * Deff / (4.0 * Fs * ImTarget) : 20.0 * Lr, 20.0 * Lr);
+    d.magnetizingInductance = req::provided_inductance(dr).value_or(
+        std::max((ImTarget > 0) ? Vhb * Deff / (4.0 * Fs * ImTarget) : 20.0 * Lr, 20.0 * Lr));
     d.splitCapacitance = 470e-6;
     d.phaseDeg = 180.0 * Dcmd;
     d.switchDuty = 0.5;

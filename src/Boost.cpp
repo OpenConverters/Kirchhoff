@@ -53,8 +53,8 @@ BoostDesign design_boost(const json& tasInputs) {
     const double rippleRatio = 0.4;
     const double iout = d.outputPower / d.outputVoltage;
     const double maxCurrentRipple = rippleRatio * iout;
-    d.inductance = vinMax * (d.outputVoltage - vinMax)
-                 / (maxCurrentRipple * d.switchingFrequency * d.outputVoltage);
+    d.inductance = req::provided_inductance(dr).value_or(
+        vinMax * (d.outputVoltage - vinMax) / (maxCurrentRipple * d.switchingFrequency * d.outputVoltage));
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
     d.outputCapacitance = iout * d.dutyCycle / (d.switchingFrequency * 0.01 * d.outputVoltage);
     return d;

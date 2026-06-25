@@ -56,7 +56,8 @@ AcfDesign design_acf(const json& tasInputs) {
     n = d.turnsRatio;
 
     // Magnetizing inductance: Lm = Vin_min * n / (Fs * Io)  (reflected secondary current Io/n).
-    d.magnetizingInductance = vinMin * n / (Fs * Io);
+    d.magnetizingInductance = req::provided_inductance(dr).value_or(
+        vinMin * n / (Fs * Io));
     // Output inductor: Lo = (Vin_max/n - Vd - Vo) * tOn / ripple,  tOn = D/Fs.
     const double tOn = D / Fs;
     d.outputInductance = (vinMax / n - d.diodeDrop - Vo) * tOn / cfg::get(d.config, "inductorRippleRatio", kRippleRatio);

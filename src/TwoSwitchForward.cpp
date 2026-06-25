@@ -48,7 +48,8 @@ TwoSwitchForwardDesign design_two_switch_forward(const json& tasInputs) {
     double n = vinMin * cfg::get(d.config, "maxDutyCycle", kMaxDuty) / (d.outputVoltage + d.diodeDrop);
     n = std::round(n * 100.0) / 100.0;
     d.turnsRatio = n;
-    d.magnetizingInductance = vinMin * n / (d.switchingFrequency * iout);
+    d.magnetizingInductance = req::provided_inductance(dr).value_or(
+        vinMin * n / (d.switchingFrequency * iout));
     const double tOn = cfg::get(d.config, "maxDutyCycle", kMaxDuty) / d.switchingFrequency;
     d.outputInductance = (vinMax / n - d.diodeDrop - d.outputVoltage) * tOn / cfg::get(d.config, "inductorRippleRatio", kRippleRatio);
     d.dutyCycle = n * (d.outputVoltage + d.diodeDrop) / d.inputVoltage;

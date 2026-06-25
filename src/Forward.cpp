@@ -50,7 +50,8 @@ ForwardDesign design_forward(const json& tasInputs) {
     n = std::round(n * 100.0) / 100.0;
     d.turnsRatio = n;
     // Magnetizing inductance: Lm = Vin_min / (fsw * reflected secondary current), reflected = Iout/n.
-    d.magnetizingInductance = vinMin * n / (d.switchingFrequency * iout);
+    d.magnetizingInductance = req::provided_inductance(dr).value_or(
+        vinMin * n / (d.switchingFrequency * iout));
     // Output inductor: Lout = (Vin_max/n - Vd - Vout) * tOn / rippleRatio,  tOn = D_max/fsw.
     const double tOn = cfg::get(d.config, "maxDutyCycle", kMaxDuty) / d.switchingFrequency;
     d.outputInductance = (vinMax / n - d.diodeDrop - d.outputVoltage) * tOn / cfg::get(d.config, "inductorRippleRatio", kRippleRatio);

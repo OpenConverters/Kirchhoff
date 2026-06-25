@@ -54,7 +54,8 @@ PushPullDesign design_push_pull(const json& tasInputs) {
     // Iprimary = Pout / Vin_min / eff.
     const double tOn = d.maxDutyCycle * T;
     const double iPrimary = d.outputPower / vinMin / d.efficiency;
-    d.magnetizingInductance = vinMin * tOn / iPrimary;
+    d.magnetizingInductance = req::provided_inductance(dr).value_or(
+        vinMin * tOn / iPrimary);
     // Output inductor (MKF, worst case = max Vin): tOn_sec = (T/2)*(Vout+Vd)*N/Vin; ΔI = ripple*Iout;
     // Lout = (Vin/N - Vout) * tOn_sec / ΔI.
     const double tOnSec = (T / 2.0) * (d.outputVoltage + d.diodeDrop) * N / vinMax;

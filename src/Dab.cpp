@@ -70,7 +70,8 @@ DabDesign design_dab(const json& tasInputs) {
     // 3. Magnetizing inductance: max(Vin²/(1.2·Fs·P), 10·L) — 30% magnetizing-ripple target, floored
     //    at 10× the series inductance (MKF Dab::process_design_requirements step 4).
     double LmFromCurrent = Vin * Vin / (1.2 * Fs * P);
-    d.magnetizingInductance = std::max(LmFromCurrent, 10.0 * d.seriesInductance);
+    d.magnetizingInductance = req::provided_inductance(dr).value_or(
+        std::max(LmFromCurrent, 10.0 * d.seriesInductance));
 
     d.phaseShiftDeg = d3deg;
     d.switchDuty = cfg::get(config, "switchDutyFraction", kSwitchDuty);

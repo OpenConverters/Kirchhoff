@@ -37,6 +37,22 @@ constexpr double ESR_RIPPLE_FRACTION = 0.005;  // ESR ripple-voltage budget = 0.
 // diode; a real sourced diode carries its own datasheet Vf@I — real-rectifier compensation must use that.)
 inline double dideal_diode_drop(double current) { return SAS::ideal_diode_drop(current); }
 
+// "Design around the magnetic" (ABT #30 / della-Pollock flow): if the caller pinned the magnetizing
+// inductance in the spec — any of magnetizingInductance / desiredInductance / inductance, as a number or
+// {nominal} — the topology sizes the REST of the stage around THAT L instead of computing its own. Returns
+// nullopt if none is provided (compute as before).
+inline std::optional<double> provided_inductance(const json& designRequirements) {
+    if (designRequirements.is_object())
+        for (const char* k : {"magnetizingInductance", "desiredInductance", "inductance"})
+            if (designRequirements.contains(k)) {
+                const json& v = designRequirements.at(k);
+                if (v.is_number()) return v.get<double>();
+                if (v.is_object() && v.contains("nominal") && v.at("nominal").is_number())
+                    return v.at("nominal").get<double>();
+            }
+    return std::nullopt;
+}
+
 // --- semiconductor: MOSFET main switch ---
 inline json mosfet(const std::string& role, double ratedVds, double ratedId,
                    double maxRdsOn, double maxTjC) {

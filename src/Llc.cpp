@@ -69,7 +69,8 @@ LlcDesign design_llc(const json& tasInputs) {
     d.resonantFrequency = fr;
     d.resonantInductance = Zr / (2.0 * M_PI * fr);
     d.resonantCapacitance = 1.0 / (2.0 * M_PI * fr * Zr);
-    d.magnetizingInductance = cfg::get(d.config, "inductanceRatio", kInductanceRatio) * d.resonantInductance;
+    d.magnetizingInductance = req::provided_inductance(dr).value_or(
+        cfg::get(d.config, "inductanceRatio", kInductanceRatio) * d.resonantInductance);
 
     d.switchDuty = cfg::get(d.config, "switchDutyFraction", kSwitchDuty);
     d.loadResistance = Rload;

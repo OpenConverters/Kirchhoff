@@ -83,7 +83,8 @@ FlybackDesign design_flyback(const json& tasInputs) {
     const double centerPrimaryRamp   = centerSecondaryRamp / n;
     const double tOn = maxDutyCycle / d.switchingFrequency;
     const double voltsSeconds = vinMin * tOn;
-    d.magnetizingInductance = voltsSeconds / rippleRatio / centerPrimaryRamp;
+    d.magnetizingInductance = req::provided_inductance(dr).value_or(
+        voltsSeconds / rippleRatio / centerPrimaryRamp);
 
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
     const double iout = d.outputPower / d.outputVoltage;

@@ -60,7 +60,8 @@ CllcDesign design_cllc(const json& tasInputs) {
     const double wr = 2.0 * M_PI * fr;
     d.primaryResonantCapacitance = 1.0 / (2.0 * M_PI * cfg::get(d.config, "qualityFactor", kQualityFactor) * fr * Ro);
     d.primaryResonantInductance = 1.0 / (wr * wr * d.primaryResonantCapacitance);
-    d.magnetizingInductance = cfg::get(d.config, "inductanceRatio", kInductanceRatio) * d.primaryResonantInductance;
+    d.magnetizingInductance = req::provided_inductance(dr).value_or(
+        cfg::get(d.config, "inductanceRatio", kInductanceRatio) * d.primaryResonantInductance);
     d.secondaryResonantInductance = d.primaryResonantInductance / (n * n);
     d.secondaryResonantCapacitance = n * n * d.primaryResonantCapacitance;
 

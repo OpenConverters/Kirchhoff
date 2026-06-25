@@ -209,7 +209,7 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
     std::set<std::string> seenMagRefs;
     // (stage,component,pin) -> the stage port it is exposed on (for the stimulus to reach it).
     std::map<std::tuple<std::string, std::string, std::string>, std::string> pinPort;
-    bool deckHasRealSemi = false;   // any DATASHEET semiconductor -> a real deck that gets the cshunt aid
+    bool deckHasRealComponent = false;   // any real part (DATASHEET semi OR MKF_MODEL magnetic) -> gets cshunt
 
     for (const auto& stage : stages) {
         if (!stage.contains("circuit") || !stage.at("circuit").is_object()) continue;  // control stages
@@ -263,7 +263,7 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
             if (!cd.is_object() || !cd.contains("semiconductor")) continue;
             hasSemi = true;
             if (infer_fidelity(cd, fidelity).origin != PEAS::Fidelity::Origin::DATASHEET) { allRealAdequate = false; continue; }
-            deckHasRealSemi = true;
+            deckHasRealComponent = true;
             const json& semi = cd.at("semiconductor");
             if (semi.contains("mosfet") &&
                 numAt(semi.at("mosfet"), {"manufacturerInfo", "datasheetInfo", "electrical", "outputCapacitance"}) < maxSnubberCap)
@@ -322,6 +322,7 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
                 && data.at("magnetic").contains("modelOutputs")
                 && data.at("magnetic").at("modelOutputs").is_object()
                 && data.at("magnetic").at("modelOutputs").contains("spiceSubcircuit")) {
+                deckHasRealComponent = true;   // an MKF_MODEL magnetic is a stiff real core -> needs cshunt too
                 const json& sk = data.at("magnetic").at("modelOutputs").at("spiceSubcircuit");
                 if (seenMagRefs.insert(sk.at("reference").get<std::string>()).second) {
                     std::string text = sk.at("text").get<std::string>();
@@ -513,7 +514,7 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
     // a tiny node-to-ground cap that keeps a stiff stripped-body-diode resonant tank (llc/src) from going
     // singular. Gated on real semiconductors — it would detune the pinned ideal decks (see KirchhoffConfig).
     os << ".options reltol=1e-3 abstol=1e-9 vntol=1e-6 method=gear";
-    if (deckHasRealSemi) os << " cshunt=" << cfg::node_shunt_cap(cfg::object_of(tasDoc.at("inputs")));
+    if (deckHasRealComponent) os << " cshunt=" << cfg::node_shunt_cap(cfg::object_of(tasDoc.at("inputs")));
     os << "\n";
     os << ".tran " << maxStep << " " << stopTime << " 0 " << maxStep << (useIc ? " uic" : "") << "\n";
     const double from = stopTime - 50 * period;

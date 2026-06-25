@@ -71,7 +71,8 @@ d.dutyCycle = duty_boost(Vin, Vo + Vd, d.turnsRatio, eta);
     const double dIL1 = cfg::get(d.config, "l1RippleRatio", kRippleRatio) * (Iin / 2.0);
     const double dEff = std::max(2.0 * Dmin - 1.0, Dmin);
     d.inputInductance = vinMin * dEff / (dIL1 * Fs);
-    d.magnetizingInductance = d.inputInductance;   // Lpri_half ≈ L1 (MKF mirrors Lpri to the L1 magnitude)
+    d.magnetizingInductance = req::provided_inductance(dr).value_or(
+        d.inputInductance);   // Lpri_half ≈ L1 (MKF mirrors Lpri to the L1 magnitude)
 
     // Output cap from the 1% ripple target: Co = Iout·D/(ΔVo·Fs), ΔVo = coRipplePct·Vo.
     d.outputCapacitance = Iout * d.dutyCycle / (cfg::get(d.config, "outputCapRipple", kCoRipplePct) * Vo * Fs);

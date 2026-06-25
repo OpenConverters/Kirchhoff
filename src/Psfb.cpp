@@ -95,7 +95,8 @@ PsfbDesign design_psfb(const json& tasInputs) {
     // Magnetizing inductance: Im_peak target = 10% of reflected load current; Lm = Vin*Deff/(4*Fs*Im).
     double ImTarget = 0.1 * Io / d.turnsRatio;
     double Lm = (ImTarget > 0) ? Vin * Deff / (4.0 * Fs * ImTarget) : 20.0 * Lr;
-    d.magnetizingInductance = std::max(Lm, 20.0 * Lr);
+    d.magnetizingInductance = req::provided_inductance(dr).value_or(
+        std::max(Lm, 20.0 * Lr));
 
     d.switchDuty = cfg::get(d.config, "switchDutyFraction", kSwitchDuty);
     // Lagging-leg phase shift = 180*Deff_cmd (textbook PSFB phase-shift modulation: Deff = phi/180).
