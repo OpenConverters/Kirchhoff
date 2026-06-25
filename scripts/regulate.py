@@ -17,9 +17,12 @@ be an off-target point. Known limits (both report regulated=False / a caveat, ne
   * Some real resonant/high-power decks can't reach target because the needed operating region DIVERGES in
     ngspice (e.g. an SRC whose >gain frequencies all diverge, or a 400->48 V DAB) -> regulated=False at the
     closest reachable point.
-  * Dual-output topologies (isolated_buck / isolated_buck_boost): the generated deck loads only the PRIMARY
-    rail, so the reported efficiency is primary-rail-only (not the full converter). Regulation of the primary
-    Vout is still valid. Loading the secondary is a deck-generation fix (TasAssembler), out of this tool's scope.
+  * Dual-output topologies (isolated_buck / isolated_buck_boost): efficiency now sums BOTH rails — the
+    secondary is an isolated rail returning to its OWN ground, so its power uses a differential measurement
+    (v(out)-v(ref)). NB the flybuck secondary currently under-delivers in the generated deck even at IDEAL
+    fidelity (~1 V vs a 12 V spec) — a separate isolated_buck deck/design bug (latent because the C++ suite
+    gates only the primary rail), NOT a measurement error; the reported (low) efficiency faithfully reflects
+    that broken operating point. Primary-Vout regulation is valid.
 
     from regulate import simulate_regulated
     spec = {...}                                            # same spec you pass to design_<topo>_tas
@@ -110,44 +113,55 @@ def _set_control(tas, field, value):
             wf[field] = value
 
 
+_GND = {"0", "gnd", "GND", "Gnd"}
+
+
 def _parse_deck(deck):
-    """Pull what the operating-point measurement needs: input DC source, the output load (kind + value), and
-    the largest bulk capacitance in the deck (for an RC-based steady-state settle). We use the LARGEST cap
-    rather than a node-name match because the inter-stage flattening renames the output cap's nodes; the bulk
-    output cap dominates the tiny device Coss, and over-estimating the settle is safe (under-estimating is the
-    bug that measures a transient)."""
+    """Pull what the operating-point measurement needs: the input DC source, EVERY output load, and the
+    largest bulk capacitance (for an RC-based settle). A load is identified structurally as an element from an
+    output node (name contains 'out') to ground — this catches the primary `Rload Vout 0` AND a multi-output
+    topology's internal secondary load (e.g. `RRsec vout_sec gnd`), while excluding an output-cap ESR (which
+    goes to the cap node, not ground). Returns (vin_name, vin, loads, cmax) where loads is a list of
+    (node, kind, value): kind R=ohms, I=amps (constant-current sink), P=watts (constant-power sink)."""
     vin = vin_name = None
-    load_kind = load_val = None          # ("R", ohms) | ("I", amps) | ("P", watts)
+    loads = []
     cmax = 0.0
     for ln in deck.splitlines():
         m = re.match(r"^(V\w+)\s+\S+\s+\S+\s+DC\s+([-\d.eE+]+)", ln)
         if m and vin is None:            # the input DC source (gate drives are PULSE, not DC)
             vin_name, vin = m.group(1), float(m.group(2))
-        m = re.match(r"^Rload\s+(\S+)\s+(\S+)\s+([-\d.eE+]+)", ln)
+        m = re.match(r"^R\w+\s+(\S+)\s+(\S+)\s+([-\d.eE+]+)", ln)
         if m:
-            load_kind, load_val = "R", float(m.group(3))
-        m = re.match(r"^Iload\s+\S+\s+\S+\s+DC\s+([-\d.eE+]+)", ln)
+            n1, n2, rv = m.group(1), m.group(2), float(m.group(3))
+            if re.search("out", n1, re.I) and n2 in _GND:
+                loads.append((n1, n2, "R", rv))
+            elif re.search("out", n2, re.I) and n1 in _GND:
+                loads.append((n2, n1, "R", rv))
+        m = re.match(r"^Iload\s+(\S+)\s+(\S+)\s+DC\s+([-\d.eE+]+)", ln)
         if m:
-            load_kind, load_val = "I", abs(float(m.group(1)))
-        m = re.match(r"^Bload\b.*?=\s*([-\d.eE+]+)\s*/", ln)   # constant-power: I = P / max(V,Vk)
+            loads.append((m.group(1), m.group(2), "I", abs(float(m.group(3)))))
+        m = re.match(r"^Bload\s+(\S+)\s+(\S+)\b.*?=\s*([-\d.eE+]+)\s*/", ln)   # constant-power: I = P/max(V,Vk)
         if m:
-            load_kind, load_val = "P", float(m.group(1))
+            loads.append((m.group(1), m.group(2), "P", float(m.group(3))))
         m = re.match(r"^C\w+\s+\S+\s+\S+\s+([-\d.eE+]+)", ln)
         if m:
             cmax = max(cmax, float(m.group(1)))
-    return vin_name, vin, load_kind, load_val, cmax
+    return vin_name, vin, loads, cmax
 
 
 def _simulate(tas, fidelity, tag):
-    """Render + run the deck; return (vout_avg, pin, pout) measured at steady state, or None on
+    """Render + run the deck; return (vout_avg, pin, pout, steady) at steady state, or None on
     non-convergence. fsw is read from the (possibly just-modified) stimulus so frequency control settles
-    correctly; the settle is RC-based (max of 400 periods and 10 output-RC time constants), matching the C++
-    harness, so a large-Cout / high-R output is actually settled — not measured mid-transient."""
+    correctly; the settle is RC-based (max of 400 periods, 10 output-RC), so a slow/high-R output is actually
+    settled. pout sums EVERY load (so a dual-output converter reports full-converter, not primary-only, power).
+    `steady` compares Vout over two windows (one ~24 periods before the end, one at the end) to flag a deck
+    that is still drifting / in a slow limit cycle rather than truly settled."""
     deck = PyKirchhoff.tas_to_ngspice(tas, fidelity)
-    vin_name, vin, load_kind, load_val, cmax = _parse_deck(deck)
+    vin_name, vin, loads, cmax = _parse_deck(deck)
     fsw = _design_fsw(tas)
     period = 1.0 / fsw
-    rc = (load_val if load_kind == "R" else 1.0) * cmax    # output-RC time constant (largest bulk cap)
+    r_primary = next((v for n, ref, k, v in loads if k == "R" and n.lower() == "vout"), None)
+    rc = (r_primary if r_primary else 1.0) * cmax          # output-RC time constant (largest bulk cap)
     settle = max(400.0 * period, 10.0 * rc)
     tstep = period / 200.0
     deck = re.sub(r"\.tran\s+\S+\s+\S+\s+\S+\s+\S+",
@@ -155,19 +169,28 @@ def _simulate(tas, fidelity, tag):
     cpos = deck.rfind("\n.control")
     if cpos != -1:
         deck = deck[:cpos]
-    # Instantaneous output power as a behavioural source, then meas its AVERAGE — this is the true average load
-    # power (avg of v*i_load), correct under ripple, and load-agnostic. (ngspice `meas rms` is unreliable here.)
-    if load_kind == "R":
-        pexpr = f"v(Vout)*v(Vout)/{load_val:.10g}"
-    elif load_kind == "I":
-        pexpr = f"v(Vout)*{load_val:.10g}"
-    elif load_kind == "P":
-        pexpr = f"{load_val:.10g}"
-    else:
-        pexpr = None
+    # Instantaneous total output power as a behavioural source (sum over loads), then meas its AVERAGE — the
+    # true average load power (avg of v*i_load), correct under ripple and load-agnostic. (`meas rms` is broken.)
+    # An isolated rail (flybuck secondary) returns to its OWN node, not the primary ground 0, and floats vs 0,
+    # so the load power must use the DIFFERENTIAL voltage across the load (v(out)-v(ref)), not node-to-0.
+    def vd(node, ref):
+        return f"v({node})" if ref == "0" else f"(v({node})-v({ref}))"
+    terms = []
+    for node, ref, kind, val in loads:
+        d = vd(node, ref)
+        if kind == "R":
+            terms.append(f"{d}*{d}/{val:.10g}")
+        elif kind == "I":
+            terms.append(f"{d}*{val:.10g}")
+        elif kind == "P":
+            terms.append(f"{val:.10g}")
+    pexpr = " + ".join(terms) if terms else None
     frm, to = settle - period, settle
+    w0 = settle - 100.0 * period                                    # last ~100 periods, for the steady check
     ctrl = ["run",
             f"meas tran vout avg v(Vout) from={frm:.12g} to={to:.12g}",
+            f"meas tran vmax max v(Vout) from={w0:.12g} to={to:.12g}",
+            f"meas tran vmin min v(Vout) from={w0:.12g} to={to:.12g}",
             f"meas tran iin avg i({vin_name}) from={frm:.12g} to={to:.12g}"]
     if pexpr is not None:
         deck += f"\nBpout n_pout_meas 0 V = {pexpr}\n"
@@ -186,15 +209,16 @@ def _simulate(tas, fidelity, tag):
     def grab(name):
         m = re.search(rf"\b{name}\s*=\s*([-\d.eE+]+)", text)
         return float(m.group(1)) if m else None
-    vout, iin, pout_m = grab("vout"), grab("iin"), grab("pout")
+    vout, vmax, vmin, iin, pout_m = grab("vout"), grab("vmax"), grab("vmin"), grab("iin"), grab("pout")
     if vout is None or iin is None or vin is None:
         return None
     pin = abs(vin * iin)
-    if pout_m is not None:
-        pout = abs(pout_m)
-    else:
-        pout = float("nan")
-    return vout, pin, pout
+    pout = abs(pout_m) if pout_m is not None else float("nan")
+    # steady iff the peak-to-peak of Vout over the last ~100 periods is just switching ripple, not a drift /
+    # slow limit cycle. A truly settled deck holds a flat envelope; one still moving shows a large pp.
+    steady = (vmax is None or vmin is None or abs(vout) < 1e-9
+              or (vmax - vmin) <= 0.10 * abs(vout))
+    return vout, pin, pout, steady
 
 
 def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_iter=24):
@@ -260,14 +284,14 @@ def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_
         if r is not None:
             pts.append(r)
 
-    bx, vout, pin, pout = min(pts, key=lambda p: abs(p[1] - target_vout))
-    value = bx
+    bx, vout, pin, pout, steady = min(pts, key=lambda p: abs(p[1] - target_vout))
     return {
         "converged": True,
         "regulated": abs(vout - target_vout) <= tol * target_vout,   # did we actually reach target?
+        "steady_state": bool(steady),            # False -> Vout still drifting/oscillating; treat eff with care
         "topology": topology,
         "control": ctrl,
-        "value": value,                          # the regulated duty / phaseDeg / frequency
+        "value": bx,                             # the regulated duty / phaseDeg / frequency
         "vout": vout,
         "target_vout": target_vout,
         "vout_error": (vout - target_vout) / target_vout,
@@ -295,7 +319,7 @@ if __name__ == "__main__":
     d_des = tas["simulation"]["stimulus"][0]["waveform"]["dutyCycle"]
     ol = _simulate(copy.deepcopy(tas), fid, "boost_ol")
     if ol:
-        vout, pin, pout = ol
+        vout, pin, pout, _steady = ol
         print(f"open-loop  (duty={d_des:.4f}): Vout={vout:.3f} V  eff={pout/pin*100:.1f}%")
     r = simulate_regulated(copy.deepcopy(tas), target_vout=24.0, topology="boost", fidelity=fid)
     print(f"regulated  (duty={r['value']:.4f}): Vout={r['vout']:.3f} V  eff={r['efficiency']*100:.1f}%  "
