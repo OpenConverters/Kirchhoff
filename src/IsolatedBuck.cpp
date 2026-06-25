@@ -1,4 +1,5 @@
 #include "IsolatedBuck.hpp"
+#include "Dimension.hpp"
 #include "ComponentRequirements.hpp"
 #include "KirchhoffConfig.hpp"
 #include <cmath>
@@ -9,13 +10,7 @@ namespace Kirchhoff {
 using nlohmann::json;
 
 namespace {
-double nominal(const json& j) {
-    if (j.is_number()) return j.get<double>();
-    if (j.contains("nominal")) return j.at("nominal").get<double>();
-    if (j.contains("minimum") && j.contains("maximum"))
-        return 0.5 * (j.at("minimum").get<double>() + j.at("maximum").get<double>());
-    throw std::runtime_error("isolated_buck design: no nominal");
-}
+double nominal(const json& j) { return PEAS::resolve_dimensional_values(j); }
 constexpr double kRippleRatio = 0.4;   // primary-inductor current ripple (MKF IsolatedBuck default)
 } // namespace
 
@@ -35,12 +30,9 @@ IsolatedBuckDesign design_isolated_buck(const json& tasInputs) {
         d.primaryPower   = op.at("outputs").at(0).at("power").get<double>();
         d.secondaryPower = op.at("outputs").at(1).at("power").get<double>();
     }
-    double vinMax = d.inputVoltage, vinMin = d.inputVoltage;
-    {
-        const json& iv = dr.at("inputVoltage");
-        if (iv.is_object() && iv.contains("maximum")) vinMax = iv.at("maximum").get<double>();
-        if (iv.is_object() && iv.contains("minimum")) vinMin = iv.at("minimum").get<double>();
-    }
+    const json& iv = dr.at("inputVoltage");
+    const double vinMax = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::MAXIMUM);
+    const double vinMin = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::MINIMUM);
     d.inputVoltageMin = vinMin;
     d.inputVoltageMax = vinMax;
 

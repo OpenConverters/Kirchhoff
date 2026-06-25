@@ -1,4 +1,5 @@
 #include "Vienna.hpp"
+#include "Dimension.hpp"
 #include "KirchhoffConfig.hpp"
 #include <cmath>
 #include <vector>
@@ -9,13 +10,7 @@ namespace Kirchhoff {
 using nlohmann::json;
 
 namespace {
-double nominal(const json& j) {
-    if (j.is_number()) return j.get<double>();
-    if (j.contains("nominal")) return j.at("nominal").get<double>();
-    if (j.contains("minimum") && j.contains("maximum"))
-        return 0.5 * (j.at("minimum").get<double>() + j.at("maximum").get<double>());
-    throw std::runtime_error("vienna design: no nominal");
-}
+double nominal(const json& j) { return PEAS::resolve_dimensional_values(j); }
 constexpr double kBusCapacitance  = 470e-6;
 constexpr double kSenseResistance = 0.1;
 constexpr double kPi              = 3.14159265358979323846;

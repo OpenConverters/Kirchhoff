@@ -1,4 +1,5 @@
 #include "Psfb.hpp"
+#include "Dimension.hpp"
 #include "ComponentRequirements.hpp"
 #include "KirchhoffConfig.hpp"
 #include <cmath>
@@ -9,13 +10,7 @@ namespace Kirchhoff {
 using nlohmann::json;
 
 namespace {
-double nominal(const json& j) {
-    if (j.is_number()) return j.get<double>();
-    if (j.contains("nominal")) return j.at("nominal").get<double>();
-    if (j.contains("minimum") && j.contains("maximum"))
-        return 0.5 * (j.at("minimum").get<double>() + j.at("maximum").get<double>());
-    throw std::runtime_error("psfb design: no nominal");
-}
+double nominal(const json& j) { return PEAS::resolve_dimensional_values(j); }
 
 // PSFB control: leg-to-leg phase shift sets the effective duty Deff = phi/180. Commanded D_cmd=0.7
 // (phi=126 deg) — same operating point as the MKF reference (gen_psfb sets phase_shift=126).
@@ -53,12 +48,9 @@ PsfbDesign design_psfb(const json& tasInputs) {
         d.inputVoltage = nominal(dr.at("inputVoltage"));
         d.outputPower = nominal(dr.at("outputs").at(0).at("power"));
     }
-    double vinMax = d.inputVoltage, vinMin = d.inputVoltage;
-    {
-        const json& iv = dr.at("inputVoltage");
-        if (iv.is_object() && iv.contains("maximum")) vinMax = iv.at("maximum").get<double>();
-        if (iv.is_object() && iv.contains("minimum")) vinMin = iv.at("minimum").get<double>();
-    }
+    const json& iv = dr.at("inputVoltage");
+    const double vinMax = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::MAXIMUM);
+    const double vinMin = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::MINIMUM);
     d.inputVoltageMin = vinMin;
     d.inputVoltageMax = vinMax;
 

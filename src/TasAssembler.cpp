@@ -8,6 +8,7 @@
 #include "CiasConverter.hpp"
 #include "CiasCircuitConverter.hpp"
 #include "KirchhoffConfig.hpp"
+#include "Dimension.hpp"   // PEAS::resolve_dimensional_values — canonical {nominal,min,max} resolver
 
 #include <sstream>
 #include <map>
@@ -46,17 +47,10 @@ json component_to_leaf(const json& data, const PEAS::Fidelity& f) {
 double op_input_voltage(const json& inputs) {
     if (inputs.contains("operatingPoints") && !inputs.at("operatingPoints").empty())
         return inputs.at("operatingPoints").at(0).at("inputVoltage").get<double>();
-    const json& iv = inputs.at("designRequirements").at("inputVoltage");
-    if (iv.is_number()) return iv.get<double>();
-    if (iv.contains("nominal")) return iv.at("nominal").get<double>();
-    throw std::runtime_error("TasAssembler: no input voltage");
+    return PEAS::resolve_dimensional_values(inputs.at("designRequirements").at("inputVoltage"));
 }
 
-double num_or_nominal(const json& j) {
-    if (j.is_number()) return j.get<double>();
-    if (j.is_object() && j.contains("nominal")) return j.at("nominal").get<double>();
-    throw std::runtime_error("TasAssembler: expected number or {nominal}");
-}
+double num_or_nominal(const json& j) { return PEAS::resolve_dimensional_values(j); }
 
 // The load is NOT a converter component — it is the boundary condition the converter drives,
 // the dual of the input source. Synthesize the matching ngspice element from the per-operating-point
@@ -434,7 +428,7 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
         if (!dreq.contains("lineFrequency"))
             throw std::runtime_error("TasAssembler: acSinglePhase input requires designRequirements.lineFrequency");
         const json& lf = dreq.at("lineFrequency");
-        const double lineFreq = lf.is_number() ? lf.get<double>() : lf.at("nominal").get<double>();
+        const double lineFreq = PEAS::resolve_dimensional_values(lf);
         const double vpeak = vin * std::sqrt(2.0);
         const std::string nL = acInputNodes.empty() ? "acLine" : acInputNodes[0];
         const std::string nN = acInputNodes.size() >= 2 ? acInputNodes[1] : std::string("0");
@@ -451,7 +445,7 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
             throw std::runtime_error("TasAssembler: acThreePhase input needs 3 phase nodes (got "
                                      + std::to_string(acInputNodes.size()) + ")");
         const json& lf = dreq.at("lineFrequency");
-        const double lineFreq = lf.is_number() ? lf.get<double>() : lf.at("nominal").get<double>();
+        const double lineFreq = PEAS::resolve_dimensional_values(lf);
         const double vpeak = vin * std::sqrt(2.0);
         const char* names[3] = {"Vpha", "Vphb", "Vphc"};
         const double phase[3] = {0.0, -120.0, -240.0};

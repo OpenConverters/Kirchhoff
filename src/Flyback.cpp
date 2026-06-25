@@ -1,4 +1,5 @@
 #include "Flyback.hpp"
+#include "Dimension.hpp"
 #include "RasConverter.hpp"
 #include "CasConverter.hpp"
 #include "SasConverter.hpp"
@@ -18,14 +19,7 @@ namespace Kirchhoff {
 using nlohmann::json;
 
 namespace {
-double nominal(const json& j, const std::string& what) {
-    if (j.is_number()) return j.get<double>();
-    if (j.is_object() && j.contains("nominal") && j.at("nominal").is_number())
-        return j.at("nominal").get<double>();
-    if (j.is_object() && j.contains("minimum") && j.contains("maximum"))
-        return 0.5 * (j.at("minimum").get<double>() + j.at("maximum").get<double>());
-    throw std::runtime_error("flyback design: no nominal for " + what);
-}
+double nominal(const json& j, const std::string& what) { return PEAS::resolve_dimensional_values(j); }
 } // namespace
 
 FlybackDesign design_flyback(const json& tasInputs) {
@@ -47,12 +41,9 @@ FlybackDesign design_flyback(const json& tasInputs) {
     }
 
     // Minimum input voltage drives the turns ratio + inductance sizing (MKF semantics).
-    double vinMin = d.inputVoltage, vinMax = d.inputVoltage;
-    {
-        const json& iv = dr.at("inputVoltage");
-        if (iv.is_object() && iv.contains("minimum")) vinMin = iv.at("minimum").get<double>();
-        if (iv.is_object() && iv.contains("maximum")) vinMax = iv.at("maximum").get<double>();
-    }
+    const json& iv = dr.at("inputVoltage");
+    const double vinMin = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::MINIMUM);
+    const double vinMax = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::MAXIMUM);
     d.inputVoltageMin = vinMin;
     d.inputVoltageMax = vinMax;
     d.isolationVoltage = dr.value("isolationVoltage", 0.0);

@@ -1,4 +1,5 @@
 #include "Acf.hpp"
+#include "Dimension.hpp"
 #include "ComponentRequirements.hpp"
 #include "KirchhoffConfig.hpp"
 #include <cmath>
@@ -8,13 +9,7 @@ namespace Kirchhoff {
 using nlohmann::json;
 
 namespace {
-double nominal(const json& j) {
-    if (j.is_number()) return j.get<double>();
-    if (j.contains("nominal")) return j.at("nominal").get<double>();
-    if (j.contains("minimum") && j.contains("maximum"))
-        return 0.5 * (j.at("minimum").get<double>() + j.at("maximum").get<double>());
-    throw std::runtime_error("acf design: no nominal");
-}
+double nominal(const json& j) { return PEAS::resolve_dimensional_values(j); }
 constexpr double kDuty       = 0.45;   // main-switch operating duty (MKF ACF maximumDutyCycle)
 constexpr double kDeadFrac   = 0.01;   // 100ns dead time between main & clamp switches at 100kHz
 constexpr double kRippleRatio = 0.4;   // output-inductor current ripple
@@ -35,12 +30,9 @@ AcfDesign design_acf(const json& tasInputs) {
         d.inputVoltage = nominal(dr.at("inputVoltage"));
         d.outputPower = nominal(dr.at("outputs").at(0).at("power"));
     }
-    double vinMax = d.inputVoltage, vinMin = d.inputVoltage;
-    {
-        const json& iv = dr.at("inputVoltage");
-        if (iv.is_object() && iv.contains("maximum")) vinMax = iv.at("maximum").get<double>();
-        if (iv.is_object() && iv.contains("minimum")) vinMin = iv.at("minimum").get<double>();
-    }
+    const json& iv = dr.at("inputVoltage");
+    const double vinMax = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::MAXIMUM);
+    const double vinMin = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::MINIMUM);
     d.inputVoltageMin = vinMin;
     d.inputVoltageMax = vinMax;
 

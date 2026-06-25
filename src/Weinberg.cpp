@@ -1,4 +1,5 @@
 #include "Weinberg.hpp"
+#include "Dimension.hpp"
 #include "KirchhoffConfig.hpp"
 #include "ComponentRequirements.hpp"
 #include <cmath>
@@ -9,13 +10,7 @@ namespace Kirchhoff {
 using nlohmann::json;
 
 namespace {
-double nominal(const json& j) {
-    if (j.is_number()) return j.get<double>();
-    if (j.contains("nominal")) return j.at("nominal").get<double>();
-    if (j.contains("minimum") && j.contains("maximum"))
-        return 0.5 * (j.at("minimum").get<double>() + j.at("maximum").get<double>());
-    throw std::runtime_error("weinberg design: no nominal");
-}
+double nominal(const json& j) { return PEAS::resolve_dimensional_values(j); }
 constexpr double kRippleRatio = 0.30;   // input-inductor (L1) current ripple (MKF Weinberg default)
 constexpr double kDTarget     = 0.55;   // boost-regime duty target used to size n (MKF)
 constexpr double kCoRipplePct = 0.01;   // output-cap voltage ripple fraction (MKF)
@@ -40,12 +35,9 @@ WeinbergDesign design_weinberg(const json& tasInputs) {
         d.inputVoltage = op.at("inputVoltage").get<double>();
         d.outputPower  = op.at("outputs").at(0).at("power").get<double>();
     }
-    double vinMax = d.inputVoltage, vinMin = d.inputVoltage;
-    {
-        const json& iv = dr.at("inputVoltage");
-        if (iv.is_object() && iv.contains("maximum")) vinMax = iv.at("maximum").get<double>();
-        if (iv.is_object() && iv.contains("minimum")) vinMin = iv.at("minimum").get<double>();
-    }
+    const json& iv = dr.at("inputVoltage");
+    const double vinMax = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::MAXIMUM);
+    const double vinMin = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::MINIMUM);
     d.inputVoltageMin = vinMin;
     d.inputVoltageMax = vinMax;
 
