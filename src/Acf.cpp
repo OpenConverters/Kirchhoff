@@ -102,6 +102,15 @@ json build_acf_tas(const AcfDesign& d) {
     capd["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;
     capd["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage * 2;
 
+    // Numerical node snubber on the switching node. The ACF is the one switching topology that shipped WITHOUT
+    // one, so at high Vin / light load the active-clamp node (whose only DC path is the clamp switch ROFF)
+    // produces an unresolvably fast dV/dt -> ngspice "timestep too small". A small node-to-gnd cap tames it,
+    // exactly like the bridge midpoints. Named "Csn" so the real-fidelity strip replaces it with the switch's
+    // Coss when a real part is bound (and the real deck's cshunt covers convergence).
+    json snb; snb["capacitor"] = json::object();
+    snb["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::node_snubber_cap(d.config);
+    snb["inputs"]["designRequirements"]["ratedVoltage"] = d.inputVoltage * 4;
+
     // Active-clamp forward cell: main switch Q1 (vin->sw), 2-winding transformer (sw->gnd primary), the
     // clamp leg (Sc: vin->clamp_node, Cc: clamp_node->sw — clamp_node gets its DC path through Sc's
     // ROFF, like MKF's 1Meg bleeder), and the forward output (Dfwd + Dfw + Lout). Dot orientation
@@ -110,17 +119,19 @@ json build_acf_tas(const AcfDesign& d) {
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate_main"), port("gate_clamp")});
     cell["components"] = json::array({comp("Q1", mosfet()), comp("Sc", mosfet()), comp("Cc", cc),
                                       comp("T1", xfmr), comp("Dfwd", diode()), comp("Dfw", diode()),
-                                      comp("Lout", lout)});
+                                      comp("Lout", lout), comp("Csn", snb), comp("Csn2", snb)});
     cell["connections"] = json::array({
         conn("vin_net",  {pin("Q1", "drain"), pin("Sc", "drain"), prt("vin")}),
-        conn("sw_node",  {pin("Q1", "source"), pin("T1", "primary_start"), pin("Cc", "2")}),
-        conn("clamp_node", {pin("Sc", "source"), pin("Cc", "1")}),
+        conn("sw_node",  {pin("Q1", "source"), pin("T1", "primary_start"), pin("Cc", "2"), pin("Csn", "1")}),
+        // clamp_node is the stiff one (its only DC path is the clamp switch ROFF); a node snubber there clears
+        // the last high-Vin/light-load/high-fsw corner. Both Csn* strip together for a real-fidelity deck.
+        conn("clamp_node", {pin("Sc", "source"), pin("Cc", "1"), pin("Csn2", "1")}),
         // secondary -> forward rectifier (forward diode + freewheel diode) -> output inductor
         conn("sec_in",   {pin("T1", "secondary1_start"), pin("Dfwd", "anode")}),
         conn("sec_rect", {pin("Dfwd", "cathode"), pin("Dfw", "cathode"), pin("Lout", "primary_start")}),
         conn("vout_net", {pin("Lout", "primary_end"), prt("vout")}),
         conn("gnd_net",  {pin("T1", "primary_end"), pin("T1", "secondary1_end"),
-                          pin("Dfw", "anode"), prt("gnd")}),
+                          pin("Dfw", "anode"), pin("Csn", "2"), pin("Csn2", "2"), prt("gnd")}),
         conn("gate_main_net",  {pin("Q1", "gate"), prt("gate_main")}),
         conn("gate_clamp_net", {pin("Sc", "gate"), prt("gate_clamp")})});
 
