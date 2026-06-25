@@ -161,9 +161,12 @@ def _parse_deck(deck):
         m = re.match(r"^(V\w+)\s+\S+\s+\S+\s+DC\s+([-\d.eE+]+)", ln)
         if m and sub is None and vin is None:             # the top-level input DC source
             vin_name, vin = m.group(1), float(m.group(2))
-        m = re.match(r"^R\w+\s+(\S+)\s+(\S+)\s+([-\d.eE+]+)", ln)
-        if m:
-            n1, n2, rv = m.group(1), m.group(2), float(m.group(3))
+        m = re.match(r"^(R\w+)\s+(\S+)\s+(\S+)\s+([-\d.eE+]+)", ln)
+        # A LOAD is a resistor from an output node to ground. Exclude by name the non-load resistors that can
+        # also sit near an output node (an output-cap ESR, a numerical snubber/loop-breaker, a bias/bleeder),
+        # so a stray one is never silently summed as delivered power.
+        if m and not re.search(r"esr|sense|rsn|dcr|bias|bleed", m.group(1), re.I):
+            n1, n2, rv = m.group(2), m.group(3), float(m.group(4))
             if re.search("out", n1, re.I) and n2 in _GND:
                 loads.append((resolve(n1, sub), resolve(n2, sub), "R", rv))
             elif re.search("out", n2, re.I) and n1 in _GND:
@@ -245,16 +248,20 @@ def _simulate(tas, fidelity, tag):
         return None
     pin = abs(vin * iin)
     pout = abs(pout_m) if pout_m is not None else float("nan")
-    # steady iff the peak-to-peak of Vout over the last ~100 periods is just switching ripple, not a drift /
-    # slow limit cycle. A truly settled deck holds a flat envelope; one still moving shows a large pp.
-    steady = (vmax is None or vmin is None or abs(vout) < 1e-9
-              or (vmax - vmin) <= 0.10 * abs(vout))
-    return vout, pin, pout, steady
+    # relative peak-to-peak of Vout over the last ~100 periods: just switching ripple when settled, large when
+    # still drifting / in a slow limit cycle. The caller turns this into the steady/not-steady decision so the
+    # threshold stays a tunable parameter (not a magic number buried here).
+    ripple = 0.0 if (vmax is None or vmin is None or abs(vout) < 1e-9) else (vmax - vmin) / abs(vout)
+    return vout, pin, pout, ripple
 
 
-def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_iter=24):
+def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_iter=24,
+                       steady_ripple_frac=0.10):
     """Bisect the topology's control variable until the simulated Vout hits target_vout, then report the
     regulated operating point + efficiency.
+
+    Tunable (no magic numbers): `tol` = Vout-on-target band; `steady_ripple_frac` = max Vout peak-to-peak (as a
+    fraction of Vout) still counted as steady-state.
 
     Returns a dict. Two distinct flags — DON'T conflate them:
       "converged": at least one operating point simulated without diverging (a deck-health signal).
@@ -315,7 +322,8 @@ def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_
         if r is not None:
             pts.append(r)
 
-    bx, vout, pin, pout, steady = min(pts, key=lambda p: abs(p[1] - target_vout))
+    bx, vout, pin, pout, ripple = min(pts, key=lambda p: abs(p[1] - target_vout))
+    steady = ripple <= steady_ripple_frac
     return {
         "converged": True,
         "regulated": abs(vout - target_vout) <= tol * target_vout,   # did we actually reach target?

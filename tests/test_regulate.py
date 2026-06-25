@@ -36,12 +36,41 @@ def _check(design_fn, topo, vin, vout, p, fsw):
     return r
 
 
+# --- Independent analytical conduction-loss efficiency, to VALIDATE the simulated number (not just bound it).
+# The bound test parts are Ron=0.02 and a DIDEAL-style diode Vf=0.8 V @ 1 A (Vf(I)=0.8+Vt*ln(I)). The estimate
+# ignores switching/body-diode/DCR loss, so it agrees with the sim to a few %, but it is dead-wrong (off by
+# tens of %) if the tool mis-measures power (e.g. drops a rail) — which is exactly what we want to catch.
+import math
+_RON, _VT = 0.02, 0.025852
+
+
+def _vf(i):
+    return 0.8 + _VT * math.log(max(i, 1e-9))
+
+
+def _eta_buck(vin, vout, pout):
+    iout, d = pout / vout, vout / vin
+    losses = iout ** 2 * _RON * d + _vf(iout) * iout * (1 - d)   # switch conduction + freewheel-diode drop
+    return pout / (pout + losses)
+
+
+def _eta_boost(vin, vout, pout):
+    iout, d = pout / vout, 1 - vin / vout
+    il = iout / (1 - d)                                          # inductor/input current
+    losses = il ** 2 * _RON * d + _vf(iout) * iout               # switch conduction + output-diode drop
+    return pout / (pout + losses)
+
+
 def test_regulate_duty_buck():
-    _check(PyKirchhoff.design_buck_tas, "buck", 12, 5, 50, 400000)
+    r = _check(PyKirchhoff.design_buck_tas, "buck", 12, 5, 50, 400000)
+    eta = _eta_buck(12, 5, 50)
+    assert abs(r["efficiency"] - eta) <= 0.04, f"buck eff sim {r['efficiency']:.3f} vs analytical {eta:.3f}"
 
 
 def test_regulate_duty_boost():       # ABT #28's example topology
-    _check(PyKirchhoff.design_boost_tas, "boost", 12, 24, 108, 250000)
+    r = _check(PyKirchhoff.design_boost_tas, "boost", 12, 24, 108, 250000)
+    eta = _eta_boost(12, 24, 108)
+    assert abs(r["efficiency"] - eta) <= 0.04, f"boost eff sim {r['efficiency']:.3f} vs analytical {eta:.3f}"
 
 
 def test_regulate_phase_psfb():
