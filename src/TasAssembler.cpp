@@ -508,7 +508,15 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
     // a tiny node-to-ground cap that keeps a stiff stripped-body-diode resonant tank (llc/src) from going
     // singular. Gated on real semiconductors — it would detune the pinned ideal decks (see KirchhoffConfig).
     os << ".options reltol=1e-3 abstol=1e-9 vntol=1e-6 method=gear";
-    if (deckHasRealComponent) os << " cshunt=" << cfg::node_shunt_cap(cfg::object_of(tasDoc.at("inputs")));
+    if (deckHasRealComponent) {
+        // Real-deck convergence aids (ABT #33): cshunt = node-to-ground dV/dt; rshunt = node-to-ground DC
+        // reference that breaks a stiff MKF_MODEL core's near-singular branch (cshunt alone can't); itl4 lets
+        // the transient grind through a hard point instead of collapsing to "timestep too small".
+        const json in = cfg::object_of(tasDoc.at("inputs"));
+        os << " cshunt=" << cfg::node_shunt_cap(in)
+           << " rshunt=" << cfg::node_shunt_res(in)
+           << " itl4="   << cfg::tran_iter_limit(in);
+    }
     os << "\n";
     os << ".tran " << maxStep << " " << stopTime << " 0 " << maxStep << (useIc ? " uic" : "") << "\n";
     const double from = stopTime - 50 * period;

@@ -62,6 +62,8 @@ constexpr double kBiasLossFrac      = 1e-3;   // a DC-bias/bleed resistor dissip
 constexpr double kLoopBreakerFrac   = 1e-4;   // numerical loop-breaker R as a fraction of the reflected load R
 constexpr double kVoltageDerate     = 0.8;    // operate devices at <= this fraction of rating (IPC-9592)
 constexpr double kNodeShuntCap      = 1e-12;  // ngspice cshunt: tiny node-to-ground cap, REAL decks only (see below)
+constexpr double kNodeShuntRes      = 1e9;    // ngspice rshunt: large node-to-ground R, REAL decks only (see below)
+constexpr double kTranIterLimit     = 100;    // ngspice itl4: transient Newton iterations per timestep (default 10)
 
 // ── Principled auxiliary-component rules (for the ideal-switch ngspice decks) ─────────────────────────
 
@@ -91,6 +93,19 @@ inline double snubber_res(const json& in) {
 // real deck's loose real-loss bands absorb it, but it would detune the tightly-pinned IDEAL decks past their
 // 5% tolerance. A solver setting like reltol/abstol, but circuit-affecting, so it lives here and is overridable.
 inline double node_shunt_cap(const json& in) { return get(in, "nodeShuntCap", kNodeShuntCap); }
+
+// ngspice `rshunt` — a large resistance from every node to ground. Where cshunt gives a node a defined dV/dt,
+// rshunt gives it a DC reference, which is what a STIFF MKF_MODEL core needs: a real-core subcircuit (coupled
+// inductors near unity coupling, or a frequency-dependent-loss R-L ladder) presents a near-singular branch the
+// DC operating point / transient cannot resolve from cshunt alone, so it diverges "across the whole bracket"
+// (ABT #33). At 1e9 Ohm the leakage (~nA) is negligible vs any converter load, so it breaks the singularity
+// without detuning Vout. REAL decks only (same gating as cshunt). Overridable.
+inline double node_shunt_res(const json& in) { return get(in, "nodeShuntRes", kNodeShuntRes); }
+
+// ngspice `itl4` — max transient Newton iterations per timestep. ngspice cuts the timestep when a point does
+// not converge in itl4 iterations; for a stiff core that bottoms out at "timestep too small". Raising it lets
+// the solver work harder at a hard point instead of collapsing the step. REAL decks only. Overridable.
+inline double tran_iter_limit(const json& in) { return get(in, "tranIterLimit", kTranIterLimit); }
 
 // DC-bias / bleed resistor (a node that needs a defined DC path — e.g. a DAB floating midpoint). Sized to
 // dissipate at most `delta` of rated power at the blocking voltage:  R = V_block^2 / (delta · P).
