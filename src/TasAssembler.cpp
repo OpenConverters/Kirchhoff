@@ -7,6 +7,7 @@
 #include "MasConverter.hpp"
 #include "CiasConverter.hpp"
 #include "CiasCircuitConverter.hpp"
+#include "KirchhoffConfig.hpp"
 
 #include <sstream>
 #include <map>
@@ -507,15 +508,13 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
         os << ".ic v(" << group_node(ic.at("node").get<std::string>()) << ")="
            << ic.at("voltage").get<double>() << "\n";
 
-    // Gear integration + tight tolerances tame the stiff ideal diodes; both ngspice and LTspice accept
-    // these option names + the Gear method. For a REAL deck only, append cshunt — a tiny capacitance from
-    // every node to ground that gives each node a defined dV/dt, so a stiff resonant tank whose switch body
-    // diode was stripped (llc/src) no longer goes singular ("timestep too small"). It is gated on real
-    // semiconductors because, applied to the pinned IDEAL decks, even 1e-12 F detunes them past the 5 %
-    // requirements/MKF-equivalence tolerance; on a real deck the looser real-loss bands absorb it (verified
-    // psfb/dab/llc/src Vout shift < 0.1 %). Like reltol/abstol it is a fixed numerical-solver setting.
-    os << ".options reltol=1e-3 abstol=1e-9 vntol=1e-6 method=gear"
-       << (deckHasRealSemi ? " cshunt=1e-12" : "") << "\n";
+    // Gear integration + tight tolerances tame the stiff ideal diodes; both ngspice and LTspice accept these
+    // option names + the Gear method. For a REAL deck only, append cshunt (cfg::node_shunt_cap, overridable):
+    // a tiny node-to-ground cap that keeps a stiff stripped-body-diode resonant tank (llc/src) from going
+    // singular. Gated on real semiconductors — it would detune the pinned ideal decks (see KirchhoffConfig).
+    os << ".options reltol=1e-3 abstol=1e-9 vntol=1e-6 method=gear";
+    if (deckHasRealSemi) os << " cshunt=" << cfg::node_shunt_cap(cfg::object_of(tasDoc.at("inputs")));
+    os << "\n";
     os << ".tran " << maxStep << " " << stopTime << " 0 " << maxStep << (useIc ? " uic" : "") << "\n";
     const double from = stopTime - 50 * period;
     if (lt) {

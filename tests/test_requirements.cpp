@@ -215,9 +215,12 @@ const std::set<std::string> kNotPinned = {};  // NO exclusions: every topology i
 // isolated secondary) output spec, taken from the fixture's design section.
 const std::set<std::string> kDualOutput = {"isolated_buck", "isolated_buck_boost"};
 // Real-deck sweep: topologies whose full-converter deck does NOT converge once the ideal numerical aids are
-// stripped. EMPTY since the .options cshunt=1e-13 solver aid (TasAssembler) keeps the stripped resonant
-// half-bridge tanks (llc/src) non-singular without detuning — they now converge too. Kept as the mechanism
-// for honestly recording any future hold-out rather than silencing it. See check_real_deck.
+// stripped. EMPTY at the FIXTURE operating points: the real-deck-only cshunt aid (cfg::node_shunt_cap, TasAssembler)
+// keeps the stripped resonant half-bridge tanks (llc/src) non-singular without detuning, so every fixture-point
+// real deck converges. NB this sweep validates ONE point per topology (the low-voltage fixture). Real-deck
+// convergence is operating-point fragile and NOT universal: e.g. a high-power 400->48 V DAB real deck still
+// diverges and cshunt does not close it at any value — a documented limitation, not a regression. Kept as the
+// mechanism for honestly recording any future hold-out rather than silencing it. See check_real_deck.
 const std::set<std::string> kRealDeckKnownHard = {};
 
 void check_meets_requirements(const std::string& name) {

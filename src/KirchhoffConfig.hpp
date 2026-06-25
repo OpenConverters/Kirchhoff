@@ -61,6 +61,7 @@ constexpr double kNodeSnubberCap    = 2.2e-9;
 constexpr double kBiasLossFrac      = 1e-3;   // a DC-bias/bleed resistor dissipates <= this fraction of rated P
 constexpr double kLoopBreakerFrac   = 1e-4;   // numerical loop-breaker R as a fraction of the reflected load R
 constexpr double kVoltageDerate     = 0.8;    // operate devices at <= this fraction of rating (IPC-9592)
+constexpr double kNodeShuntCap      = 1e-12;  // ngspice cshunt: tiny node-to-ground cap, REAL decks only (see below)
 
 // ── Principled auxiliary-component rules (for the ideal-switch ngspice decks) ─────────────────────────
 
@@ -83,6 +84,13 @@ inline double diode_snubber_cap(const json& in)     { return get(in, "diodeSnubb
 inline double snubber_res(const json& in) {
     return get(in, "snubberRes", kSnubberRes);
 }
+
+// ngspice `cshunt` — a tiny capacitance the solver places from every node to ground, giving each node a
+// defined dV/dt so a stiff node (e.g. a resonant tank whose switch body diode was stripped on a real-device
+// deck) does not go singular ("timestep too small"). Emitted on REAL-semiconductor decks only: at 1e-12 F a
+// real deck's loose real-loss bands absorb it, but it would detune the tightly-pinned IDEAL decks past their
+// 5% tolerance. A solver setting like reltol/abstol, but circuit-affecting, so it lives here and is overridable.
+inline double node_shunt_cap(const json& in) { return get(in, "nodeShuntCap", kNodeShuntCap); }
 
 // DC-bias / bleed resistor (a node that needs a defined DC path — e.g. a DAB floating midpoint). Sized to
 // dissipate at most `delta` of rated power at the blocking voltage:  R = V_block^2 / (delta · P).
