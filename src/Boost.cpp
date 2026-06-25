@@ -42,13 +42,13 @@ BoostDesign design_boost(const json& tasInputs) {
     const double vinMin = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::MINIMUM);
     d.inputVoltageMin = vinMin;
     d.inputVoltageMax = vinMax;
-    const double rippleRatio = 0.4;
+    const double rippleRatio = cfg::ripple_ratio(d.config, 0.4);
     const double iout = d.outputPower / d.outputVoltage;
     const double maxCurrentRipple = rippleRatio * iout;
     d.inductance = req::provided_inductance(dr).value_or(
         vinMax * (d.outputVoltage - vinMax) / (maxCurrentRipple * d.switchingFrequency * d.outputVoltage));
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
-    d.outputCapacitance = iout * d.dutyCycle / (d.switchingFrequency * 0.01 * d.outputVoltage);
+    d.outputCapacitance = iout * d.dutyCycle / (d.switchingFrequency * cfg::output_ripple_fraction(d.config) * d.outputVoltage);
     return d;
 }
 
@@ -78,7 +78,7 @@ json build_boost_tas(const BoostDesign& d) {
     // VOLTAGES at Vin_max: switch and diode both block Vout.
     const double ratedVds = d.outputVoltage / cfg::v_derate(d.config);
     const double ratedVr  = d.outputVoltage / cfg::v_derate(d.config);
-    const double maxRdsOn = 0.01 * d.outputPower / (IswRms * IswRms);
+    const double maxRdsOn = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IswRms * IswRms);
     const double maxVf    = (ratedVr < 100.0) ? 0.6 : 1.2;
 
     // component PEAS docs: discriminator + detailed inputs.designRequirements

@@ -42,14 +42,14 @@ BuckDesign design_buck(const json& tasInputs) {
     // Inductance (MKF Buck::process_design_requirements):
     //   maximumCurrentRiple = currentRippleRatio * Iout
     //   L = Vout*(Vin_max - Vout) / (maximumCurrentRiple * fsw * Vin_max)
-    const double rippleRatio = 0.4;
+    const double rippleRatio = cfg::ripple_ratio(d.config, 0.4);
     const double iout = d.outputPower / d.outputVoltage;
     const double maxCurrentRipple = rippleRatio * iout;
     d.inductance = req::provided_inductance(dr).value_or(
         d.outputVoltage * (vinMax - d.outputVoltage) / (maxCurrentRipple * d.switchingFrequency * vinMax));
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
-    // Buck output ripple ΔV = ΔIL / (8*fsw*Cout); size Cout for ~1% ripple.
-    d.outputCapacitance = maxCurrentRipple / (8.0 * d.switchingFrequency * 0.01 * d.outputVoltage);
+    // Buck output ripple ΔV = ΔIL / (8*fsw*Cout); size Cout for the configured ripple fraction (~1% default).
+    d.outputCapacitance = maxCurrentRipple / (8.0 * d.switchingFrequency * cfg::output_ripple_fraction(d.config) * d.outputVoltage);
     return d;
 }
 
@@ -78,7 +78,7 @@ json build_buck_tas(const BuckDesign& d) {
     const double IdiodeAvg = iout * (1.0 - Dmax);
     const double IcoutRms = dIL / (2.0 * std::sqrt(3.0));               // triangular ripple into Cout
     const double ratedVds = d.inputVoltageMax / cfg::v_derate(d.config);          // switch + diode both block Vin
-    const double maxRdsOn = 0.01 * d.outputPower / (IswRms * IswRms);
+    const double maxRdsOn = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IswRms * IswRms);
     const double maxVf = (ratedVds < 100.0) ? 0.6 : 1.2;
 
     // Inductor voltage: +(Vin-Vout) ON / -Vout OFF (volt-second balanced).

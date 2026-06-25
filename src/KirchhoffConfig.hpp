@@ -124,5 +124,24 @@ inline double loop_breaker_res(const json& in, double Rload) {
 // Device voltage derating (required rating = peak stress / derate).
 inline double v_derate(const json& in) { return get(in, "vDerate", kVoltageDerate); }
 
+// ── Per-topology design knobs (externally configurable so HS can drive the design) ────────────────────
+// Each takes the topology's principled default and lets config override it. HS sets these in
+// tasInputs["config"] to steer Kirchhoff's sizing (e.g. to match its own realism-gate policy).
+
+// Inductor current-ripple ratio ΔI_L/I (sizes the magnetizing inductance). Default differs per topology
+// (buck/boost/forward 0.4, push/half-bridge 0.3), passed in as `dflt`; config "rippleRatio" overrides.
+inline double ripple_ratio(const json& in, double dflt) { return get(in, "rippleRatio", dflt); }
+
+// Output-voltage ripple as a fraction of Vout (sizes the output capacitor). config "outputRippleFraction".
+inline double output_ripple_fraction(const json& in, double dflt = 0.01) { return get(in, "outputRippleFraction", dflt); }
+
+// Switch Rds(on) loss budget as a fraction of rated power (the maxOnResistance requirement). config "rdsOnLossFraction".
+inline double rds_on_loss_fraction(const json& in, double dflt = 0.01) { return get(in, "rdsOnLossFraction", dflt); }
+
+// Ideal-deck transient analysis window/step (the real-deck path overrides these in regulate). config
+// "tranStopTime" / "tranMaxTimeStep".
+inline double tran_stop_time(const json& in, double dflt = 0.004)   { return get(in, "tranStopTime", dflt); }
+inline double tran_max_timestep(const json& in, double dflt = 5e-8) { return get(in, "tranMaxTimeStep", dflt); }
+
 } // namespace cfg
 } // namespace Kirchhoff
