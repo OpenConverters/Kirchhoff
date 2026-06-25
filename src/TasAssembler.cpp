@@ -206,7 +206,12 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
     bool deckHasRealComponent = false;   // any real part (DATASHEET semi OR MKF_MODEL magnetic) -> gets cshunt
 
     for (const auto& stage : stages) {
-        if (!stage.contains("circuit") || !stage.at("circuit").is_object()) continue;  // control stages
+        if (!stage.contains("circuit") || !stage.at("circuit").is_object()) continue;  // control stages (no brick)
+        // A physicalControl stage (role "control") DOES carry a circuit (its controller IC),
+        // but it is sourced for the BOM only — the gate is driven by the stimulus / control
+        // law, not by instantiating the controller in the power deck. Skip it here so a
+        // sourced control IC never double-drives the gate; the fill still walks its circuit.
+        if (stage.value("role", "") == "control") continue;
         const std::string sname = stage.at("name").get<std::string>();
         const json& brick = stage.at("circuit");
 

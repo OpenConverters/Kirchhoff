@@ -144,6 +144,7 @@ json build_fsbb_tas(const FsbbDesign& d) {
       tas["inputs"]["operatingPoints"] = json::array({op}); }
 
     tas["topology"]["stages"] = json::array({
+        req::control_stage("pwmController"),
         pstage("fsbbCell", "switchingCell", cell, bind("vin", "dcBus"), bind("vout", "pulsatingDc")),
         pstage("filter", "outputFilter", filt, bind("in", "pulsatingDc"), bind("in", "dcOutput"))});
     tas["topology"]["interStageConnections"] = json::array({

@@ -133,6 +133,7 @@ json build_isolated_buck_boost_tas(const IsolatedBuckBoostDesign& d) {
       tas["inputs"]["operatingPoints"] = json::array({op}); }
 
     tas["topology"]["stages"] = json::array({
+        req::control_stage("pwmController"),
         pstage("flybuckboostCell", "switchingCell", cell, bind("vin", "dcBus"), bind("vout", "dcOutput"))});
     tas["topology"]["interStageConnections"] = json::array({
         isc("Vin", "externalPort", "input", {sp("flybuckboostCell", "vin")}),

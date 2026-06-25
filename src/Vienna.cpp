@@ -1,6 +1,7 @@
 #include "Vienna.hpp"
 #include "DimensionJson.hpp"
 #include "KirchhoffConfig.hpp"
+#include "ComponentRequirements.hpp"
 #include <cmath>
 #include <vector>
 #include <string>
@@ -194,6 +195,7 @@ json build_vienna_tas(const ViennaDesign& d) {
     auto pstage = [&](const char* name, const char* role, json brick, json inb, json outb) {
         json s; s["name"]=name; s["role"]=role; s["circuit"]=brick; s["inputPort"]=inb; s["outputPort"]=outb; return s; };
     tas["topology"]["stages"] = json::array({
+        req::control_stage("pfcController"),
         pstage("viennaPower", "switchingCell", pcell, bind("a","acInput"), bind("busP","dcOutput")),
         pstage("viennaControl", "control", ccell, bind("a","sense"), bind("ga","drive"))});
     // a/b/c are the three input phases (also tapped by the control); gnd = source neutral = midpoint.

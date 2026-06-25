@@ -75,6 +75,40 @@ inline json diode(double ratedVr, double ratedIf, double maxVf,
     return r;
 }
 
+// --- controller / gate driver (CTAS family): the control IC that drives the stage ---
+// `category` is the CTAS function.category discriminator (pwmController / llcController /
+// pfcController / gateDriver / …) so the HS librarian sources the right CLASS of part for
+// the topology's control mode. The selector also matches the converter's intendedTopology,
+// Vin and fsw — those come from the TAS designRequirements, not repeated here.
+inline json controller(const std::string& category) {
+    json r;
+    r["function"]["category"] = category;
+    return r;
+}
+
+// A ready-to-append physicalControl STAGE carrying one controller seed. role "control"
+// => the assembler skips it in the power deck (the gate is driven by the stimulus /
+// control law), but the HS librarian walks its circuit and sources the real control IC.
+// Add ONE line — control_stage("<ctas-category>") — to a topology's stages array.
+inline json control_stage(const std::string& category) {
+    json comp;
+    comp["name"] = "U1";
+    comp["data"]["controller"] = json::object();
+    comp["data"]["inputs"]["designRequirements"] = controller(category);
+    json brick;
+    brick["name"] = "control-brick";
+    brick["ports"] = json::array();
+    brick["components"] = json::array({comp});
+    brick["connections"] = json::array();
+    json s;
+    s["name"] = "control";
+    s["role"] = "control";
+    s["controlImplementation"] = "physical";
+    s["circuit"] = brick;
+    s["ports"] = json::array();
+    return s;
+}
+
 // --- capacitor ---
 inline json capacitor(double capacitance, double ratedVoltage, double minRippleCurrentRms,
                       double maxEsr, const std::string& role) {

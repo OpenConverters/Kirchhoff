@@ -166,6 +166,7 @@ json build_clllc_tas(const ClllcDesign& d) {
       tas["inputs"]["operatingPoints"] = json::array({op}); }
 
     tas["topology"]["stages"] = json::array({
+        req::control_stage("llcController"),
         pstage("clllcPower", "switchingCell", pcell, bind("vin", "dcBus"), bind("vout", "dcOutput")),
         pstage("srControl", "control", ccell, bind("senseP", "sense"), bind("gA", "drive"))});
     tas["topology"]["interStageConnections"] = json::array({

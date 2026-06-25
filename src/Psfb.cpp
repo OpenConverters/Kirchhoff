@@ -212,6 +212,7 @@ json build_psfb_tas(const PsfbDesign& d) {
       tas["inputs"]["operatingPoints"] = json::array({op}); }
 
     tas["topology"]["stages"] = json::array({
+        req::control_stage("pwmController"),
         pstage("psfbCell", "switchingCell", cell, bind("vin", "dcBus"), bind("vout", "pulsatingDc")),
         pstage("filter", "outputFilter", filt, bind("in", "pulsatingDc"), bind("in", "dcOutput"))});
     tas["topology"]["interStageConnections"] = json::array({

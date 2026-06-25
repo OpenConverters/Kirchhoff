@@ -149,6 +149,7 @@ json build_src_tas(const SrcDesign& d) {
       tas["inputs"]["operatingPoints"] = json::array({op}); }
 
     tas["topology"]["stages"] = json::array({
+        req::control_stage("llcController"),
         pstage("srcCell", "switchingCell", cell, bind("vin", "dcBus"), bind("vout", "dcOutput"))});
     tas["topology"]["interStageConnections"] = json::array({
         isc("Vin", "externalPort", "input", {sp("srcCell", "vin")}),

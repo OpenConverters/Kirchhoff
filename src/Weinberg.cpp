@@ -178,6 +178,7 @@ json build_weinberg_tas(const WeinbergDesign& d) {
       tas["inputs"]["operatingPoints"] = json::array({op}); }
 
     tas["topology"]["stages"] = json::array({
+        req::control_stage("pwmController"),
         pstage("weinbergCell", "switchingCell", cell, bind("vin", "dcBus"), bind("vout", "dcOutput"))});
     tas["topology"]["interStageConnections"] = json::array({
         isc("Vin", "externalPort", "input", {sp("weinbergCell", "vin")}),

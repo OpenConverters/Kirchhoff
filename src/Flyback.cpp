@@ -324,6 +324,7 @@ json build_flyback_tas(const FlybackDesign& d) {
       tas["inputs"]["operatingPoints"] = json::array({op}); }
 
     tas["topology"]["stages"] = json::array({
+        req::control_stage("pwmController"),
         pstage("inverter", "inverter", inv, bind("dc+", "dcBus"), bind("sw", "hfAc")),
         istage("transformer", xfmr, bind("pri", "hfAc"), {bind("sec", "hfAc")}),
         pstage("rectifier", "outputRectifier", rect, bind("ac_in", "hfAc"), bind("dc_out", "pulsatingDc")),

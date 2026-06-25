@@ -141,7 +141,8 @@ json build_boost_tas(const BoostDesign& d) {
 
     tas["topology"]["stages"] = json::array({
         pstage("switchingCell", "switchingCell", cell, bind("vin", "dcBus"), bind("vout", "pulsatingDc")),
-        pstage("filter", "outputFilter", filt, bind("in", "pulsatingDc"), bind("in", "dcOutput"))});
+        pstage("filter", "outputFilter", filt, bind("in", "pulsatingDc"), bind("in", "dcOutput")),
+        req::control_stage("pwmController")});   // sourced control IC (BOM); skipped in the power deck
     tas["topology"]["interStageConnections"] = json::array({
         isc("Vin", "externalPort", "input", {sp("switchingCell", "vin")}),
         isc("GND", "externalPort", "input", {sp("switchingCell", "gnd"), sp("filter", "rtn")}),

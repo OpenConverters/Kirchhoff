@@ -136,6 +136,7 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
       tas["inputs"]["operatingPoints"] = json::array({op}); }
 
     tas["topology"]["stages"] = json::array({
+        req::control_stage("pwmController"),
         pstage("flybuckCell", "switchingCell", cell, bind("vin", "dcBus"), bind("vout", "dcOutput"))});
     tas["topology"]["interStageConnections"] = json::array({
         isc("Vin", "externalPort", "input", {sp("flybuckCell", "vin")}),

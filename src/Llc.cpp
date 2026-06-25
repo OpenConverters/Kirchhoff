@@ -164,6 +164,7 @@ json build_llc_tas(const LlcDesign& d) {
       tas["inputs"]["operatingPoints"] = json::array({op}); }
 
     tas["topology"]["stages"] = json::array({
+        req::control_stage("llcController"),
         pstage("llcCell", "switchingCell", cell, bind("vin", "dcBus"), bind("vout", "dcOutput"))});
     tas["topology"]["interStageConnections"] = json::array({
         isc("Vin", "externalPort", "input", {sp("llcCell", "vin")}),

@@ -1,6 +1,7 @@
 #include "Pfc.hpp"
 #include "DimensionJson.hpp"
 #include "KirchhoffConfig.hpp"
+#include "ComponentRequirements.hpp"
 #include <cmath>
 #include <vector>
 #include <stdexcept>
@@ -179,6 +180,7 @@ json build_pfc_tas(const PfcDesign& d) {
       tas["inputs"]["operatingPoints"] = json::array({op}); }
 
     tas["topology"]["stages"] = json::array({
+        req::control_stage("pfcController"),
         pstage("pfcPower", "switchingCell", pcell, bind("acLine", "acInput"), bind("vout", "dcOutput")),
         pstage("pfcControl", "control", ccell, bind("nL", "sense"), bind("g", "drive"))});
     tas["topology"]["interStageConnections"] = json::array({
