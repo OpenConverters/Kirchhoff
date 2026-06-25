@@ -21,7 +21,7 @@
 #include <cmath>
 #include <algorithm>
 #include "SasConverter.hpp"   // SAS::ideal_diode_drop — single source for the DIDEAL forward drop
-#include "Dimension.hpp"      // PEAS::resolve_dimensional_values — canonical {nominal,min,max} resolver
+#include "DimensionJson.hpp"      // PEAS::resolve_dimensional_values — canonical {nominal,min,max} resolver
 
 namespace Kirchhoff {
 namespace req {

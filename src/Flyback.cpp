@@ -1,5 +1,5 @@
 #include "Flyback.hpp"
-#include "Dimension.hpp"
+#include "DimensionJson.hpp"
 #include "RasConverter.hpp"
 #include "CasConverter.hpp"
 #include "SasConverter.hpp"

@@ -8,7 +8,7 @@
 #include "CiasConverter.hpp"
 #include "CiasCircuitConverter.hpp"
 #include "KirchhoffConfig.hpp"
-#include "Dimension.hpp"   // PEAS::resolve_dimensional_values — canonical {nominal,min,max} resolver
+#include "DimensionJson.hpp"   // PEAS::resolve_dimensional_values — canonical {nominal,min,max} resolver
 
 #include <sstream>
 #include <map>

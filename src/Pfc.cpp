@@ -1,5 +1,5 @@
 #include "Pfc.hpp"
-#include "Dimension.hpp"
+#include "DimensionJson.hpp"
 #include "KirchhoffConfig.hpp"
 #include <cmath>
 #include <vector>

@@ -1,5 +1,5 @@
 #include "IsolatedBuck.hpp"
-#include "Dimension.hpp"
+#include "DimensionJson.hpp"
 #include "ComponentRequirements.hpp"
 #include "KirchhoffConfig.hpp"
 #include <cmath>
