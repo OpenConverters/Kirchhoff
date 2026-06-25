@@ -21,6 +21,7 @@
 #include <cmath>
 #include <algorithm>
 #include "SasConverter.hpp"   // SAS::ideal_diode_drop — single source for the DIDEAL forward drop
+#include "Dimension.hpp"      // PEAS::resolve_dimensional_values — canonical {nominal,min,max} resolver
 
 namespace Kirchhoff {
 namespace req {
@@ -44,12 +45,8 @@ inline double dideal_diode_drop(double current) { return SAS::ideal_diode_drop(c
 inline std::optional<double> provided_inductance(const json& designRequirements) {
     if (designRequirements.is_object())
         for (const char* k : {"magnetizingInductance", "desiredInductance", "inductance"})
-            if (designRequirements.contains(k)) {
-                const json& v = designRequirements.at(k);
-                if (v.is_number()) return v.get<double>();
-                if (v.is_object() && v.contains("nominal") && v.at("nominal").is_number())
-                    return v.at("nominal").get<double>();
-            }
+            if (designRequirements.contains(k))
+                return PEAS::resolve_dimensional_values(designRequirements.at(k));   // canonical resolver, not raw nominal
     return std::nullopt;
 }
 
