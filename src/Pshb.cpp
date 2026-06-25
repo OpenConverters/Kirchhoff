@@ -153,6 +153,7 @@ json build_pshb_tas(const PshbDesign& d) {
       tas["inputs"]["operatingPoints"]=json::array({op}); }
     tas["topology"]["stages"]=json::array({
         req::control_stage("pwmController"),
+        req::control_stage("gateDriver", "gate-driver", "UDR"),
         pstage("pshbCell","switchingCell",cell,bind("vin","dcBus"),bind("vout","pulsatingDc")),
         pstage("filter","outputFilter",filt,bind("in","pulsatingDc"),bind("in","dcOutput"))});
     tas["topology"]["interStageConnections"]=json::array({

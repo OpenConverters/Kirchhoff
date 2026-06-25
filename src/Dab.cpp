@@ -205,6 +205,7 @@ json build_dab_tas(const DabDesign& d) {
 
     tas["topology"]["stages"] = json::array({
         req::control_stage("pwmController"),
+        req::control_stage("gateDriver", "gate-driver", "UDR"),
         pstage("dabCell", "switchingCell", cell, bind("vin", "dcBus"), bind("vout", "dcOutput"))});
     tas["topology"]["interStageConnections"] = json::array({
         isc("Vin", "externalPort", "input", {sp("dabCell", "vin")}),

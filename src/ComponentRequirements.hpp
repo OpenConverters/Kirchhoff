@@ -90,18 +90,20 @@ inline json controller(const std::string& category) {
 // => the assembler skips it in the power deck (the gate is driven by the stimulus /
 // control law), but the HS librarian walks its circuit and sources the real control IC.
 // Add ONE line — control_stage("<ctas-category>") — to a topology's stages array.
-inline json control_stage(const std::string& category) {
+inline json control_stage(const std::string& category,
+                          const std::string& stageName = "control",
+                          const std::string& compName = "U1") {
     json comp;
-    comp["name"] = "U1";
+    comp["name"] = compName;
     comp["data"]["controller"] = json::object();
     comp["data"]["inputs"]["designRequirements"] = controller(category);
     json brick;
-    brick["name"] = "control-brick";
+    brick["name"] = stageName + "-brick";
     brick["ports"] = json::array();
     brick["components"] = json::array({comp});
     brick["connections"] = json::array();
     json s;
-    s["name"] = "control";
+    s["name"] = stageName;
     s["role"] = "control";
     s["controlImplementation"] = "physical";
     s["circuit"] = brick;
@@ -117,6 +119,17 @@ inline json capacitor(double capacitance, double ratedVoltage, double minRippleC
     r["ratedVoltage"] = ratedVoltage;
     r["minimumRippleCurrent"] = minRippleCurrentRms;
     r["maximumEsr"] = maxEsr;
+    r["role"] = role;
+    return r;
+}
+
+// --- resistor (snubber damping R, current sense, bias/bleed, feedback divider) ---
+inline json resistor(double resistance, double powerRating, double tolerance,
+                     const std::string& role) {
+    json r;
+    r["resistance"]["nominal"] = resistance;
+    r["powerRating"] = powerRating;
+    r["tolerance"] = tolerance;
     r["role"] = role;
     return r;
 }
