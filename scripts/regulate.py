@@ -181,9 +181,13 @@ def _parse_deck(deck):
         m = re.match(r"^Bload\s+(\S+)\s+(\S+)\b.*?=\s*([-\d.eE+]+)\s*/", ln)   # constant-power
         if m:
             loads.append((resolve(m.group(1), sub), resolve(m.group(2), sub), "P", float(m.group(3))))
-        m = re.match(r"^C\w+\s+\S+\s+\S+\s+([-\d.eE+]+)", ln)
-        if m:
-            cmax = max(cmax, float(m.group(1)))
+        m = re.match(r"^(C\w+)\s+\S+\s+\S+\s+([-\d.eE+]+)", ln)
+        # cmax is the OUTPUT bulk cap (sets the settle RC). Exclude model-internal
+        # caps by name: the saturating-inductor flux integrator (Cflux_*) is a 1 F
+        # numerical integrator on an internal flux node, NOT a power capacitor —
+        # counting it makes rc (and the .tran settle) explode by orders of magnitude.
+        if m and not re.search(r"flux", m.group(1), re.I):
+            cmax = max(cmax, float(m.group(2)))
     return vin_name, vin, loads, cmax
 
 
