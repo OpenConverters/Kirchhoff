@@ -29,8 +29,8 @@ def _check(design_fn, topo, vin, vout, p, fsw):
     tas = design_fn(_spec(vin, vout, p, fsw))
     R.bind_datasheet_semis(tas)
     r = R.simulate_regulated(tas, vout, topo, fidelity={"origin": "DATASHEET"})
-    assert r["converged"], f"{topo} regulation did not converge"
-    assert abs(r["vout"] - vout) <= 0.03 * vout, f"{topo} Vout {r['vout']:.3f} off target {vout}"
+    assert r["regulated"], f"{topo} did not regulate to target (vout={r.get('vout')}, target={vout})"
+    assert abs(r["vout"] - vout) <= 0.02 * vout, f"{topo} Vout {r['vout']:.3f} off target {vout}"
     assert 0.5 < r["efficiency"] <= 1.0, f"{topo} efficiency {r['efficiency']:.3f} implausible"
     return r
 
