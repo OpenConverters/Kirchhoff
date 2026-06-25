@@ -37,6 +37,10 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "build"))
 import PyKirchhoff  # noqa: E402
+try:
+    import PyOpenMagnetics as _PYOM  # authoritative magnetics models (calculate_saturation_current); optional
+except Exception:  # pragma: no cover - PyOM not installed -> verdict falls back to the subcircuit's Isat
+    _PYOM = None
 
 # control variable per topology: (stimulus waveform field, search bracket). The Vout-vs-control direction is
 # auto-detected (sampling the bracket ends), so we never hardcode a possibly-wrong monotonicity.
@@ -297,15 +301,72 @@ def _winding_excitations(data):
     return []
 
 
+_ISAT_MISMATCH_FRAC = 0.5   # |exported - model| / model above this = a real exporter/model disagreement
+                            # (the ABT #33 bug was ~N-fold; temperature/rounding scatter is well under 50%)
+
+
+def _magnetic_temperature(data):
+    """Ambient temperature from the magnetic's operating point (deg C); 25 if unspecified."""
+    for op in data.get("inputs", {}).get("operatingPoints", []) or []:
+        t = (op.get("conditions") or {}).get("ambientTemperature")
+        if t is not None:
+            return float(t)
+    return 25.0
+
+
+def _datasheet_isat(magnetic):
+    """Datasheet-rated peak saturation current from manufacturerInfo.datasheetInfo (the electrical entries'
+    saturationCurrentPeak), or None. Used only when the core/coil architecture is absent, so the physical
+    model can't run."""
+    found = []
+
+    def _walk(o):
+        if isinstance(o, dict):
+            v = o.get("saturationCurrentPeak")
+            if isinstance(v, (int, float)) and v > 0:
+                found.append(float(v))
+            for x in o.values():
+                _walk(x)
+        elif isinstance(o, list):
+            for x in o:
+                _walk(x)
+
+    _walk((magnetic.get("manufacturerInfo") or {}).get("datasheetInfo"))
+    return min(found) if found else None
+
+
+def _authoritative_isat(magnetic, temperature):
+    """The authoritative saturation current and its source. Precedence (the house rule): use the PHYSICAL
+    MODEL (Magnetic::calculate_saturation_current — the SAME one Heaviside's realism gate and the fixed MKF
+    exporter use) when the core/coil ARCHITECTURE is present; only when the architecture is missing fall back
+    to the DATASHEET rating (datasheetInfo.electrical[].saturationCurrentPeak). NEVER the subcircuit's emitted
+    value (that's what we cross-check against) and NEVER a re-derived formula (the ABT #33 lesson). Returns
+    (Isat, source) with source in {'model','datasheet'}, or (None, None)."""
+    if not isinstance(magnetic, dict):
+        return None, None
+    if magnetic.get("core") and magnetic.get("coil") and _PYOM is not None:
+        try:
+            return abs(float(_PYOM.calculate_saturation_current(magnetic, temperature))), "model"
+        except Exception:
+            pass
+    ds = _datasheet_isat(magnetic)
+    return (ds, "datasheet") if ds is not None else (None, None)
+
+
 def saturation_findings(tas):
-    """Magnetics whose DC operating current exceeds the MKF core's Isat. RESTRICTED to single-winding
-    inductors: there the winding current IS the current through the saturable Lmag, so the comparison is
-    exact. A multi-winding magnetic is SKIPPED — its winding (load) currents are not the magnetizing current
-    (in a true transformer they largely cancel in the core, so a winding-current-vs-Isat test would
-    false-positive), and detecting transformer saturation needs the magnetizing current (a follow-up). The
-    DC/offset current — not the peak — is what 'saturated at operating current' means and what collapses Lmag
-    for the whole cycle (a peak-only excursion usually still simulates). Each finding:
-    {component, operating_current, peak_current, isat, ratio}. A linear Rdc+Lmag core (no _Isat) never trips."""
+    """Per single-winding MKF_MODEL inductor, judge saturation from the AUTHORITATIVE calculate_saturation_
+    current (NOT the subcircuit's emitted Isat) and CROSS-CHECK the two. Two finding kinds, both meaning 'no
+    valid regulated operating point':
+      kind='saturated'              : DC operating current exceeds the authoritative Isat — the core really is
+                                      too small (Lmag collapses all cycle). A genuine magnetic-design failure.
+      kind='exporter_isat_mismatch' : the subcircuit's emitted Isat disagrees with calculate_saturation_current
+                                      beyond tolerance — the deck will collapse SPURIOUSLY but the core is fine.
+                                      An MKF exporter bug, NOT a magnetic-design failure. (This is the check
+                                      that would have caught ABT #33 automatically instead of blaming the core.)
+    The authoritative Isat is the PHYSICAL MODEL when the core/coil architecture is present, else the DATASHEET
+    rating (datasheetInfo.saturationCurrentPeak); the subcircuit's emitted Isat is NEVER the authority, only the
+    cross-check target. No finding when neither model nor datasheet can supply Isat. Single-winding only: there
+    the winding current IS the magnetizing current; a transformer's load currents cancel in the core (skipped)."""
     out = []
     for comp in _walk_components(tas.get("topology", {})):
         data = comp.get("data", {})
@@ -318,22 +379,27 @@ def saturation_findings(tas):
         excs = _winding_excitations(data)
         if len(excs) != 1:                               # single-winding inductors only (see docstring)
             continue
-        isats = [v for v in (_ng_value(x) for x in
-                 re.findall(r"_Isat\s*=\s*([0-9.eE+\-]+\s*[a-zA-Z]*)", text)) if v and v > 0]
-        if not isats:
-            continue
-        isat = min(isats)                                # the core's saturation current
-        proc = excs[0]
-        iop = proc.get("offset")                         # DC operating current (saturates Lmag all cycle)
+        iop = excs[0].get("offset")                      # DC operating current (saturates Lmag all cycle)
         if iop is None:
             continue
         iop = abs(float(iop))
-        if iop <= isat:                                  # operating current within Isat -> not saturated
+        sub_isats = [v for v in (_ng_value(x) for x in
+                     re.findall(r"_Isat\s*=\s*([0-9.eE+\-]+\s*[a-zA-Z]*)", text)) if v and v > 0]
+        isat_subckt = min(sub_isats) if sub_isats else None     # the exporter's emitted value -> cross-check ONLY
+        isat, isat_source = _authoritative_isat(mag, _magnetic_temperature(data))
+        if isat is None:                                 # no architecture AND no datasheet -> can't judge, no claim
             continue
-        pk = proc.get("peak")
-        out.append({"component": comp.get("name", "?"), "operating_current": iop,
-                    "peak_current": abs(float(pk)) if pk is not None else None,
-                    "isat": isat, "ratio": iop / isat})
+        name = comp.get("name", "?")
+        pk = excs[0].get("peak")
+        peak = abs(float(pk)) if pk is not None else None
+        if iop > isat:                                   # genuine saturation, by the authoritative Isat
+            out.append({"kind": "saturated", "component": name, "operating_current": iop, "peak_current": peak,
+                        "isat": isat, "isat_source": isat_source, "ratio": iop / isat})
+        elif (isat_subckt is not None
+              and abs(isat_subckt - isat) > _ISAT_MISMATCH_FRAC * isat):
+            out.append({"kind": "exporter_isat_mismatch", "component": name, "operating_current": iop,
+                        "isat_authoritative": isat, "isat_authoritative_source": isat_source,
+                        "isat_subcircuit": isat_subckt, "ratio": isat_subckt / isat})
     return out
 
 
@@ -356,20 +422,31 @@ def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_
     if ctrl is None:
         raise ValueError(f"no control-variable mapping for topology '{topology}'")
     field, bracket = _CONTROL[ctrl]
-    # A core that saturates at the operating current has no valid regulated point: the inductance collapses
-    # and every deck in the bracket aborts. Surface that as an explicit verdict instead of grinding the bisect
-    # through decks that all diverge, and instead of returning an opaque converged=False (HS ABT #33).
-    sat = saturation_findings(tas)
-    if sat:
-        w = max(sat, key=lambda s: s["ratio"])
+    # A magnetic that can't give a valid regulated point (the deck collapses across the whole bracket): either
+    # a genuinely saturated core, OR a sound core whose exported Isat disagrees with calculate_saturation_
+    # current (an exporter bug that collapses the deck spuriously). Surface the right verdict instead of an
+    # opaque converged=False, and don't grind the bisect through decks that all abort (HS ABT #33).
+    issues = saturation_findings(tas)
+    if issues:
+        saturated = [s for s in issues if s["kind"] == "saturated"]
+        if saturated:
+            w = max(saturated, key=lambda s: s["ratio"])
+            reason = (f"magnetic saturated at operating current: {w['component']} operating "
+                      f"{w['operating_current']:.3g} A > Isat {w['isat']:.3g} A ({w['ratio']:.1f}x, Isat from "
+                      f"{w['isat_source']}) — Lmag collapses, so no control setting yields a valid operating "
+                      f"point. Magnetic-design failure (core too small / ungapped for the current).")
+        else:
+            m = issues[0]   # exporter_isat_mismatch
+            reason = (f"exported saturation current disagrees with calculate_saturation_current: "
+                      f"{m['component']} subcircuit Isat {m['isat_subcircuit']:.3g} A vs model "
+                      f"{m['isat_authoritative']:.3g} A ({m['ratio']:.2f}x) — the MKF saturable-L collapses "
+                      f"SPURIOUSLY, but the core is NOT saturated (operating {m['operating_current']:.3g} A < "
+                      f"{m['isat_authoritative']:.3g} A). MKF exporter bug, not a magnetic-design failure — fix "
+                      f"the exporter's Isat.")
         return {
-            "converged": False, "regulated": False, "steady_state": False, "saturated": sat,
-            "topology": topology, "control": ctrl, "target_vout": target_vout,
-            "reason": (f"magnetic saturated at operating current: {w['component']} operating "
-                       f"{w['operating_current']:.3g} A > Isat {w['isat']:.3g} A ({w['ratio']:.1f}x) — the MKF "
-                       f"core's magnetizing inductance collapses at the operating current, so no control "
-                       f"setting yields a valid operating point. Magnetic-design failure (core too small / "
-                       f"ungapped for the current), not a solver issue."),
+            "converged": False, "regulated": False, "steady_state": False,
+            "magnetic_issues": issues, "saturated": saturated,
+            "topology": topology, "control": ctrl, "target_vout": target_vout, "reason": reason,
         }
     fsw = _design_fsw(tas)
     # Frequency control: stay in the ABOVE-resonance region where Vout is MONOTONIC in frequency (below

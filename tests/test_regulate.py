@@ -118,26 +118,41 @@ _BOOST_SPEC = {"designRequirements": {"efficiency": 0.9,
                "operatingPoints": [{"inputVoltage": 12, "outputs": [{"power": 24}]}]}
 
 
-def test_magnetic_saturation_verdict():
-    # An MKF_MODEL core whose Isat (0.41 A) is far below the boost's peak inductor current (~2.5 A) saturates;
-    # Kirchhoff must report an explicit 'magnetic saturated' verdict rather than grind the bisect through
-    # diverging decks and return an opaque converged=False (HS ABT #33). Short-circuits, so no ngspice run.
-    sat_sub = (".subckt MKF_SAT P1+ P1-\n"
-               "Rdc_1 P1+ n1 0.028\n"
-               "Vmag_sense_1 n1 Lmag_flux_1 0\n"
-               "BLmag_1 Lmag_flux_1 P1- V='Lmag_1_L0/(1+pow(abs(I(Vmag_sense_1))/Lmag_1_Isat,2))*ddt(I(Vmag_sense_1))'\n"
-               ".param Lmag_1_L0=160.3u\n.param Lmag_1_Isat=0.411617\n.ends")
-    tas = _stamp_subckt(PyKirchhoff.design_boost_tas(_BOOST_SPEC), sat_sub, "MKF_SAT")
+def _mag_tas(sub_text, *, offset, peak=None, datasheet_isat=None, core_coil=None):
+    """Minimal single-winding-inductor TAS: one magnetic carrying the stamped subckt and (optionally) a
+    datasheet Isat and/or a sourced core+coil, at a chosen DC operating (offset) current."""
+    mag = dict(core_coil) if core_coil else {}
+    mag["modelOutputs"] = {"spiceSubcircuit": {"text": sub_text}}
+    if datasheet_isat is not None:
+        mag["manufacturerInfo"] = {"datasheetInfo": {"electrical": [{"saturationCurrentPeak": datasheet_isat}]}}
+    proc = {"offset": offset, "peak": offset * 1.1 if peak is None else peak}
+    return {"topology": {"stages": [{"circuit": {"components": [
+        {"name": "L1", "data": {"magnetic": mag,
+            "inputs": {"operatingPoints": [{"conditions": {"ambientTemperature": 25.0},
+                "excitationsPerWinding": [{"current": {"processed": proc}}]}]}}}]}}]}}
+
+
+def test_saturation_via_datasheet_when_no_architecture():
+    # No sourced core/coil -> the authoritative Isat is the DATASHEET rating (saturationCurrentPeak), NOT the
+    # subcircuit's emitted value. operating 2.34 A > datasheet 0.41 A -> saturated (source='datasheet').
+    sub = ".subckt M P1 P2\n.param Lmag_1_Isat=99\n.ends"   # subcircuit value deliberately bogus -> ignored
+    tas = _mag_tas(sub, offset=2.34, datasheet_isat=0.41)
     f = R.saturation_findings(tas)
-    assert f and f[0]["isat"] == 0.411617 and f[0]["operating_current"] > f[0]["isat"] and f[0]["ratio"] > 1.0, f
+    assert len(f) == 1 and f[0]["kind"] == "saturated" and f[0]["isat_source"] == "datasheet" \
+        and abs(f[0]["isat"] - 0.41) < 1e-9 and f[0]["ratio"] > 1.0, f
     r = R.simulate_regulated(tas, 24.0, "boost", fidelity={"origin": "MKF_MODEL"})
-    assert r["converged"] is False and r["regulated"] is False
-    assert r.get("saturated"), "result must carry the saturation findings"
-    assert "saturated" in r.get("reason", "").lower()
+    assert r["converged"] is False and r.get("saturated") and "saturated" in r["reason"].lower()
+
+
+def test_subcircuit_isat_is_never_the_authority():
+    # A subcircuit with an _Isat but NO architecture AND NO datasheet -> the verdict cannot use the subcircuit
+    # as a source of truth, so it makes NO claim (the ABT #33 lesson: never trust the exporter's emitted value).
+    sub = ".subckt M P1 P2\n.param Lmag_1_Isat=0.1\n.ends"
+    assert R.saturation_findings(_mag_tas(sub, offset=2.0)) == [], "subcircuit Isat must not be authoritative"
 
 
 def test_no_false_saturation_on_linear_core():
-    # A linear Rdc+Lmag MKF subcircuit (no _Isat param) must NOT trip the saturation verdict.
+    # A linear Rdc+Lmag subcircuit (no _Isat) on a requirements-only magnetic -> no Isat source -> no finding.
     lin_sub = ".subckt MKF_LIN P1+ P1-\nRdc1 P1+ na 0.028\nLmag1 na P1- 160.3u\n.ends"
     tas = _stamp_subckt(PyKirchhoff.design_boost_tas(_BOOST_SPEC), lin_sub, "MKF_LIN")
     assert R.saturation_findings(tas) == [], "linear core wrongly flagged as saturated"
@@ -145,27 +160,45 @@ def test_no_false_saturation_on_linear_core():
 
 def test_saturation_skips_multiwinding():
     # A transformer's winding (load) currents largely cancel in the core, so a winding-current-vs-Isat test
-    # would false-positive. Saturation detection is restricted to single-winding inductors (where the winding
-    # current IS the magnetizing current). A 2-winding magnetic — even with winding currents far above Isat —
-    # must NOT be flagged; transformer saturation (magnetizing-current based) is a documented follow-up.
+    # would false-positive. Restricted to single-winding inductors; a 2-winding magnetic is skipped even with a
+    # datasheet Isat and winding currents far above it.
     sub = ".subckt T P1 P2 S1 S2\n.param Lmag_1_Isat=0.1\n.ends"
 
     def _exc(offset):
         return {"current": {"processed": {"offset": offset, "peak": offset * 1.1}}}
 
     tas = {"topology": {"stages": [{"circuit": {"components": [
-        {"name": "T1", "data": {"magnetic": {"modelOutputs": {"spiceSubcircuit": {"text": sub}}},
-                                "inputs": {"operatingPoints": [
-                                    {"excitationsPerWinding": [_exc(2.0), _exc(5.0)]}]}}}]}}]}}
-    assert R.saturation_findings(tas) == [], "multi-winding magnetic must not be (naively) flagged"
+        {"name": "T1", "data": {"magnetic": {
+            "manufacturerInfo": {"datasheetInfo": {"electrical": [{"saturationCurrentPeak": 0.1}]}},
+            "modelOutputs": {"spiceSubcircuit": {"text": sub}}},
+            "inputs": {"operatingPoints": [{"excitationsPerWinding": [_exc(2.0), _exc(5.0)]}]}}}]}}]}}
+    assert R.saturation_findings(tas) == [], "multi-winding magnetic must not be flagged"
 
 
 def test_saturation_uses_operating_not_peak_current():
-    # The verdict is on the DC operating (offset) current, not the peak — so a deck whose peak nudges over Isat
-    # but whose DC operating current is within Isat is NOT flagged (it usually still simulates).
-    sub = ".subckt L P1 P2\n.param Lmag_1_Isat=1.0\n.ends"
-    one = {"topology": {"stages": [{"circuit": {"components": [
-        {"name": "L1", "data": {"magnetic": {"modelOutputs": {"spiceSubcircuit": {"text": sub}}},
-                                "inputs": {"operatingPoints": [{"excitationsPerWinding": [
-                                    {"current": {"processed": {"offset": 0.9, "peak": 1.4}}}]}]}}}]}}]}}
-    assert R.saturation_findings(one) == [], "peak-only excursion must not trip the operating-current verdict"
+    # On the DC operating (offset) current, not the peak: peak 1.4 A > datasheet 1.0 A but operating 0.9 A <
+    # 1.0 A -> NOT flagged.
+    tas = _mag_tas(".subckt L P1 P2\n.ends", offset=0.9, peak=1.4, datasheet_isat=1.0)
+    assert R.saturation_findings(tas) == [], "peak-only excursion must not trip the operating-current verdict"
+
+
+def test_exporter_isat_mismatch_via_model():
+    # The cross-check: with a REAL core, judge from calculate_saturation_current and CATCH a subcircuit whose
+    # emitted Isat disagrees (the ABT #33 self-check). Needs PyOM.
+    import pytest
+    pyom = pytest.importorskip("PyOpenMagnetics")
+    conv = {"inputVoltage": {"nominal": 12.0}, "efficiency": 0.9, "diodeVoltageDrop": 0.7, "currentRippleRatio": 0.4,
+            "operatingPoints": [{"inputVoltage": 12.0, "switchingFrequency": 100000.0, "ambientTemperature": 25.0,
+                                 "currentRippleRatio": 0.4, "outputVoltages": [24.0], "outputCurrents": [1.0]}]}
+    mag = pyom.design_magnetics_from_converter("boost", conv, 1, "available cores", False, None)["data"][0]["mas"]["magnetic"]
+    isat = pyom.calculate_saturation_current(mag, 25.0)
+    iop, bogus = 0.4 * isat, 0.1 * isat
+    # subcircuit Isat ~10x low, operating below the REAL Isat -> exporter mismatch (the core is fine)
+    f = R.saturation_findings(_mag_tas(f".subckt M P1 P2\n.param Lmag_1_Isat={bogus}\n.ends", offset=iop, core_coil=mag))
+    assert len(f) == 1 and f[0]["kind"] == "exporter_isat_mismatch" and f[0]["isat_authoritative_source"] == "model", f
+    assert abs(f[0]["isat_authoritative"] - isat) < 1e-3 and abs(f[0]["isat_subcircuit"] - bogus) < 1e-6
+    # subcircuit agrees with the model -> no finding
+    assert R.saturation_findings(_mag_tas(f".subckt M P1 P2\n.param Lmag_1_Isat={isat}\n.ends", offset=iop, core_coil=mag)) == []
+    # genuine saturation (operating above the real Isat) -> kind saturated, source model
+    g = R.saturation_findings(_mag_tas(f".subckt M P1 P2\n.param Lmag_1_Isat={isat}\n.ends", offset=isat * 1.5, core_coil=mag))
+    assert len(g) == 1 and g[0]["kind"] == "saturated" and g[0]["isat_source"] == "model", g
