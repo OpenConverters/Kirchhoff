@@ -50,3 +50,22 @@ def test_regulate_phase_psfb():
 
 def test_regulate_frequency_llc():
     _check(PyKirchhoff.design_llc_tas, "llc", 400, 48, 960, 100000)
+
+
+def test_regulate_dual_output_isolated_buck():
+    # Dual-output flybuck: the secondary load lives INSIDE the stage subckt, so the efficiency must reach it
+    # via the hierarchical node. A correct full-converter efficiency (both rails) is plausible (>60%); the
+    # old primary-only measurement read a broken ~25%.
+    ib = {"designRequirements": {"efficiency": 1.0,
+                                 "inputVoltage": {"minimum": 45, "nominal": 48, "maximum": 51},
+                                 "switchingFrequency": {"nominal": 200000},
+                                 "outputs": [{"name": "out", "voltage": {"nominal": 5}},
+                                             {"name": "vsec", "voltage": {"nominal": 12}}]},
+          "operatingPoints": [{"inputVoltage": 48, "outputs": [{"power": 2.5}, {"power": 5}]}]}
+    tas = PyKirchhoff.design_isolated_buck_tas(ib)
+    R.bind_datasheet_semis(tas)
+    r = R.simulate_regulated(tas, 5.0, "isolated_buck", fidelity={"origin": "DATASHEET"})
+    assert r["regulated"], f"isolated_buck primary did not regulate (vout={r.get('vout')})"
+    assert r["steady_state"], "isolated_buck regulated point is not steady-state"
+    assert 0.6 < r["efficiency"] <= 1.0, f"isolated_buck full-converter efficiency {r['efficiency']:.3f} " \
+                                         "implausible (secondary rail not counted?)"

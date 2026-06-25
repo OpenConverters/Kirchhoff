@@ -17,12 +17,11 @@ be an off-target point. Known limits (both report regulated=False / a caveat, ne
   * Some real resonant/high-power decks can't reach target because the needed operating region DIVERGES in
     ngspice (e.g. an SRC whose >gain frequencies all diverge, or a 400->48 V DAB) -> regulated=False at the
     closest reachable point.
-  * Dual-output topologies (isolated_buck / isolated_buck_boost): efficiency now sums BOTH rails — the
-    secondary is an isolated rail returning to its OWN ground, so its power uses a differential measurement
-    (v(out)-v(ref)). NB the flybuck secondary currently under-delivers in the generated deck even at IDEAL
-    fidelity (~1 V vs a 12 V spec) — a separate isolated_buck deck/design bug (latent because the C++ suite
-    gates only the primary rail), NOT a measurement error; the reported (low) efficiency faithfully reflects
-    that broken operating point. Primary-Vout regulation is valid.
+  * Dual-output topologies (isolated_buck / isolated_buck_boost): efficiency sums BOTH rails. The secondary
+    load lives INSIDE the stage subckt, so its node is reached via the hierarchical name (xinst.node) and its
+    ground (a subckt port) maps to the X-line's top node. With that the flybuck reports a sane full-converter
+    efficiency and the secondary delivers its rail — an earlier primary-only reading that looked like a broken
+    ~25% / ~1 V secondary was purely a top-level-node measurement artifact, not a converter bug.
 
     from regulate import simulate_regulated
     spec = {...}                                            # same spec you pass to design_<topo>_tas
@@ -118,31 +117,63 @@ _GND = {"0", "gnd", "GND", "Gnd"}
 
 def _parse_deck(deck):
     """Pull what the operating-point measurement needs: the input DC source, EVERY output load, and the
-    largest bulk capacitance (for an RC-based settle). A load is identified structurally as an element from an
-    output node (name contains 'out') to ground — this catches the primary `Rload Vout 0` AND a multi-output
-    topology's internal secondary load (e.g. `RRsec vout_sec gnd`), while excluding an output-cap ESR (which
-    goes to the cap node, not ground). Returns (vin_name, vin, loads, cmax) where loads is a list of
-    (node, kind, value): kind R=ohms, I=amps (constant-current sink), P=watts (constant-power sink)."""
+    largest bulk capacitance. A load is identified structurally as an element from an output node (name
+    contains 'out') to ground — this catches the primary `Rload Vout 0` AND a multi-output topology's internal
+    secondary load (e.g. `RRsec vout_sec gnd`), while excluding an output-cap ESR (which goes to the cap node).
+
+    The assembler renders every stage as its OWN `.subckt` instantiated by an `X` line, so a load that lives
+    INSIDE a subckt (the flybuck secondary) has nodes that aren't visible at the top level. We resolve each
+    node to a top-level-measurable reference: a subckt PORT maps to the X-line's top node (e.g. gnd->0), an
+    internal node becomes the hierarchical `xinst.node`. Returns (vin_name, vin, loads, cmax) with loads a
+    list of (out_ref, gnd_ref, kind, value) where the refs are ready to drop into v(...)."""
+    lines = deck.splitlines()
+    # subckt name -> port list; and which subckt (if any) each line sits in
+    subckt_ports, line_sub, cur = {}, [], None
+    for ln in lines:
+        ms = re.match(r"^\.subckt\s+(\S+)\s+(.*)", ln, re.I)
+        me = re.match(r"^\.ends", ln, re.I)
+        line_sub.append(cur)
+        if ms:
+            cur = ms.group(1); subckt_ports[cur] = ms.group(2).split()
+        elif me:
+            cur = None
+    # subckt name -> (hierarchical prefix, {port: top-level node}) from its X instantiation
+    inst = {}
+    for ln in lines:
+        mx = re.match(r"^([Xx]\S+)\s+(.*)", ln)
+        if mx:
+            toks = mx.group(2).split()
+            sub, tops = toks[-1], toks[:-1]
+            if sub in subckt_ports and len(tops) == len(subckt_ports[sub]):
+                inst[sub] = (mx.group(1).lower(), dict(zip(subckt_ports[sub], tops)))
+
+    def resolve(node, sub):
+        if sub is None:
+            return node                                   # already a top-level node
+        prefix, pmap = inst.get(sub, ("", {}))
+        return pmap.get(node, f"{prefix}.{node}")         # port -> top node, else hierarchical internal node
+
     vin = vin_name = None
     loads = []
     cmax = 0.0
-    for ln in deck.splitlines():
+    for i, ln in enumerate(lines):
+        sub = line_sub[i]
         m = re.match(r"^(V\w+)\s+\S+\s+\S+\s+DC\s+([-\d.eE+]+)", ln)
-        if m and vin is None:            # the input DC source (gate drives are PULSE, not DC)
+        if m and sub is None and vin is None:             # the top-level input DC source
             vin_name, vin = m.group(1), float(m.group(2))
         m = re.match(r"^R\w+\s+(\S+)\s+(\S+)\s+([-\d.eE+]+)", ln)
         if m:
             n1, n2, rv = m.group(1), m.group(2), float(m.group(3))
             if re.search("out", n1, re.I) and n2 in _GND:
-                loads.append((n1, n2, "R", rv))
+                loads.append((resolve(n1, sub), resolve(n2, sub), "R", rv))
             elif re.search("out", n2, re.I) and n1 in _GND:
-                loads.append((n2, n1, "R", rv))
+                loads.append((resolve(n2, sub), resolve(n1, sub), "R", rv))
         m = re.match(r"^Iload\s+(\S+)\s+(\S+)\s+DC\s+([-\d.eE+]+)", ln)
         if m:
-            loads.append((m.group(1), m.group(2), "I", abs(float(m.group(3)))))
-        m = re.match(r"^Bload\s+(\S+)\s+(\S+)\b.*?=\s*([-\d.eE+]+)\s*/", ln)   # constant-power: I = P/max(V,Vk)
+            loads.append((resolve(m.group(1), sub), resolve(m.group(2), sub), "I", abs(float(m.group(3)))))
+        m = re.match(r"^Bload\s+(\S+)\s+(\S+)\b.*?=\s*([-\d.eE+]+)\s*/", ln)   # constant-power
         if m:
-            loads.append((m.group(1), m.group(2), "P", float(m.group(3))))
+            loads.append((resolve(m.group(1), sub), resolve(m.group(2), sub), "P", float(m.group(3))))
         m = re.match(r"^C\w+\s+\S+\s+\S+\s+([-\d.eE+]+)", ln)
         if m:
             cmax = max(cmax, float(m.group(1)))
