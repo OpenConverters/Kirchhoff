@@ -98,3 +98,46 @@ def test_regulate_dual_output_isolated_buck():
     assert r["steady_state"], "isolated_buck regulated point is not steady-state"
     assert 0.6 < r["efficiency"] <= 1.0, f"isolated_buck full-converter efficiency {r['efficiency']:.3f} " \
                                          "implausible (secondary rail not counted?)"
+
+
+def _stamp_subckt(tas, text, ref):
+    for st in tas["topology"]["stages"]:
+        c = st.get("circuit")
+        if isinstance(c, dict):
+            for comp in c["components"]:
+                d = comp.get("data", {})
+                if "magnetic" in d:
+                    d["magnetic"]["modelOutputs"] = {"spiceSubcircuit": {"reference": ref, "text": text}}
+    return tas
+
+
+_BOOST_SPEC = {"designRequirements": {"efficiency": 0.9,
+                                      "inputVoltage": {"minimum": 11.4, "nominal": 12, "maximum": 12.6},
+                                      "switchingFrequency": {"nominal": 100000},
+                                      "outputs": [{"name": "out", "voltage": {"nominal": 24}}]},
+               "operatingPoints": [{"inputVoltage": 12, "outputs": [{"power": 24}]}]}
+
+
+def test_magnetic_saturation_verdict():
+    # An MKF_MODEL core whose Isat (0.41 A) is far below the boost's peak inductor current (~2.5 A) saturates;
+    # Kirchhoff must report an explicit 'magnetic saturated' verdict rather than grind the bisect through
+    # diverging decks and return an opaque converged=False (HS ABT #33). Short-circuits, so no ngspice run.
+    sat_sub = (".subckt MKF_SAT P1+ P1-\n"
+               "Rdc_1 P1+ n1 0.028\n"
+               "Vmag_sense_1 n1 Lmag_flux_1 0\n"
+               "BLmag_1 Lmag_flux_1 P1- V='Lmag_1_L0/(1+pow(abs(I(Vmag_sense_1))/Lmag_1_Isat,2))*ddt(I(Vmag_sense_1))'\n"
+               ".param Lmag_1_L0=160.3u\n.param Lmag_1_Isat=0.411617\n.ends")
+    tas = _stamp_subckt(PyKirchhoff.design_boost_tas(_BOOST_SPEC), sat_sub, "MKF_SAT")
+    f = R.saturation_findings(tas)
+    assert f and f[0]["isat"] == 0.411617 and f[0]["peak_current"] > f[0]["isat"] and f[0]["ratio"] > 1.0, f
+    r = R.simulate_regulated(tas, 24.0, "boost", fidelity={"origin": "MKF_MODEL"})
+    assert r["converged"] is False and r["regulated"] is False
+    assert r.get("saturated"), "result must carry the saturation findings"
+    assert "saturated" in r.get("reason", "").lower()
+
+
+def test_no_false_saturation_on_linear_core():
+    # A linear Rdc+Lmag MKF subcircuit (no _Isat param) must NOT trip the saturation verdict.
+    lin_sub = ".subckt MKF_LIN P1+ P1-\nRdc1 P1+ na 0.028\nLmag1 na P1- 160.3u\n.ends"
+    tas = _stamp_subckt(PyKirchhoff.design_boost_tas(_BOOST_SPEC), lin_sub, "MKF_LIN")
+    assert R.saturation_findings(tas) == [], "linear core wrongly flagged as saturated"

@@ -255,6 +255,79 @@ def _simulate(tas, fidelity, tag):
     return vout, pin, pout, ripple
 
 
+# ── magnetic-saturation verdict ───────────────────────────────────────────────────────────────────────
+# An MKF_MODEL core models saturation as Lmag = L0/(1+(I/Isat)^2). When the design's peak winding current
+# exceeds the core's Isat, the magnetizing inductance collapses at the operating point and the transient
+# aborts ('timestep too small'). That is a magnetic-DESIGN failure (core too small / ungapped for the
+# current), NOT a solver problem — so report it as an explicit verdict (Isat from the MKF subcircuit, peak
+# current from the design's winding excitation) instead of opaque divergence. (HS ABT #33.)
+_NG_SUFFIX = {"meg": 1e6, "t": 1e12, "g": 1e9, "k": 1e3,
+              "m": 1e-3, "u": 1e-6, "n": 1e-9, "p": 1e-12, "f": 1e-15}
+
+
+def _ng_value(s):
+    """Parse an ngspice numeric literal (optional engineering suffix, e.g. '160.3u', '411.617m', '0.41')."""
+    m = re.match(r"\s*([-+]?[0-9.]+(?:[eE][-+]?[0-9]+)?)\s*(meg|[tgkmunpf])?", s, re.I)
+    if not m:
+        return None
+    v = float(m.group(1))
+    if m.group(2):
+        v *= _NG_SUFFIX[m.group(2).lower()]
+    return v
+
+
+def _walk_components(node):
+    """Yield every component dict anywhere under a TAS topology (stages -> circuits -> components, nested)."""
+    if isinstance(node, dict):
+        for c in node.get("components", []) or []:
+            yield c
+        for v in node.values():
+            yield from _walk_components(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _walk_components(v)
+
+
+def _design_peak_current(data):
+    """The largest peak winding current the design imposes on a magnetic (from its operating-point excitation)."""
+    peaks = []
+    for op in data.get("inputs", {}).get("operatingPoints", []) or []:
+        for exc in op.get("excitationsPerWinding", []) or []:
+            pk = exc.get("current", {}).get("processed", {}).get("peak")
+            if pk is not None:
+                peaks.append(abs(float(pk)))
+    return max(peaks) if peaks else None
+
+
+def saturation_findings(tas):
+    """Magnetics whose design peak winding current exceeds the MKF core's Isat. Each finding:
+    {component, peak_current, isat, ratio}. Empty when no MKF_MODEL magnetic is over its saturation current
+    (a linear Rdc+Lmag subcircuit, with no _Isat param, never triggers)."""
+    out, seen = [], set()
+    for comp in _walk_components(tas.get("topology", {})):
+        data = comp.get("data", {})
+        mag = data.get("magnetic")
+        if not isinstance(mag, dict):
+            continue
+        text = (mag.get("modelOutputs") or {}).get("spiceSubcircuit", {}).get("text")
+        if not text:
+            continue
+        isats = [_ng_value(v) for v in re.findall(r"_Isat\s*=\s*([0-9.eE+\-]+\s*[a-zA-Z]*)", text)]
+        isats = [v for v in isats if v and v > 0]
+        ipk = _design_peak_current(data)
+        if not isats or ipk is None:
+            continue
+        isat = min(isats)                      # worst-case (lowest-rated) winding
+        if ipk <= isat:
+            continue
+        name = comp.get("name", "?")
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append({"component": name, "peak_current": ipk, "isat": isat, "ratio": ipk / isat})
+    return out
+
+
 def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_iter=24,
                        steady_ripple_frac=0.10):
     """Bisect the topology's control variable until the simulated Vout hits target_vout, then report the
@@ -274,6 +347,21 @@ def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_
     if ctrl is None:
         raise ValueError(f"no control-variable mapping for topology '{topology}'")
     field, bracket = _CONTROL[ctrl]
+    # A core that saturates at the operating current has no valid regulated point: the inductance collapses
+    # and every deck in the bracket aborts. Surface that as an explicit verdict instead of grinding the bisect
+    # through decks that all diverge, and instead of returning an opaque converged=False (HS ABT #33).
+    sat = saturation_findings(tas)
+    if sat:
+        w = max(sat, key=lambda s: s["ratio"])
+        return {
+            "converged": False, "regulated": False, "steady_state": False, "saturated": sat,
+            "topology": topology, "control": ctrl, "target_vout": target_vout,
+            "reason": (f"magnetic saturated at operating current: {w['component']} peak "
+                       f"{w['peak_current']:.3g} A > Isat {w['isat']:.3g} A ({w['ratio']:.1f}x) — the MKF "
+                       f"core's magnetizing inductance collapses at the operating current, so no control "
+                       f"setting yields a valid operating point. Magnetic-design failure (core too small / "
+                       f"ungapped for the current), not a solver issue."),
+        }
     fsw = _design_fsw(tas)
     # Frequency control: stay in the ABOVE-resonance region where Vout is MONOTONIC in frequency (below
     # resonance the gain turns over). The design fsw is at/above resonance, so bracket from just under it up.
