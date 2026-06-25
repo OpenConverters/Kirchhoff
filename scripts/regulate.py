@@ -288,22 +288,25 @@ def _walk_components(node):
             yield from _walk_components(v)
 
 
-def _design_peak_current(data):
-    """The largest peak winding current the design imposes on a magnetic (from its operating-point excitation)."""
-    peaks = []
+def _winding_excitations(data):
+    """Per-winding processed current excitation the design imposes on a magnetic, ordered by winding."""
     for op in data.get("inputs", {}).get("operatingPoints", []) or []:
-        for exc in op.get("excitationsPerWinding", []) or []:
-            pk = exc.get("current", {}).get("processed", {}).get("peak")
-            if pk is not None:
-                peaks.append(abs(float(pk)))
-    return max(peaks) if peaks else None
+        excs = op.get("excitationsPerWinding", []) or []
+        if excs:
+            return [e.get("current", {}).get("processed", {}) for e in excs]
+    return []
 
 
 def saturation_findings(tas):
-    """Magnetics whose design peak winding current exceeds the MKF core's Isat. Each finding:
-    {component, peak_current, isat, ratio}. Empty when no MKF_MODEL magnetic is over its saturation current
-    (a linear Rdc+Lmag subcircuit, with no _Isat param, never triggers)."""
-    out, seen = [], set()
+    """Magnetics whose DC operating current exceeds the MKF core's Isat. RESTRICTED to single-winding
+    inductors: there the winding current IS the current through the saturable Lmag, so the comparison is
+    exact. A multi-winding magnetic is SKIPPED — its winding (load) currents are not the magnetizing current
+    (in a true transformer they largely cancel in the core, so a winding-current-vs-Isat test would
+    false-positive), and detecting transformer saturation needs the magnetizing current (a follow-up). The
+    DC/offset current — not the peak — is what 'saturated at operating current' means and what collapses Lmag
+    for the whole cycle (a peak-only excursion usually still simulates). Each finding:
+    {component, operating_current, peak_current, isat, ratio}. A linear Rdc+Lmag core (no _Isat) never trips."""
+    out = []
     for comp in _walk_components(tas.get("topology", {})):
         data = comp.get("data", {})
         mag = data.get("magnetic")
@@ -312,19 +315,25 @@ def saturation_findings(tas):
         text = (mag.get("modelOutputs") or {}).get("spiceSubcircuit", {}).get("text")
         if not text:
             continue
-        isats = [_ng_value(v) for v in re.findall(r"_Isat\s*=\s*([0-9.eE+\-]+\s*[a-zA-Z]*)", text)]
-        isats = [v for v in isats if v and v > 0]
-        ipk = _design_peak_current(data)
-        if not isats or ipk is None:
+        excs = _winding_excitations(data)
+        if len(excs) != 1:                               # single-winding inductors only (see docstring)
             continue
-        isat = min(isats)                      # worst-case (lowest-rated) winding
-        if ipk <= isat:
+        isats = [v for v in (_ng_value(x) for x in
+                 re.findall(r"_Isat\s*=\s*([0-9.eE+\-]+\s*[a-zA-Z]*)", text)) if v and v > 0]
+        if not isats:
             continue
-        name = comp.get("name", "?")
-        if name in seen:
+        isat = min(isats)                                # the core's saturation current
+        proc = excs[0]
+        iop = proc.get("offset")                         # DC operating current (saturates Lmag all cycle)
+        if iop is None:
             continue
-        seen.add(name)
-        out.append({"component": name, "peak_current": ipk, "isat": isat, "ratio": ipk / isat})
+        iop = abs(float(iop))
+        if iop <= isat:                                  # operating current within Isat -> not saturated
+            continue
+        pk = proc.get("peak")
+        out.append({"component": comp.get("name", "?"), "operating_current": iop,
+                    "peak_current": abs(float(pk)) if pk is not None else None,
+                    "isat": isat, "ratio": iop / isat})
     return out
 
 
@@ -356,8 +365,8 @@ def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_
         return {
             "converged": False, "regulated": False, "steady_state": False, "saturated": sat,
             "topology": topology, "control": ctrl, "target_vout": target_vout,
-            "reason": (f"magnetic saturated at operating current: {w['component']} peak "
-                       f"{w['peak_current']:.3g} A > Isat {w['isat']:.3g} A ({w['ratio']:.1f}x) — the MKF "
+            "reason": (f"magnetic saturated at operating current: {w['component']} operating "
+                       f"{w['operating_current']:.3g} A > Isat {w['isat']:.3g} A ({w['ratio']:.1f}x) — the MKF "
                        f"core's magnetizing inductance collapses at the operating current, so no control "
                        f"setting yields a valid operating point. Magnetic-design failure (core too small / "
                        f"ungapped for the current), not a solver issue."),

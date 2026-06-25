@@ -129,7 +129,7 @@ def test_magnetic_saturation_verdict():
                ".param Lmag_1_L0=160.3u\n.param Lmag_1_Isat=0.411617\n.ends")
     tas = _stamp_subckt(PyKirchhoff.design_boost_tas(_BOOST_SPEC), sat_sub, "MKF_SAT")
     f = R.saturation_findings(tas)
-    assert f and f[0]["isat"] == 0.411617 and f[0]["peak_current"] > f[0]["isat"] and f[0]["ratio"] > 1.0, f
+    assert f and f[0]["isat"] == 0.411617 and f[0]["operating_current"] > f[0]["isat"] and f[0]["ratio"] > 1.0, f
     r = R.simulate_regulated(tas, 24.0, "boost", fidelity={"origin": "MKF_MODEL"})
     assert r["converged"] is False and r["regulated"] is False
     assert r.get("saturated"), "result must carry the saturation findings"
@@ -141,3 +141,31 @@ def test_no_false_saturation_on_linear_core():
     lin_sub = ".subckt MKF_LIN P1+ P1-\nRdc1 P1+ na 0.028\nLmag1 na P1- 160.3u\n.ends"
     tas = _stamp_subckt(PyKirchhoff.design_boost_tas(_BOOST_SPEC), lin_sub, "MKF_LIN")
     assert R.saturation_findings(tas) == [], "linear core wrongly flagged as saturated"
+
+
+def test_saturation_skips_multiwinding():
+    # A transformer's winding (load) currents largely cancel in the core, so a winding-current-vs-Isat test
+    # would false-positive. Saturation detection is restricted to single-winding inductors (where the winding
+    # current IS the magnetizing current). A 2-winding magnetic — even with winding currents far above Isat —
+    # must NOT be flagged; transformer saturation (magnetizing-current based) is a documented follow-up.
+    sub = ".subckt T P1 P2 S1 S2\n.param Lmag_1_Isat=0.1\n.ends"
+
+    def _exc(offset):
+        return {"current": {"processed": {"offset": offset, "peak": offset * 1.1}}}
+
+    tas = {"topology": {"stages": [{"circuit": {"components": [
+        {"name": "T1", "data": {"magnetic": {"modelOutputs": {"spiceSubcircuit": {"text": sub}}},
+                                "inputs": {"operatingPoints": [
+                                    {"excitationsPerWinding": [_exc(2.0), _exc(5.0)]}]}}}]}}]}}
+    assert R.saturation_findings(tas) == [], "multi-winding magnetic must not be (naively) flagged"
+
+
+def test_saturation_uses_operating_not_peak_current():
+    # The verdict is on the DC operating (offset) current, not the peak — so a deck whose peak nudges over Isat
+    # but whose DC operating current is within Isat is NOT flagged (it usually still simulates).
+    sub = ".subckt L P1 P2\n.param Lmag_1_Isat=1.0\n.ends"
+    one = {"topology": {"stages": [{"circuit": {"components": [
+        {"name": "L1", "data": {"magnetic": {"modelOutputs": {"spiceSubcircuit": {"text": sub}}},
+                                "inputs": {"operatingPoints": [{"excitationsPerWinding": [
+                                    {"current": {"processed": {"offset": 0.9, "peak": 1.4}}}]}]}}}]}}]}}
+    assert R.saturation_findings(one) == [], "peak-only excursion must not trip the operating-current verdict"
