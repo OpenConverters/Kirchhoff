@@ -19,7 +19,10 @@ namespace Kirchhoff {
 using nlohmann::json;
 
 namespace {
-double nominal(const json& j, const std::string& what) { return PEAS::resolve_dimensional_values(j); }
+double nominal(const json& j, const std::string& what) {
+    try { return PEAS::resolve_dimensional_values(j); }
+    catch (const std::exception&) { throw std::runtime_error("flyback design: no nominal/min/max for " + what); }
+}
 } // namespace
 
 FlybackDesign design_flyback(const json& tasInputs) {
