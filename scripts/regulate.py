@@ -268,7 +268,13 @@ def _simulate(tas, fidelity, tag):
             f"meas tran vmin min v(Vout) from={w0:.12g} to={to:.12g}",
             f"meas tran iin avg i({vin_name}) from={frm:.12g} to={to:.12g}"]
     if pexpr is not None:
-        deck += f"\nBpout n_pout_meas 0 V = {pexpr}\n"
+        # Power probe: a behavioural CURRENT source into a 1 ohm resistor to ground, so
+        # v(n_pout_meas) == the (instantaneous) power expression AND the node has a real DC
+        # path to ground. A B-VOLTAGE source on a node that nothing else touches leaves its
+        # branch current (bpout#branch) an unconstrained solver unknown — with a stiff v*v
+        # expression the gear integrator aborts ("timestep too small; trouble with bpout#branch"),
+        # masking otherwise-valid regulated points across topologies.
+        deck += f"\nBpout 0 n_pout_meas I = {pexpr}\nRpout_meas n_pout_meas 0 1\n"
         ctrl.append(f"meas tran pout avg v(n_pout_meas) from={frm:.12g} to={to:.12g}")
     deck += "\n.control\n" + "\n".join(ctrl) + "\nprint vout iin\n.endc\n.end\n"
     with tempfile.NamedTemporaryFile("w", suffix=f"_{tag}.cir", delete=False) as f:
