@@ -96,13 +96,31 @@ def _design_fsw(tas):
     return 100000.0
 
 
-def _set_control(tas, field, value):
+def _set_control(tas, field, value, topology=None):
     """Set the control field across the pwm stimuli.
 
     duty / frequency: apply to every pwm leg uniformly.
     phaseDeg: a phase-shifted bridge has a FIXED reference leg (phases 0 / 180) and a LAGGING leg whose two
         switches sit at φ and φ+180. We hold the reference leg and move only the lagging leg, so `value` is the
-        bridge phase-shift φ — not a blanket overwrite (which would collapse the bridge)."""
+        bridge phase-shift φ — not a blanket overwrite (which would collapse the bridge).
+    fsbb: the 4-switch buck-boost is a COORDINATED modulation, not uniform duty — the charge switches (Q1/Q4,
+        designed at phase 0) run at duty D=value while the discharge switches (Q2/Q3) run the complementary
+        (1−D)−2·dt at phase (D+dt)·360 (dt = the per-leg dead-time, stashed from the design by
+        _stash_fsbb_modulation). A blanket duty overwrite drives all four legs the same → the bridge collapses
+        and Vout never reaches target. Charge legs keep phase 0 throughout, so phase==0 vs ≠0 stays a stable
+        partition across the bisection."""
+    if topology == "fsbb" and field == "dutyCycle":
+        dt = float(tas.get("_fsbbDeadFraction", 0.0))
+        for st in tas.get("simulation", {}).get("stimulus", []):
+            wf = st.get("waveform", {})
+            if wf.get("type") != "pwm":
+                continue
+            if float(wf.get("phaseDeg", 0.0)) == 0.0:                  # charge leg (Q1/Q4)
+                wf["dutyCycle"] = value
+            else:                                                       # discharge leg (Q2/Q3)
+                wf["dutyCycle"] = max(0.0, (1.0 - value) - 2.0 * dt)
+                wf["phaseDeg"] = (value + dt) * 360.0
+        return
     for st in tas.get("simulation", {}).get("stimulus", []):
         wf = st.get("waveform", {})
         if wf.get("type") != "pwm":
@@ -114,6 +132,21 @@ def _set_control(tas, field, value):
             wf["phaseDeg"] = value if p < 180.0 else (value + 180.0)   # lagging leg: φ and φ+180
         else:
             wf[field] = value
+
+
+def _stash_fsbb_modulation(tas):
+    """Recover the fsbb per-leg dead-time fraction from the PRISTINE designed stimulus (before the bisection
+    overwrites any duty) and stash it on the tas, so _set_control can re-derive the coordinated 4-switch
+    modulation from the single control D. The discharge leg was designed at phase (D0+dt)·360 and the charge
+    leg at D0, so dt = (discharge_phase/360) − D0."""
+    stims = [st for st in tas.get("simulation", {}).get("stimulus", [])
+             if st.get("waveform", {}).get("type") == "pwm"]
+    charge = [st for st in stims if float(st["waveform"].get("phaseDeg", 0.0)) == 0.0]
+    disch = [st for st in stims if float(st["waveform"].get("phaseDeg", 0.0)) != 0.0]
+    if charge and disch:
+        d0 = float(charge[0]["waveform"].get("dutyCycle", 0.5))
+        ph0 = float(disch[0]["waveform"].get("phaseDeg", 0.0)) / 360.0
+        tas["_fsbbDeadFraction"] = max(0.0, ph0 - d0)
 
 
 _GND = {"0", "gnd", "GND", "Gnd"}
@@ -426,6 +459,8 @@ def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_
     if ctrl is None:
         raise ValueError(f"no control-variable mapping for topology '{topology}'")
     field, bracket = _CONTROL[ctrl]
+    if topology == "fsbb":
+        _stash_fsbb_modulation(tas)   # capture dead-time before the bisection overwrites duties
     # A magnetic that can't give a valid regulated point (the deck collapses across the whole bracket): either
     # a genuinely saturated core, OR a sound core whose exported Isat disagrees with calculate_saturation_
     # current (an exporter bug that collapses the deck spuriously). Surface the right verdict instead of an
@@ -462,7 +497,7 @@ def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_
         resonant deck diverge sporadically) to find a nearby valid point. Returns (x_used, vout, pin, pout)."""
         for dj in (0.0, 0.03, -0.03, 0.06, -0.06, 0.10):
             xj = x * (1.0 + dj)
-            _set_control(tas, field, xj)
+            _set_control(tas, field, xj, topology)
             r = _simulate(tas, fidelity, f"{topology}_{field}")
             if r is not None:
                 return (xj,) + r

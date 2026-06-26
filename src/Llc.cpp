@@ -83,23 +83,78 @@ json build_llc_tas(const LlcDesign& d) {
     auto sp = [](const char* st, const char* po) { json e; e["stage"] = st; e["port"] = po; return e; };
     auto isc = [](const char* name, const char* kind, const char* dir, std::vector<json> eps) {
         json c; c["name"] = name; c["kind"] = kind; if (dir[0]) c["direction"] = dir; c["endpoints"] = eps; return c; };
+    // Bare seeds (no designRequirements). Body diodes (anti-parallel to a FET) use these as-is — the HS
+    // fill DEFERS a requirement-less diode as a FET body diode. REAL switches/rectifiers take a `req`.
     auto mosfet = []() { json j; j["semiconductor"]["mosfet"] = json::object(); return j; };
     auto diode  = []() { json j; j["semiconductor"]["diode"] = json::object(); return j; };
+    auto mosfetReq = [](const json& r) { json j; j["semiconductor"]["mosfet"] = json::object();
+        j["inputs"]["designRequirements"] = r; return j; };
+    auto diodeReq  = [](const json& r) { json j; j["semiconductor"]["diode"] = json::object();
+        j["inputs"]["designRequirements"] = r; return j; };
 
     const double n = d.turnsRatio;
+
+    // --- resonant-tank stresses (FHA, evaluated at the nominal point, driven AT fr) ---
+    // The LLC tank is SINUSOIDAL at fr, so every magnetic excitation here is a sine (label "sinusoidal",
+    // vRms=vPk/√2, vPkPk=2·vPk, offset 0). Half-bridge: the tank sees a ±Vin/2 square; its fundamental
+    // peak is (4/π)(Vin/2)=2Vin/π, rms √2·Vin/π. The primary/tank current carries the real load power
+    // (Pin/Vtank1_rms) plus the reactive magnetizing current (triangular, peak (Vin/2)·(T/4)/Lm).
+    const double fr   = d.resonantFrequency, Tfr = 1.0 / fr;
+    const double Pin  = d.outputPower / d.efficiency;
+    const double Iout = d.outputPower / d.outputVoltage;
+    const double Vtank1Rms = std::sqrt(2.0) * d.inputVoltage / M_PI;     // fund. rms of ±Vin/2 square
+    const double IloadRms  = Pin / Vtank1Rms;                            // real (in-phase) tank current
+    const double ImagPk    = (d.inputVoltage / 2.0) * (Tfr / 4.0) / d.magnetizingInductance;  // Lm triangle pk
+    const double ImagRms   = ImagPk / std::sqrt(3.0);
+    const double ItankRms  = std::sqrt(IloadRms * IloadRms + ImagRms * ImagRms);  // primary winding current
+    const double ItankPk   = std::sqrt(2.0) * ItankRms;                 // sinusoidal peak
+    const double ItankPkPk = 2.0 * ItankPk;
+    // Each CT secondary half conducts a rectified half-sine of the reflected tank current; combined the
+    // two halves deliver Iout. Half-sine present 50%: peak = (π/2)·Iout, rms = (π/4)·Iout per half.
+    const double IsecPk   = (M_PI / 2.0) * Iout, IsecRms = (M_PI / 4.0) * Iout, IsecPkPk = IsecPk;
+    // Winding voltages (sinusoidal at fr): the resonant inductor sees i·Zr (Zr=2π·fr·Lr); the transformer
+    // primary clamps to the reflected output ±n·Vo; each CT secondary half clamps to ±Vo.
+    const double Zr     = 2.0 * M_PI * fr * d.resonantInductance;
+    const double vLrPk  = ItankPk * Zr, vLrRms = vLrPk / std::sqrt(2.0), vLrPkPk = 2.0 * vLrPk;
+    const double vPriPk = n * d.outputVoltage, vPriRms = vPriPk / std::sqrt(2.0), vPriPkPk = 2.0 * vPriPk;
+    const double vSecPk = d.outputVoltage,     vSecRms = vSecPk / std::sqrt(2.0), vSecPkPk = 2.0 * vSecPk;
+
+    // --- semiconductor requirements (sourceable) ---
+    // Primary half-bridge MOSFETs Q1/Q2 each block the full bus Vin when off and carry the resonant
+    // tank current (peak ItankPk, rms ItankRms — the same primary current that drives the magnetic).
+    const double ratedVdsQ = d.inputVoltageMax / cfg::v_derate(d.config);
+    const double maxRdsOnQ  = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (ItankRms * ItankRms);
+    const json reqQ = req::mosfet("mainSwitch", ratedVdsQ, ItankPk, maxRdsOnQ, 125.0);
+    // Center-tapped rectifier diodes D1/D2: each non-conducting half is reverse-biased to ~2·Vout (its own
+    // Vout plus the conducting half's Vout), and conducts a rectified half-sine of the reflected tank
+    // current (peak IsecPk, avg current Iout). NOT a body diode — an independent output rectifier.
+    const double ratedVrD = 2.0 * d.outputVoltage / cfg::v_derate(d.config);
+    const double maxVfD    = (ratedVrD < 100.0) ? 0.6 : 1.2;
+    const json reqD = req::diode(ratedVrD, IsecPk, maxVfD, 0.05 * Tfr);
 
     json cr; cr["capacitor"] = json::object();
     cr["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.resonantCapacitance;
     cr["inputs"]["designRequirements"]["ratedVoltage"] = d.inputVoltage * 2;
 
+    // Resonant inductor Lr: its OWN single-winding magnetic (carries the full sinusoidal tank current).
     json lr; lr["magnetic"] = json::object();
-    lr["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"] = d.resonantInductance;
-    lr["inputs"]["designRequirements"]["turnsRatios"] = json::array();
+    lr["inputs"] = req::magnetic_inputs(d.resonantInductance, 0.2, /*single winding*/ {}, {"primary"},
+        std::nullopt, 25.0, {
+            req::winding_excitation("sinusoidal", fr, ItankPk, ItankRms, 0.0, ItankPkPk, std::nullopt,
+                                    vLrPk, vLrRms, 0.0, vLrPkPk)});
 
     // Transformer: primary Lpri = Lm, two CT secondary halves (turnsRatios=[n,n]), K=0.999 (MKF).
+    // 3 physical windings = turnsRatios.size()+1: primary (tank current) + two CT secondary halves.
+    std::vector<std::string> isoSides{"primary", "secondary", "secondary"};
     json t1; t1["magnetic"] = json::object();
-    t1["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"] = d.magnetizingInductance;
-    { json rn; rn["nominal"] = n; t1["inputs"]["designRequirements"]["turnsRatios"] = json::array({rn, rn}); }
+    t1["inputs"] = req::magnetic_inputs(d.magnetizingInductance, 0.1, {n, n}, isoSides,
+        std::nullopt, 25.0, {
+            req::winding_excitation("sinusoidal", fr, ItankPk, ItankRms, 0.0, ItankPkPk, std::nullopt,
+                                    vPriPk, vPriRms, 0.0, vPriPkPk),
+            req::winding_excitation("sinusoidal", fr, IsecPk, IsecRms, 0.0, IsecPkPk, std::nullopt,
+                                    vSecPk, vSecRms, 0.0, vSecPkPk),
+            req::winding_excitation("sinusoidal", fr, IsecPk, IsecRms, 0.0, IsecPkPk, std::nullopt,
+                                    vSecPk, vSecRms, 0.0, vSecPkPk)});
     t1["inputs"]["designRequirements"]["coupling"] = cfg::get(d.config, "transformerCoupling", 0.999);
 
     // Bus split caps (establish the Vbus/2 midpoint the tank returns to).
@@ -122,10 +177,11 @@ json build_llc_tas(const LlcDesign& d) {
     json cell; cell["name"] = "llc-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("g1"), port("g2")});
     cell["components"] = json::array({
-        comp("Q1", mosfet()), comp("Q2", mosfet()), comp("Dq1", diode()), comp("Dq2", diode()),
+        comp("Q1", mosfetReq(reqQ)), comp("Q2", mosfetReq(reqQ)),
+        comp("Dq1", diode()), comp("Dq2", diode()),   // Dq1/Dq2 = Q1/Q2 body diodes -> bare seed (deferred)
         comp("Chi", busCap()), comp("Clo", busCap()),
         comp("Cr", cr), comp("Lr", lr), comp("T1", t1),
-        comp("D1", diode()), comp("D2", diode()), comp("Cout", cout),
+        comp("D1", diodeReq(reqD)), comp("D2", diodeReq(reqD)), comp("Cout", cout),
         comp("Rsn1", snubR()), comp("Csn1", snubC()), comp("Rsn2", snubR()), comp("Csn2", snubC())});
     cell["connections"] = json::array({
         // Half-bridge leg + bus split. Q1 (vbus->sw), Q2 (sw->gnd) complementary; Dq1/Dq2 are the ZVS

@@ -77,15 +77,71 @@ json build_acf_tas(const AcfDesign& d) {
     auto diode  = []() { json j; j["semiconductor"]["diode"] = json::object(); return j; };
 
     const double n = d.turnsRatio, Lm = d.magnetizingInductance, fsw = d.switchingFrequency;
+    const double T = 1.0 / fsw, Dn = d.dutyCycle, Vin = d.inputVoltage, Vout = d.outputVoltage;
+    const double iout = d.outputPower / Vout;
 
-    // 2-winding transformer (primary + 1 secondary, NO demag winding — active clamp resets it).
+    // --- per-winding electrical stresses (active-clamp forward; clamp resets the core, no demag winding) ---
+    // Magnetizing current ramp during ON, peak = Vin*D*T/Lm; the active clamp carries it during reset.
+    const double ImagPk  = Vin * Dn * T / Lm;
+    const double ImagRms = ImagPk * std::sqrt(Dn / 3.0);
+    const double dILout  = (Vin / n - d.diodeDrop - Vout) * (Dn * T) / d.outputInductance;
+    const double IpkLout = iout + dILout / 2.0;
+    const double IrmsLout = std::sqrt(iout * iout + dILout * dILout / 12.0);
+    // Secondary carries the inductor current during ON (conducts D).
+    const double IcSec   = iout, IpkSec = IpkLout;
+    const double IrmsSec = std::sqrt(Dn) * std::sqrt(iout * iout + dILout * dILout / 12.0);
+    // Primary = reflected secondary current (Iout/n) + magnetizing ramp, during ON.
+    const double IcPri   = iout / n;
+    const double IpkPri  = IpkSec / n + ImagPk;
+    const double IrmsPri = std::sqrt(Dn) * IcPri + ImagRms;
+    // Winding voltages: primary +Vin during ON; during reset the active clamp holds the core at the
+    // volt-second-balanced reset level Vreset = Vin*D/(1-D). Peak = max(Vin, Vreset), swing = Vin+Vreset.
+    const double Vreset  = Vin * Dn / (1.0 - Dn);
+    const double vPriPk = std::max(Vin, Vreset), vPriPkPk = Vin + Vreset;
+    const double vPriRms = std::sqrt(Dn * Vin * Vin + (1.0 - Dn) * Vreset * Vreset);
+    const double vSecPk = Vin / n, vSecPkPk = Vin / n;
+    const double vSecRms = std::sqrt(Dn) * (Vin / n);
+    const double vLonF = Vin / n - d.diodeDrop - Vout, vLoff = Vout;
+    const double vLoutPk = std::max(std::abs(vLonF), vLoff), vLoutPkPk = std::abs(vLonF) + vLoff;
+    const double vLoutRms = std::sqrt(Dn * vLonF * vLonF + (1.0 - Dn) * vLoff * vLoff);
+
+    // --- semiconductor stresses (active-clamp forward) ---
+    // Both the main switch Q1 and the clamp switch Sc sit across (Vin + Vclamp): when off, the node
+    // they share swings to the clamp level Vin+Vreset. Evaluated at the max-input corner:
+    //   VdsStress = Vin_max + Vin_max*D/(1-D)   (Vreset at the worst-case rail).
+    const double VresetMax = d.inputVoltageMax * Dn / (1.0 - Dn);
+    const double VdsStress = d.inputVoltageMax + VresetMax;
+    const double ratedVds  = VdsStress / cfg::v_derate(d.config);
+    const double maxRdsOnMain  = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IrmsPri * IrmsPri);
+    // Clamp switch carries the magnetizing reset current (peak ImagPk, rms ImagRms); size its RdsOn to
+    // its own conduction loss budget. It is a REAL FET (req::mosfet), not a body diode.
+    const double maxRdsOnClamp = (ImagRms > 0.0)
+        ? cfg::rds_on_loss_fraction(d.config) * d.outputPower / (ImagRms * ImagRms)
+        : maxRdsOnMain;
+    // Output forward/freewheel rectifiers reverse-block the secondary peak Vin_max/n, carry ~Iout.
+    const double ratedVrSec = (d.inputVoltageMax / n) / cfg::v_derate(d.config);
+    const double maxVfSec    = (ratedVrSec < 100.0) ? 0.6 : 1.2;
+    const double maxTrr      = 0.05 * T;
+    json mainSw = mosfet();
+    mainSw["inputs"]["designRequirements"] = req::mosfet("mainSwitch", ratedVds, IpkPri, maxRdsOnMain, 125.0);
+    json clampSw = mosfet();
+    clampSw["inputs"]["designRequirements"] = req::mosfet("mainSwitch", ratedVds, ImagPk, maxRdsOnClamp, 125.0);
+    auto rectDiode = [&]() { json j = diode();
+        j["inputs"]["designRequirements"] = req::diode(ratedVrSec, iout / 0.7, maxVfSec, maxTrr); return j; };
+
+    // 2-winding transformer (primary + 1 secondary, NO demag winding — active clamp resets it) -> 2 excitations.
+    std::vector<std::string> xfmrIso{"primary", "secondary"};
     json xfmr; xfmr["magnetic"] = json::object();
-    xfmr["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"] = Lm;
-    { json rn; rn["nominal"] = n; xfmr["inputs"]["designRequirements"]["turnsRatios"] = json::array({rn}); }
-
+    xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, {n}, xfmrIso, std::nullopt, 25.0, {
+        req::winding_excitation("forwardPrimary",   fsw, IpkPri, IrmsPri, 0.0, IpkPri, Dn,
+                                vPriPk, vPriRms, 0.0, vPriPkPk),
+        req::winding_excitation("forwardSecondary", fsw, IpkSec, IrmsSec, IcSec, dILout, Dn,
+                                vSecPk, vSecRms, 0.0, vSecPkPk)});
+    // Output filter inductor: single winding (turnsRatios = []) -> 1 excitation, DC-biased at Iout.
     json lout; lout["magnetic"] = json::object();
-    lout["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"] = d.outputInductance;
-    lout["inputs"]["designRequirements"]["turnsRatios"] = json::array();
+    lout["inputs"] = req::magnetic_inputs(d.outputInductance, 0.2, {}, {"primary"}, std::nullopt, 25.0, {
+        req::winding_excitation("triangular", fsw, IpkLout, IrmsLout, iout, dILout, Dn,
+                                vLoutPk, vLoutRms, 0.0, vLoutPkPk)});
 
     json cc; cc["capacitor"] = json::object();   // active-clamp capacitor
     cc["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.clampCapacitance;
@@ -110,8 +166,8 @@ json build_acf_tas(const AcfDesign& d) {
     // matches MKF (primary & secondary in-phase: primary_start=sw, secondary1_start=sec_in).
     json cell; cell["name"] = "acf-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate_main"), port("gate_clamp")});
-    cell["components"] = json::array({comp("Q1", mosfet()), comp("Sc", mosfet()), comp("Cc", cc),
-                                      comp("T1", xfmr), comp("Dfwd", diode()), comp("Dfw", diode()),
+    cell["components"] = json::array({comp("Q1", mainSw), comp("Sc", clampSw), comp("Cc", cc),
+                                      comp("T1", xfmr), comp("Dfwd", rectDiode()), comp("Dfw", rectDiode()),
                                       comp("Lout", lout), comp("Csn", snb), comp("Csn2", snb)});
     cell["connections"] = json::array({
         conn("vin_net",  {pin("Q1", "drain"), pin("Sc", "drain"), prt("vin")}),

@@ -85,27 +85,87 @@ json build_weinberg_tas(const WeinbergDesign& d) {
     auto sp = [](const char* st, const char* po) { json e; e["stage"] = st; e["port"] = po; return e; };
     auto isc = [](const char* name, const char* kind, const char* dir, std::vector<json> eps) {
         json c; c["name"] = name; c["kind"] = kind; if (dir[0]) c["direction"] = dir; c["endpoints"] = eps; return c; };
-    auto mosfet = []() { json j; j["semiconductor"]["mosfet"] = json::object(); return j; };
-    auto diode  = []() { json j; j["semiconductor"]["diode"] = json::object(); return j; };
+    auto mosfet = [](const json& reqs) { json j; j["semiconductor"]["mosfet"] = json::object();
+        j["inputs"]["designRequirements"] = reqs; return j; };
+    auto diode  = [](const json& reqs) { json j; j["semiconductor"]["diode"] = json::object();
+        j["inputs"]["designRequirements"] = reqs; return j; };
     auto res = [](double r) { json c; c["resistor"] = json::object();
         c["inputs"]["designRequirements"]["deviceType"] = "resistor";
         c["inputs"]["designRequirements"]["resistance"]["nominal"] = r; return c; };
 
-    const double n = d.turnsRatio;
+    const double n = d.turnsRatio, fsw = d.switchingFrequency;
+    const double Vin = d.inputVoltage, Vout = d.outputVoltage, D = d.switchDuty;
+
+    // --- per-winding electrical stresses (boost regime D>0.5, nominal operating point) ---
+    // CURRENTS. The current-fed front end draws Iin = Pin/Vin; the two L1 windings split it (Iin/2
+    // each, DC-biased). Each primary half carries the full input current during its conduction
+    // (duty D, the halves overlap for D>0.5); each secondary half supplies the output current Iout
+    // through its rectifier on alternate half-cycles.
+    const double Iin  = d.outputPower / (d.efficiency * Vin);
+    const double Iout = d.outputPower / Vout;
+    const double IL1avg = Iin / 2.0;
+    const double dIL1 = cfg::get(d.config, "l1RippleRatio", kRippleRatio) * IL1avg;
+    const double IpkL1  = IL1avg + dIL1 / 2.0;
+    const double IrmsL1 = std::sqrt(IL1avg * IL1avg + dIL1 * dIL1 / 12.0);
+    // Primary half: input current during its ON-fraction D; offset 0 (AC winding).
+    const double IpkPri  = Iin + dIL1 / 2.0;
+    const double IrmsPri = std::sqrt(D) * Iin;
+    // Secondary half: supplies Iout, conducting ~half the period (CT full-wave); offset 0.
+    const double IpkSec  = Iout;
+    const double IrmsSec = Iout / std::sqrt(2.0);
+    // VOLTAGES. The output rectifier clamps each secondary half to ±Vout; the primary halves reflect
+    // that to ±Vout/n. Winding-voltage offsets are 0 (DC bias is in the L1 current). The input
+    // inductor L1 charges at +Vin for an effective fraction dEff and resets at -Vin·dEff/(1−dEff)
+    // (volt-second balance).
+    const double dEff = std::max(2.0 * D - 1.0, D);
+    const double vL1Reset = (dEff < 1.0) ? Vin * dEff / (1.0 - dEff) : Vin;
+    const double vL1Pk = std::max(Vin, vL1Reset), vL1PkPk = Vin + vL1Reset;
+    const double vL1Rms = std::sqrt(dEff * Vin * Vin + (1.0 - dEff) * vL1Reset * vL1Reset);
+    const double vPriPk = Vout / n, vPriPkPk = 2.0 * Vout / n, vPriRms = Vout / n;
+    const double vSecPk = Vout, vSecPkPk = 2.0 * Vout, vSecRms = Vout;
+
+    // ── semiconductor requirements (boost regime, nominal operating corner) ──
+    // Push-pull primary switches S1/S2: in a current-fed push-pull each off-switch drain is clamped by
+    // the conducting half + the reflected secondary to ~2·Vout/n (the full primary pk-pk reflected
+    // voltage); it carries the full input current during its conduction (duty D). Secondary CT-FW
+    // rectifiers Dpos/Dneg are REAL output rectifiers: each blocks the full secondary pk-pk (2·Vout)
+    // when its partner conducts, and supplies Iout on alternate half-cycles. (No anti-parallel FET;
+    // the energy-recovery path is the series-RC snubber, so no separate recovery diode here.)
+    const double ratedVdsW = vPriPkPk / cfg::v_derate(d.config);   // S1/S2 block ~2*Vout/n reflected
+    const double ratedVrW  = vSecPkPk / cfg::v_derate(d.config);   // Dpos/Dneg block ~2*Vout
+    const double maxRdsOnW = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IrmsPri * IrmsPri);
+    const double maxVfW    = (ratedVrW < 100.0) ? 0.6 : 1.2;
+    const double maxTrrW   = 0.05 / fsw;
+    const json reqSW   = req::mosfet("mainSwitch", ratedVdsW, IpkPri, maxRdsOnW, 125.0);
+    const json reqRect = req::diode(ratedVrW, Iout / 0.7, maxVfW, maxTrrW);  // CT full-wave: each carries Iout-avg
 
     // Input coupled inductor L1 (1:1, two windings), K=0.999. winding0=L1a (vin->l1a_mid),
     // secondary1=L1b (vin->l1b_mid). Both dots at vin (primary_start/secondary1_start).
+    // turnsRatios=[1] -> 2 physical windings -> 2 excitations (both carry Iin/2, DC-biased).
     json l1; l1["magnetic"] = json::object();
-    l1["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"] = d.inputInductance;
-    { json r1; r1["nominal"] = 1.0; l1["inputs"]["designRequirements"]["turnsRatios"] = json::array({r1}); }
+    l1["inputs"] = req::magnetic_inputs(d.inputInductance, 0.2, {1.0}, {"primary", "primary"},
+        std::nullopt, 25.0, {
+            req::winding_excitation("triangular", fsw, IpkL1, IrmsL1, IL1avg, dIL1, dEff,
+                                    vL1Pk, vL1Rms, 0.0, vL1PkPk),
+            req::winding_excitation("triangular", fsw, IpkL1, IrmsL1, IL1avg, dIL1, dEff,
+                                    vL1Pk, vL1Rms, 0.0, vL1PkPk)});
     l1["inputs"]["designRequirements"]["coupling"] = cfg::get(d.config, "transformerCoupling", 0.999);
 
     // Main transformer: CT primary (2 halves) + CT secondary (2 halves) = 4 coupled windings via
     // turnsRatios=[1, n, n]. Opposite-dot wound (encoded by the start/end node order below). K=0.9999.
+    // Isolated -> isolationSides {primary, primary, secondary, secondary}; WeinbergDesign carries no
+    // isolationVoltage -> nullopt.
     json t1; t1["magnetic"] = json::object();
-    t1["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"] = d.magnetizingInductance;
-    { json r1; r1["nominal"] = 1.0; json rn; rn["nominal"] = n;
-      t1["inputs"]["designRequirements"]["turnsRatios"] = json::array({r1, rn, rn}); }
+    t1["inputs"] = req::magnetic_inputs(d.magnetizingInductance, 0.1, {1.0, n, n},
+        {"primary", "primary", "secondary", "secondary"}, std::nullopt, 25.0, {
+            req::winding_excitation("pushPullPrimary",   fsw, IpkPri, IrmsPri, 0.0, dIL1, D,
+                                    vPriPk, vPriRms, 0.0, vPriPkPk),
+            req::winding_excitation("pushPullPrimary",   fsw, IpkPri, IrmsPri, 0.0, dIL1, D,
+                                    vPriPk, vPriRms, 0.0, vPriPkPk),
+            req::winding_excitation("pushPullSecondary", fsw, IpkSec, IrmsSec, 0.0, Iout, D,
+                                    vSecPk, vSecRms, 0.0, vSecPkPk),
+            req::winding_excitation("pushPullSecondary", fsw, IpkSec, IrmsSec, 0.0, Iout, D,
+                                    vSecPk, vSecRms, 0.0, vSecPkPk)});
 
     json cout; cout["capacitor"] = json::object();
     cout["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;
@@ -130,8 +190,8 @@ json build_weinberg_tas(const WeinbergDesign& d) {
         // physical DCR. 1 mΩ is the minimum that converges; the old 0.05 Ω was an arbitrary lossy value that
         // burned ~2.5% of the output at the high-current corner (150 V/10 A: 4.5%→2.0% once shrunk to ideal).
         comp("Rdcra", res(cfg::loop_breaker_res(d.config, d.loadResistance))), comp("Rdcrb", res(cfg::loop_breaker_res(d.config, d.loadResistance))),
-        comp("S1", mosfet()), comp("S2", mosfet()),
-        comp("Dpos", diode()), comp("Dneg", diode()), comp("Cout", cout),
+        comp("S1", mosfet(reqSW)), comp("S2", mosfet(reqSW)),
+        comp("Dpos", diode(reqRect)), comp("Dneg", diode(reqRect)), comp("Cout", cout),
         comp("RsnS1", res(cfg::snubber_res(d.config))), comp("CsnS1", snubC()),
         comp("RsnS2", res(cfg::snubber_res(d.config))), comp("CsnS2", snubC()),
         comp("RsnDp", res(cfg::snubber_res(d.config))), comp("CsnDp", snubC()),

@@ -76,40 +76,98 @@ json build_cllc_tas(const CllcDesign& d) {
     auto sp = [](const char* st, const char* po) { json e; e["stage"] = st; e["port"] = po; return e; };
     auto isc = [](const char* name, const char* kind, const char* dir, std::vector<json> eps) {
         json c; c["name"] = name; c["kind"] = kind; if (dir[0]) c["direction"] = dir; c["endpoints"] = eps; return c; };
+    // Bare seeds (no designRequirements). Body diodes (anti-parallel to a FET) use these as-is — the HS
+    // fill DEFERS a requirement-less diode as a FET body diode. REAL switches take a `req`.
     auto mosfet = []() { json j; j["semiconductor"]["mosfet"] = json::object(); return j; };
     auto diode  = []() { json j; j["semiconductor"]["diode"] = json::object(); return j; };
+    auto mosfetReq = [](const json& r) { json j; j["semiconductor"]["mosfet"] = json::object();
+        j["inputs"]["designRequirements"] = r; return j; };
 
     const double n = d.turnsRatio;
 
     auto capBrick = [&](double c, double vrated) { json j; j["capacitor"] = json::object();
         j["inputs"]["designRequirements"]["capacitance"]["nominal"] = c;
         j["inputs"]["designRequirements"]["ratedVoltage"] = vrated; return j; };
-    auto indBrick = [&](double L) { json j; j["magnetic"] = json::object();
-        j["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"] = L;
-        j["inputs"]["designRequirements"]["turnsRatios"] = json::array(); return j; };
+
+    // --- resonant-tank stresses (FHA, evaluated at the nominal point, operated AT resonance fr) ---
+    // CLLC is a FULL bridge both sides, so the primary tank sees a ±Vin square (fund. rms 2√2·Vin/π).
+    // Tank is SINUSOIDAL → every magnetic excitation is a sine ("sinusoidal", vRms=vPk/√2, vPkPk=2·vPk,
+    // offset 0). Primary tank current = real load current (Pin/Vtank1_rms) + reactive magnetizing
+    // (Lm sees ±Vin, triangle peak Vin·(T/4)/Lm). The secondary tank/winding carries the reflected real
+    // load current ×n (n=Vin/Vo>1 here).
+    const double fr   = d.resonantFrequency, Tfr = 1.0 / fr;
+    const double Pin  = d.outputPower / d.efficiency;
+    const double Vtank1Rms = 2.0 * std::sqrt(2.0) * d.inputVoltage / M_PI;  // fund. rms of ±Vin square
+    const double IloadRms  = Pin / Vtank1Rms;                               // real primary tank current
+    const double ImagPk    = d.inputVoltage * (Tfr / 4.0) / d.magnetizingInductance;  // Lm triangle pk
+    const double ImagRms   = ImagPk / std::sqrt(3.0);
+    const double ItankRms  = std::sqrt(IloadRms * IloadRms + ImagRms * ImagRms);  // primary winding current
+    const double ItankPk   = std::sqrt(2.0) * ItankRms, ItankPkPk = 2.0 * ItankPk;
+    const double IsecRms   = IloadRms * n;                                  // reflected to the secondary
+    const double IsecPk    = std::sqrt(2.0) * IsecRms, IsecPkPk = 2.0 * IsecPk;
+    // Winding voltages (sinusoidal at fr): each Lr sees i·Z (Z=2π·fr·L); transformer primary clamps to
+    // the reflected output ±n·Vo (≈±Vin), the single secondary to ±Vo.
+    const double Zr1    = 2.0 * M_PI * fr * d.primaryResonantInductance;
+    const double Zr2    = 2.0 * M_PI * fr * d.secondaryResonantInductance;
+    const double vLr1Pk = ItankPk * Zr1, vLr1Rms = vLr1Pk / std::sqrt(2.0), vLr1PkPk = 2.0 * vLr1Pk;
+    const double vLr2Pk = IsecPk * Zr2,  vLr2Rms = vLr2Pk / std::sqrt(2.0), vLr2PkPk = 2.0 * vLr2Pk;
+    const double vPriPk = n * d.outputVoltage, vPriRms = vPriPk / std::sqrt(2.0), vPriPkPk = 2.0 * vPriPk;
+    const double vSecPk = d.outputVoltage,     vSecRms = vSecPk / std::sqrt(2.0), vSecPkPk = 2.0 * vSecPk;
+
+    // --- semiconductor requirements (sourceable). All rectification is ACTIVE (synchronous-rectifier
+    // MOSFETs both sides); the only diodes (DS1..DS4, DSa..DSd) are FET body diodes -> left bare/deferred.
+    // Primary full-bridge Q1..Q4: each blocks the full bus Vin when off, carries the primary tank current
+    // (peak ItankPk, rms ItankRms — the same primary current that drives the magnetic).
+    const double ratedVdsPri = d.inputVoltageMax / cfg::v_derate(d.config);
+    const double maxRdsOnPri  = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (ItankRms * ItankRms);
+    const json reqPri = req::mosfet("mainSwitch", ratedVdsPri, ItankPk, maxRdsOnPri, 125.0);
+    // Secondary SR full-bridge Qa..Qd: each blocks the output rail Vout when off, carries the secondary
+    // (reflected) tank current (peak IsecPk, rms IsecRms).
+    const double ratedVdsSec = d.outputVoltage / cfg::v_derate(d.config);
+    const double maxRdsOnSec  = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IsecRms * IsecRms);
+    const json reqSec = req::mosfet("mainSwitch", ratedVdsSec, IsecPk, maxRdsOnSec, 125.0);
 
     json cr1 = capBrick(d.primaryResonantCapacitance, d.inputVoltage * 2);
-    json lr1 = indBrick(d.primaryResonantInductance);
-    json lr2 = indBrick(d.secondaryResonantInductance);
+    // Primary resonant inductor Lr1: its OWN single-winding magnetic (full primary tank current).
+    json lr1; lr1["magnetic"] = json::object();
+    lr1["inputs"] = req::magnetic_inputs(d.primaryResonantInductance, 0.2, {}, {"primary"},
+        std::nullopt, 25.0, {
+            req::winding_excitation("sinusoidal", fr, ItankPk, ItankRms, 0.0, ItankPkPk, std::nullopt,
+                                    vLr1Pk, vLr1Rms, 0.0, vLr1PkPk)});
+    // Secondary resonant inductor Lr2: its OWN single-winding magnetic (reflected secondary tank current).
+    json lr2; lr2["magnetic"] = json::object();
+    lr2["inputs"] = req::magnetic_inputs(d.secondaryResonantInductance, 0.2, {}, {"primary"},
+        std::nullopt, 25.0, {
+            req::winding_excitation("sinusoidal", fr, IsecPk, IsecRms, 0.0, IsecPkPk, std::nullopt,
+                                    vLr2Pk, vLr2Rms, 0.0, vLr2PkPk)});
     json cr2 = capBrick(d.secondaryResonantCapacitance, d.outputVoltage * 2);
     json cout = capBrick(d.outputCapacitance, d.outputVoltage * 2);
 
     // Transformer: primary Lpri = Lm, single secondary, turnsRatios=[n], K=0.9999.
+    // 2 physical windings = turnsRatios.size()+1: primary (tank current) + secondary (reflected ×n).
+    std::vector<std::string> isoSides{"primary", "secondary"};
     json t1; t1["magnetic"] = json::object();
-    t1["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"] = d.magnetizingInductance;
-    { json rn; rn["nominal"] = n; t1["inputs"]["designRequirements"]["turnsRatios"] = json::array({rn}); }
+    t1["inputs"] = req::magnetic_inputs(d.magnetizingInductance, 0.1, {n}, isoSides,
+        std::nullopt, 25.0, {
+            req::winding_excitation("sinusoidal", fr, ItankPk, ItankRms, 0.0, ItankPkPk, std::nullopt,
+                                    vPriPk, vPriRms, 0.0, vPriPkPk),
+            req::winding_excitation("sinusoidal", fr, IsecPk, IsecRms, 0.0, IsecPkPk, std::nullopt,
+                                    vSecPk, vSecRms, 0.0, vSecPkPk)});
 
     json cell; cell["name"] = "cllc-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"),
                                  port("g1"), port("g2")});
     cell["components"] = json::array({
-        // primary full bridge + body diodes
-        comp("Q1", mosfet()), comp("Q2", mosfet()), comp("Q3", mosfet()), comp("Q4", mosfet()),
+        // primary full bridge + body diodes (DS1..DS4 = Q1..Q4 body diodes -> bare seed, deferred)
+        comp("Q1", mosfetReq(reqPri)), comp("Q2", mosfetReq(reqPri)),
+        comp("Q3", mosfetReq(reqPri)), comp("Q4", mosfetReq(reqPri)),
         comp("DS1", diode()), comp("DS2", diode()), comp("DS3", diode()), comp("DS4", diode()),
         // primary tank + transformer + secondary tank
         comp("Cr1", cr1), comp("Lr1", lr1), comp("T1", t1), comp("Lr2", lr2), comp("Cr2", cr2),
-        // secondary active synchronous rectifier (4 switches) + body diodes (full-bridge rectifying)
-        comp("Qa", mosfet()), comp("Qb", mosfet()), comp("Qc", mosfet()), comp("Qd", mosfet()),
+        // secondary active synchronous rectifier (4 switches) + body diodes (DSa..DSd = Qa..Qd body
+        // diodes -> bare seed, deferred; the rectifiers are the SR MOSFETs themselves)
+        comp("Qa", mosfetReq(reqSec)), comp("Qb", mosfetReq(reqSec)),
+        comp("Qc", mosfetReq(reqSec)), comp("Qd", mosfetReq(reqSec)),
         comp("DSa", diode()), comp("DSb", diode()), comp("DSc", diode()), comp("DSd", diode()),
         comp("Cout", cout)});
     cell["connections"] = json::array({

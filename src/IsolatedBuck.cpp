@@ -70,16 +70,57 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
     auto sp = [](const char* st, const char* po) { json e; e["stage"] = st; e["port"] = po; return e; };
     auto isc = [](const char* name, const char* kind, const char* dir, std::vector<json> eps) {
         json c; c["name"] = name; c["kind"] = kind; if (dir[0]) c["direction"] = dir; c["endpoints"] = eps; return c; };
-    auto mosfet = []() { json j; j["semiconductor"]["mosfet"] = json::object(); return j; };
-    auto diode  = []() { json j; j["semiconductor"]["diode"] = json::object(); return j; };
+    auto mosfet = [](json reqs = json()) { json j; j["semiconductor"]["mosfet"] = json::object();
+        if (!reqs.is_null()) j["inputs"]["designRequirements"] = reqs; return j; };
+    auto diode  = [](json reqs = json()) { json j; j["semiconductor"]["diode"] = json::object();
+        if (!reqs.is_null()) j["inputs"]["designRequirements"] = reqs; return j; };
 
     const double N = d.turnsRatio, Lm = d.magnetizingInductance;
+    const double fsw = d.switchingFrequency, T = 1.0 / fsw, D = d.dutyCycle;
+
+    // --- coupled-inductor winding stresses (REUSE the design's voltages/powers) ---
+    // Primary winding = the buck inductor: DC-biased triangular current. Its average is the reflected
+    // load current Imax = I_pri + ΣI_sec/N (same quantity design_isolated_buck used to size ΔI); the
+    // ripple ΔI is set by V_off·D·T/Lmag (V_off = Vin − V_pri during the ON interval). Evaluated at Vin.
+    const double IpriLoad = d.primaryPower / d.primaryVoltage;
+    const double IsecLoad = d.secondaryPower / d.secondaryVoltage;
+    const double IcPri = IpriLoad + IsecLoad / N;                 // average primary-winding current
+    const double dIpri = (d.inputVoltage - d.primaryVoltage) * D * T / Lm;  // pk-pk ripple
+    const double IpkPri = IcPri + dIpri / 2.0;
+    const double IrmsPri = std::sqrt(IcPri * IcPri + dIpri * dIpri / 12.0);
+    // Secondary winding (flyback rail): conducts only during OFF (1−D); peak is the primary peak
+    // reflected by N, DC offset = the secondary load current it delivers per full period.
+    const double IcSec = IsecLoad, dIsec = dIpri * N;
+    const double IpkSec = IpkPri * N;
+    const double IrmsSec = std::sqrt(1.0 - D) * std::sqrt(IcSec * IcSec + dIsec * dIsec / 12.0);
+
+    // Winding voltages (volt-second balanced): primary sees +(Vin−V_pri) during ON / −V_pri during OFF;
+    // secondary mirrors the primary scaled by 1/N. Evaluated at the nominal operating point.
+    const double VpriOn = d.inputVoltage - d.primaryVoltage, VpriOff = d.primaryVoltage;
+    const double vPriPk = std::max(VpriOn, VpriOff), vPriPkPk = VpriOn + VpriOff;
+    const double vPriRms = std::sqrt(D * VpriOn * VpriOn + (1.0 - D) * VpriOff * VpriOff);
+    const double vSecPk = vPriPk / N, vSecPkPk = vPriPkPk / N;
+    const double vSecRms = vPriRms / N;
+
+    // --- semiconductor stresses (max-stress corner Vin_max) ---
+    // Synchronous buck pair QS1 (high-side) / QS2 (low-side): the switch node swings 0..Vin, so each
+    // blocks Vin_max. Both carry the primary-winding (buck-inductor) current.
+    const double ratedVds = d.inputVoltageMax / cfg::v_derate(d.config);
+    const double maxRdsOn = cfg::rds_on_loss_fraction(d.config) * d.primaryPower / (IrmsPri * IrmsPri);
+    // Dsec (isolated secondary flyback rectifier): blocks Vsec + reflected (Vin−Vpri)/N; carries Isec.
+    const double VrSec    = (d.secondaryVoltage + (d.inputVoltageMax - d.primaryVoltage) / N) / cfg::v_derate(d.config);
+    const double maxVfSec = (VrSec < 100.0) ? 0.6 : 1.2;
 
     // Coupled inductor (2-winding magnetic): primary winding = the buck inductor (Lmag), secondary
-    // winding gives the isolated flyback rail. turnsRatios = [N].
+    // winding gives the isolated flyback rail. turnsRatios = [N]. (Non-galvanic isolationVoltage not
+    // carried on the spec -> std::nullopt.)
+    std::vector<std::string> isoSides{"primary", "secondary"};
     json xfmr; xfmr["magnetic"] = json::object();
-    xfmr["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"] = Lm;
-    { json rn; rn["nominal"] = N; xfmr["inputs"]["designRequirements"]["turnsRatios"] = json::array({rn}); }
+    xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, {N}, isoSides, std::nullopt, 25.0, {
+        req::winding_excitation("isolatedBuckPrimary",   fsw, IpkPri, IrmsPri, IcPri, dIpri, D,
+                                vPriPk, vPriRms, 0.0, vPriPkPk),
+        req::winding_excitation("isolatedBuckSecondary", fsw, IpkSec, IrmsSec, IcSec, dIsec, 1.0 - D,
+                                vSecPk, vSecRms, 0.0, vSecPkPk)});
 
     json cpri; cpri["capacitor"] = json::object();
     cpri["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;
@@ -98,10 +139,12 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
     json cell; cell["name"] = "flybuck-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("g1"), port("g2")});
     cell["components"] = json::array({
-        comp("QS1", mosfet()), comp("QS2", mosfet()),
+        comp("QS1", mosfet(req::mosfet("mainSwitch", ratedVds, IpkPri, maxRdsOn, 125.0))),
+        comp("QS2", mosfet(req::mosfet("mainSwitch", ratedVds, IpkPri, maxRdsOn, 125.0))),
+        // DS1/DS2 are anti-parallel BODY diodes across QS1/QS2 -> requirement-less (carried by the FET).
         comp("DS1", diode()),  comp("DS2", diode()),
         comp("T1", xfmr), comp("Cpri", cpri),
-        comp("Dsec", diode()), comp("Csec", csec), comp("Rsec", rsec)});
+        comp("Dsec", diode(req::diode(VrSec, IsecLoad / 0.7, maxVfSec, 0.05 * T))), comp("Csec", csec), comp("Rsec", rsec)});
     cell["connections"] = json::array({
         // High-side buck switch QS1 (vin->sw) + synchronous low-side QS2 (sw->gnd) driven complementary
         // with a small dead time. Anti-parallel body diodes DS1 (sw->vin) / DS2 (gnd->sw) freewheel the

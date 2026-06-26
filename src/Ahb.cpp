@@ -90,25 +90,73 @@ json build_ahb_tas(const AhbDesign& d) {
     auto sp = [](const char* st, const char* po) { json e; e["stage"] = st; e["port"] = po; return e; };
     auto isc = [](const char* name, const char* kind, const char* dir, std::vector<json> eps) {
         json c; c["name"] = name; c["kind"] = kind; if (dir[0]) c["direction"] = dir; c["endpoints"] = eps; return c; };
-    auto mosfet = []() { json j; j["semiconductor"]["mosfet"] = json::object(); return j; };
     auto diode  = []() { json j; j["semiconductor"]["diode"] = json::object(); return j; };
 
     const double N = d.turnsRatio, Lm = d.magnetizingInductance;
+    const double fsw = d.switchingFrequency, Tsw = 1.0 / fsw;
+    const double Vo = d.outputVoltage, Io = d.outputPower / Vo, Dn = d.dutyCycle;
+
+    // --- transformer winding stresses (worst-case current corner = Vin_max, max magnetizing ramp) ---
+    // Magnetizing ripple dILm reuses line ~69's volt-second balance at Vin_max. Primary winding carries
+    // the reflected load current (Io/N) plus the magnetizing current; secondary carries Io while
+    // conducting. Voltages: primary sees +Vin_max during the power-transfer interval; secondary the
+    // reflected (Vin_max/N) — both gated by the duty. Evaluated at the nominal operating point for V.
+    const double dILm = (1.0 - Dn) * d.inputVoltageMax * Dn * Tsw / Lm; // magnetizing pk-pk ripple (line ~69)
+    const double IpriCtr = Io / N;                                      // reflected load current center
+    const double IpriPk  = IpriCtr + dILm / 2.0;                        // + magnetizing ripple (line ~70)
+    const double IpriRms = std::sqrt(Dn) * std::sqrt(IpriCtr * IpriCtr + dILm * dILm / 12.0);
+    const double IsecCtr = Io;                                          // secondary carries Io when conducting
+    const double dIsecRefl = dILm * N;                                  // ripple reflected to the secondary
+    const double IsecPk  = Io + dIsecRefl / 2.0;
+    const double IsecRms = std::sqrt(Dn) * std::sqrt(IsecCtr * IsecCtr + dIsecRefl * dIsecRefl / 12.0);
+    // Winding voltages (volt-second basis at nominal Vin): primary +Vin during D, ~0 during freewheel;
+    // secondary mirrors at Vin/N. Two-level rectangular -> vRms = sqrt(D*Von^2).
+    const double Vp = d.inputVoltage, Vs = Vp / N;
+    const double vPriPk = Vp, vPriPkPk = Vp, vPriRms = std::sqrt(Dn) * Vp;
+    const double vSecPk = Vs, vSecPkPk = Vs, vSecRms = std::sqrt(Dn) * Vs;
+
+    // --- output inductor stresses: avg=Io, ripple dILo from Lo volt-seconds (CCM) ---
+    const double dILo = Vo * (1.0 - 2.0 * Dn * (1.0 - Dn)) / (d.outputInductance * fsw);  // pk-pk (= ripple sizing)
+    const double IloPk  = Io + dILo / 2.0;
+    const double IloRms = std::sqrt(Io * Io + dILo * dILo / 12.0);
+    // Output-inductor voltage: Vin/N - Vo during conduction (~2*D), -Vo during freewheel; |swing| ~ Vo.
+    const double vLoPk = std::max(std::abs(Vs - Vo), Vo), vLoPkPk = Vs, vLoRms = Vo;
+
+    // --- semiconductor ratings (sourceable requirements) ---
+    // Primary half-bridge switches Q1/Q2: each blocks the full bus (Vin_max) when off; they carry the
+    // primary current (reflected load + magnetizing), peak = IpriPk, rms = IpriRms. Anti-parallel D1/D2
+    // are the FETs' body diodes (left requirement-less).
+    const double ratedVds = d.inputVoltageMax / cfg::v_derate(d.config);
+    const double maxRdsOn  = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IpriRms * IpriRms);
+    json mosfetReq; mosfetReq["semiconductor"]["mosfet"] = json::object();
+    mosfetReq["inputs"]["designRequirements"] = req::mosfet("mainSwitch", ratedVds, IpriPk, maxRdsOn, 125.0);
+    // Secondary full-bridge rectifier Dr1..Dr4: each off diode blocks the secondary winding voltage
+    // (peak Vs); each carries the output current while conducting. REAL rectifiers -> req::diode.
+    const double ratedVr  = vSecPk / cfg::v_derate(d.config);
+    const double maxVf    = (ratedVr < 100.0) ? 0.6 : 1.2;
+    json diodeReq; diodeReq["semiconductor"]["diode"] = json::object();
+    diodeReq["inputs"]["designRequirements"] = req::diode(ratedVr, Io / 0.7, maxVf, 0.05 * Tsw);
 
     // DC-blocking capacitor Cb.
     json cb; cb["capacitor"] = json::object();
     cb["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.dcBlockingCapacitance;
     cb["inputs"]["designRequirements"]["ratedVoltage"] = d.inputVoltage * 2;
 
-    // 2-winding transformer (primary + one full secondary), turnsRatios = [N].
+    // 2-winding transformer (primary + one full secondary), turnsRatios = [N] -> 2 excitations.
+    std::vector<std::string> isoSides{"primary", "secondary"};
     json xfmr; xfmr["magnetic"] = json::object();
-    xfmr["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"] = Lm;
-    { json rn; rn["nominal"] = N; xfmr["inputs"]["designRequirements"]["turnsRatios"] = json::array({rn}); }
+    xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, {N}, isoSides, std::nullopt, 25.0, {
+        req::winding_excitation("ahbPrimary",   fsw, IpriPk, IpriRms, 0.0, dILm, Dn,
+                                vPriPk, vPriRms, 0.0, vPriPkPk),
+        req::winding_excitation("ahbSecondary", fsw, IsecPk, IsecRms, 0.0, dIsecRefl, Dn,
+                                vSecPk, vSecRms, 0.0, vSecPkPk)});
 
-    // Output inductor Lo (single-winding magnetic).
+    // Output inductor Lo (single-winding magnetic, DC-biased at Io).
     json lout; lout["magnetic"] = json::object();
-    lout["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"] = d.outputInductance;
-    lout["inputs"]["designRequirements"]["turnsRatios"] = json::array();
+    lout["inputs"] = req::magnetic_inputs(d.outputInductance, 0.2, {}, {"primary"},
+        std::nullopt, 25.0, {
+            req::winding_excitation("triangular", fsw, IloPk, IloRms, Io, dILo, std::nullopt,
+                                    vLoPk, vLoRms, 0.0, vLoPkPk)});
 
     json capd; capd["capacitor"] = json::object();
     capd["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;
@@ -125,9 +173,9 @@ json build_ahb_tas(const AhbDesign& d) {
     json cell; cell["name"] = "ahb-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate1"), port("gate2")});
     cell["components"] = json::array({
-        comp("Q1", mosfet()), comp("Q2", mosfet()), comp("D1", diode()), comp("D2", diode()),
+        comp("Q1", mosfetReq), comp("Q2", mosfetReq), comp("D1", diode()), comp("D2", diode()),
         comp("Cb", cb), comp("T1", xfmr),
-        comp("Dr1", diode()), comp("Dr2", diode()), comp("Dr3", diode()), comp("Dr4", diode()),
+        comp("Dr1", diodeReq), comp("Dr2", diodeReq), comp("Dr3", diodeReq), comp("Dr4", diodeReq),
         comp("Lout", lout), comp("Csw", snub()), comp("CsnSA", snub()), comp("CsnSB", snub())});
     cell["connections"] = json::array({
         // Half bridge: Q1 high-side (vin->sw), Q2 low-side (sw->gnd) + anti-parallel body diodes.

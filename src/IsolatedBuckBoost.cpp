@@ -71,18 +71,62 @@ json build_isolated_buck_boost_tas(const IsolatedBuckBoostDesign& d) {
     auto sp = [](const char* st, const char* po) { json e; e["stage"] = st; e["port"] = po; return e; };
     auto isc = [](const char* name, const char* kind, const char* dir, std::vector<json> eps) {
         json c; c["name"] = name; c["kind"] = kind; if (dir[0]) c["direction"] = dir; c["endpoints"] = eps; return c; };
-    auto mosfet = []() { json j; j["semiconductor"]["mosfet"] = json::object(); return j; };
-    auto diode  = []() { json j; j["semiconductor"]["diode"] = json::object(); return j; };
+    auto mosfet = [](json reqs = json()) { json j; j["semiconductor"]["mosfet"] = json::object();
+        if (!reqs.is_null()) j["inputs"]["designRequirements"] = reqs; return j; };
+    auto diode  = [](json reqs = json()) { json j; j["semiconductor"]["diode"] = json::object();
+        if (!reqs.is_null()) j["inputs"]["designRequirements"] = reqs; return j; };
 
     const double N = d.turnsRatio, Lm = d.magnetizingInductance;
+    const double fsw = d.switchingFrequency, T = 1.0 / fsw, D = d.dutyCycle;
+
+    // --- coupled-inductor (flyback) winding stresses (REUSE the design's voltages/powers) ---
+    // Magnetizing current center referred to primary = the reflected total load current
+    // Imax = I_pri + ΣI_sec/N (same quantity design_isolated_buck_boost used to size ΔI). Primary winding
+    // conducts during ON (D); ripple ΔI = Vin·D·T/Lmag. Secondary conducts during OFF (1−D).
+    const double IpriLoad = d.primaryPower / d.primaryVoltage;
+    const double IsecLoad = d.secondaryPower / d.secondaryVoltage;
+    const double IcMag = IpriLoad + IsecLoad / N;                 // magnetizing center, primary-referred
+    const double dIpri = d.inputVoltage * D * T / Lm;             // primary pk-pk ripple
+    const double IpkPri = IcMag + dIpri / 2.0;
+    const double IrmsPri = std::sqrt(D) * std::sqrt(IcMag * IcMag + dIpri * dIpri / 12.0);
+    // Secondary winding: peak = primary peak reflected by N; conducts during OFF; DC offset = the
+    // secondary load current it delivers per full period.
+    const double IcSec = IsecLoad, dIsec = dIpri * N;
+    const double IpkSec = IpkPri * N;
+    const double IrmsSec = std::sqrt(1.0 - D) * std::sqrt((IcMag * N) * (IcMag * N) + dIsec * dIsec / 12.0);
+
+    // Winding voltages (volt-second balanced, flyback): primary sees +Vin during ON / −V_pri during OFF;
+    // secondary mirrors the primary scaled by 1/N. Evaluated at the nominal operating point.
+    const double VpriOn = d.inputVoltage, VpriOff = d.primaryVoltage;
+    const double vPriPk = std::max(VpriOn, VpriOff), vPriPkPk = VpriOn + VpriOff;
+    const double vPriRms = std::sqrt(D * VpriOn * VpriOn + (1.0 - D) * VpriOff * VpriOff);
+    const double vSecPk = vPriPk / N, vSecPkPk = vPriPkPk / N;
+    const double vSecRms = vPriRms / N;
+
+    // --- semiconductor stresses (flyback-class, max-stress corner Vin_max) ---
+    // QS1 blocks Vin_max + the reflected primary-rail voltage during OFF (clamp-limited).
+    const double VdsStress = d.inputVoltageMax + d.primaryVoltage;
+    const double ratedVds  = VdsStress / cfg::v_derate(d.config);
+    const double maxRdsOn  = cfg::rds_on_loss_fraction(d.config) * d.primaryPower / (IrmsPri * IrmsPri);
+    // Dpri (primary inverting-rail rectifier): blocks Vin during ON; carries the primary load current.
+    const double VrPri    = d.inputVoltageMax / cfg::v_derate(d.config);
+    const double maxVfPri = (VrPri < 100.0) ? 0.6 : 1.2;
+    // Dsec (isolated secondary flyback rectifier): blocks Vsec + reflected Vin/N; carries Isec.
+    const double VrSec    = (d.secondaryVoltage + d.inputVoltageMax / N) / cfg::v_derate(d.config);
+    const double maxVfSec = (VrSec < 100.0) ? 0.6 : 1.2;
 
     // Coupled inductor (2-winding flyback magnetic): primary winding = flyback primary (Lmag, tied to
     // gnd), secondary winding gives the isolated rail. turnsRatios = [N]. Flyback dot polarity: primary
     // dot at pri_in, secondary dot at gnd (opposite ends) so the secondary blocks during ON / conducts
     // during OFF — encoded by primary_start=pri_in, secondary1_start=gnd (the dotted "start" terminals).
+    // (Non-galvanic isolationVoltage not carried on the spec -> std::nullopt.)
+    std::vector<std::string> isoSides{"primary", "secondary"};
     json xfmr; xfmr["magnetic"] = json::object();
-    xfmr["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"] = Lm;
-    { json rn; rn["nominal"] = N; xfmr["inputs"]["designRequirements"]["turnsRatios"] = json::array({rn}); }
+    xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, {N}, isoSides, std::nullopt, 25.0, {
+        req::winding_excitation("flybackPrimary",   fsw, IpkPri, IrmsPri, IcMag, dIpri, D,
+                                vPriPk, vPriRms, 0.0, vPriPkPk),
+        req::winding_excitation("flybackSecondary", fsw, IpkSec, IrmsSec, IcSec, dIsec, 1.0 - D,
+                                vSecPk, vSecRms, 0.0, vSecPkPk)});
 
     json cpri; cpri["capacitor"] = json::object();
     cpri["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;
@@ -99,9 +143,9 @@ json build_isolated_buck_boost_tas(const IsolatedBuckBoostDesign& d) {
     json cell; cell["name"] = "flybuckboost-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("g1")});
     cell["components"] = json::array({
-        comp("QS1", mosfet()), comp("T1", xfmr),
-        comp("Dpri", diode()), comp("Cpri", cpri),
-        comp("Dsec", diode()), comp("Csec", csec), comp("Rsec", rsec)});
+        comp("QS1", mosfet(req::mosfet("mainSwitch", ratedVds, IpkPri, maxRdsOn, 125.0))), comp("T1", xfmr),
+        comp("Dpri", diode(req::diode(VrPri, IpriLoad / 0.7, maxVfPri, 0.05 * T))), comp("Cpri", cpri),
+        comp("Dsec", diode(req::diode(VrSec, IsecLoad / 0.7, maxVfSec, 0.05 * T))), comp("Csec", csec), comp("Rsec", rsec)});
     cell["connections"] = json::array({
         conn("vin_net",  {pin("QS1", "drain"), prt("vin")}),
         // pri_in: switch source + coupled-inductor primary (to gnd) + primary diode cathode. During ON

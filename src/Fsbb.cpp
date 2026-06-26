@@ -79,13 +79,37 @@ json build_fsbb_tas(const FsbbDesign& d) {
     auto sp = [](const char* st, const char* po) { json e; e["stage"] = st; e["port"] = po; return e; };
     auto isc = [](const char* name, const char* kind, const char* dir, std::vector<json> eps) {
         json c; c["name"] = name; c["kind"] = kind; if (dir[0]) c["direction"] = dir; c["endpoints"] = eps; return c; };
-    auto mosfet = []() { json j; j["semiconductor"]["mosfet"] = json::object(); return j; };
-    auto diode  = []() { json j; j["semiconductor"]["diode"] = json::object(); return j; };
+    auto mosfet = [](json reqs = json()) { json j; j["semiconductor"]["mosfet"] = json::object();
+        if (!reqs.is_null()) j["inputs"]["designRequirements"] = reqs; return j; };
+    auto diode  = [](json reqs = json()) { json j; j["semiconductor"]["diode"] = json::object();
+        if (!reqs.is_null()) j["inputs"]["designRequirements"] = reqs; return j; };
 
-    // Single inductor L (single-winding magnetic).
+    // Single inductor L (single-winding magnetic) -> complete sourceable requirement with excitation.
+    // 4-switch buck-boost SIMULTANEOUS mode: charge phase applies Vin across L for D·T; the inductor
+    // delivers to the output only during (1-D), so I_L,avg = Io/(1-D). Currents at Vin_min (max duty /
+    // max inductor current); voltages at Vin_max (max flux swing). (mirrors Boost's worst-case corner.)
+    const double fsw = d.switchingFrequency, T = 1.0 / fsw, L_H = d.inductance;
+    const double Vo = d.outputVoltage, Io = d.outputPower / Vo;
+    const double Di = Vo / (d.inputVoltageMin + Vo);          // duty at Vin_min (current corner)
+    const double ILavg = Io / (1.0 - Di);                     // buck-boost inductor average current
+    const double dIL   = d.inputVoltageMin * Di * T / L_H;    // pk-pk ripple (charge phase)
+    const double IpkL  = ILavg + dIL / 2.0;
+    const double IrmsL = std::sqrt(ILavg * ILavg + dIL * dIL / 12.0);
+    const double Dv = Vo / (d.inputVoltageMax + Vo);          // duty at Vin_max (voltage corner)
+    const double vIndPk = std::max(d.inputVoltageMax, Vo), vIndPkPk = d.inputVoltageMax + Vo;
+    const double vIndRms = std::sqrt(Dv * d.inputVoltageMax * d.inputVoltageMax + (1.0 - Dv) * Vo * Vo);
     json lind; lind["magnetic"] = json::object();
-    lind["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"] = d.inductance;
-    lind["inputs"]["designRequirements"]["turnsRatios"] = json::array();
+    lind["inputs"] = req::magnetic_inputs(d.inductance, 0.2, /*single winding*/ {}, {"primary"},
+        std::nullopt, 25.0, {
+            req::winding_excitation("triangular", fsw, IpkL, IrmsL, ILavg, dIL, d.dutyCycle,
+                                    vIndPk, vIndRms, 0.0, vIndPkPk)});
+
+    // --- semiconductor stresses: all four H-bridge switches share one rating ---
+    // Buck leg Q1/Q2 nodes swing 0..Vin_max; boost leg Q3/Q4 nodes swing 0..Vout. Worst-case block
+    // voltage = max(Vin_max, Vout). Each switch carries the inductor current (IpkL / IrmsL).
+    const double Vblock   = std::max(d.inputVoltageMax, Vo);
+    const double ratedVds = Vblock / cfg::v_derate(d.config);
+    const double maxRdsOn = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IrmsL * IrmsL);
 
     json capd; capd["capacitor"] = json::object();
     capd["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;
@@ -103,7 +127,11 @@ json build_fsbb_tas(const FsbbDesign& d) {
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"),
                                  port("g1"), port("g2"), port("g3"), port("g4")});
     cell["components"] = json::array({
-        comp("Q1", mosfet()), comp("Q2", mosfet()), comp("Q3", mosfet()), comp("Q4", mosfet()),
+        comp("Q1", mosfet(req::mosfet("mainSwitch", ratedVds, IpkL, maxRdsOn, 125.0))),
+        comp("Q2", mosfet(req::mosfet("mainSwitch", ratedVds, IpkL, maxRdsOn, 125.0))),
+        comp("Q3", mosfet(req::mosfet("mainSwitch", ratedVds, IpkL, maxRdsOn, 125.0))),
+        comp("Q4", mosfet(req::mosfet("mainSwitch", ratedVds, IpkL, maxRdsOn, 125.0))),
+        // D1..D4 are anti-parallel BODY diodes across Q1..Q4 -> requirement-less (carried by the FET).
         comp("D1", diode()),  comp("D2", diode()),  comp("D3", diode()),  comp("D4", diode()),
         comp("L", lind), comp("Csw1", snub()), comp("Csw2", snub())});
     cell["connections"] = json::array({

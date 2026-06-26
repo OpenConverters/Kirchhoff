@@ -114,25 +114,73 @@ json build_psfb_tas(const PsfbDesign& d) {
     auto sp = [](const char* st, const char* po) { json e; e["stage"] = st; e["port"] = po; return e; };
     auto isc = [](const char* name, const char* kind, const char* dir, std::vector<json> eps) {
         json c; c["name"] = name; c["kind"] = kind; if (dir[0]) c["direction"] = dir; c["endpoints"] = eps; return c; };
-    auto mosfet = []() { json j; j["semiconductor"]["mosfet"] = json::object(); return j; };
     auto diode  = []() { json j; j["semiconductor"]["diode"] = json::object(); return j; };
 
     const double N = d.turnsRatio, Lm = d.magnetizingInductance;
+    const double fsw = d.switchingFrequency, Tsw = 1.0 / fsw;
+    const double Vo = d.outputVoltage, Io = d.outputPower / Vo;
+    const double Vin = d.inputVoltage, Deff = d.effectiveDuty;
 
-    // Series resonant/leakage inductor Lr (single-winding magnetic).
+    // --- stresses ---
+    // Output inductor (CCM): avg=Io, ripple from the Lo sizing volt-seconds.
+    const double dILo = Vo * (1.0 - Deff) / (d.outputInductance * fsw);   // pk-pk (= ripple sizing)
+    const double IloPk  = Io + dILo / 2.0;
+    const double IloRms = std::sqrt(Io * Io + dILo * dILo / 12.0);
+    const double vLoPk = std::max(std::abs(Vin / N - Vo), Vo), vLoPkPk = Vin / N, vLoRms = Vo;
+
+    // Transformer: PRIMARY carries the reflected output current (Io/N) during the power-transfer phase
+    // plus the magnetizing current; SECONDARY carries Io. Magnetizing ramp Im_pp from Vin*Deff over the
+    // active half (the same volt-seconds that sized Lm). Primary sees +-Vin (full bridge); secondary
+    // +-Vin/N. Two-level rectangular -> vRms = sqrt(Deff)*Von (effective on-fraction per polarity).
+    const double dILm = Vin * Deff * Tsw / (2.0 * Lm);   // magnetizing pk-pk
+    const double IpriCtr = Io / N;
+    const double IpriPk  = IpriCtr + dILm / 2.0;
+    const double IpriRms = std::sqrt(Deff) * std::sqrt(IpriCtr * IpriCtr + dILm * dILm / 12.0);
+    const double IsecPk  = Io + dILo / 2.0;             // = output-inductor peak (secondary feeds Lout)
+    const double IsecRms = std::sqrt(Deff) * std::sqrt(Io * Io + dILo * dILo / 12.0);
+    const double Vs = Vin / N;
+    const double vPriPk = Vin, vPriPkPk = 2.0 * Vin, vPriRms = std::sqrt(Deff) * Vin;
+    const double vSecPk = Vs,  vSecPkPk = 2.0 * Vs,  vSecRms = std::sqrt(Deff) * Vs;
+
+    // --- semiconductor ratings (sourceable requirements) ---
+    // Primary full-bridge switches QA..QD: each blocks the full bus (Vin_max) when off; they carry the
+    // primary current (reflected load + magnetizing), peak = IpriPk, rms = IpriRms. Anti-parallel DA..DD
+    // are the FETs' body diodes (left requirement-less).
+    const double ratedVds = d.inputVoltageMax / cfg::v_derate(d.config);
+    const double maxRdsOn  = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IpriRms * IpriRms);
+    json mosfetReq; mosfetReq["semiconductor"]["mosfet"] = json::object();
+    mosfetReq["inputs"]["designRequirements"] = req::mosfet("mainSwitch", ratedVds, IpriPk, maxRdsOn, 125.0);
+    // Secondary full-bridge rectifier Dr1..Dr4: each off diode blocks the secondary winding voltage
+    // (peak Vs); each carries the output current while conducting. REAL rectifiers -> req::diode.
+    const double ratedVr  = vSecPk / cfg::v_derate(d.config);
+    const double maxVf    = (ratedVr < 100.0) ? 0.6 : 1.2;
+    json diodeReq; diodeReq["semiconductor"]["diode"] = json::object();
+    diodeReq["inputs"]["designRequirements"] = req::diode(ratedVr, Io / 0.7, maxVf, 0.05 * Tsw);
+
+    // Series resonant/leakage inductor Lr (single-winding magnetic). Carries the full primary current;
+    // the tank is AC (no DC bias). Voltage is the leg-to-leg commutation drop ~Vin during commutation.
+    const double IlrPk = IpriPk, IlrRms = IpriRms;
     json lr; lr["magnetic"] = json::object();
-    lr["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"] = d.seriesInductance;
-    lr["inputs"]["designRequirements"]["turnsRatios"] = json::array();
+    lr["inputs"] = req::magnetic_inputs(d.seriesInductance, 0.2, {}, {"primary"},
+        std::nullopt, 25.0, {
+            req::winding_excitation("triangular", fsw, IlrPk, IlrRms, 0.0, 2.0 * IpriCtr, std::nullopt,
+                                    Vin, std::sqrt(Deff) * Vin, 0.0, 2.0 * Vin)});
 
-    // 2-winding transformer (primary + one full secondary), turnsRatios = [N].
+    // 2-winding transformer (primary + one full secondary), turnsRatios = [N] -> 2 excitations.
+    std::vector<std::string> isoSides{"primary", "secondary"};
     json xfmr; xfmr["magnetic"] = json::object();
-    xfmr["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"] = Lm;
-    { json rn; rn["nominal"] = N; xfmr["inputs"]["designRequirements"]["turnsRatios"] = json::array({rn}); }
+    xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, {N}, isoSides, std::nullopt, 25.0, {
+        req::winding_excitation("psfbPrimary",   fsw, IpriPk, IpriRms, 0.0, dILm, Deff,
+                                vPriPk, vPriRms, 0.0, vPriPkPk),
+        req::winding_excitation("psfbSecondary", fsw, IsecPk, IsecRms, 0.0, dILo, Deff,
+                                vSecPk, vSecRms, 0.0, vSecPkPk)});
 
-    // Output inductor Lo (single-winding magnetic).
+    // Output inductor Lo (single-winding magnetic, DC-biased at Io).
     json lout; lout["magnetic"] = json::object();
-    lout["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"] = d.outputInductance;
-    lout["inputs"]["designRequirements"]["turnsRatios"] = json::array();
+    lout["inputs"] = req::magnetic_inputs(d.outputInductance, 0.2, {}, {"primary"},
+        std::nullopt, 25.0, {
+            req::winding_excitation("triangular", fsw, IloPk, IloRms, Io, dILo, std::nullopt,
+                                    vLoPk, vLoRms, 0.0, vLoPkPk)});
 
     json capd; capd["capacitor"] = json::object();
     capd["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;
@@ -154,10 +202,10 @@ json build_psfb_tas(const PsfbDesign& d) {
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"),
                                  port("gateA"), port("gateB"), port("gateC"), port("gateD")});
     cell["components"] = json::array({
-        comp("QA", mosfet()), comp("QB", mosfet()), comp("QC", mosfet()), comp("QD", mosfet()),
+        comp("QA", mosfetReq), comp("QB", mosfetReq), comp("QC", mosfetReq), comp("QD", mosfetReq),
         comp("DA", diode()),  comp("DB", diode()),  comp("DC", diode()),  comp("DD", diode()),
         comp("Lr", lr), comp("T1", xfmr),
-        comp("Dr1", diode()), comp("Dr2", diode()), comp("Dr3", diode()), comp("Dr4", diode()),
+        comp("Dr1", diodeReq), comp("Dr2", diodeReq), comp("Dr3", diodeReq), comp("Dr4", diodeReq),
         comp("Lout", lout), comp("CsnA", snub()), comp("CsnC", snub()),
         comp("CsnSA", snub()), comp("CsnSB", snub())});
     cell["connections"] = json::array({

@@ -86,21 +86,67 @@ json build_dab_tas(const DabDesign& d) {
     auto sp = [](const char* st, const char* po) { json e; e["stage"] = st; e["port"] = po; return e; };
     auto isc = [](const char* name, const char* kind, const char* dir, std::vector<json> eps) {
         json c; c["name"] = name; c["kind"] = kind; if (dir[0]) c["direction"] = dir; c["endpoints"] = eps; return c; };
-    auto mosfet = []() { json j; j["semiconductor"]["mosfet"] = json::object(); return j; };
-    auto diode  = []() { json j; j["semiconductor"]["diode"] = json::object(); return j; };
+    auto mosfet = [](json reqs = json()) { json j; j["semiconductor"]["mosfet"] = json::object();
+        if (!reqs.is_null()) j["inputs"]["designRequirements"] = reqs; return j; };
+    auto diode  = [](json reqs = json()) { json j; j["semiconductor"]["diode"] = json::object();
+        if (!reqs.is_null()) j["inputs"]["designRequirements"] = reqs; return j; };
 
     const double N = d.turnsRatio, Lm = d.magnetizingInductance;
+    const double fsw = d.switchingFrequency, Lr_H = d.seriesInductance;
 
-    // Series (resonant + leakage) inductor Lr — single-winding magnetic.
+    // --- SPS tank-current stress (the current shared by Lr and the transformer primary) ---
+    // SPS inductor current is the piecewise-linear (trapezoidal) tank current. Primary-referred levels:
+    // V1 = Vin, V2' = N·Vout; the inductor sees (V1+V2') for the phase-shift fraction φ then (V1−V2') for
+    // the rest of the half-period, sign-symmetric. di/dθ = v_L/(ωL). Extrema (half-wave symmetric, so
+    // i(π) = −i(0)):
+    const double w = 2.0 * M_PI * fsw;                            // electrical angular frequency
+    const double phi = d.phaseShiftDeg * M_PI / 180.0;           // outer phase shift D3 (rad)
+    const double V1t = d.inputVoltage, V2t = N * d.outputVoltage; // primary-referred bridge square levels
+    const double i0  = -(V1t * M_PI + V2t * (2.0 * phi - M_PI)) / (2.0 * w * Lr_H);  // i_L at θ=0
+    const double iphi = i0 + (V1t + V2t) * phi / (w * Lr_H);                          // i_L at θ=φ
+    const double IpkTank = std::max(std::abs(i0), std::abs(iphi));
+    // RMS over a half period of the two linear segments [i0→iphi over φ] and [iphi→−i0 over π−φ]:
+    auto segSq = [](double a, double b, double len) { return len * (a * a + a * b + b * b) / 3.0; };
+    const double IrmsTank = std::sqrt((segSq(i0, iphi, phi) + segSq(iphi, -i0, M_PI - phi)) / M_PI);
+    const double dITank = std::abs(iphi - i0);                   // pk-pk swing within a half-period
+
+    // Inductor voltage levels (square, sign-symmetric); RMS = sqrt(d·(V1+V2')² + (1−d)·(V1−V2')²).
+    const double dFrac = phi / M_PI;
+    const double vLrPk = std::max(std::abs(V1t + V2t), std::abs(V1t - V2t)), vLrPkPk = 2.0 * vLrPk;
+    const double vLrRms = std::sqrt(dFrac * (V1t + V2t) * (V1t + V2t) + (1.0 - dFrac) * (V1t - V2t) * (V1t - V2t));
+
+    // Series (resonant + leakage) inductor Lr — single-winding magnetic carrying the full tank current.
     json lr; lr["magnetic"] = json::object();
-    lr["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"] = d.seriesInductance;
-    lr["inputs"]["designRequirements"]["turnsRatios"] = json::array();
+    lr["inputs"] = req::magnetic_inputs(Lr_H, 0.2, /*single winding*/ {}, {"primary"},
+        std::nullopt, 25.0, {
+            req::winding_excitation("triangular", fsw, IpkTank, IrmsTank, 0.0, dITank, std::nullopt,
+                                    vLrPk, vLrRms, 0.0, vLrPkPk)});
 
     // 2-winding transformer (primary + one secondary), turnsRatios = [N]. K=0.9999 (MAS default) so the
     // coupled-L matrix is non-singular with Lr in series (the whole reason DAB needs K<1).
+    // Primary winding carries the tank current (Lr is in series with it); secondary current is the tank
+    // current reflected by N (ampere-turns balance). Bridge windings see ±square voltages: primary ±Vin,
+    // secondary ±Vout. No DC bias (AC-driven). Galvanic-only isolation (no isolationVoltage on spec).
+    const double IpkSec = IpkTank * N, IrmsSec = IrmsTank * N, dITankSec = dITank * N;
+    const double vPriPk = d.inputVoltage,  vPriPkPk = 2.0 * d.inputVoltage,  vPriRms = d.inputVoltage;   // ±Vin square
+    const double vSecPk = d.outputVoltage, vSecPkPk = 2.0 * d.outputVoltage, vSecRms = d.outputVoltage;  // ±Vout square
+
+    // --- semiconductor stresses: primary bridge blocks Vin, secondary bridge blocks Vout ---
+    // QA..QD (primary full bridge) block the DC-link Vin_max and carry the tank current (IrmsTank).
+    // QE..QH (secondary active bridge) block Vout and carry the reflected tank current (IrmsSec).
+    // All eight are real, independently-driven switches (no passive rectifier — the secondary is a driven
+    // bridge, the phase shift sets the power transfer); their anti-parallel diodes DA..DH are BODY diodes.
+    const double ratedVdsPri = d.inputVoltageMax / cfg::v_derate(d.config);
+    const double ratedVdsSec = d.outputVoltage  / cfg::v_derate(d.config);
+    const double maxRdsOnPri = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IrmsTank * IrmsTank);
+    const double maxRdsOnSec = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IrmsSec  * IrmsSec);
+    std::vector<std::string> isoSides{"primary", "secondary"};
     json xfmr; xfmr["magnetic"] = json::object();
-    xfmr["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"] = Lm;
-    { json rn; rn["nominal"] = N; xfmr["inputs"]["designRequirements"]["turnsRatios"] = json::array({rn}); }
+    xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, {N}, isoSides, std::nullopt, 25.0, {
+        req::winding_excitation("dabPrimary",   fsw, IpkTank, IrmsTank, 0.0, dITank,    std::nullopt,
+                                vPriPk, vPriRms, 0.0, vPriPkPk),
+        req::winding_excitation("dabSecondary", fsw, IpkSec,  IrmsSec,  0.0, dITankSec, std::nullopt,
+                                vSecPk, vSecRms, 0.0, vSecPkPk)});
 
     json capd; capd["capacitor"] = json::object();
     capd["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;
@@ -129,12 +175,14 @@ json build_dab_tas(const DabDesign& d) {
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"),
                                  port("gateA"), port("gateB"), port("gateC"), port("gateD"),
                                  port("gateE"), port("gateF"), port("gateG"), port("gateH")});
+    auto mosfetPri = [&]() { return mosfet(req::mosfet("mainSwitch", ratedVdsPri, IpkTank, maxRdsOnPri, 125.0)); };
+    auto mosfetSec = [&]() { return mosfet(req::mosfet("mainSwitch", ratedVdsSec, IpkSec,  maxRdsOnSec, 125.0)); };
     cell["components"] = json::array({
-        // primary bridge + body diodes
-        comp("QA", mosfet()), comp("QB", mosfet()), comp("QC", mosfet()), comp("QD", mosfet()),
+        // primary bridge + (requirement-less) anti-parallel BODY diodes
+        comp("QA", mosfetPri()), comp("QB", mosfetPri()), comp("QC", mosfetPri()), comp("QD", mosfetPri()),
         comp("DA", diode()),  comp("DB", diode()),  comp("DC", diode()),  comp("DD", diode()),
-        // secondary active bridge + body diodes
-        comp("QE", mosfet()), comp("QF", mosfet()), comp("QG", mosfet()), comp("QH", mosfet()),
+        // secondary active bridge + (requirement-less) anti-parallel BODY diodes
+        comp("QE", mosfetSec()), comp("QF", mosfetSec()), comp("QG", mosfetSec()), comp("QH", mosfetSec()),
         comp("DE", diode()),  comp("DF", diode()),  comp("DG", diode()),  comp("DH", diode()),
         comp("Lr", lr), comp("T1", xfmr), comp("Cout", capd),
         // per-switch RC snubbers (hi = across top switch, lo = across bottom switch)

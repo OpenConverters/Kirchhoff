@@ -86,19 +86,76 @@ json build_pshb_tas(const PshbDesign& d) {
     auto sp = [](const char* st, const char* po){ json e; e["stage"]=st; e["port"]=po; return e; };
     auto isc = [](const char* name, const char* kind, const char* dir, std::vector<json> eps){
         json c; c["name"]=name; c["kind"]=kind; if(dir[0]) c["direction"]=dir; c["endpoints"]=eps; return c; };
-    auto mosfet = [](){ json j; j["semiconductor"]["mosfet"]=json::object(); return j; };
     auto diode  = [](){ json j; j["semiconductor"]["diode"]=json::object(); return j; };
 
     const double N = d.turnsRatio, Lm = d.magnetizingInductance;
+    const double fsw = d.switchingFrequency, Tsw = 1.0 / fsw;
+    const double Vo = d.outputVoltage, Io = d.outputPower / Vo;
+    const double Vhb = 0.5 * d.inputVoltage, Deff = d.effectiveDuty;   // split-cap half bus (sizing basis)
+
+    // --- stresses ---
+    // Output inductor (CCM): avg=Io, ripple from the Lo sizing volt-seconds.
+    const double dILo = Vo * (1.0 - Deff) / (d.outputInductance * fsw);   // pk-pk (= ripple sizing)
+    const double IloPk  = Io + dILo / 2.0;
+    const double IloRms = std::sqrt(Io * Io + dILo * dILo / 12.0);
+    const double vLoPk = std::max(std::abs(Vhb / N - Vo), Vo), vLoPkPk = Vhb / N, vLoRms = Vo;
+
+    // Transformer: the primary swings +-Vhb (= +-Vin/2, the split-cap half bus). PRIMARY carries the
+    // reflected output current (Io/N) plus magnetizing; SECONDARY carries Io. Magnetizing ramp from
+    // Vhb*Deff over the active half (same volt-seconds that sized Lm). vRms = sqrt(Deff)*Von.
+    const double dILm = Vhb * Deff * Tsw / (2.0 * Lm);   // magnetizing pk-pk
+    const double IpriCtr = Io / N;
+    const double IpriPk  = IpriCtr + dILm / 2.0;
+    const double IpriRms = std::sqrt(Deff) * std::sqrt(IpriCtr * IpriCtr + dILm * dILm / 12.0);
+    const double IsecPk  = Io + dILo / 2.0;             // secondary feeds Lout
+    const double IsecRms = std::sqrt(Deff) * std::sqrt(Io * Io + dILo * dILo / 12.0);
+    const double Vs = Vhb / N;
+    const double vPriPk = Vhb, vPriPkPk = 2.0 * Vhb, vPriRms = std::sqrt(Deff) * Vhb;
+    const double vSecPk = Vs,  vSecPkPk = 2.0 * Vs,  vSecRms = std::sqrt(Deff) * Vs;
+
+    // --- semiconductor ratings (sourceable requirements) ---
+    // 3-level NPC stack switches S1..S4: each device blocks the split-cap half bus (Vhb = Vin/2) when
+    // off; they carry the primary current (reflected load + magnetizing), peak = IpriPk, rms = IpriRms.
+    // Anti-parallel Db1..Db4 are the FETs' body diodes (left requirement-less).
+    const double ratedVds = Vhb / cfg::v_derate(d.config);
+    const double maxRdsOn  = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IpriRms * IpriRms);
+    json mosfetReq; mosfetReq["semiconductor"]["mosfet"] = json::object();
+    mosfetReq["inputs"]["designRequirements"] = req::mosfet("mainSwitch", ratedVds, IpriPk, maxRdsOn, 125.0);
+    // NPC neutral-point clamp diodes DC1/DC2: REAL diodes (not anti-parallel to any single FET) that
+    // clamp the inner nodes to the cap midpoint and freewheel the primary current; each blocks Vhb.
+    const double ratedVrClamp = Vhb / cfg::v_derate(d.config);
+    const double maxVfClamp    = (ratedVrClamp < 100.0) ? 0.6 : 1.2;
+    json clampDiodeReq; clampDiodeReq["semiconductor"]["diode"] = json::object();
+    clampDiodeReq["inputs"]["designRequirements"] = req::diode(ratedVrClamp, IpriPk, maxVfClamp, 0.05 * Tsw);
+    // Secondary full-bridge rectifier Dr1..Dr4: each off diode blocks the secondary winding voltage
+    // (peak Vs); each carries the output current while conducting. REAL rectifiers -> req::diode.
+    const double ratedVr  = vSecPk / cfg::v_derate(d.config);
+    const double maxVf    = (ratedVr < 100.0) ? 0.6 : 1.2;
+    json diodeReq; diodeReq["semiconductor"]["diode"] = json::object();
+    diodeReq["inputs"]["designRequirements"] = req::diode(ratedVr, Io / 0.7, maxVf, 0.05 * Tsw);
+
+    // Series resonant/leakage inductor Lr (single-winding magnetic): full primary current, AC (no DC).
     json lr; lr["magnetic"]=json::object();
-    lr["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"]=d.seriesInductance;
-    lr["inputs"]["designRequirements"]["turnsRatios"]=json::array();
+    lr["inputs"] = req::magnetic_inputs(d.seriesInductance, 0.2, {}, {"primary"},
+        std::nullopt, 25.0, {
+            req::winding_excitation("triangular", fsw, IpriPk, IpriRms, 0.0, 2.0 * IpriCtr, std::nullopt,
+                                    Vhb, std::sqrt(Deff) * Vhb, 0.0, 2.0 * Vhb)});
+
+    // 2-winding transformer (primary + one full secondary), turnsRatios = [N] -> 2 excitations.
+    std::vector<std::string> isoSides{"primary", "secondary"};
     json xfmr; xfmr["magnetic"]=json::object();
-    xfmr["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"]=Lm;
-    { json rn; rn["nominal"]=N; xfmr["inputs"]["designRequirements"]["turnsRatios"]=json::array({rn}); }
+    xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, {N}, isoSides, std::nullopt, 25.0, {
+        req::winding_excitation("pshbPrimary",   fsw, IpriPk, IpriRms, 0.0, dILm, Deff,
+                                vPriPk, vPriRms, 0.0, vPriPkPk),
+        req::winding_excitation("pshbSecondary", fsw, IsecPk, IsecRms, 0.0, dILo, Deff,
+                                vSecPk, vSecRms, 0.0, vSecPkPk)});
+
+    // Output inductor Lo (single-winding magnetic, DC-biased at Io).
     json lout; lout["magnetic"]=json::object();
-    lout["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"]=d.outputInductance;
-    lout["inputs"]["designRequirements"]["turnsRatios"]=json::array();
+    lout["inputs"] = req::magnetic_inputs(d.outputInductance, 0.2, {}, {"primary"},
+        std::nullopt, 25.0, {
+            req::winding_excitation("triangular", fsw, IloPk, IloRms, Io, dILo, std::nullopt,
+                                    vLoPk, vLoRms, 0.0, vLoPkPk)});
     auto cap = [](double c, double v){ json j; j["capacitor"]=json::object();
         j["inputs"]["designRequirements"]["capacitance"]["nominal"]=c;
         j["inputs"]["designRequirements"]["ratedVoltage"]=v; return j; };
@@ -110,11 +167,11 @@ json build_pshb_tas(const PshbDesign& d) {
     cell["ports"]=json::array({port("vin"),port("gnd"),port("vout"),port("g1"),port("g2"),port("g3"),port("g4")});
     cell["components"]=json::array({
         comp("CsHi",csplit), comp("CsLo",csplit),
-        comp("S1",mosfet()), comp("S2",mosfet()), comp("S3",mosfet()), comp("S4",mosfet()),
+        comp("S1",mosfetReq), comp("S2",mosfetReq), comp("S3",mosfetReq), comp("S4",mosfetReq),
         comp("Db1",diode()), comp("Db2",diode()), comp("Db3",diode()), comp("Db4",diode()),
-        comp("DC1",diode()), comp("DC2",diode()),
+        comp("DC1",clampDiodeReq), comp("DC2",clampDiodeReq),
         comp("Lr",lr), comp("T1",xfmr),
-        comp("Dr1",diode()), comp("Dr2",diode()), comp("Dr3",diode()), comp("Dr4",diode()),
+        comp("Dr1",diodeReq), comp("Dr2",diodeReq), comp("Dr3",diodeReq), comp("Dr4",diodeReq),
         comp("Lout",lout), comp("CsnB",snub), comp("CsnSA",snub), comp("CsnSB",snub)});
     cell["connections"]=json::array({
         conn("vin_net",  {pin("CsHi","1"), pin("S1","drain"), pin("Db1","cathode"), prt("vin")}),

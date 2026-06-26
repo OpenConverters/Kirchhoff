@@ -77,17 +77,77 @@ json build_push_pull_tas(const PushPullDesign& d) {
     auto diode  = []() { json j; j["semiconductor"]["diode"] = json::object(); return j; };
 
     const double N = d.turnsRatio, Lm = d.magnetizingInductance;
+    const double fsw = d.switchingFrequency;
+    const double Vin = d.inputVoltage, Vout = d.outputVoltage, Dn = d.dutyCycle;
+
+    // --- per-winding electrical stresses (volt-second balanced, nominal operating point) ---
+    // CURRENTS. Buck-derived: the output inductor carries a DC-biased triangle (avg=Iout). Each
+    // secondary half conducts only during its switch's ON-time (duty Dn per half-cycle) carrying
+    // the inductor current; each primary half reflects that, scaled by 1/N, plus magnetizing.
+    const double Iout  = d.outputPower / Vout;
+    const double dILout = cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Iout;
+    const double IpkLout = Iout + dILout / 2.0;
+    const double IrmsLout = std::sqrt(Iout * Iout + dILout * dILout / 12.0);
+    // Secondary half: square pulse of height ≈ Iout for duty Dn (one half-cycle); offset 0 (AC).
+    const double IpkSec  = IpkLout;
+    const double IrmsSec = std::sqrt(Dn) * Iout;
+    const double dISec   = dILout;
+    // Primary half: reflected secondary current /N, conducting duty Dn on alternate half-cycles.
+    const double IpkPri  = IpkLout / N;
+    const double IrmsPri = std::sqrt(Dn) * Iout / N;
+    const double dIPri   = dILout / N;
+    // VOLTAGES. Each primary half is a square ±Vin (center tap at Vin; the off half is reflected to
+    // -Vin). Each secondary half sees ±N·Vin. The output inductor sees +(Vin/N - Vout) when either
+    // diode conducts (combined duty 2·Dn) and -Vout otherwise. All winding-voltage offsets are 0
+    // (the DC bias lives in the inductor CURRENT, not its volt-seconds).
+    const double D2 = std::min(1.0, 2.0 * Dn);
+    const double vPriPk = Vin, vPriPkPk = 2.0 * Vin, vPriRms = Vin;
+    const double vSecPk = N * Vin, vSecPkPk = 2.0 * N * Vin, vSecRms = N * Vin;
+    const double vLoutOn = Vin / N - Vout;
+    const double vLoutPk = std::max(std::fabs(vLoutOn), Vout), vLoutPkPk = Vin / N;
+    const double vLoutRms = std::sqrt(D2 * vLoutOn * vLoutOn + (1.0 - D2) * Vout * Vout);
+
+    // --- semiconductor stresses (push-pull, center-tapped) ---
+    // Each primary switch blocks 2*Vin: when its half is off, the conducting half drives the center tap
+    // such that the off switch drain sees the rail (Vin) plus the reflected opposite half (Vin) = 2*Vin.
+    // Worst case at the max input corner: ratedVds = 2*Vin_max / V_DERATE.
+    const double VdsStress = 2.0 * d.inputVoltageMax;
+    const double ratedVds  = VdsStress / cfg::v_derate(d.config);
+    const double maxRdsOn  = (IrmsPri > 0.0)
+        ? cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IrmsPri * IrmsPri)
+        : cfg::rds_on_loss_fraction(d.config) * d.outputPower;
+    // Center-tapped full-wave output rectifiers Dtop/Dbot are REAL rectifiers (not FET body diodes):
+    // each reverse-blocks the FULL secondary swing 2*N*Vin (the non-conducting diode sees both half
+    // windings in series) and carries the inductor current during its half-cycle (~Iout).
+    const double ratedVr  = (2.0 * N * d.inputVoltageMax) / cfg::v_derate(d.config);
+    const double maxVf    = (ratedVr < 100.0) ? 0.6 : 1.2;
+    const double Tsw      = 1.0 / fsw;
+    const double maxTrr   = 0.05 * Tsw;
+    auto mosfetReq = [&]() { json j = mosfet();
+        j["inputs"]["designRequirements"] = req::mosfet("mainSwitch", ratedVds, IpkPri, maxRdsOn, 125.0); return j; };
+    auto rectDiode = [&]() { json j = diode();
+        j["inputs"]["designRequirements"] = req::diode(ratedVr, Iout / 0.7, maxVf, maxTrr); return j; };
 
     // 4-winding transformer: turnsRatios = [1 (2nd primary half), N (sec top), N (sec bot)].
     // Dot/terminal order mirrors MKF: Lpri_top pri_top->center_tap; Lpri_bot center_tap->pri_bot;
-    // Lsec_top sec_top->gnd; Lsec_bot gnd->sec_bot.
+    // Lsec_top sec_top->gnd; Lsec_bot gnd->sec_bot. Isolated -> isolationSides per winding
+    // {primary, primary, secondary, secondary}. PushPullDesign carries no isolationVoltage -> nullopt.
     json xfmr; xfmr["magnetic"] = json::object();
-    xfmr["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"] = Lm;
-    { json r1; r1["nominal"] = 1.0; json rn; rn["nominal"] = N;
-      xfmr["inputs"]["designRequirements"]["turnsRatios"] = json::array({r1, rn, rn}); }
+    xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, {1.0, N, N},
+        {"primary", "primary", "secondary", "secondary"}, std::nullopt, 25.0, {
+            req::winding_excitation("pushPullPrimary",   fsw, IpkPri, IrmsPri, 0.0, dIPri, Dn,
+                                    vPriPk, vPriRms, 0.0, vPriPkPk),
+            req::winding_excitation("pushPullPrimary",   fsw, IpkPri, IrmsPri, 0.0, dIPri, Dn,
+                                    vPriPk, vPriRms, 0.0, vPriPkPk),
+            req::winding_excitation("pushPullSecondary", fsw, IpkSec, IrmsSec, 0.0, dISec, Dn,
+                                    vSecPk, vSecRms, 0.0, vSecPkPk),
+            req::winding_excitation("pushPullSecondary", fsw, IpkSec, IrmsSec, 0.0, dISec, Dn,
+                                    vSecPk, vSecRms, 0.0, vSecPkPk)});
     json lout; lout["magnetic"] = json::object();
-    lout["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"] = d.outputInductance;
-    lout["inputs"]["designRequirements"]["turnsRatios"] = json::array();
+    lout["inputs"] = req::magnetic_inputs(d.outputInductance, 0.2, /*single winding*/ {}, {"primary"},
+        std::nullopt, 25.0, {
+            req::winding_excitation("triangular", fsw, IpkLout, IrmsLout, Iout, dILout, D2,
+                                    vLoutPk, vLoutRms, 0.0, vLoutPkPk)});
     json capd; capd["capacitor"] = json::object();
     capd["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;
     capd["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage * 2;
@@ -104,8 +164,8 @@ json build_push_pull_tas(const PushPullDesign& d) {
 
     json cell; cell["name"] = "push-pull-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate1"), port("gate2")});
-    cell["components"] = json::array({comp("T1", xfmr), comp("Q1", mosfet()), comp("Q2", mosfet()),
-                                      comp("Dtop", diode()), comp("Dbot", diode()), comp("Lout", lout),
+    cell["components"] = json::array({comp("T1", xfmr), comp("Q1", mosfetReq()), comp("Q2", mosfetReq()),
+                                      comp("Dtop", rectDiode()), comp("Dbot", rectDiode()), comp("Lout", lout),
                                       comp("Csn1", snub()), comp("Csn2", snub()),
                                       comp("Csn3", snub()), comp("Csn4", snub())});
     cell["connections"] = json::array({

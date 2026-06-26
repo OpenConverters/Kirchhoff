@@ -409,6 +409,75 @@ void check_real_deck(const std::string& name, double coss = 1e-9, bool probe = f
     SUCCEED();   // diagnostic: never fails the build
 }
 
+// --- MAGNETIC-SEED COMPLETENESS (ABT #34): every magnetic a topology emits must carry a COMPLETE MAS
+// envelope — designRequirements (magnetizingInductance + turnsRatios) AND one operating point whose
+// excitationsPerWinding has exactly ONE excitation per physical winding (= turnsRatios.size()+1). The
+// downstream topology-agnostic PyOM designer (calculate_advised_magnetics_fast) raises on an incomplete
+// seed, so an inductance-only seed must never reach it. Each excitation must carry finite current+voltage
+// (peak & rms) — no NaN/inf and no all-zero stress. ---
+void collect_magnetics(const json& node, std::vector<json>& out) {
+    if (node.is_object()) {
+        if (node.contains("data") && node["data"].is_object() && node["data"].contains("magnetic"))
+            out.push_back(node["data"]);
+        for (auto& [k, v] : node.items()) collect_magnetics(v, out);
+    } else if (node.is_array()) {
+        for (const auto& e : node) collect_magnetics(e, out);
+    }
+}
+
+bool finite_pos(const json& x) { return x.is_number() && std::isfinite(x.get<double>()); }
+
+void check_magnetic_completeness(const std::string& name) {
+    json fx = load_fixture(name);
+    const json& in = fx.at("inputs");
+    json di = kirchhoff_inputs(in);
+    if (kDualOutput.count(name)) {
+        const json& des = fx.at("design");
+        json os; os["name"] = "vsec"; os["voltage"]["nominal"] = des.at("secondaryVoltage").get<double>();
+        di["designRequirements"]["outputs"].push_back(os);
+        json osp; osp["power"] = des.at("secondaryPower").get<double>();
+        di["operatingPoints"][0]["outputs"].push_back(osp);
+    }
+    Built b; bool built = false;
+    for (const auto& t : topologies()) if (t.name == name) { b = t.build(di); built = true; break; }
+    REQUIRE(built);
+
+    std::vector<json> mags;
+    collect_magnetics(b.tas, mags);
+    INFO(name << ": magnetic components found = " << mags.size());
+    REQUIRE(mags.size() >= 1);   // every topology has at least one magnetic
+
+    for (const auto& m : mags) {
+        REQUIRE(m.contains("inputs"));
+        const json& inp = m.at("inputs");
+        REQUIRE(inp.contains("designRequirements"));
+        const json& dr = inp.at("designRequirements");
+        REQUIRE(dr.contains("magnetizingInductance"));
+        const size_t nWind = dr.contains("turnsRatios") ? dr.at("turnsRatios").size() + 1 : 1;
+        // COMPLETE seed: operatingPoints[0].excitationsPerWinding, one per physical winding.
+        REQUIRE(inp.contains("operatingPoints"));
+        REQUIRE(inp.at("operatingPoints").size() >= 1);
+        const json& op = inp.at("operatingPoints").at(0);
+        REQUIRE(op.contains("excitationsPerWinding"));
+        const json& exc = op.at("excitationsPerWinding");
+        INFO(name << ": winding count expected " << nWind << " (turnsRatios+1), got " << exc.size());
+        CHECK(exc.size() == nWind);
+        for (const auto& e : exc) {
+            REQUIRE(e.contains("frequency"));
+            CHECK(finite_pos(e.at("frequency")));
+            REQUIRE(e.contains("current"));  REQUIRE(e.at("current").contains("processed"));
+            REQUIRE(e.contains("voltage"));  REQUIRE(e.at("voltage").contains("processed"));
+            const json& ci = e.at("current").at("processed");
+            const json& vo = e.at("voltage").at("processed");
+            CHECK(finite_pos(ci.at("peak")));   CHECK(finite_pos(ci.at("rms")));
+            CHECK(finite_pos(vo.at("peak")));   CHECK(finite_pos(vo.at("rms")));
+            // not an all-zero stress (would mean a fabricated placeholder, not a real excitation)
+            CHECK((std::fabs(ci.at("peak").get<double>()) + std::fabs(ci.at("rms").get<double>())) > 0.0);
+            CHECK((std::fabs(vo.at("peak").get<double>()) + std::fabs(vo.at("rms").get<double>())) > 0.0);
+        }
+    }
+}
+
 }  // namespace
 
 // One TEST_CASE per topology (each tagged) so a failure names the offending converter directly.
@@ -433,6 +502,13 @@ TEST_CASE("Weinberg meets requirements", "[requirements][weinberg]")            
 TEST_CASE("LLC meets requirements", "[requirements][llc]")                         { check_meets_requirements("llc"); }
 TEST_CASE("SRC meets requirements", "[requirements][src]")                         { check_meets_requirements("src"); }
 TEST_CASE("CLLC meets requirements", "[requirements][cllc]")                       { check_meets_requirements("cllc"); }
+
+// Magnetic-seed completeness (ABT #34): every magnetic carries a full excitation-bearing MAS envelope.
+TEST_CASE("magnetic seed complete: all topologies", "[magseed]") {
+    for (const auto& t : topologies()) {
+        DYNAMIC_SECTION(t.name) { check_magnetic_completeness(t.name); }
+    }
+}
 
 // Multi-point: each topology at its MKF PtP reference-design operating points (validated our way).
 TEST_CASE("Buck PtP reference designs deliver spec", "[requirements][ptp][buck]")           { check_topo_points("buck"); }

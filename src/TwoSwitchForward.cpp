@@ -66,13 +66,68 @@ json build_two_switch_forward_tas(const TwoSwitchForwardDesign& d) {
     auto mosfet = []() { json j; j["semiconductor"]["mosfet"] = json::object(); return j; };
     auto diode  = []() { json j; j["semiconductor"]["diode"] = json::object(); return j; };
 
-    // 2-winding transformer (primary + secondary, no demag): turnsRatios = [n].
+    const double n = d.turnsRatio, Lm = d.magnetizingInductance, fsw = d.switchingFrequency;
+    const double T = 1.0 / fsw, Dn = d.dutyCycle, Vin = d.inputVoltage, Vout = d.outputVoltage;
+    const double iout = d.outputPower / d.outputVoltage;
+
+    // --- per-winding electrical stresses (two-switch forward; the two clamp diodes reset to ±Vin) ---
+    // Magnetizing current ramp during ON, peak = Vin*D*T/Lm; resets through the clamp diodes (the
+    // primary itself carries the reset current back to the rails, no separate demag winding).
+    const double ImagPk  = Vin * Dn * T / Lm;
+    const double ImagRms = ImagPk * std::sqrt(Dn / 3.0);
+    const double dILout  = (Vin / n - d.diodeDrop - Vout) * (Dn * T) / d.outputInductance;
+    const double IpkLout = iout + dILout / 2.0;
+    const double IrmsLout = std::sqrt(iout * iout + dILout * dILout / 12.0);
+    // Secondary carries the inductor current during ON (conducts D).
+    const double IcSec   = iout, IpkSec = IpkLout;
+    const double IrmsSec = std::sqrt(Dn) * std::sqrt(iout * iout + dILout * dILout / 12.0);
+    // Primary = reflected secondary current (Iout/n) + magnetizing ramp, during ON.
+    const double IcPri   = iout / n;
+    const double IpkPri  = IpkSec / n + ImagPk;
+    const double IrmsPri = std::sqrt(Dn) * IcPri + ImagRms;
+    // Winding voltages: primary +Vin during ON, -Vin during reset (clamped by D1/D2); peak Vin, swing 2*Vin.
+    const double vPriPk = Vin, vPriPkPk = 2.0 * Vin;
+    const double vPriRms = Vin;                                  // square ±Vin
+    const double vSecPk = Vin / n, vSecPkPk = Vin / n;
+    const double vSecRms = std::sqrt(Dn) * (Vin / n);
+    const double vLonF = Vin / n - d.diodeDrop - Vout, vLoff = Vout;
+    const double vLoutPk = std::max(std::abs(vLonF), vLoff), vLoutPkPk = std::abs(vLonF) + vLoff;
+    const double vLoutRms = std::sqrt(Dn * vLonF * vLonF + (1.0 - Dn) * vLoff * vLoff);
+
+    // --- semiconductor stresses (two-switch forward) ---
+    // Each primary switch blocks Vin_max: the two clamp diodes D1/D2 hold the switch nodes to the rails
+    // during reset, so neither MOSFET sees more than the input bus. ratedVds = Vin_max / V_DERATE.
+    const double ratedVds = d.inputVoltageMax / cfg::v_derate(d.config);
+    const double maxRdsOn = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IrmsPri * IrmsPri);
+    // Clamp/reset diodes D1,D2 are REAL rectifiers (not FET body diodes): they steer the magnetizing
+    // reset current back to the rails and reverse-block the full input bus Vin_max. They carry the
+    // magnetizing reset current (peak ImagPk).
+    const double ratedVrClamp = d.inputVoltageMax / cfg::v_derate(d.config);
+    const double maxVfClamp    = (ratedVrClamp < 100.0) ? 0.6 : 1.2;
+    // Output forward/freewheel rectifiers reverse-block the secondary peak Vin_max/n, carry ~Iout.
+    const double ratedVrSec = (d.inputVoltageMax / n) / cfg::v_derate(d.config);
+    const double maxVfSec    = (ratedVrSec < 100.0) ? 0.6 : 1.2;
+    const double maxTrr      = 0.05 * T;
+    const auto mreq = req::mosfet("mainSwitch", ratedVds, IpkPri, maxRdsOn, 125.0);
+    auto mosfetReq = [&]() { json j = mosfet(); j["inputs"]["designRequirements"] = mreq; return j; };
+    auto clampDiode = [&]() { json j = diode();
+        j["inputs"]["designRequirements"] = req::diode(ratedVrClamp, ImagPk / 0.7, maxVfClamp, maxTrr); return j; };
+    auto rectDiode = [&]() { json j = diode();
+        j["inputs"]["designRequirements"] = req::diode(ratedVrSec, iout / 0.7, maxVfSec, maxTrr); return j; };
+
+    // 2-winding transformer (primary + secondary, no demag): turnsRatios = [n] -> 2 excitations.
+    std::vector<std::string> xfmrIso{"primary", "secondary"};
     json xfmr; xfmr["magnetic"] = json::object();
-    xfmr["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"] = d.magnetizingInductance;
-    { json rn; rn["nominal"] = d.turnsRatio; xfmr["inputs"]["designRequirements"]["turnsRatios"] = json::array({rn}); }
+    xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, {n}, xfmrIso, std::nullopt, 25.0, {
+        req::winding_excitation("forwardPrimary",   fsw, IpkPri, IrmsPri, 0.0, IpkPri, Dn,
+                                vPriPk, vPriRms, 0.0, vPriPkPk),
+        req::winding_excitation("forwardSecondary", fsw, IpkSec, IrmsSec, IcSec, dILout, Dn,
+                                vSecPk, vSecRms, 0.0, vSecPkPk)});
+    // Output filter inductor: single winding (turnsRatios = []) -> 1 excitation, DC-biased at Iout.
     json lout; lout["magnetic"] = json::object();
-    lout["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"] = d.outputInductance;
-    lout["inputs"]["designRequirements"]["turnsRatios"] = json::array();
+    lout["inputs"] = req::magnetic_inputs(d.outputInductance, 0.2, {}, {"primary"}, std::nullopt, 25.0, {
+        req::winding_excitation("triangular", fsw, IpkLout, IrmsLout, iout, dILout, Dn,
+                                vLoutPk, vLoutRms, 0.0, vLoutPkPk)});
     json capd; capd["capacitor"] = json::object();
     capd["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;
     capd["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage * 2;
@@ -80,9 +135,9 @@ json build_two_switch_forward_tas(const TwoSwitchForwardDesign& d) {
     // forward cell: 2 switches (driven together) + 2 clamp diodes + transformer + output stage.
     json cell; cell["name"] = "two-switch-forward-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate")});
-    cell["components"] = json::array({comp("Q1", mosfet()), comp("Q2", mosfet()),
-                                      comp("D1", diode()), comp("D2", diode()), comp("T1", xfmr),
-                                      comp("Dfwd", diode()), comp("Dfw", diode()), comp("Lout", lout)});
+    cell["components"] = json::array({comp("Q1", mosfetReq()), comp("Q2", mosfetReq()),
+                                      comp("D1", clampDiode()), comp("D2", clampDiode()), comp("T1", xfmr),
+                                      comp("Dfwd", rectDiode()), comp("Dfw", rectDiode()), comp("Lout", lout)});
     cell["connections"] = json::array({
         // High side: vin -> Q1 -> sw1_out -> primary_start; clamp D1 (gnd -> sw1_out), clamp D2 (pri_gnd -> vin)
         conn("vin_net",  {pin("Q1", "drain"), pin("D2", "cathode"), prt("vin")}),

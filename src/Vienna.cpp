@@ -76,17 +76,50 @@ json build_vienna_tas(const ViennaDesign& d) {
     auto sp = [](const std::string& st, const std::string& po) { json e; e["stage"]=st; e["port"]=po; return e; };
     auto isc = [](const std::string& name, const char* kind, const char* dir, std::vector<json> eps) {
         json c; c["name"]=name; c["kind"]=kind; if (dir[0]) c["direction"]=dir; c["endpoints"]=eps; return c; };
-    auto mosfet = []() { json j; j["semiconductor"]["mosfet"] = json::object(); return j; };
-    auto diode  = []() { json j; j["semiconductor"]["diode"] = json::object(); return j; };
+    auto mosfet = [](const json& reqs) { json j; j["semiconductor"]["mosfet"] = json::object();
+        j["inputs"]["designRequirements"] = reqs; return j; };
+    auto diode  = [](const json& reqs) { json j; j["semiconductor"]["diode"] = json::object();
+        j["inputs"]["designRequirements"] = reqs; return j; };
     auto capBrick = [&](double c, double vr) { json j; j["capacitor"] = json::object();
         j["inputs"]["designRequirements"]["capacitance"]["nominal"] = c;
         j["inputs"]["designRequirements"]["ratedVoltage"] = vr; return j; };
-    auto indBrick = [&](double L) { json j; j["magnetic"] = json::object();
-        j["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"] = L;
-        j["inputs"]["designRequirements"]["turnsRatios"] = json::array(); return j; };
+    auto indBrick = [&](double L, const json& excitation) { json j; j["magnetic"] = json::object();
+        j["inputs"] = req::magnetic_inputs(L, 0.2, /*single winding*/ {}, {"primary"},
+            std::nullopt, 25.0, {excitation}); return j; };
+
+    // Per-phase boost-inductor excitation. Each Vienna leg boosts its phase to the HALF-bus (Vout/2, the
+    // 3-level step). Current is a rectified-sine envelope (per-phase peak) with HF ripple; voltages are the
+    // half-bus boost levels. (Mirrors the single-phase PFC inductor; per-phase current = total/3.)
+    const double pinV   = d.outputPower / std::max(d.efficiency, 1e-6);
+    const double vpeakV = d.inputVoltageRms * std::sqrt(2.0);
+    const double Vhalf  = 0.5 * d.outputVoltage;
+    const double iLineRmsV = pinV / (3.0 * d.inputVoltageRms);          // per-phase LF rms
+    const double iPeakEnvV = std::sqrt(2.0) * iLineRmsV;                // per-phase line-current peak
+    const double dILpkV = Vhalf / (4.0 * d.switchingFrequency * d.boostInductance);  // inverts the L sizing
+    const double IpkLV  = iPeakEnvV + dILpkV / 2.0;
+    const double IrmsLV = std::sqrt(iLineRmsV * iLineRmsV + dILpkV * dILpkV / 12.0);
+    const double IavgLV = (2.0 / kPi) * iPeakEnvV;
+    const double DpkV   = std::max(0.0, (Vhalf - vpeakV) / Vhalf);      // boost duty at line peak (to half-bus)
+    const double vIndPkV   = std::max(vpeakV, Vhalf - vpeakV), vIndPkPkV = Vhalf;
+    const double vIndRmsV  = std::sqrt(DpkV * vpeakV * vpeakV + (1.0 - DpkV) * (Vhalf - vpeakV) * (Vhalf - vpeakV));
+    const json indExcV = req::winding_excitation("triangular", d.switchingFrequency,
+        IpkLV, IrmsLV, IavgLV, dILpkV, DpkV, vIndPkV, vIndRmsV, 0.0, vIndPkPkV);
     auto resBrick = [&](double r) { json j; j["resistor"] = json::object();
         j["inputs"]["designRequirements"]["deviceType"] = "resistor";
         j["inputs"]["designRequirements"]["resistance"]["nominal"] = r; return j; };
+
+    // ── per-phase semiconductor requirements (worst-case corner) ──
+    // Each Vienna leg's bidirectional switch SW* steers its phase to the midpoint; when off it blocks
+    // the HALF bus (Vout/2, the 3-level step). The per-phase rectifier diodes Dp*/Dn* clamp node X to
+    // ±half-bus and are REAL line/phase rectifiers (Dp: X->busP, Dn: busN->X — neither is anti-parallel
+    // to SW*, which shunts X->gnd). All carry the per-phase line-current envelope already computed.
+    const double ratedVdsV = Vhalf / cfg::v_derate(d.config);   // switch blocks the half-bus
+    const double ratedVrV  = Vhalf / cfg::v_derate(d.config);   // each diode blocks the half-bus
+    const double maxRdsOnV = cfg::rds_on_loss_fraction(d.config) * (d.outputPower / 3.0) / (IrmsLV * IrmsLV);
+    const double maxVfV    = (ratedVrV < 100.0) ? 0.6 : 1.2;
+    const double IfV       = IavgLV / 0.7;   // per-phase rectifier average current with margin
+    const json reqSWV = req::mosfet("mainSwitch", ratedVdsV, IpkLV, maxRdsOnV, 125.0);
+    const json reqDV  = req::diode(ratedVrV, IfV, maxVfV);   // phase rectifier (no trr spec)
 
     json pcell; pcell["name"] = "vienna-power";
     json ports = json::array({port("a"), port("b"), port("c"), port("gnd"), port("busP"), port("busN")});
@@ -109,10 +142,10 @@ json build_vienna_tas(const ViennaDesign& d) {
         const std::string p = ph[i];
         const std::string RS="Rs"+p, L="L"+p, SW="SW"+p, DP="Dp"+p, DN="Dn"+p, X="x"+p, G="g"+p, NL="nl"+p;
         comps.push_back(comp(RS, resBrick(d.senseResistance)));
-        comps.push_back(comp(L, indBrick(d.boostInductance)));
-        comps.push_back(comp(SW, mosfet()));
-        comps.push_back(comp(DP, diode()));
-        comps.push_back(comp(DN, diode()));
+        comps.push_back(comp(L, indBrick(d.boostInductance, indExcV)));
+        comps.push_back(comp(SW, mosfet(reqSWV)));
+        comps.push_back(comp(DP, diode(reqDV)));
+        comps.push_back(comp(DN, diode(reqDV)));
         conns.push_back(conn("phin_"+p, {pin(RS,"1"), prt(p)}));                   // phase source -> Rsense
         conns.push_back(conn(NL, {pin(RS,"2"), pin(L,"primary_start"), prt(NL)})); // sense node -> L
         conns.push_back(conn(X, {pin(L,"primary_end"), pin(SW,"drain"),

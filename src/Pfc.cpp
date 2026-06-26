@@ -82,14 +82,16 @@ json build_pfc_tas(const PfcDesign& d) {
     auto sp = [](const char* st, const char* po) { json e; e["stage"] = st; e["port"] = po; return e; };
     auto isc = [](const char* name, const char* kind, const char* dir, std::vector<json> eps) {
         json c; c["name"] = name; c["kind"] = kind; if (dir[0]) c["direction"] = dir; c["endpoints"] = eps; return c; };
-    auto mosfet = []() { json j; j["semiconductor"]["mosfet"] = json::object(); return j; };
-    auto diode  = []() { json j; j["semiconductor"]["diode"] = json::object(); return j; };
+    auto mosfet = [](const json& reqs) { json j; j["semiconductor"]["mosfet"] = json::object();
+        j["inputs"]["designRequirements"] = reqs; return j; };
+    auto diode  = [](const json& reqs) { json j; j["semiconductor"]["diode"] = json::object();
+        j["inputs"]["designRequirements"] = reqs; return j; };
     auto capBrick = [&](double c, double vr) { json j; j["capacitor"] = json::object();
         j["inputs"]["designRequirements"]["capacitance"]["nominal"] = c;
         j["inputs"]["designRequirements"]["ratedVoltage"] = vr; return j; };
-    auto indBrick = [&](double L) { json j; j["magnetic"] = json::object();
-        j["inputs"]["designRequirements"]["magnetizingInductance"]["nominal"] = L;
-        j["inputs"]["designRequirements"]["turnsRatios"] = json::array(); return j; };
+    auto indBrick = [&](double L, const json& excitation) { json j; j["magnetic"] = json::object();
+        j["inputs"] = req::magnetic_inputs(L, 0.2, /*single winding*/ {}, {"primary"},
+            std::nullopt, 25.0, {excitation}); return j; };
     auto resBrick = [&](double r) { json j; j["resistor"] = json::object();
         j["inputs"]["designRequirements"]["deviceType"] = "resistor";
         j["inputs"]["designRequirements"]["resistance"]["nominal"] = r; return j; };
@@ -107,13 +109,50 @@ json build_pfc_tas(const PfcDesign& d) {
     // Rsense is in SERIES with the inductor (busP -> Rsense -> nL -> L), so V(busP)-V(nL) = iL·Rsense is
     // the true input/inductor current (a return-side resistor would sense the load return, not iL). The
     // boost return is clean ground.
+    // Boost-inductor excitation: the current is a rectified-sine ENVELOPE (peak iPeak at the line peak)
+    // with HF switching ripple riding on it. Saturation is set by the line-peak instantaneous peak; heating
+    // by the line-rms input current (plus the HF ripple); flux swing (core loss) by the HF voltage at the
+    // boost rate. (No DC bias — the envelope returns to ~0 each line zero-crossing; offset = line average.)
+    const double pinW  = d.outputPower / std::max(d.efficiency, 1e-6);
+    const double vpeak = d.inputVoltageRms * std::sqrt(2.0);
+    const double iLineRms = pinW / d.inputVoltageRms;       // input/inductor LF rms (boost emulates a resistor)
+    const double iPeakEnv = std::sqrt(2.0) * iLineRms;       // line-peak of the current envelope
+    const double dILpk = vpeak * (d.outputVoltage - vpeak)
+                         / (d.boostInductance * d.switchingFrequency * d.outputVoltage);  // HF ripple at line peak
+    const double IpkL  = iPeakEnv + dILpk / 2.0;
+    const double IrmsL = std::sqrt(iLineRms * iLineRms + dILpk * dILpk / 12.0);
+    const double IavgL = (2.0 / kPi) * iPeakEnv;             // mean of |line| over a half-cycle
+    const double Dpk   = (d.outputVoltage - vpeak) / d.outputVoltage;  // boost duty at the line peak
+    const double vIndPk   = std::max(vpeak, d.outputVoltage - vpeak), vIndPkPk = d.outputVoltage;
+    const double vIndRms  = std::sqrt(Dpk * vpeak * vpeak + (1.0 - Dpk) * (d.outputVoltage - vpeak) * (d.outputVoltage - vpeak));
+    const json indExc = req::winding_excitation("triangular", d.switchingFrequency,
+        IpkL, IrmsL, IavgL, dILpk, Dpk, vIndPk, vIndRms, 0.0, vIndPkPk);
+
+    // ── semiconductor requirements (worst-case corner) ──
+    // The boost MOSFET SW and the boost diode D5 both block the DC bus Vout. The four bridge
+    // diodes D1..D4 rectify the AC line; the off diode blocks ~Vout (the bus rail sits across the
+    // off-side bridge legs). All carry the boost-inductor / line current envelope already computed.
+    const double ratedVdsP = d.outputVoltage / cfg::v_derate(d.config);   // SW blocks Vout
+    const double ratedVrBoost = d.outputVoltage / cfg::v_derate(d.config);// D5 blocks Vout
+    const double ratedVrBridge = d.outputVoltage / cfg::v_derate(d.config);// bridge diode blocks Vbus
+    const double maxRdsOnP = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IrmsL * IrmsL);
+    const double maxVfBoost  = (ratedVrBoost  < 100.0) ? 0.6 : 1.2;
+    const double maxVfBridge = (ratedVrBridge < 100.0) ? 0.6 : 1.2;
+    // Bridge diodes carry the full rectified line current (avg of |i_line|); the boost diode carries
+    // the output-side average current. Size both to the line current envelope (peak->continuous rating).
+    const double IfBridge = IavgL / 0.7;   // line-current average with margin
+    const double IfBoost  = IavgL / 0.7;   // boost-diode average current (= mean inductor current)
+    const json reqSW = req::mosfet("mainSwitch", ratedVdsP, IpkL, maxRdsOnP, 125.0);
+    const json reqD5 = req::diode(ratedVrBoost, IfBoost, maxVfBoost, 0.05 / d.switchingFrequency);
+    const json reqBridge = req::diode(ratedVrBridge, IfBridge, maxVfBridge);  // line-freq rectifier (no trr spec)
+
     json pcell; pcell["name"] = "pfc-power";
     pcell["ports"] = json::array({port("acLine"), port("acNeutral"), port("gnd"), port("vout"),
                                   port("busP"), port("nL"), port("g")});
     pcell["components"] = json::array({
-        comp("D1", diode()), comp("D2", diode()), comp("D3", diode()), comp("D4", diode()),
+        comp("D1", diode(reqBridge)), comp("D2", diode(reqBridge)), comp("D3", diode(reqBridge)), comp("D4", diode(reqBridge)),
         comp("Rsense", resBrick(d.senseResistance)),   // inductor-current sense (in series with L)
-        comp("L", indBrick(d.boostInductance)), comp("SW", mosfet()), comp("D5", diode()),
+        comp("L", indBrick(d.boostInductance, indExc)), comp("SW", mosfet(reqSW)), comp("D5", diode(reqD5)),
         comp("Cout", capBrick(d.outputCapacitance, d.outputVoltage * 2)),
         comp("Rref", resBrick(10e3))});                 // floating-mains common-mode reference
     pcell["connections"] = json::array({
