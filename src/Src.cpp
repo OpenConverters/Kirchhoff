@@ -78,7 +78,8 @@ json build_src_tas(const SrcDesign& d) {
     // Bare seeds (no designRequirements). Body diodes (anti-parallel to a FET) use these as-is — the HS
     // fill DEFERS a requirement-less diode as a FET body diode. REAL switches/rectifiers take a `req`.
     auto mosfet = []() { json j; j["semiconductor"]["mosfet"] = json::object(); return j; };
-    auto diode  = []() { json j; j["semiconductor"]["diode"] = json::object(); return j; };
+    auto diode  = [&]() { json j; j["semiconductor"]["diode"] = json::object();
+        j["inputs"]["designRequirements"] = req::body_diode(d.inputVoltage, d.outputPower / d.inputVoltage); return j; };
     auto mosfetReq = [](const json& r) { json j; j["semiconductor"]["mosfet"] = json::object();
         j["inputs"]["designRequirements"] = r; return j; };
     auto diodeReq  = [](const json& r) { json j; j["semiconductor"]["diode"] = json::object();
@@ -147,7 +148,9 @@ json build_src_tas(const SrcDesign& d) {
                                     vSecPk, vSecRms, 0.0, vSecPkPk),
             req::winding_excitation("sinusoidal", fr, IsecPk, IsecRms, 0.0, IsecPkPk, std::nullopt,
                                     vSecPk, vSecRms, 0.0, vSecPkPk)});
-    t1["inputs"]["designRequirements"]["coupling"] = cfg::get(d.config, "transformerCoupling", 0.999);
+    { const double kCpl = cfg::get(d.config, "transformerCoupling", 0.999);
+      t1["inputs"]["designRequirements"]["leakageInductance"] =
+          json::array({ json{{"nominal", (1.0 - kCpl*kCpl) * d.magnetizingInductance}} }); }
 
     auto busCap = [&]() { json c; c["capacitor"] = json::object();
         c["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::get(d.config, "busSplitCap", 10e-6);

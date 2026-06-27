@@ -81,8 +81,9 @@ json build_fsbb_tas(const FsbbDesign& d) {
         json c; c["name"] = name; c["kind"] = kind; if (dir[0]) c["direction"] = dir; c["endpoints"] = eps; return c; };
     auto mosfet = [](json reqs = json()) { json j; j["semiconductor"]["mosfet"] = json::object();
         if (!reqs.is_null()) j["inputs"]["designRequirements"] = reqs; return j; };
-    auto diode  = [](json reqs = json()) { json j; j["semiconductor"]["diode"] = json::object();
-        if (!reqs.is_null()) j["inputs"]["designRequirements"] = reqs; return j; };
+    auto diode  = [&](json reqs = json()) { json j; j["semiconductor"]["diode"] = json::object();
+        j["inputs"]["designRequirements"] = reqs.is_null()
+            ? req::body_diode(d.inputVoltage, d.outputPower / d.inputVoltage) : reqs; return j; };
 
     // Single inductor L (single-winding magnetic) -> complete sourceable requirement with excitation.
     // 4-switch buck-boost SIMULTANEOUS mode: charge phase applies Vin across L for D·T; the inductor

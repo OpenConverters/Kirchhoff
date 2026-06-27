@@ -74,7 +74,8 @@ json build_push_pull_tas(const PushPullDesign& d) {
     auto isc = [](const char* name, const char* kind, const char* dir, std::vector<json> eps) {
         json c; c["name"] = name; c["kind"] = kind; if (dir[0]) c["direction"] = dir; c["endpoints"] = eps; return c; };
     auto mosfet = []() { json j; j["semiconductor"]["mosfet"] = json::object(); return j; };
-    auto diode  = []() { json j; j["semiconductor"]["diode"] = json::object(); return j; };
+    auto diode  = [&]() { json j; j["semiconductor"]["diode"] = json::object();
+        j["inputs"]["designRequirements"] = req::body_diode(d.inputVoltage, d.outputPower / d.inputVoltage); return j; };
 
     const double N = d.turnsRatio, Lm = d.magnetizingInductance;
     const double fsw = d.switchingFrequency;

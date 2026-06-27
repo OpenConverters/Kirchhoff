@@ -90,7 +90,8 @@ json build_ahb_tas(const AhbDesign& d) {
     auto sp = [](const char* st, const char* po) { json e; e["stage"] = st; e["port"] = po; return e; };
     auto isc = [](const char* name, const char* kind, const char* dir, std::vector<json> eps) {
         json c; c["name"] = name; c["kind"] = kind; if (dir[0]) c["direction"] = dir; c["endpoints"] = eps; return c; };
-    auto diode  = []() { json j; j["semiconductor"]["diode"] = json::object(); return j; };
+    auto diode  = [&]() { json j; j["semiconductor"]["diode"] = json::object();
+        j["inputs"]["designRequirements"] = req::body_diode(d.inputVoltage, d.outputPower / d.inputVoltage); return j; };
 
     const double N = d.turnsRatio, Lm = d.magnetizingInductance;
     const double fsw = d.switchingFrequency, Tsw = 1.0 / fsw;

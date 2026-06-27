@@ -74,7 +74,8 @@ json build_clllc_tas(const ClllcDesign& d) {
     // Bare seeds (no designRequirements). Body diodes (anti-parallel to a FET) use these as-is — the HS
     // fill DEFERS a requirement-less diode as a FET body diode. REAL switches take a `req`.
     auto mosfet = []() { json j; j["semiconductor"]["mosfet"] = json::object(); return j; };
-    auto diode  = []() { json j; j["semiconductor"]["diode"] = json::object(); return j; };
+    auto diode  = [&]() { json j; j["semiconductor"]["diode"] = json::object();
+        j["inputs"]["designRequirements"] = req::body_diode(d.inputVoltage, d.outputPower / d.inputVoltage); return j; };
     auto mosfetReq = [](const json& r) { json j; j["semiconductor"]["mosfet"] = json::object();
         j["inputs"]["designRequirements"] = r; return j; };
     auto capBrick = [&](double c, double vr) { json j; j["capacitor"] = json::object();

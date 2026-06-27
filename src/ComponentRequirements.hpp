@@ -63,6 +63,19 @@ inline json mosfet(const std::string& role, double ratedVds, double ratedId,
     return r;
 }
 
+// --- semiconductor: body diode of a sourced FET (anti-parallel) ---
+// A basic, SAS-valid diode requirement tagged role "bodyDiode": the fill DEFERS it (the FET it
+// shadows carries the real device) rather than sourcing it as an independent rectifier. Ratings
+// mirror the switch it shadows (it blocks the same bus and freewheels the same current).
+inline json body_diode(double ratedVr, double ratedIf) {
+    json r;
+    r["deviceType"] = "diode";
+    r["ratedReverseVoltage"] = ratedVr;
+    r["ratedForwardCurrent"] = ratedIf;
+    r["role"] = "bodyDiode";
+    return r;
+}
+
 // --- semiconductor: rectifier diode (role omitted — the SAS role enum has no generic output rectifier) ---
 inline json diode(double ratedVr, double ratedIf, double maxVf,
                   std::optional<double> maxTrr = std::nullopt) {

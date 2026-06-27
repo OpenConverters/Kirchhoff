@@ -86,7 +86,8 @@ json build_llc_tas(const LlcDesign& d) {
     // Bare seeds (no designRequirements). Body diodes (anti-parallel to a FET) use these as-is — the HS
     // fill DEFERS a requirement-less diode as a FET body diode. REAL switches/rectifiers take a `req`.
     auto mosfet = []() { json j; j["semiconductor"]["mosfet"] = json::object(); return j; };
-    auto diode  = []() { json j; j["semiconductor"]["diode"] = json::object(); return j; };
+    auto diode  = [&]() { json j; j["semiconductor"]["diode"] = json::object();
+        j["inputs"]["designRequirements"] = req::body_diode(d.inputVoltage, d.outputPower / d.inputVoltage); return j; };
     auto mosfetReq = [](const json& r) { json j; j["semiconductor"]["mosfet"] = json::object();
         j["inputs"]["designRequirements"] = r; return j; };
     auto diodeReq  = [](const json& r) { json j; j["semiconductor"]["diode"] = json::object();
@@ -155,7 +156,11 @@ json build_llc_tas(const LlcDesign& d) {
                                     vSecPk, vSecRms, 0.0, vSecPkPk),
             req::winding_excitation("sinusoidal", fr, IsecPk, IsecRms, 0.0, IsecPkPk, std::nullopt,
                                     vSecPk, vSecRms, 0.0, vSecPkPk)});
-    t1["inputs"]["designRequirements"]["coupling"] = cfg::get(d.config, "transformerCoupling", 0.999);
+    // Leakage requirement (MAS field) instead of a raw coupling: L_leak = L_mag*(1-k^2) referred to
+    // the magnetizing winding; the emitter recovers k = sqrt(1 - L_leak/L_mag).
+    { const double kCpl = cfg::get(d.config, "transformerCoupling", 0.999);
+      t1["inputs"]["designRequirements"]["leakageInductance"] =
+          json::array({ json{{"nominal", (1.0 - kCpl*kCpl) * d.magnetizingInductance}} }); }
 
     // Bus split caps (establish the Vbus/2 midpoint the tank returns to).
     auto busCap = [&]() { json c; c["capacitor"] = json::object();

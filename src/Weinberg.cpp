@@ -155,7 +155,9 @@ json build_weinberg_tas(const WeinbergDesign& d) {
                                     vL1Pk, vL1Rms, 0.0, vL1PkPk),
             req::winding_excitation("triangular", fsw, IpkL1, IrmsL1, IL1avg, dIL1, dEff,
                                     vL1Pk, vL1Rms, 0.0, vL1PkPk)});
-    l1["inputs"]["designRequirements"]["coupling"] = cfg::get(d.config, "transformerCoupling", 0.999);
+    { const double kCpl = cfg::get(d.config, "transformerCoupling", 0.999);
+      l1["inputs"]["designRequirements"]["leakageInductance"] =
+          json::array({ json{{"nominal", (1.0 - kCpl*kCpl) * d.inputInductance}} }); }
 
     // Main transformer: CT primary (2 halves) + CT secondary (2 halves) = 4 coupled windings via
     // turnsRatios=[1, n, n]. Opposite-dot wound (encoded by the start/end node order below). K=0.9999.
