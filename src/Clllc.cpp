@@ -81,8 +81,15 @@ json build_clllc_tas(const ClllcDesign& d) {
         j["inputs"]["designRequirements"]["capacitance"]["nominal"] = c;
         j["inputs"]["designRequirements"]["ratedVoltage"] = vr; return j; };
     auto resBrick = [&](double r) { json j; j["resistor"] = json::object();
-        j["inputs"]["designRequirements"]["deviceType"] = "resistor";
-        j["inputs"]["designRequirements"]["resistance"]["nominal"] = r; return j; };
+        auto& dr = j["inputs"]["designRequirements"];
+        dr["deviceType"] = "resistor";
+        dr["resistance"]["nominal"] = r;
+        // Conservative requirement floor: a resistor dissipates I^2*R (series) or V^2/R (shunt);
+        // the physical value is the smaller. Exact for load resistors (=Pout), safe for sense/divider.
+        const double Iout_ = d.outputPower / d.outputVoltage, Vb_ = d.outputVoltage;
+        const double i2r_ = Iout_*Iout_*r, v2r_ = Vb_*Vb_/r;
+        dr["powerRating"] = (i2r_ < v2r_ ? i2r_ : v2r_);
+        return j; };
 
     const double n = d.turnsRatio;
 
@@ -248,11 +255,12 @@ json build_clllc_tas(const ClllcDesign& d) {
     auto stim = [&](const char* sw, double phaseDeg) {
         json st; st["stage"] = "clllcPower"; st["component"] = sw; st["signal"] = "gate";
         st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;
-        st["waveform"]["dutyCycle"] = d.switchDuty; st["waveform"]["phaseDeg"] = phaseDeg;
+        st["waveform"]["dutyCycle"] = d.switchDuty; st["waveform"]["phase"] = phaseDeg;
         return st; };
     tas["simulation"]["stimulus"] = json::array({stim("Q1", 0.0), stim("Q2", 180.0)});
     { json ic; ic["node"] = "Vout"; ic["voltage"] = d.outputVoltage;
       tas["simulation"]["initialConditions"] = json::array({ic}); }
+    req::finalize_control_seeds(tas, "clllcResonantConverter");  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

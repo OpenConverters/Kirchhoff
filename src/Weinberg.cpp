@@ -89,9 +89,15 @@ json build_weinberg_tas(const WeinbergDesign& d) {
         j["inputs"]["designRequirements"] = reqs; return j; };
     auto diode  = [](const json& reqs) { json j; j["semiconductor"]["diode"] = json::object();
         j["inputs"]["designRequirements"] = reqs; return j; };
-    auto res = [](double r) { json c; c["resistor"] = json::object();
-        c["inputs"]["designRequirements"]["deviceType"] = "resistor";
-        c["inputs"]["designRequirements"]["resistance"]["nominal"] = r; return c; };
+    auto res = [&](double r) { json c; c["resistor"] = json::object();
+        auto& dr = c["inputs"]["designRequirements"];
+        dr["deviceType"] = "resistor";
+        dr["resistance"]["nominal"] = r;
+        // Conservative requirement floor: min(I^2*R, V^2/R) (exact for loads; safe for damping/snubber).
+        const double Iout_ = d.outputPower / d.outputVoltage, Vb_ = d.outputVoltage;
+        const double i2r_ = Iout_*Iout_*r, v2r_ = Vb_*Vb_/r;
+        dr["powerRating"] = (i2r_ < v2r_ ? i2r_ : v2r_);
+        return c; };
 
     const double n = d.turnsRatio, fsw = d.switchingFrequency;
     const double Vin = d.inputVoltage, Vout = d.outputVoltage, D = d.switchDuty;
@@ -252,9 +258,10 @@ json build_weinberg_tas(const WeinbergDesign& d) {
     auto stim = [&](const char* sw, double phaseDeg) {
         json st; st["stage"] = "weinbergCell"; st["component"] = sw; st["signal"] = "gate";
         st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;
-        st["waveform"]["dutyCycle"] = d.switchDuty; st["waveform"]["phaseDeg"] = phaseDeg;
+        st["waveform"]["dutyCycle"] = d.switchDuty; st["waveform"]["phase"] = phaseDeg;
         return st; };
     tas["simulation"]["stimulus"] = json::array({stim("S1", 0.0), stim("S2", 180.0)});
+    req::finalize_control_seeds(tas, "weinbergConverter");  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

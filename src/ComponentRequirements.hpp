@@ -76,14 +76,49 @@ inline json diode(double ratedVr, double ratedIf, double maxVf,
 }
 
 // --- controller / gate driver (CTAS family): the control IC that drives the stage ---
-// `category` is the CTAS function.category discriminator (pwmController / llcController /
+// `category` is the CTAS controllerCategory discriminator (pwmController / llcController /
 // pfcController / gateDriver / …) so the HS librarian sources the right CLASS of part for
-// the topology's control mode. The selector also matches the converter's intendedTopology,
-// Vin and fsw — those come from the TAS designRequirements, not repeated here.
+// the topology's control mode. It lives at the TOP LEVEL of the seed's designRequirements
+// (ctas/inputs/designRequirements.json requires `category` there — NOT under `function`,
+// which is the PART's datasheetInfo discriminator, a different object). The selector also
+// matches the converter's topology, Vin and fsw: for switching-converter categories the
+// schema additionally requires `topology` + `switchingFrequency` in the seed, injected by
+// finalize_control_seeds() once the assembled doc carries them.
 inline json controller(const std::string& category) {
     json r;
-    r["function"]["category"] = category;
+    r["category"] = category;
     return r;
+}
+
+// The switching-converter controller categories: ctas/inputs/designRequirements.json requires
+// `topology` + `switchingFrequency` in the seed for exactly these (so an ideal behavioural switch
+// model can be built from the seed alone). Other categories (gateDriver, supervisor, …) need only
+// `category`. Mirrors the schema's if/then enum.
+inline bool is_switching_controller_category(const std::string& category) {
+    return category == "pwmController" || category == "multiphaseController" ||
+           category == "llcController" || category == "pfcController" ||
+           category == "dualPwmController" || category == "phaseShiftController" ||
+           category == "digitalController";
+}
+
+// Inject the topology + switching frequency that switching-controller seeds require, reading the
+// frequency from the assembled doc's top-level designRequirements. Call once per build_*_tas after
+// the stages and top-level designRequirements are set, passing the converter's peas `topology` enum
+// value (e.g. "flybackConverter"). Non-switching controller seeds are left untouched.
+inline void finalize_control_seeds(json& tas, const std::string& topology) {
+    if (!tas.contains("topology") || !tas.at("topology").contains("stages")) return;
+    const json& dreq = tas.at("inputs").at("designRequirements");
+    for (auto& st : tas["topology"]["stages"]) {
+        if (!st.contains("circuit") || !st.at("circuit").is_object()) continue;
+        for (auto& c : st["circuit"]["components"]) {
+            if (!c.contains("data") || !c.at("data").contains("controller")) continue;
+            json& dr = c["data"]["inputs"]["designRequirements"];
+            if (is_switching_controller_category(dr.value("category", std::string{}))) {
+                dr["topology"] = topology;
+                dr["switchingFrequency"] = dreq.at("switchingFrequency");
+            }
+        }
+    }
 }
 
 // A ready-to-append physicalControl STAGE carrying one controller seed. role "control"
@@ -99,7 +134,14 @@ inline json control_stage(const std::string& category,
     comp["data"]["inputs"]["designRequirements"] = controller(category);
     json brick;
     brick["name"] = stageName + "-brick";
-    brick["ports"] = json::array();
+    // A physicalControl stage must expose >=1 typed port (tas/topology.json). The controller's
+    // gate-drive output is a signal-level ('control') terminal. The brick is sourced for the BOM
+    // only — the power-deck assembler skips role:"control" stages — so it is NOT electrically wired
+    // here (the interStageConnections to the switch gates belong to the control-circuit realisation),
+    // which is why `connections` stays empty.
+    json gatePort; gatePort["name"] = "gate_drive";
+    gatePort["description"] = "Controller gate-drive / control-signal output.";
+    brick["ports"] = json::array({gatePort});
     brick["components"] = json::array({comp});
     brick["connections"] = json::array();
     json s;
@@ -107,7 +149,8 @@ inline json control_stage(const std::string& category,
     s["role"] = "control";
     s["controlImplementation"] = "physical";
     s["circuit"] = brick;
-    s["ports"] = json::array();
+    json pb; pb["port"] = "gate_drive"; pb["type"] = "control";
+    s["ports"] = json::array({pb});
     return s;
 }
 
@@ -124,12 +167,14 @@ inline json capacitor(double capacitance, double ratedVoltage, double minRippleC
 }
 
 // --- resistor (snubber damping R, current sense, bias/bleed, feedback divider) ---
-inline json resistor(double resistance, double powerRating, double tolerance,
-                     const std::string& role) {
+// RAS-conformant: ras/inputs/designRequirements.json requires deviceType + resistance + powerRating
+// for the resistor branch (unevaluatedProperties:false there, so ONLY RAS-defined fields). `role`
+// is the optional converter-function enum (snubber/damping/bleed/currentSense/divider/...).
+inline json resistor(double resistance, double powerRating, const std::string& role) {
     json r;
+    r["deviceType"] = "resistor";
     r["resistance"]["nominal"] = resistance;
     r["powerRating"] = powerRating;
-    r["tolerance"] = tolerance;
     r["role"] = role;
     return r;
 }

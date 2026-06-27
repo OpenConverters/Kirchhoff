@@ -226,12 +226,13 @@ json build_pshb_tas(const PshbDesign& d) {
     auto stim = [&](const char* sw, double duty, double phaseDeg){
         json st; st["stage"]="pshbCell"; st["component"]=sw; st["signal"]="gate";
         st["waveform"]["type"]="pwm"; st["waveform"]["frequency"]=d.switchingFrequency;
-        st["waveform"]["dutyCycle"]=duty; st["waveform"]["phaseDeg"]=phaseDeg; return st; };
+        st["waveform"]["dutyCycle"]=duty; st["waveform"]["phase"]=phaseDeg; return st; };
     tas["simulation"]["stimulus"]=json::array({
         stim("S1", outer, 0.0),
         stim("S2", 0.5 - dt, 0.0),
         stim("S3", 0.5 - dt, (0.5 + dt) * 360.0),
         stim("S4", outer, 180.0)});
+    req::finalize_control_seeds(tas, "phaseShiftedHalfBridgeConverter");  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

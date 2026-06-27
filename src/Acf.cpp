@@ -220,11 +220,12 @@ json build_acf_tas(const AcfDesign& d) {
     auto stim = [&](const char* sw, const char* sig, double duty, double phaseDeg) {
         json st; st["stage"] = "acfCell"; st["component"] = sw; st["signal"] = sig;
         st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = fsw;
-        st["waveform"]["dutyCycle"] = duty; st["waveform"]["phaseDeg"] = phaseDeg;
+        st["waveform"]["dutyCycle"] = duty; st["waveform"]["phase"] = phaseDeg;
         return st; };
     tas["simulation"]["stimulus"] = json::array({
         stim("Q1", "gate", D, 0.0),
         stim("Sc", "gate", (1.0 - D) - 2.0 * dt, (D + dt) * 360.0)});
+    req::finalize_control_seeds(tas, "activeClampForwardConverter");  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

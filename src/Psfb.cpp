@@ -276,11 +276,12 @@ json build_psfb_tas(const PsfbDesign& d) {
     auto stim = [&](const char* sw, double phaseDeg) {
         json st; st["stage"] = "psfbCell"; st["component"] = sw; st["signal"] = "gate";
         st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;
-        st["waveform"]["dutyCycle"] = d.switchDuty; st["waveform"]["phaseDeg"] = phaseDeg;
+        st["waveform"]["dutyCycle"] = d.switchDuty; st["waveform"]["phase"] = phaseDeg;
         return st; };
     tas["simulation"]["stimulus"] = json::array({
         stim("QA", 0.0), stim("QB", 180.0),
         stim("QC", d.phaseDeg), stim("QD", 180.0 + d.phaseDeg)});
+    req::finalize_control_seeds(tas, "phaseShiftedFullBridgeConverter");  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

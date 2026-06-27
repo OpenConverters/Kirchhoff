@@ -476,7 +476,7 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
         const double period = 1.0 / fsw, ton = duty * period;
         // Optional phase shift (degrees) -> PULSE delay TD = phaseDeg/360 * period. Enables
         // interleaved / phase-shifted multi-switch drives (push-pull 180 deg, bridges, etc.).
-        const double phaseDeg = wf.value("phaseDeg", 0.0);
+        const double phaseDeg = wf.value("phase", 0.0);
         const double td = (phaseDeg / 360.0) * period;
         os << "Vstim_" << stage << "_" << comp << " " << stimNode << " 0 PULSE(0 5 "
            << td << " 1n 1n " << ton << " " << period << ")\n";

@@ -205,6 +205,7 @@ json build_forward_tas(const ForwardDesign& d) {
     st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = fsw;
     st["waveform"]["dutyCycle"] = d.dutyCycle;
     tas["simulation"]["stimulus"] = json::array({st});
+    req::finalize_control_seeds(tas, "singleSwitchForwardConverter");  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

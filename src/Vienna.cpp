@@ -105,8 +105,15 @@ json build_vienna_tas(const ViennaDesign& d) {
     const json indExcV = req::winding_excitation("triangular", d.switchingFrequency,
         IpkLV, IrmsLV, IavgLV, dILpkV, DpkV, vIndPkV, vIndRmsV, 0.0, vIndPkPkV);
     auto resBrick = [&](double r) { json j; j["resistor"] = json::object();
-        j["inputs"]["designRequirements"]["deviceType"] = "resistor";
-        j["inputs"]["designRequirements"]["resistance"]["nominal"] = r; return j; };
+        auto& dr = j["inputs"]["designRequirements"];
+        dr["deviceType"] = "resistor";
+        dr["resistance"]["nominal"] = r;
+        // Conservative requirement floor: a resistor dissipates I^2*R (series) or V^2/R (shunt);
+        // the physical value is the smaller. Exact for load resistors (=Pout), safe for sense/divider.
+        const double Iout_ = d.outputPower / d.outputVoltage, Vb_ = d.outputVoltage;
+        const double i2r_ = Iout_*Iout_*r, v2r_ = Vb_*Vb_/r;
+        dr["powerRating"] = (i2r_ < v2r_ ? i2r_ : v2r_);
+        return j; };
 
     // ── per-phase semiconductor requirements (worst-case corner) ──
     // Each Vienna leg's bidirectional switch SW* steers its phase to the midpoint; when off it blocks
@@ -254,6 +261,7 @@ json build_vienna_tas(const ViennaDesign& d) {
     { json ic; ic["node"]="busP"; ic["voltage"]= 0.5*d.outputVoltage; ics.push_back(ic); }
     { json ic; ic["node"]="busN"; ic["voltage"]=-0.5*d.outputVoltage; ics.push_back(ic); }
     tas["simulation"]["initialConditions"] = ics;
+    req::finalize_control_seeds(tas, "viennaRectifierConverter");  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

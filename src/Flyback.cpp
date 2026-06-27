@@ -343,6 +343,7 @@ json build_flyback_tas(const FlybackDesign& d) {
     st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;
     st["waveform"]["dutyCycle"] = d.dutyCycle;
     tas["simulation"]["stimulus"] = json::array({st});
+    req::finalize_control_seeds(tas, "flybackConverter");  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

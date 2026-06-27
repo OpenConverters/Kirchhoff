@@ -93,8 +93,15 @@ json build_pfc_tas(const PfcDesign& d) {
         j["inputs"] = req::magnetic_inputs(L, 0.2, /*single winding*/ {}, {"primary"},
             std::nullopt, 25.0, {excitation}); return j; };
     auto resBrick = [&](double r) { json j; j["resistor"] = json::object();
-        j["inputs"]["designRequirements"]["deviceType"] = "resistor";
-        j["inputs"]["designRequirements"]["resistance"]["nominal"] = r; return j; };
+        auto& dr = j["inputs"]["designRequirements"];
+        dr["deviceType"] = "resistor";
+        dr["resistance"]["nominal"] = r;
+        // Conservative requirement floor: a resistor dissipates I^2*R (series) or V^2/R (shunt);
+        // the physical value is the smaller. Exact for load resistors (=Pout), safe for sense/divider.
+        const double Iout_ = d.outputPower / d.outputVoltage, Vb_ = d.outputVoltage;
+        const double i2r_ = Iout_*Iout_*r, v2r_ = Vb_*Vb_/r;
+        dr["powerRating"] = (i2r_ < v2r_ ? i2r_ : v2r_);
+        return j; };
     auto comparator = [&](double hyst) { json j; json& e = j["analog"]["comparator"]["behavioral"];
         e["outputHigh"] = 5.0; e["outputLow"] = 0.0; e["threshold"] = 0.0; e["hysteresis"] = hyst; return j; };
     auto multiplier = [&]() { json j; j["analog"]["multiplier"]["behavioral"]["gain"] = 1.0; return j; };
@@ -237,6 +244,7 @@ json build_pfc_tas(const PfcDesign& d) {
     // state is reached in a few line cycles (the bus-cap RC is far longer than the sim window).
     { json ic; ic["node"] = "Vout"; ic["voltage"] = d.outputVoltage;
       tas["simulation"]["initialConditions"] = json::array({ic}); }
+    req::finalize_control_seeds(tas, "powerFactorCorrection");  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

@@ -135,6 +135,9 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
     json rsec; rsec["resistor"] = json::object();
     rsec["inputs"]["designRequirements"]["deviceType"] = "resistor";
     rsec["inputs"]["designRequirements"]["resistance"]["nominal"] = d.secondaryLoadResistance;
+    rsec["inputs"]["designRequirements"]["powerRating"] =
+        d.secondaryVoltage * d.secondaryVoltage / d.secondaryLoadResistance;  // load: P = V^2/R
+    rsec["inputs"]["designRequirements"]["role"] = "bleed";
 
     json cell; cell["name"] = "flybuck-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("g1"), port("g2")});
@@ -195,11 +198,12 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
     auto stim = [&](const char* sw, double duty, double phaseDeg) {
         json st; st["stage"] = "flybuckCell"; st["component"] = sw; st["signal"] = "gate";
         st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;
-        st["waveform"]["dutyCycle"] = duty; st["waveform"]["phaseDeg"] = phaseDeg;
+        st["waveform"]["dutyCycle"] = duty; st["waveform"]["phase"] = phaseDeg;
         return st; };
     tas["simulation"]["stimulus"] = json::array({
         stim("QS1", d.dutyCycle, 0.0),
         stim("QS2", (1.0 - d.dutyCycle) - 2.0 * deadFrac, (d.dutyCycle + deadFrac) * 360.0)});
+    req::finalize_control_seeds(tas, "isolatedBuckConverter");  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

@@ -115,6 +115,10 @@ json build_cuk_tas(const CukDesign& d) {
     json rsnub; rsnub["resistor"] = json::object();
     rsnub["inputs"]["designRequirements"]["deviceType"] = "resistor";
     rsnub["inputs"]["designRequirements"]["resistance"]["nominal"] = cfg::snubber_res(d.config);
+    // RC-snubber R: P = C*V^2*f (cap energy dumped through R each cycle; V = switch-node swing).
+    rsnub["inputs"]["designRequirements"]["powerRating"] =
+        cfg::diode_snubber_cap(d.config) * vSwing * vSwing * d.switchingFrequency;
+    rsnub["inputs"]["designRequirements"]["role"] = "snubber";
     json csnub; csnub["capacitor"] = json::object();
     csnub["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::diode_snubber_cap(d.config);
     csnub["inputs"]["designRequirements"]["ratedVoltage"] = vSwing / cfg::v_derate(d.config);
@@ -170,6 +174,7 @@ json build_cuk_tas(const CukDesign& d) {
     st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;
     st["waveform"]["dutyCycle"] = d.dutyCycle;
     tas["simulation"]["stimulus"] = json::array({st});
+    req::finalize_control_seeds(tas, "cukConverter");  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

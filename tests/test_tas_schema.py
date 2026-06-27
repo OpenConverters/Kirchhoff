@@ -42,7 +42,9 @@ TAS_V = V("https://psma.com/tas/TAS.json")
 PEAS_V = V("https://psma.com/peas/peas.json")
 FAM = {"semiconductor": "https://psma.com/sas/inputs/designRequirements.json",
        "capacitor":     "https://psma.com/cas/inputs/designRequirements.json",
-       "magnetic":      "https://psma.com/mas/inputs/designRequirements.json"}
+       "magnetic":      "https://psma.com/mas/inputs/designRequirements.json",
+       "controller":    "https://psma.com/ctas/inputs/designRequirements.json",
+       "resistor":      "https://psma.com/ras/inputs/designRequirements.json"}
 OP_V = V("https://psma.com/mas/inputs/operatingPoint.json")
 
 FLYBACK_IN = {"designRequirements": {"efficiency": 0.88, "inputType": "dc",

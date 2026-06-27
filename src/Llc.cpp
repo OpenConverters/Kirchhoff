@@ -171,8 +171,13 @@ json build_llc_tas(const LlcDesign& d) {
         c["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::rectifier_snubber_cap(d.config);
         c["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage * 3; return c; };
     auto snubR = [&]() { json c; c["resistor"] = json::object();
-        c["inputs"]["designRequirements"]["deviceType"] = "resistor";
-        c["inputs"]["designRequirements"]["resistance"]["nominal"] = cfg::snubber_res(d.config); return c; };
+        auto& dr = c["inputs"]["designRequirements"];
+        dr["deviceType"] = "resistor";
+        dr["resistance"]["nominal"] = cfg::snubber_res(d.config);
+        // RC-snubber R dissipates the cap energy each cycle: P = C*V^2*f (V = clamped reverse swing).
+        const double vClamp = d.outputVoltage * 3.0;
+        dr["powerRating"] = cfg::rectifier_snubber_cap(d.config) * vClamp * vClamp * d.switchingFrequency;
+        dr["role"] = "snubber"; return c; };
 
     json cell; cell["name"] = "llc-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("g1"), port("g2")});
@@ -236,9 +241,10 @@ json build_llc_tas(const LlcDesign& d) {
         // off-resonance rectifier-test config ran at the requirement fsw and floated ~12% high; Kirchhoff
         // delivers spec by operating at resonance — an intended improvement over the MKF reference.)
         st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.resonantFrequency;
-        st["waveform"]["dutyCycle"] = d.switchDuty; st["waveform"]["phaseDeg"] = phaseDeg;
+        st["waveform"]["dutyCycle"] = d.switchDuty; st["waveform"]["phase"] = phaseDeg;
         return st; };
     tas["simulation"]["stimulus"] = json::array({stim("Q1", 0.0), stim("Q2", 180.0)});
+    req::finalize_control_seeds(tas, "llcResonantConverter");  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

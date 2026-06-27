@@ -139,6 +139,9 @@ json build_isolated_buck_boost_tas(const IsolatedBuckBoostDesign& d) {
     json rsec; rsec["resistor"] = json::object();
     rsec["inputs"]["designRequirements"]["deviceType"] = "resistor";
     rsec["inputs"]["designRequirements"]["resistance"]["nominal"] = d.secondaryLoadResistance;
+    rsec["inputs"]["designRequirements"]["powerRating"] =
+        d.secondaryVoltage * d.secondaryVoltage / d.secondaryLoadResistance;  // load: P = V^2/R
+    rsec["inputs"]["designRequirements"]["role"] = "bleed";
 
     json cell; cell["name"] = "flybuckboost-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("g1")});
@@ -189,8 +192,9 @@ json build_isolated_buck_boost_tas(const IsolatedBuckBoostDesign& d) {
     // Single flyback switch QS1 at duty D (sets |V_pri| = Vin·D/(1−D)).
     { json st; st["stage"] = "flybuckboostCell"; st["component"] = "QS1"; st["signal"] = "gate";
       st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;
-      st["waveform"]["dutyCycle"] = d.dutyCycle; st["waveform"]["phaseDeg"] = 0.0;
+      st["waveform"]["dutyCycle"] = d.dutyCycle; st["waveform"]["phase"] = 0.0;
       tas["simulation"]["stimulus"] = json::array({st}); }
+    req::finalize_control_seeds(tas, "isolatedBuckBoostConverter");  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

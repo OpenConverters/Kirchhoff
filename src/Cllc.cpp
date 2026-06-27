@@ -227,7 +227,7 @@ json build_cllc_tas(const CllcDesign& d) {
     auto stim = [&](const char* sw, const char* sig, double phaseDeg) {
         json st; st["stage"] = "cllcCell"; st["component"] = sw; st["signal"] = sig;
         st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;
-        st["waveform"]["dutyCycle"] = d.switchDuty; st["waveform"]["phaseDeg"] = phaseDeg;
+        st["waveform"]["dutyCycle"] = d.switchDuty; st["waveform"]["phase"] = phaseDeg;
         return st; };
     // Only ONE stimulus per shared gate node: Q1 drives the g1 port (shared by Q1/Q4/Qa/Qd), Q2 drives
     // g2 (shared by Q2/Q3/Qb/Qc). Emitting one per switch would put 4 voltage sources on one node
@@ -238,6 +238,7 @@ json build_cllc_tas(const CllcDesign& d) {
     // with use-initial-conditions (skipping the resonant tank's singular DC operating point).
     { json ic; ic["node"] = "Vout"; ic["voltage"] = d.outputVoltage;
       tas["simulation"]["initialConditions"] = json::array({ic}); }
+    req::finalize_control_seeds(tas, "cllcResonantConverter");  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

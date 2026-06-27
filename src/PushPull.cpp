@@ -220,9 +220,10 @@ json build_push_pull_tas(const PushPullDesign& d) {
     auto stim = [&](const char* sw, double phaseDeg) {
         json st; st["stage"] = "pushPullCell"; st["component"] = sw; st["signal"] = "gate";
         st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;
-        st["waveform"]["dutyCycle"] = d.dutyCycle; st["waveform"]["phaseDeg"] = phaseDeg;
+        st["waveform"]["dutyCycle"] = d.dutyCycle; st["waveform"]["phase"] = phaseDeg;
         return st; };
     tas["simulation"]["stimulus"] = json::array({stim("Q1", 0.0), stim("Q2", 180.0)});
+    req::finalize_control_seeds(tas, "pushPullConverter");  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

@@ -164,8 +164,11 @@ json build_dab_tas(const DabDesign& d) {
     const double snubCval = cfg::snubber_cap(d.config, d.outputPower, d.inputVoltage, d.switchingFrequency);
     const double snubRval = cfg::bias_res(d.config, d.inputVoltage, d.outputPower);
     auto biasR = [&]() { json c; c["resistor"] = json::object();
-        c["inputs"]["designRequirements"]["deviceType"] = "resistor";
-        c["inputs"]["designRequirements"]["resistance"]["nominal"] = snubRval; return c; };
+        auto& dr = c["inputs"]["designRequirements"];
+        dr["deviceType"] = "resistor";
+        dr["resistance"]["nominal"] = snubRval;
+        dr["powerRating"] = d.inputVoltage * d.inputVoltage / snubRval;  // bias bleed: P = V^2/R
+        dr["role"] = "bleed"; return c; };
     auto snubC = [&]() { json c; c["capacitor"] = json::object();
         c["inputs"]["designRequirements"]["capacitance"]["nominal"] = snubCval;
         c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) * 3;
@@ -268,12 +271,13 @@ json build_dab_tas(const DabDesign& d) {
     auto stim = [&](const char* sw, double phaseDeg) {
         json st; st["stage"] = "dabCell"; st["component"] = sw; st["signal"] = "gate";
         st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;
-        st["waveform"]["dutyCycle"] = d.switchDuty; st["waveform"]["phaseDeg"] = phaseDeg;
+        st["waveform"]["dutyCycle"] = d.switchDuty; st["waveform"]["phase"] = phaseDeg;
         return st; };
     const double p3 = d.phaseShiftDeg;
     tas["simulation"]["stimulus"] = json::array({
         stim("QA", 0.0),       stim("QB", 180.0),       stim("QC", 180.0),       stim("QD", 0.0),
         stim("QE", p3),        stim("QF", 180.0 + p3),  stim("QG", 180.0 + p3),  stim("QH", p3)});
+    req::finalize_control_seeds(tas, "dualActiveBridgeConverter");  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 
