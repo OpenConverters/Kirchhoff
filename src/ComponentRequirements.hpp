@@ -215,18 +215,32 @@ inline json winding_excitation(const std::string& currentLabel, double frequency
 }
 
 // --- magnetic: full inputs (designRequirements + one operating point) ---
+// turnsRatioIsCeiling (optional, parallel to turnsRatios): mark a step-down ratio that was sized from
+// the topology's MAXIMUM duty as a CEILING. Such a ratio is emitted as a {maximum} requirement instead
+// of {nominal}, so the magnetic adviser's NumberTurns rejects integer-turn realizations whose realized
+// N_pri/N_sec overshoots it (which would need more than the max duty — for forward/push-pull/bridge that
+// is per-switch D >= 0.5, shorting the transformer) and adds primary turns until the ratio fits. A bare
+// {nominal} only enforces a loose +/- threshold band, letting e.g. 12/4 = 3.0 slip past a 2.72 target.
+// Structural ratios (a matched 1:1 second primary / demag winding) must stay {nominal} (exact). Default
+// empty -> every ratio nominal (unchanged behaviour for non-duty-limited magnetics).
 inline json magnetic_inputs(double Lm, double lmTolerance,
                             const std::vector<double>& turnsRatios,
                             const std::vector<std::string>& isolationSides,
                             std::optional<double> isolationVoltage,
                             double ambientC,
-                            const std::vector<json>& excitationsPerWinding) {
+                            const std::vector<json>& excitationsPerWinding,
+                            const std::vector<bool>& turnsRatioIsCeiling = {}) {
     json dr;
     dr["magnetizingInductance"]["nominal"] = Lm;
     dr["magnetizingInductance"]["minimum"] = Lm * (1.0 - lmTolerance);
     dr["magnetizingInductance"]["maximum"] = Lm * (1.0 + lmTolerance);
     dr["turnsRatios"] = json::array();
-    for (double n : turnsRatios) dr["turnsRatios"].push_back(json{{"nominal", n}});
+    for (size_t i = 0; i < turnsRatios.size(); ++i) {
+        if (i < turnsRatioIsCeiling.size() && turnsRatioIsCeiling[i])
+            dr["turnsRatios"].push_back(json{{"maximum", turnsRatios[i]}});
+        else
+            dr["turnsRatios"].push_back(json{{"nominal", turnsRatios[i]}});
+    }
     dr["isolationSides"] = isolationSides;
     if (isolationVoltage) {
         dr["insulation"]["mainSupplyVoltage"]["nominal"] = *isolationVoltage;

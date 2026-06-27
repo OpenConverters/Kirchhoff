@@ -143,7 +143,10 @@ json build_push_pull_tas(const PushPullDesign& d) {
             req::winding_excitation("pushPullSecondary", fsw, IpkSec, IrmsSec, 0.0, dISec, Dn,
                                     vSecPk, vSecRms, 0.0, vSecPkPk),
             req::winding_excitation("pushPullSecondary", fsw, IpkSec, IrmsSec, 0.0, dISec, Dn,
-                                    vSecPk, vSecRms, 0.0, vSecPkPk)});
+                                    vSecPk, vSecRms, 0.0, vSecPkPk)},
+        // N (computed at maxDutyCycle, line ~42) is the duty CEILING -> emit the two secondary ratios as
+        // {maximum}; the 1.0 second-primary half is a structural 1:1 and stays {nominal}.
+        /*turnsRatioIsCeiling=*/{false, true, true});
     json lout; lout["magnetic"] = json::object();
     lout["inputs"] = req::magnetic_inputs(d.outputInductance, 0.2, /*single winding*/ {}, {"primary"},
         std::nullopt, 25.0, {
