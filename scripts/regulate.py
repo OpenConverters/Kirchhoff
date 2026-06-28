@@ -58,6 +58,12 @@ _TOPO_CONTROL = {
     **{t: "frequency" for t in ("llc", "src", "cllc", "clllc")},
 }
 
+# AC-input topologies whose closed-loop controller is rendered INTO the deck (a designed PI voltage loop +
+# inner current loop, no open-loop stimulus). They REGULATE THEMSELVES, so there is no control variable to
+# bisect — the operating point is "run the deck once and measure". Their two-timescale dynamics (line vs
+# switching) need LINE-cycle measurement windowing, not the switching-period windowing the DC path uses.
+_SELF_REGULATED = {"pfc", "vienna"}
+
 
 # A schema-valid DATASHEET MOSFET/diode, for binding a seed TAS into a real-fidelity deck. HS fills its own
 # sourced parts; this mirrors that so the tool is self-testable (and usable as a quick default).
@@ -323,6 +329,104 @@ def _simulate(tas, fidelity, tag):
     return vout, pin, pout, ripple
 
 
+def _line_frequency(tas):
+    """Line (mains) frequency [Hz] from the AC-input designRequirements, or None for a DC-input deck."""
+    dr = (tas.get("inputs", {}) or {}).get("designRequirements", {}) or {}
+    lf = dr.get("lineFrequency")
+    if isinstance(lf, dict):
+        for k in ("nominal", "minimum", "maximum"):
+            if isinstance(lf.get(k), (int, float)):
+                return float(lf[k])
+    return float(lf) if isinstance(lf, (int, float)) else None
+
+
+def _ac_source(deck):
+    """The AC line source `Vxxx n1 n2 SIN(...)` in a rectified-input deck: (name, n1, n2), or None."""
+    for ln in deck.splitlines():
+        m = re.match(r"^(V\w+)\s+(\S+)\s+(\S+)\s+SIN\(", ln, re.I)
+        if m:
+            return m.group(1), m.group(2), m.group(3)
+    return None
+
+
+def _simulate_self_regulated(tas, fidelity, line_freq, tag):
+    """Operating point of a SELF-REGULATING AC-input converter (PFC / Vienna). Its closed-loop controller is
+    rendered INTO the deck, so there is no control variable to bisect — run the deck over whole LINE cycles
+    (the bus is precharged + UIC, so it settles in a handful) and measure the regulated bus, the REAL input
+    power (avg of v_line·i_line, correct under the rectified-line + 2×line bus ripple), the output power and
+    the power factor. Returns (vout, pin, pout, ripple, pf) at steady state, or None on non-convergence.
+    Uses LINE-cycle windowing (the DC path's switching-period window would mis-average the line ripple)."""
+    deck = PyKirchhoff.tas_to_ngspice(tas, fidelity)
+    src = _ac_source(deck)
+    if src is None:
+        return None
+    vname, n1, n2 = src
+    _vn, _vin, loads, _cmax = _parse_deck(deck)
+    period = 1.0 / line_freq
+    mtran = re.match(r"(?s).*?\.tran\s+(\S+)\s+(\S+)\s+\S+\s+\S+", deck)
+    tstep = float(mtran.group(1)) if mtran else period / 4000.0
+    # Settle: the 2×-line bus ripple + the (slow) voltage loop, but the precharge means a few line cycles
+    # suffice; never run fewer cycles than the deck's own designed stopTime asked for.
+    settle = max(6.0 * period, float(mtran.group(2)) if mtran else 0.0)
+    deck = re.sub(r"\.tran\s+\S+\s+\S+\s+\S+\s+\S+(\s+uic)?",
+                  f".tran {tstep:.12g} {settle:.12g} 0 {tstep:.12g} uic", deck)   # AC decks start from precharge
+    cpos = deck.rfind("\n.control")
+    if cpos != -1:
+        deck = deck[:cpos]
+    frm, to = settle - period, settle               # the last WHOLE line cycle (averages the 2×line ripple)
+    w0 = settle - 2.0 * period
+    vac = f"v({n1})" if n2 in _GND else f"(v({n1})-v({n2}))"
+    ctrl = ["run",
+            f"let m_iac = -i({vname})",
+            f"let m_pinst = {vac}*m_iac",
+            f"meas tran m_vout avg v(Vout) from={frm:.12g} to={to:.12g}",
+            f"meas tran m_vmax max v(Vout) from={w0:.12g} to={to:.12g}",
+            f"meas tran m_vmin min v(Vout) from={w0:.12g} to={to:.12g}",
+            f"meas tran m_pin avg m_pinst from={frm:.12g} to={to:.12g}",
+            f"meas tran m_vrms rms {vac} from={frm:.12g} to={to:.12g}",
+            f"meas tran m_irms rms m_iac from={frm:.12g} to={to:.12g}"]
+    for i, (node, ref, _kind, _val) in enumerate(loads):
+        vexpr = f"v({node})" if ref == "0" else f"v({node},{ref})"
+        ctrl.append(f"meas tran m_vld{i} avg {vexpr} from={frm:.12g} to={to:.12g}")
+    deck += "\n.control\n" + "\n".join(ctrl) + "\n.endc\n.end\n"
+    with tempfile.NamedTemporaryFile("w", suffix=f"_{tag}.cir", delete=False) as f:
+        f.write(deck)
+        path = f.name
+    try:
+        out = subprocess.run(["ngspice", "-b", path], capture_output=True, text=True, timeout=600)
+        text = out.stdout + out.stderr
+    finally:
+        os.unlink(path)
+    if "Timestep too small" in text or "simulation(s) aborted" in text:
+        return None
+
+    def grab(name):
+        m = re.search(rf"\b{name}\s*=\s*([-\d.eE+]+)", text)
+        return float(m.group(1)) if m else None
+    vout, vmax, vmin = grab("m_vout"), grab("m_vmax"), grab("m_vmin")
+    pin, vrms, irms = grab("m_pin"), grab("m_vrms"), grab("m_irms")
+    if vout is None or pin is None:
+        return None
+    pin = abs(pin)
+    pout = 0.0
+    have_pout = bool(loads)
+    for i, (_node, _ref, kind, val) in enumerate(loads):
+        vld = grab(f"m_vld{i}")
+        if vld is None:
+            have_pout = False
+            break
+        if kind == "R":
+            pout += vld * vld / val
+        elif kind == "I":
+            pout += abs(vld * val)
+        elif kind == "P":
+            pout += val
+    pout = pout if have_pout else float("nan")
+    ripple = 0.0 if (vmax is None or vmin is None or abs(vout) < 1e-9) else (vmax - vmin) / abs(vout)
+    pf = (pin / (vrms * irms)) if (vrms and irms) else float("nan")
+    return vout, pin, pout, ripple, pf
+
+
 # ── magnetic-saturation verdict ───────────────────────────────────────────────────────────────────────
 # An MKF_MODEL core models saturation as Lmag = L0/(1+(I/Isat)^2). When the design's peak winding current
 # exceeds the core's Isat, the magnetizing inductance collapses at the operating point and the transient
@@ -483,9 +587,10 @@ def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_
     if fidelity is None:
         fidelity = {"origin": "DATASHEET"}
     ctrl = _TOPO_CONTROL.get(topology)
-    if ctrl is None:
+    if ctrl is None and topology not in _SELF_REGULATED:
         raise ValueError(f"no control-variable mapping for topology '{topology}'")
-    field, bracket = _CONTROL[ctrl]
+    if topology not in _SELF_REGULATED:
+        field, bracket = _CONTROL[ctrl]
     if topology == "fsbb":
         _stash_fsbb_modulation(tas)   # capture dead-time before the bisection overwrites duties
     # A magnetic that can't give a valid regulated point (the deck collapses across the whole bracket): either
@@ -513,6 +618,28 @@ def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_
             "converged": False, "regulated": False, "steady_state": False,
             "magnetic_issues": issues, "saturated": saturated,
             "topology": topology, "control": ctrl, "target_vout": target_vout, "reason": reason,
+        }
+    # SELF-REGULATING AC-input topologies (PFC / Vienna): no control variable — the closed-loop controller
+    # is in the deck. Run it ONCE over whole line cycles and report the regulated operating point.
+    if topology in _SELF_REGULATED:
+        line_freq = _line_frequency(tas)
+        if line_freq is None:
+            raise ValueError(f"self-regulated topology '{topology}' needs designRequirements.lineFrequency")
+        r = _simulate_self_regulated(tas, fidelity, line_freq, topology)
+        tmag = abs(float(target_vout)) or 1.0
+        if r is None:
+            return {"converged": False, "regulated": False, "steady_state": False, "topology": topology,
+                    "control": "self", "target_vout": target_vout}
+        vout, pin, pout, ripple, pf = r
+        return {
+            "converged": True,
+            "regulated": abs(abs(vout) - tmag) <= tol * tmag,
+            "steady_state": ripple <= steady_ripple_frac,
+            "topology": topology, "control": "self", "value": None,
+            "vout": vout, "target_vout": target_vout, "vout_error": (abs(vout) - tmag) / tmag,
+            "pin": pin, "pout": pout,
+            "efficiency": (pout / pin) if (pin and pout == pout) else float("nan"),
+            "power_factor": pf,
         }
     fsw = _design_fsw(tas)
     # Frequency control: stay in the ABOVE-resonance region where Vout is MONOTONIC in frequency (below
