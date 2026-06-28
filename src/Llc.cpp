@@ -50,8 +50,9 @@ LlcDesign design_llc(const json& tasInputs) {
     // a 0.85 V DIDEAL drop is ~7% of a 12 V rail but negligible at 48 V (diverges from MKF's Vd=0).
     const double Vd = req::dideal_diode_drop(Iout);
     double n = (cfg::get(d.config, "bridgeFactor", kBridgeFactor) * Vin) / (Vo + Vd);
-    d.turnsRatio = std::round(n * 100.0) / 100.0;
-
+    // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
+    // the duty-derived value so the rest of the stage is sized around the fixed transformer.
+    d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(std::round(n * 100.0) / 100.0);
     // Resonant tank (FHA / Runo Nielsen TDA): Rac = 8n²/π²·Rload, Zr = Q·Rac, fr = √(fmin·fmax),
     // Lr = Zr/(2π·fr), Cr = 1/(2π·fr·Zr), Lm = Ln·Lr.   (MKF Llc::process_design_requirements)
     const double Rload = Vo / Iout;
@@ -123,19 +124,24 @@ json build_llc_tas(const LlcDesign& d) {
     // --- semiconductor requirements (sourceable) ---
     // Primary half-bridge MOSFETs Q1/Q2 each block the full bus Vin when off and carry the resonant
     // tank current (peak ItankPk, rms ItankRms — the same primary current that drives the magnetic).
-    const double ratedVdsQ = d.inputVoltageMax / cfg::v_derate(d.config);
+    const double ratedVdsQ = d.inputVoltageMax / cfg::v_derate_mosfet(d.config);
     const double maxRdsOnQ  = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (ItankRms * ItankRms);
     const json reqQ = req::mosfet("mainSwitch", ratedVdsQ, ItankPk, maxRdsOnQ, 125.0);
     // Center-tapped rectifier diodes D1/D2: each non-conducting half is reverse-biased to ~2·Vout (its own
     // Vout plus the conducting half's Vout), and conducts a rectified half-sine of the reflected tank
     // current (peak IsecPk, avg current Iout). NOT a body diode — an independent output rectifier.
-    const double ratedVrD = 2.0 * d.outputVoltage / cfg::v_derate(d.config);
+    const double ratedVrD = 2.0 * d.outputVoltage / cfg::v_derate_diode(d.config);
     const double maxVfD    = (ratedVrD < 100.0) ? 0.6 : 1.2;
     const json reqD = req::diode(ratedVrD, IsecPk, maxVfD, 0.05 * Tfr);
 
     json cr; cr["capacitor"] = json::object();
     cr["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.resonantCapacitance;
     cr["inputs"]["designRequirements"]["ratedVoltage"] = d.inputVoltage * 2;
+    // RESONANT cap: its value sets the tank frequency, so it must be sourced CLOSE to nominal — the
+    // default fill treats capacitance as a ripple MINIMUM and oversizes up to 2x, which detuned the LLC
+    // tank (6.7nF design -> 12nF sourced -> fr 126->105kHz -> 0V output). role=resonant tells the HS
+    // fill to pick the NEAREST value, not oversize (abt #54).
+    cr["inputs"]["designRequirements"]["role"] = "resonant";
 
     // Resonant inductor Lr: its OWN single-winding magnetic (carries the full sinusoidal tank current).
     json lr; lr["magnetic"] = json::object();
@@ -183,6 +189,28 @@ json build_llc_tas(const LlcDesign& d) {
         const double vClamp = d.outputVoltage * 3.0;
         dr["powerRating"] = cfg::rectifier_snubber_cap(d.config) * vClamp * vClamp * d.switchingFrequency;
         dr["role"] = "snubber"; return c; };
+    // Cap-divider BALANCING resistors. The bus-split midpoint msplit (Chi/Clo junction, = Vbus/2)
+    // otherwise has NO DC path — only the two caps (open at DC) and the transformer primary inductor —
+    // so ngspice's MNA matrix is SINGULAR at that node ("singular matrix: check node msplit"). At the
+    // design fsw it recovers, but at other frequencies the floating midpoint produces garbage Vout
+    // (e.g. 139 V), so the regulator never converges (abt #54). Two equal high-value balancing
+    // resistors give msplit a DC reference at exactly Vbus/2 without disturbing the AC operation.
+    auto balR = [&]() { json c; c["resistor"] = json::object();
+        auto& dr = c["inputs"]["designRequirements"];
+        dr["deviceType"] = "resistor";
+        dr["resistance"]["nominal"] = 100000.0;   // 100 kΩ: negligible loss (V²/R ≈ mW), defines msplit
+        dr["powerRating"] = 0.5;
+        dr["role"] = "balancing"; return c; };
+    // Half-bridge switching-node numerical dV/dt snubber (Csw -> stripped when the FET carries real Coss).
+    // The IDEAL switch slews sw_node infinitely fast; at off-unity gain (e.g. 400->48, Ln/Q put the tank
+    // far from the drive) ngspice can't resolve the edge and aborts ("Timestep too small ... node sw_node")
+    // — the rectifier snubber alone doesn't reach the primary node. A small cap to ground mimics Coss and
+    // makes the ideal deck converge across operating points (100 pF lands Vout within <0.1% of the MKF
+    // reference). Named Csw* so the assembler drops it once a real FET's Coss (>= this cap) does the
+    // limiting physically, leaving the DATASHEET/MKF_MODEL deck untouched (abt #54).
+    auto swSnub = [&]() { json c; c["capacitor"] = json::object();
+        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = 100e-12;
+        c["inputs"]["designRequirements"]["ratedVoltage"] = d.inputVoltage * 2; return c; };
 
     json cell; cell["name"] = "llc-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("g1"), port("g2")});
@@ -190,16 +218,21 @@ json build_llc_tas(const LlcDesign& d) {
         comp("Q1", mosfetReq(reqQ)), comp("Q2", mosfetReq(reqQ)),
         comp("Dq1", diode()), comp("Dq2", diode()),   // Dq1/Dq2 = Q1/Q2 body diodes -> bare seed (deferred)
         comp("Chi", busCap()), comp("Clo", busCap()),
+        comp("Rbal_hi", balR()), comp("Rbal_lo", balR()),   // define the bus-split midpoint at DC (abt #54)
         comp("Cr", cr), comp("Lr", lr), comp("T1", t1),
         comp("D1", diodeReq(reqD)), comp("D2", diodeReq(reqD)), comp("Cout", cout),
+        comp("Csw1", swSnub()),   // half-bridge sw_node dV/dt snubber (stripped when Coss is real)
         comp("Rsn1", snubR()), comp("Csn1", snubC()), comp("Rsn2", snubR()), comp("Csn2", snubC())});
     cell["connections"] = json::array({
         // Half-bridge leg + bus split. Q1 (vbus->sw), Q2 (sw->gnd) complementary; Dq1/Dq2 are the ZVS
         // body diodes. The tank returns to the split midpoint msplit (= Vbus/2).
-        conn("vin_net",  {pin("Q1", "drain"), pin("Dq1", "cathode"), pin("Chi", "1"), prt("vin")}),
+        conn("vin_net",  {pin("Q1", "drain"), pin("Dq1", "cathode"), pin("Chi", "1"),
+                          pin("Rbal_hi", "1"), prt("vin")}),
         conn("sw_node",  {pin("Q1", "source"), pin("Q2", "drain"),
-                          pin("Dq1", "anode"), pin("Dq2", "cathode"), pin("Cr", "1")}),
-        conn("msplit",   {pin("Chi", "2"), pin("Clo", "1"), pin("T1", "primary_end")}),
+                          pin("Dq1", "anode"), pin("Dq2", "cathode"), pin("Cr", "1"),
+                          pin("Csw1", "1")}),
+        conn("msplit",   {pin("Chi", "2"), pin("Clo", "1"), pin("T1", "primary_end"),
+                          pin("Rbal_hi", "2"), pin("Rbal_lo", "1")}),
         // Series resonant tank: sw_node -> Cr -> Lr -> Lpri(=Lm) -> msplit.
         conn("cr_mid",   {pin("Cr", "2"), pin("Lr", "primary_start")}),
         conn("pri_top",  {pin("Lr", "primary_end"), pin("T1", "primary_start")}),
@@ -212,6 +245,7 @@ json build_llc_tas(const LlcDesign& d) {
                           pin("Rsn1", "2"), pin("Csn1", "2"), pin("Rsn2", "2"), pin("Csn2", "2"),
                           pin("Cout", "1"), prt("vout")}),
         conn("gnd_net",  {pin("Q2", "source"), pin("Dq2", "anode"), pin("Clo", "2"),
+                          pin("Rbal_lo", "2"), pin("Csw1", "2"),
                           pin("T1", "secondary1_end"), pin("T1", "secondary2_start"),
                           pin("Cout", "2"), prt("gnd")}),
         conn("g1_net", {pin("Q1", "gate"), prt("g1")}),

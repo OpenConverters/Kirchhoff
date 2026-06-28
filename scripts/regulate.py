@@ -46,7 +46,8 @@ except Exception:  # pragma: no cover - PyOM not installed -> verdict falls back
 # auto-detected (sampling the bracket ends), so we never hardcode a possibly-wrong monotonicity.
 _CONTROL = {
     "duty":      ("dutyCycle", (0.04, 0.96)),   # buck family
-    "phase":     ("phaseDeg",  (15.0, 170.0)),  # psfb/pshb/dab: phase-shift of the lagging leg, ~0..180 deg
+    "phase":     ("phase",     (15.0, 170.0)),  # psfb/pshb/dab: phase-shift of the lagging leg, ~0..180 deg
+                                                 # (waveform field is "phase" — matches TasAssembler + the KH designs)
     "frequency": ("frequency", None),           # resonant: bracket derived from the design fsw
 }
 _TOPO_CONTROL = {
@@ -115,21 +116,21 @@ def _set_control(tas, field, value, topology=None):
             wf = st.get("waveform", {})
             if wf.get("type") != "pwm":
                 continue
-            if float(wf.get("phaseDeg", 0.0)) == 0.0:                  # charge leg (Q1/Q4)
+            if float(wf.get("phase", 0.0)) == 0.0:                     # charge leg (Q1/Q4)
                 wf["dutyCycle"] = value
             else:                                                       # discharge leg (Q2/Q3)
                 wf["dutyCycle"] = max(0.0, (1.0 - value) - 2.0 * dt)
-                wf["phaseDeg"] = (value + dt) * 360.0
+                wf["phase"] = (value + dt) * 360.0
         return
     for st in tas.get("simulation", {}).get("stimulus", []):
         wf = st.get("waveform", {})
         if wf.get("type") != "pwm":
             continue
-        if field == "phaseDeg":
-            p = float(wf.get("phaseDeg", 0.0))
+        if field == "phase":
+            p = float(wf.get("phase", 0.0))
             if p in (0.0, 180.0):
                 continue                                   # reference leg — fixed
-            wf["phaseDeg"] = value if p < 180.0 else (value + 180.0)   # lagging leg: φ and φ+180
+            wf["phase"] = value if p < 180.0 else (value + 180.0)   # lagging leg: φ and φ+180
         else:
             wf[field] = value
 
@@ -141,11 +142,11 @@ def _stash_fsbb_modulation(tas):
     leg at D0, so dt = (discharge_phase/360) − D0."""
     stims = [st for st in tas.get("simulation", {}).get("stimulus", [])
              if st.get("waveform", {}).get("type") == "pwm"]
-    charge = [st for st in stims if float(st["waveform"].get("phaseDeg", 0.0)) == 0.0]
-    disch = [st for st in stims if float(st["waveform"].get("phaseDeg", 0.0)) != 0.0]
+    charge = [st for st in stims if float(st["waveform"].get("phase", 0.0)) == 0.0]
+    disch = [st for st in stims if float(st["waveform"].get("phase", 0.0)) != 0.0]
     if charge and disch:
         d0 = float(charge[0]["waveform"].get("dutyCycle", 0.5))
-        ph0 = float(disch[0]["waveform"].get("phaseDeg", 0.0)) / 360.0
+        ph0 = float(disch[0]["waveform"].get("phase", 0.0)) / 360.0
         tas["_fsbbDeadFraction"] = max(0.0, ph0 - d0)
 
 
@@ -262,21 +263,26 @@ def _simulate(tas, fidelity, tag):
     pexpr = " + ".join(terms) if terms else None
     frm, to = settle - period, settle
     w0 = settle - 100.0 * period                                    # last ~100 periods, for the steady check
+    # CRITICAL: prefix every meas RESULT name with `m_`. ngspice is case-insensitive and a `meas`
+    # result becomes a (scalar) vector in the plot — so naming a measurement `vout` SHADOWS the node
+    # vector `v(Vout)`. Every measurement AFTER it that reads `v(Vout)` (vmax/vmin and each vld*) then
+    # operates on that 1-point scalar and returns 0 with a collapsed window (`to=0`), silently zeroing
+    # pout/efficiency and forcing vmax==vmin (ripple 0 -> always "steady"). The `m_` namespace can't
+    # collide with a circuit node, so each measurement reads the true transient vector. (abt #54.)
     ctrl = ["run",
-            f"meas tran vout avg v(Vout) from={frm:.12g} to={to:.12g}",
-            f"meas tran vmax max v(Vout) from={w0:.12g} to={to:.12g}",
-            f"meas tran vmin min v(Vout) from={w0:.12g} to={to:.12g}",
-            f"meas tran iin avg i({vin_name}) from={frm:.12g} to={to:.12g}"]
-    if pexpr is not None:
-        # Power probe: a behavioural CURRENT source into a 1 ohm resistor to ground, so
-        # v(n_pout_meas) == the (instantaneous) power expression AND the node has a real DC
-        # path to ground. A B-VOLTAGE source on a node that nothing else touches leaves its
-        # branch current (bpout#branch) an unconstrained solver unknown — with a stiff v*v
-        # expression the gear integrator aborts ("timestep too small; trouble with bpout#branch"),
-        # masking otherwise-valid regulated points across topologies.
-        deck += f"\nBpout 0 n_pout_meas I = {pexpr}\nRpout_meas n_pout_meas 0 1\n"
-        ctrl.append(f"meas tran pout avg v(n_pout_meas) from={frm:.12g} to={to:.12g}")
-    deck += "\n.control\n" + "\n".join(ctrl) + "\nprint vout iin\n.endc\n.end\n"
+            f"meas tran m_vout avg v(Vout) from={frm:.12g} to={to:.12g}",
+            f"meas tran m_vmax max v(Vout) from={w0:.12g} to={to:.12g}",
+            f"meas tran m_vmin min v(Vout) from={w0:.12g} to={to:.12g}",
+            f"meas tran m_iin avg i({vin_name}) from={frm:.12g} to={to:.12g}"]
+    # Output power: measure each load's AVERAGE terminal voltage and form the power in PYTHON below —
+    # do NOT inject a behavioural power probe into the circuit. A B-source with a v*v expression (even
+    # a current source into a 1 ohm dummy) perturbs the MNA Jacobian and collapses the GLOBAL timestep
+    # on stiff resonant decks (the LLC half-bridge body diode aborts with "timestep too small" at
+    # t~1e-11 the moment Bpout is present, abt #54). A pure measurement leaves the solve untouched.
+    for i, (node, ref, _kind, _val) in enumerate(loads):
+        vexpr = f"v({node})" if ref == "0" else f"v({node},{ref})"
+        ctrl.append(f"meas tran m_vld{i} avg {vexpr} from={frm:.12g} to={to:.12g}")
+    deck += "\n.control\n" + "\n".join(ctrl) + "\nprint v(Vout) i(" + vin_name + ")\n.endc\n.end\n"
     with tempfile.NamedTemporaryFile("w", suffix=f"_{tag}.cir", delete=False) as f:
         f.write(deck)
         path = f.name
@@ -290,11 +296,26 @@ def _simulate(tas, fidelity, tag):
     def grab(name):
         m = re.search(rf"\b{name}\s*=\s*([-\d.eE+]+)", text)
         return float(m.group(1)) if m else None
-    vout, vmax, vmin, iin, pout_m = grab("vout"), grab("vmax"), grab("vmin"), grab("iin"), grab("pout")
+    vout, vmax, vmin, iin = grab("m_vout"), grab("m_vmax"), grab("m_vmin"), grab("m_iin")
     if vout is None or iin is None or vin is None:
         return None
     pin = abs(vin * iin)
-    pout = abs(pout_m) if pout_m is not None else float("nan")
+    # Sum the output power from each load's measured average terminal voltage (no in-circuit probe).
+    # R: V^2/R, I: V*I, P: constant. avg(V)^2 ~= avg(V^2) at the low-ripple regulated point we report.
+    pout = 0.0
+    have_pout = bool(loads)
+    for i, (_node, _ref, kind, val) in enumerate(loads):
+        vld = grab(f"m_vld{i}")
+        if vld is None:
+            have_pout = False
+            break
+        if kind == "R":
+            pout += vld * vld / val
+        elif kind == "I":
+            pout += abs(vld * val)
+        elif kind == "P":
+            pout += val
+    pout = pout if have_pout else float("nan")
     # relative peak-to-peak of Vout over the last ~100 periods: just switching ripple when settled, large when
     # still drifting / in a slow limit cycle. The caller turns this into the steady/not-steady decision so the
     # threshold stays a tunable parameter (not a magic number buried here).
@@ -513,6 +534,11 @@ def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_
     # samples, never assumes a fixed monotonicity direction, and skips holes in the gain curve). Seed a grid,
     # then repeatedly interpolate the control value that should hit target from the two converging samples
     # that straddle it.
+    # Regulate on the output MAGNITUDE so INVERTING topologies (cuk, inverting buck-boost) work:
+    # their Vout is negative, so bisecting signed Vout toward a positive target drives the control to
+    # zero (chasing an unreachable +target). |Vout| is monotonic in the control for both polarities,
+    # so we hit |Vout| = |target| and report the SIGNED Vout (the gate sees the true negative rail).
+    tmag = abs(float(target_vout)) or 1.0
     N = 9
     pts = [p for p in (sample(lo + (hi - lo) * k / (N - 1)) for k in range(N)) if p is not None]
     if not pts:
@@ -521,17 +547,17 @@ def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_
 
     for _ in range(max_iter - N):
         pts.sort(key=lambda p: p[0])
-        cur = min(pts, key=lambda p: abs(p[1] - target_vout))
-        if abs(cur[1] - target_vout) <= tol * target_vout:
+        cur = min(pts, key=lambda p: abs(abs(p[1]) - tmag))
+        if abs(abs(cur[1]) - tmag) <= tol * tmag:
             break
-        nxt = None                                          # interpolate within a straddling pair
+        nxt = None                                          # interpolate within a straddling pair (in |Vout|)
         for a, b in zip(pts, pts[1:]):
-            if (a[1] - target_vout) * (b[1] - target_vout) < 0 and a[1] != b[1]:
-                nxt = a[0] + (b[0] - a[0]) * (target_vout - a[1]) / (b[1] - a[1])
+            if (abs(a[1]) - tmag) * (abs(b[1]) - tmag) < 0 and a[1] != b[1]:
+                nxt = a[0] + (b[0] - a[0]) * (tmag - abs(a[1])) / (abs(b[1]) - abs(a[1]))
                 break
         if nxt is None:                                     # no straddle yet: step outward past the closest end
             lo_p, hi_p = pts[0], pts[-1]
-            slope_end = hi_p if abs(hi_p[1] - target_vout) < abs(lo_p[1] - target_vout) else lo_p
+            slope_end = hi_p if abs(abs(hi_p[1]) - tmag) < abs(abs(lo_p[1]) - tmag) else lo_p
             step = 0.12 * (hi - lo)
             nxt = slope_end[0] + (step if slope_end is hi_p else -step)
         nxt = min(max(nxt, 0.5 * lo), 1.5 * hi)
@@ -541,18 +567,19 @@ def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_
         if r is not None:
             pts.append(r)
 
-    bx, vout, pin, pout, ripple = min(pts, key=lambda p: abs(p[1] - target_vout))
+    bx, vout, pin, pout, ripple = min(pts, key=lambda p: abs(abs(p[1]) - tmag))
     steady = ripple <= steady_ripple_frac
     return {
         "converged": True,
-        "regulated": abs(vout - target_vout) <= tol * target_vout,   # did we actually reach target?
+        # Regulated on |Vout| so inverting topologies count; report the SIGNED Vout below.
+        "regulated": abs(abs(vout) - tmag) <= tol * tmag,   # did we actually reach target magnitude?
         "steady_state": bool(steady),            # False -> Vout still drifting/oscillating; treat eff with care
         "topology": topology,
         "control": ctrl,
         "value": bx,                             # the regulated duty / phaseDeg / frequency
         "vout": vout,
         "target_vout": target_vout,
-        "vout_error": (vout - target_vout) / target_vout,
+        "vout_error": (abs(vout) - tmag) / tmag,
         "pin": pin,
         "pout": pout,
         "efficiency": (pout / pin) if (pin and pout == pout) else float("nan"),

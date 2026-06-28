@@ -41,9 +41,17 @@ SrcDesign design_src(const json& tasInputs) {
     const double Vin = d.inputVoltage, Vo = d.outputVoltage;
     const double Iout = d.outputPower / Vo;
 
-    double n = (cfg::get(d.config, "bridgeFactor", kBridgeFactor) * Vin) / Vo;
-    d.turnsRatio = std::round(n * 100.0) / 100.0;
-
+    // Turns ratio: n = k_bridge·Vin/(Vo+Vd). The SRC tank gain PEAKS at unity at fr (it can only step
+    // DOWN off resonance — there is no parallel Lm to boost like the LLC), so the realized output at fr is
+    // 0.5·Vin/n MINUS the rectifier drop Vd. Without the +Vd compensation the converter tops out at Vo−Vd
+    // and can NEVER regulate to Vo (at 12 V the 0.85 V CT-rectifier drop is ~7% — the closed-loop search
+    // lands ~11.1 V and reports regulated=False). Compensating Vd puts the fr peak at Vo so the regulator
+    // can hit target just off resonance. (Mirrors the LLC n; Vd is negligible at 48 V, ~7% at 12 V.)
+    const double Vd = req::dideal_diode_drop(Iout);
+    double n = (cfg::get(d.config, "bridgeFactor", kBridgeFactor) * Vin) / (Vo + Vd);
+    // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
+    // the duty-derived value so the rest of the stage is sized around the fixed transformer.
+    d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(std::round(n * 100.0) / 100.0);
     // Two-element series tank (no resonant Lm): Rac = 8n²/π²·Rload, Zr = Q·Rac, operate at fr = fsw,
     // Lr = Zr/(2π·fr), Cr = 1/(2π·fr·Zr). Lm made large (10·Lr) so it does not load the resonance.
     const double Rload = Vo / Iout;
@@ -115,13 +123,13 @@ json build_src_tas(const SrcDesign& d) {
     // --- semiconductor requirements (sourceable) ---
     // Primary half-bridge MOSFETs Q1/Q2 each block the full bus Vin when off and carry the resonant
     // tank current (peak ItankPk, rms ItankRms — the same primary current that drives the magnetic).
-    const double ratedVdsQ = d.inputVoltageMax / cfg::v_derate(d.config);
+    const double ratedVdsQ = d.inputVoltageMax / cfg::v_derate_mosfet(d.config);
     const double maxRdsOnQ  = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (ItankRms * ItankRms);
     const json reqQ = req::mosfet("mainSwitch", ratedVdsQ, ItankPk, maxRdsOnQ, 125.0);
     // Center-tapped rectifier diodes D1/D2: each non-conducting half is reverse-biased to ~2·Vout, and
     // conducts a rectified half-sine of the reflected tank current (peak IsecPk, avg current Iout).
     // NOT a body diode — an independent output rectifier.
-    const double ratedVrD = 2.0 * d.outputVoltage / cfg::v_derate(d.config);
+    const double ratedVrD = 2.0 * d.outputVoltage / cfg::v_derate_diode(d.config);
     const double maxVfD    = (ratedVrD < 100.0) ? 0.6 : 1.2;
     const json reqD = req::diode(ratedVrD, IsecPk, maxVfD, 0.05 * Tfr);
 
@@ -171,6 +179,23 @@ json build_src_tas(const SrcDesign& d) {
         const double vClamp = d.outputVoltage * 3.0;
         dr["powerRating"] = cfg::rectifier_snubber_cap(d.config) * vClamp * vClamp * d.switchingFrequency;
         dr["role"] = "snubber"; return c; };
+    // Cap-divider BALANCING resistors — give the bus-split midpoint msplit a DC reference at Vbus/2.
+    // Without them msplit (Chi/Clo junction + transformer primary) has no DC path -> singular MNA
+    // matrix -> garbage Vout at off-design frequencies and the regulator never converges (abt #54).
+    auto balR = [&]() { json c; c["resistor"] = json::object();
+        auto& dr = c["inputs"]["designRequirements"];
+        dr["deviceType"] = "resistor";
+        dr["resistance"]["nominal"] = 100000.0;
+        dr["powerRating"] = 0.5;
+        dr["role"] = "balancing"; return c; };
+    // Half-bridge switching-node numerical dV/dt snubber (Csw -> stripped when the FET carries real Coss).
+    // The IDEAL switch slews sw_node infinitely fast; at some operating points ngspice can't resolve the
+    // edge and aborts ("Timestep too small ... node sw_node"). A small cap to ground mimics Coss so the
+    // ideal deck converges; named Csw* so the assembler drops it once a real FET's Coss does the limiting
+    // physically, leaving the DATASHEET/MKF_MODEL deck untouched (abt #54).
+    auto swSnub = [&]() { json c; c["capacitor"] = json::object();
+        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = 100e-12;
+        c["inputs"]["designRequirements"]["ratedVoltage"] = d.inputVoltage * 2; return c; };
 
     json cell; cell["name"] = "src-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("g1"), port("g2")});
@@ -178,14 +203,19 @@ json build_src_tas(const SrcDesign& d) {
         comp("Q1", mosfetReq(reqQ)), comp("Q2", mosfetReq(reqQ)),
         comp("Dq1", diode()), comp("Dq2", diode()),   // Dq1/Dq2 = Q1/Q2 body diodes -> bare seed (deferred)
         comp("Chi", busCap()), comp("Clo", busCap()),
+        comp("Rbal_hi", balR()), comp("Rbal_lo", balR()),   // define bus-split midpoint at DC (abt #54)
         comp("Cr", cr), comp("Lr", lr), comp("T1", t1),
         comp("D1", diodeReq(reqD)), comp("D2", diodeReq(reqD)), comp("Cout", cout),
+        comp("Csw1", swSnub()),   // half-bridge sw_node dV/dt snubber (stripped when Coss is real)
         comp("Rsn1", snubR()), comp("Csn1", snubC()), comp("Rsn2", snubR()), comp("Csn2", snubC())});
     cell["connections"] = json::array({
-        conn("vin_net",  {pin("Q1", "drain"), pin("Dq1", "cathode"), pin("Chi", "1"), prt("vin")}),
+        conn("vin_net",  {pin("Q1", "drain"), pin("Dq1", "cathode"), pin("Chi", "1"),
+                          pin("Rbal_hi", "1"), prt("vin")}),
         conn("sw_node",  {pin("Q1", "source"), pin("Q2", "drain"),
-                          pin("Dq1", "anode"), pin("Dq2", "cathode"), pin("Cr", "1")}),
-        conn("msplit",   {pin("Chi", "2"), pin("Clo", "1"), pin("T1", "primary_end")}),
+                          pin("Dq1", "anode"), pin("Dq2", "cathode"), pin("Cr", "1"),
+                          pin("Csw1", "1")}),
+        conn("msplit",   {pin("Chi", "2"), pin("Clo", "1"), pin("T1", "primary_end"),
+                          pin("Rbal_hi", "2"), pin("Rbal_lo", "1")}),
         conn("cr_mid",   {pin("Cr", "2"), pin("Lr", "primary_start")}),
         conn("pri_top",  {pin("Lr", "primary_end"), pin("T1", "primary_start")}),
         conn("sec_top",  {pin("T1", "secondary1_start"), pin("D1", "anode"),
@@ -196,6 +226,7 @@ json build_src_tas(const SrcDesign& d) {
                           pin("Rsn1", "2"), pin("Csn1", "2"), pin("Rsn2", "2"), pin("Csn2", "2"),
                           pin("Cout", "1"), prt("vout")}),
         conn("gnd_net",  {pin("Q2", "source"), pin("Dq2", "anode"), pin("Clo", "2"),
+                          pin("Rbal_lo", "2"), pin("Csw1", "2"),
                           pin("T1", "secondary1_end"), pin("T1", "secondary2_start"),
                           pin("Cout", "2"), prt("gnd")}),
         conn("g1_net", {pin("Q1", "gate"), prt("g1")}),

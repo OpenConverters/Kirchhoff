@@ -40,7 +40,9 @@ ClllcDesign design_clllc(const json& tasInputs) {
 
     const double Vin = d.inputVoltage, Vo = d.outputVoltage;
     double n = Vin / Vo;
-    d.turnsRatio = n;
+    // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
+    // the duty-derived value so the rest of the stage is sized around the fixed transformer.
+    d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(n);
     const double fr = d.switchingFrequency;
     d.resonantFrequency = fr;
     const double Rload = Vo * Vo / d.outputPower;
@@ -121,12 +123,12 @@ json build_clllc_tas(const ClllcDesign& d) {
     // MOSFETs both sides); the only diodes (DS1..DS4, DSE..DSH) are FET body diodes -> left bare/deferred.
     // Primary full-bridge Q1..Q4: each blocks the full bus Vin when off, carries the primary tank current
     // (peak ItankPk, rms ItankRms — the same primary current that drives the magnetic).
-    const double ratedVdsPri = d.inputVoltageMax / cfg::v_derate(d.config);
+    const double ratedVdsPri = d.inputVoltageMax / cfg::v_derate_mosfet(d.config);
     const double maxRdsOnPri  = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (ItankRms * ItankRms);
     const json reqPri = req::mosfet("mainSwitch", ratedVdsPri, ItankPk, maxRdsOnPri, 125.0);
     // Secondary SR full-bridge QE..QH: each blocks the output rail Vout when off, carries the secondary
     // (reflected) tank current (peak IsecPk, rms IsecRms).
-    const double ratedVdsSec = d.outputVoltage / cfg::v_derate(d.config);
+    const double ratedVdsSec = d.outputVoltage / cfg::v_derate_mosfet(d.config);
     const double maxRdsOnSec  = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IsecRms * IsecRms);
     const json reqSec = req::mosfet("mainSwitch", ratedVdsSec, IsecPk, maxRdsOnSec, 125.0);
 
@@ -158,7 +160,6 @@ json build_clllc_tas(const ClllcDesign& d) {
     // so the control stage can drive the SR diagonals current-aware.
     json pcell; pcell["name"] = "clllc-power";
     pcell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("g1"), port("g2"),
-                                  port("gE"), port("gF"), port("gG"), port("gH"),
                                   port("senseP"), port("senseM")});
     pcell["components"] = json::array({
         // primary full bridge + body diodes (DS1..DS4 = Q1..Q4 body diodes -> bare seed, deferred)
@@ -196,13 +197,16 @@ json build_clllc_tas(const ClllcDesign& d) {
         conn("gnd_net",  {pin("Q2","source"), pin("Q4","source"), pin("DS2","anode"), pin("DS4","anode"),
                           pin("QF","source"), pin("QH","source"), pin("DSF","anode"), pin("DSH","anode"),
                           pin("Cout","2"), prt("gnd")}),
-        // Primary gates (open-loop stimulus); SR gates (driven by the control stage).
-        conn("g1_net", {pin("Q1","gate"), pin("Q4","gate"), prt("g1")}),
-        conn("g2_net", {pin("Q2","gate"), pin("Q3","gate"), prt("g2")}),
-        conn("gE_net", {pin("QE","gate"), prt("gE")}),
-        conn("gF_net", {pin("QF","gate"), prt("gF")}),
-        conn("gG_net", {pin("QG","gate"), prt("gG")}),
-        conn("gH_net", {pin("QH","gate"), prt("gH")})});
+        // Gates: both bridges run off the SAME two stimulus signals. Primary diagonals (Q1,Q4) on g1 /
+        // (Q2,Q3) on g2 give vab=±Vin; the secondary SR diagonals are driven SYNCHRONOUS with them —
+        // diagonal A (QE,QH) on g1, diagonal B (QF,QG) on g2 — so each SR FET conducts in lock-step with
+        // its own body diode (DSE..DSH still rectify / enable the cold start). This is the same 2-signal
+        // lock-step SR drive CLLC uses. (The current-sensed srControl stage below is sourced for the BOM
+        // but its behavioural gate law is NOT lowered into the power deck — a control stage is skipped by
+        // the assembler — so wiring the SR gates to the separate driveA/driveB control nets left them
+        // FLOATING and the converter delivered 0 V; abt #60.)
+        conn("g1_net", {pin("Q1","gate"), pin("Q4","gate"), pin("QE","gate"), pin("QH","gate"), prt("g1")}),
+        conn("g2_net", {pin("Q2","gate"), pin("Q3","gate"), pin("QF","gate"), pin("QG","gate"), prt("g2")})});
 
     // ──────────────────── CONTROL stage (swappable) ────────────────────
     // ONE CTAS `controller` component — a current-sensed full-bridge synchronous-rectifier controller —
@@ -242,13 +246,11 @@ json build_clllc_tas(const ClllcDesign& d) {
         isc("Vin", "externalPort", "input", {sp("clllcPower", "vin")}),
         isc("GND", "externalPort", "input", {sp("clllcPower", "gnd")}),
         isc("Vout", "externalPort", "output", {sp("clllcPower", "vout")}),
-        // tank-current sense: power -> control
+        // tank-current sense: power -> control (the SR controller IC is sourced for the BOM and reads the
+        // sense resistor; the SR power gates themselves are driven in lock-step off g1/g2 in the power cell
+        // above, so no driveA/driveB gate nets are wired — they would float, abt #60).
         isc("senseP", "wire", "", {sp("clllcPower", "senseP"), sp("srControl", "senseP")}),
-        isc("senseM", "wire", "", {sp("clllcPower", "senseM"), sp("srControl", "senseM")}),
-        // control drives -> the two SR diagonals (one comparator output fans out to two power gates):
-        //   diagonal A (i>0): QE (gE) + QH (gH) ; diagonal B (i<0): QF (gF) + QG (gG)
-        isc("driveA", "wire", "", {sp("srControl", "gA"), sp("clllcPower", "gE"), sp("clllcPower", "gH")}),
-        isc("driveB", "wire", "", {sp("srControl", "gB"), sp("clllcPower", "gF"), sp("clllcPower", "gG")})});
+        isc("senseM", "wire", "", {sp("clllcPower", "senseM"), sp("srControl", "senseM")})});
 
     json an; an["type"] = "transient"; an["stopTime"] = 0.004; an["maximumTimeStep"] = 5e-8;
     tas["simulation"]["analyses"] = json::array({an});

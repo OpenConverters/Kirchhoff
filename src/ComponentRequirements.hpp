@@ -50,6 +50,21 @@ inline std::optional<double> provided_inductance(const json& designRequirements)
     return std::nullopt;
 }
 
+// "Design around the magnetic" for TRANSFORMERS (della-Pollock Pass 2): when the caller pins the chosen
+// magnetic, the primary:secondary turns ratio is part of that constraint (the REALIZED ratio of the cored
+// transformer MKF designed), so the topology must size the rest of the stage around THAT ratio instead of
+// re-deriving its own from the duty ceiling — otherwise the fixed magnetic and the rest of the design drift.
+// Reads designRequirements.turnsRatios[idx] (number or {nominal/maximum/minimum}), idx defaulting to the
+// primary:first-secondary ratio. Returns nullopt if none is pinned (derive as before).
+inline std::optional<double> provided_turns_ratio(const json& designRequirements, size_t idx = 0) {
+    if (designRequirements.is_object() && designRequirements.contains("turnsRatios")) {
+        const auto& tr = designRequirements.at("turnsRatios");
+        if (tr.is_array() && idx < tr.size())
+            return PEAS::resolve_dimensional_values(tr.at(idx));   // canonical resolver, not raw nominal
+    }
+    return std::nullopt;
+}
+
 // --- semiconductor: MOSFET main switch ---
 inline json mosfet(const std::string& role, double ratedVds, double ratedId,
                    double maxRdsOn, double maxTjC) {
@@ -125,6 +140,16 @@ inline void finalize_control_seeds(json& tas, const std::string& topology) {
         if (!st.contains("circuit") || !st.at("circuit").is_object()) continue;
         for (auto& c : st["circuit"]["components"]) {
             if (!c.contains("data") || !c.at("data").contains("controller")) continue;
+            // Only a controller carrying a CTAS designRequirements SEED gets topology+fsw injected. A
+            // BEHAVIOURAL controller model (e.g. the CLLLC synchronous-rectifier `controller.behavioral`)
+            // has no inputs.designRequirements — reading it via operator[] would auto-vivify a null node
+            // and `null.value("category", ...)` throws json type_error.306, breaking the whole build
+            // (abt #57). Skip any controller without an object designRequirements seed.
+            const json& data = c.at("data");
+            if (!data.contains("inputs") || !data.at("inputs").is_object()
+                || !data.at("inputs").contains("designRequirements")
+                || !data.at("inputs").at("designRequirements").is_object())
+                continue;
             json& dr = c["data"]["inputs"]["designRequirements"];
             if (is_switching_controller_category(dr.value("category", std::string{}))) {
                 dr["topology"] = topology;
@@ -223,17 +248,30 @@ inline json winding_excitation(const std::string& currentLabel, double frequency
 // {nominal} only enforces a loose +/- threshold band, letting e.g. 12/4 = 3.0 slip past a 2.72 target.
 // Structural ratios (a matched 1:1 second primary / demag winding) must stay {nominal} (exact). Default
 // empty -> every ratio nominal (unchanged behaviour for non-duty-limited magnetics).
+// lmIsMinimum (default false): emit the magnetizing inductance as a MINIMUM-only requirement
+// (Lm >= value) instead of a nominal target with +/- tolerance. A true TRANSFORMER (energy-transfer:
+// forward/bridge/push-pull/dab/etc.) wants Lm MAXIMISED to minimise magnetizing current, so it should
+// be left UNGAPPED — and the magnetic adviser only skips gapping when Lm is minimum-only (a nominal
+// target makes it GAP the core to hit that exact Lm, which forces many turns onto a small core ->
+// an overfilled, degenerate, high-leakage winding that kills phase-shift/duty power transfer, abt #56).
+// Energy-storing magnetics (flyback / flybuck coupled inductors) and resonant tanks (LLC/CLLC Lm) need
+// a SPECIFIC gapped Lm, so they keep the default nominal+tolerance.
 inline json magnetic_inputs(double Lm, double lmTolerance,
                             const std::vector<double>& turnsRatios,
                             const std::vector<std::string>& isolationSides,
                             std::optional<double> isolationVoltage,
                             double ambientC,
                             const std::vector<json>& excitationsPerWinding,
-                            const std::vector<bool>& turnsRatioIsCeiling = {}) {
+                            const std::vector<bool>& turnsRatioIsCeiling = {},
+                            bool lmIsMinimum = false) {
     json dr;
-    dr["magnetizingInductance"]["nominal"] = Lm;
-    dr["magnetizingInductance"]["minimum"] = Lm * (1.0 - lmTolerance);
-    dr["magnetizingInductance"]["maximum"] = Lm * (1.0 + lmTolerance);
+    if (lmIsMinimum) {
+        dr["magnetizingInductance"]["minimum"] = Lm;
+    } else {
+        dr["magnetizingInductance"]["nominal"] = Lm;
+        dr["magnetizingInductance"]["minimum"] = Lm * (1.0 - lmTolerance);
+        dr["magnetizingInductance"]["maximum"] = Lm * (1.0 + lmTolerance);
+    }
     dr["turnsRatios"] = json::array();
     for (size_t i = 0; i < turnsRatios.size(); ++i) {
         if (i < turnsRatioIsCeiling.size() && turnsRatioIsCeiling[i])
