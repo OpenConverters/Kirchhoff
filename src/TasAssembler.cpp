@@ -156,6 +156,22 @@ bool is_numerical_snubber(const std::string& n) {
     return n.rfind("Csn", 0) == 0 || n.rfind("Rsn", 0) == 0 || n.rfind("Csw", 0) == 0;
 }
 
+// A control stage carries a BEHAVIOURAL ANALOG control LAW iff one of its components has a `data.analog`
+// block (comparator / integrator / multiplier / summer) — the blocks CIAS lowers into B-sources. Such a
+// law is the ACTUAL gate driver of a closed-loop converter (PFC / Vienna have no open-loop stimulus, so
+// their switch is driven ONLY by this law). A bare CTAS controller-IC seed (data.controller only) carries
+// no analog law and is sourced for the BOM only. Used to decide which role:control stages to render.
+bool stage_has_analog_control_law(const json& stage) {
+    if (!stage.contains("circuit") || !stage.at("circuit").is_object()) return false;
+    const json& brick = stage.at("circuit");
+    if (!brick.contains("components") || !brick.at("components").is_array()) return false;
+    for (const auto& c : brick.at("components")) {
+        if (c.contains("data") && c.at("data").is_object() && c.at("data").contains("analog"))
+            return true;   // a raw AAS analog block (comparator/integrator/multiplier/summer) -> render
+    }
+    return false;
+}
+
 } // namespace
 
 static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fidelity,
@@ -208,10 +224,15 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
     for (const auto& stage : stages) {
         if (!stage.contains("circuit") || !stage.at("circuit").is_object()) continue;  // control stages (no brick)
         // A physicalControl stage (role "control") DOES carry a circuit (its controller IC),
-        // but it is sourced for the BOM only — the gate is driven by the stimulus / control
-        // law, not by instantiating the controller in the power deck. Skip it here so a
-        // sourced control IC never double-drives the gate; the fill still walks its circuit.
-        if (stage.value("role", "") == "control") continue;
+        // but it is sourced for the BOM only — the gate is driven by the stimulus, not by
+        // instantiating the controller in the power deck. Skip it so a sourced control IC never
+        // double-drives the gate; the fill still walks its circuit. EXCEPTION: a control stage that
+        // carries a behavioural ANALOG control LAW (PFC/Vienna's comparator+integrator+multiplier
+        // closed loop) is the ONLY thing driving its switch — there is no stimulus — so it MUST be
+        // lowered into the deck. Without this the PFC/Vienna switch gate floats and the converter
+        // delivers ~0 V (a regression from emitting a control-IC seed in every topology and skipping
+        // every role:control stage).
+        if (stage.value("role", "") == "control" && !stage_has_analog_control_law(stage)) continue;
         const std::string sname = stage.at("name").get<std::string>();
         const json& brick = stage.at("circuit");
 

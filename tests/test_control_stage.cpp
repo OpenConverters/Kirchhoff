@@ -65,14 +65,18 @@ json clllc_inputs() {
 }
 }  // namespace
 
-TEST_CASE("CLLLC closed-loop SR: control stage expressed in CIAS drives the rectifier",
+TEST_CASE("CLLLC synchronous rectifier: lock-step SR delivers a regulated output",
           "[control][cias][clllc]") {
     json di = clllc_inputs();
     Kirchhoff::ClllcDesign d = Kirchhoff::design_clllc(di);
     json tas = Kirchhoff::build_clllc_tas(d);
 
-    // The TAS carries TWO stages — a power switchingCell and a separate "control" stage — and the
-    // control stage's brick holds ONE CTAS `controller` component (the controller lives in CIAS).
+    // The secondary synchronous rectifier is driven in LOCK-STEP off the primary gate signals g1/g2
+    // (diagonal A = QE,QH on g1; diagonal B = QF,QG on g2), mirroring CLLC — each SR FET conducts with
+    // its own body diode. A current-sensed SR CONTROL stage was structurally renderable (ctas_to_cias ->
+    // CIAS comparators) but did NOT transfer power at real (DATASHEET) fidelity — the secondary stayed at
+    // ~0 V — so lock-step is the working design (abt #60). The current-sensed SR controller IC is still
+    // carried as a role:control stage and sourced for the BOM (assembler skips it in the power deck).
     bool hasControlStage = false, hasController = false;
     for (const auto& st : tas.at("topology").at("stages")) {
         if (st.value("role", "") == "control") {
@@ -82,16 +86,14 @@ TEST_CASE("CLLLC closed-loop SR: control stage expressed in CIAS drives the rect
                     hasController = true;
         }
     }
-    CHECK(hasControlStage);
+    CHECK(hasControlStage);   // the SR controller IC is sourced for the BOM
     CHECK(hasController);
 
-    // Assemble -> deck. The controller lowers (ctas_to_cias) to AAS comparators, which the CIAS->ngspice
-    // converter realises as behavioural sources (it threw on `analog`/`controller` before this work).
-    // The deck carries .ic + uic for the resonant start.
     PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
     std::string deck = Kirchhoff::tas_to_ngspice(tas, ideal);
-    REQUIRE(deck.find("SSR_CmpA") != std::string::npos); // controller -> comparator (controlled switch)
-    REQUIRE(deck.find(" uic") != std::string::npos);     // initial-condition transient
+    REQUIRE(deck.find(" uic") != std::string::npos);     // resonant start: precharge + use-initial-conditions
+    // The four SR switches are gated by the primary stimulus nets (lock-step), not a separate drive net.
+    REQUIRE(deck.find("SSR_CmpA") == std::string::npos);  // no current-sensed SR comparator in the deck
 
     // Run to steady state (the 100µF LV bus + resonant loop; output precharged so it settles quickly).
     const double fsw = 350e3, period = 1.0 / fsw, tstep = period / 200.0, tstop = 12e-3;
@@ -102,27 +104,18 @@ TEST_CASE("CLLLC closed-loop SR: control stage expressed in CIAS drives the rect
     if (cpos != std::string::npos) deck = deck.substr(0, cpos);
     deck += "\n.control\nrun\n"
             "meas tran vo AVG v(Vout) from=" + fmt(tstop - period) + " to=" + fmt(tstop) + "\n"
-            "meas tran ge_avg AVG v(driveA) from=" + fmt(tstop - period) + " to=" + fmt(tstop) + "\n"
-            "meas tran ge_hi MAX v(driveA) from=" + fmt(tstop - 2*period) + " to=" + fmt(tstop) + "\n"
-            "print vo ge_avg ge_hi\n.endc\n.end\n";
+            "print vo\n.endc\n.end\n";
 
     std::string out = run_ngspice(deck, "clllc");
-    double vo = 0, geAvg = 0, geHi = 0;
+    double vo = 0;
     REQUIRE(parse_meas(out, "vo", vo));
-    parse_meas(out, "ge_avg", geAvg);
-    parse_meas(out, "ge_hi", geHi);
 
-    INFO("CLLLC closed-loop SR: Vout=" << vo << " V, SR gate avg=" << geAvg << " V, gate max=" << geHi);
-    // (1) settles to a stable, sensible output — symmetric CLLLC at resonance is ~unity-gain DC
-    //     transformer (Vout ~ Vin = 400 V). Wide band: this is a physical-sanity gate, not an
-    //     MKF match (we deliberately diverge from MKF's solver-timed-SR 187 V).
+    INFO("CLLLC lock-step SR: Vout=" << vo << " V");
+    // Settles to a stable, sensible output — symmetric CLLLC at resonance is a ~unity-gain DC transformer
+    // (Vout ~ Vin = 400 V). Wide band: a physical-sanity gate, not an MKF match (we deliberately diverge
+    // from MKF's solver-timed SR). A delivered (non-zero, near-target) bus proves the SR rectifies.
     CHECK(vo > 300.0);
     CHECK(vo < 460.0);
-    // (2) the SR gate is genuinely being SWITCHED by the comparator (the point of the test): the gate
-    //     reaches its high rail and spends a non-trivial fraction of the period both on and off.
-    CHECK(geHi > 4.0);
-    CHECK(geAvg > 0.5);
-    CHECK(geAvg < 4.5);
 }
 
 namespace {
