@@ -340,28 +340,48 @@ def _line_frequency(tas):
     return float(lf) if isinstance(lf, (int, float)) else None
 
 
-def _ac_source(deck):
-    """The AC line source `Vxxx n1 n2 SIN(...)` in a rectified-input deck: (name, n1, n2), or None."""
+def _ac_sources(deck):
+    """Every AC line source `Vxxx n1 n2 SIN(...)`: one for a single-phase PFC, three for a 3-phase Vienna.
+    Returns [(name, n1, n2), ...]."""
+    out = []
     for ln in deck.splitlines():
         m = re.match(r"^(V\w+)\s+(\S+)\s+(\S+)\s+SIN\(", ln, re.I)
         if m:
-            return m.group(1), m.group(2), m.group(3)
-    return None
+            out.append((m.group(1), m.group(2), m.group(3)))
+    return out
+
+
+def _output_loads(deck):
+    """Output load resistor(s) of a self-regulating converter — resistors whose name contains 'load' (the KH
+    builders + the top-level assembler name the output load 'Rload'). Returns [(n1, n2, R), ...]. Measured
+    DIFFERENTIALLY, so a single-ended output (PFC: `Rload Vout 0`) AND a split DC bus (Vienna: `RRload busP
+    busN`) both work without hardcoding a `Vout` node."""
+    out = []
+    for ln in deck.splitlines():
+        m = re.match(r"^(R\w*[Ll]oad\w*)\s+(\S+)\s+(\S+)\s+([-\d.eE+]+)", ln)
+        if m:
+            out.append((m.group(2), m.group(3), float(m.group(4))))
+    return out
+
+
+def _vdiff(n1, n2):
+    """ngspice voltage across (n1, n2): single-ended to ground, else the node-pair difference."""
+    return f"v({n1})" if n2 in _GND else f"(v({n1})-v({n2}))"
 
 
 def _simulate_self_regulated(tas, fidelity, line_freq, tag):
     """Operating point of a SELF-REGULATING AC-input converter (PFC / Vienna). Its closed-loop controller is
     rendered INTO the deck, so there is no control variable to bisect — run the deck over whole LINE cycles
     (the bus is precharged + UIC, so it settles in a handful) and measure the regulated bus, the REAL input
-    power (avg of v_line·i_line, correct under the rectified-line + 2×line bus ripple), the output power and
-    the power factor. Returns (vout, pin, pout, ripple, pf) at steady state, or None on non-convergence.
-    Uses LINE-cycle windowing (the DC path's switching-period window would mis-average the line ripple)."""
+    power (Σ over phases of v_line·i_line — balanced 3-phase is ~ripple-free, single-phase carries the 2×line
+    ripple), the output power and the power factor. Returns (vout, pin, pout, ripple, pf) at steady state, or
+    None on non-convergence. Output is read DIFFERENTIALLY across the load (handles Vienna's split bus). Uses
+    LINE-cycle windowing (the DC path's switching-period window would mis-average the line ripple)."""
     deck = PyKirchhoff.tas_to_ngspice(tas, fidelity)
-    src = _ac_source(deck)
-    if src is None:
+    sources = _ac_sources(deck)
+    loads = _output_loads(deck)
+    if not sources or not loads:
         return None
-    vname, n1, n2 = src
-    _vn, _vin, loads, _cmax = _parse_deck(deck)
     period = 1.0 / line_freq
     mtran = re.match(r"(?s).*?\.tran\s+(\S+)\s+(\S+)\s+\S+\s+\S+", deck)
     tstep = float(mtran.group(1)) if mtran else period / 4000.0
@@ -373,21 +393,24 @@ def _simulate_self_regulated(tas, fidelity, line_freq, tag):
     cpos = deck.rfind("\n.control")
     if cpos != -1:
         deck = deck[:cpos]
-    frm, to = settle - period, settle               # the last WHOLE line cycle (averages the 2×line ripple)
+    frm, to = settle - period, settle               # the last WHOLE line cycle (averages the line ripple)
     w0 = settle - 2.0 * period
-    vac = f"v({n1})" if n2 in _GND else f"(v({n1})-v({n2}))"
-    ctrl = ["run",
-            f"let m_iac = -i({vname})",
-            f"let m_pinst = {vac}*m_iac",
-            f"meas tran m_vout avg v(Vout) from={frm:.12g} to={to:.12g}",
-            f"meas tran m_vmax max v(Vout) from={w0:.12g} to={to:.12g}",
-            f"meas tran m_vmin min v(Vout) from={w0:.12g} to={to:.12g}",
+    pin_terms = " + ".join(f"{_vdiff(n1, n2)}*(-i({nm}))" for nm, n1, n2 in sources)
+    # `meas avg/rms/...` needs a VECTOR, not a parenthesised expression — so materialise every differential
+    # (the split-bus output, each phase voltage, the input power) with a `let` first, then meas the vector.
+    lets = [f"let m_pinst = {pin_terms}", f"let m_vbus = {_vdiff(loads[0][0], loads[0][1])}"]
+    lets += [f"let m_vsrc{i} = {_vdiff(n1, n2)}" for i, (_nm, n1, n2) in enumerate(sources)]
+    lets += [f"let m_vldv{i} = {_vdiff(n1, n2)}" for i, (n1, n2, _R) in enumerate(loads)]
+    ctrl = ["run", *lets,
             f"meas tran m_pin avg m_pinst from={frm:.12g} to={to:.12g}",
-            f"meas tran m_vrms rms {vac} from={frm:.12g} to={to:.12g}",
-            f"meas tran m_irms rms m_iac from={frm:.12g} to={to:.12g}"]
-    for i, (node, ref, _kind, _val) in enumerate(loads):
-        vexpr = f"v({node})" if ref == "0" else f"v({node},{ref})"
-        ctrl.append(f"meas tran m_vld{i} avg {vexpr} from={frm:.12g} to={to:.12g}")
+            f"meas tran m_vout avg m_vbus from={frm:.12g} to={to:.12g}",
+            f"meas tran m_vmax max m_vbus from={w0:.12g} to={to:.12g}",
+            f"meas tran m_vmin min m_vbus from={w0:.12g} to={to:.12g}"]
+    for i, (nm, _n1, _n2) in enumerate(sources):
+        ctrl.append(f"meas tran m_vr{i} rms m_vsrc{i} from={frm:.12g} to={to:.12g}")
+        ctrl.append(f"meas tran m_ir{i} rms i({nm}) from={frm:.12g} to={to:.12g}")
+    for i in range(len(loads)):
+        ctrl.append(f"meas tran m_vld{i} avg m_vldv{i} from={frm:.12g} to={to:.12g}")
     deck += "\n.control\n" + "\n".join(ctrl) + "\n.endc\n.end\n"
     with tempfile.NamedTemporaryFile("w", suffix=f"_{tag}.cir", delete=False) as f:
         f.write(deck)
@@ -404,26 +427,29 @@ def _simulate_self_regulated(tas, fidelity, line_freq, tag):
         m = re.search(rf"\b{name}\s*=\s*([-\d.eE+]+)", text)
         return float(m.group(1)) if m else None
     vout, vmax, vmin = grab("m_vout"), grab("m_vmax"), grab("m_vmin")
-    pin, vrms, irms = grab("m_pin"), grab("m_vrms"), grab("m_irms")
+    pin = grab("m_pin")
     if vout is None or pin is None:
         return None
     pin = abs(pin)
     pout = 0.0
     have_pout = bool(loads)
-    for i, (_node, _ref, kind, val) in enumerate(loads):
+    for i, (_n1, _n2, R) in enumerate(loads):
         vld = grab(f"m_vld{i}")
         if vld is None:
             have_pout = False
             break
-        if kind == "R":
-            pout += vld * vld / val
-        elif kind == "I":
-            pout += abs(vld * val)
-        elif kind == "P":
-            pout += val
+        pout += vld * vld / R
     pout = pout if have_pout else float("nan")
+    app = 0.0                                        # apparent power Σ vrms·irms over the phases
+    have_app = True
+    for i in range(len(sources)):
+        vr, ir = grab(f"m_vr{i}"), grab(f"m_ir{i}")
+        if vr is None or ir is None:
+            have_app = False
+            break
+        app += abs(vr * ir)
     ripple = 0.0 if (vmax is None or vmin is None or abs(vout) < 1e-9) else (vmax - vmin) / abs(vout)
-    pf = (pin / (vrms * irms)) if (vrms and irms) else float("nan")
+    pf = (pin / app) if (have_app and app) else float("nan")
     return vout, pin, pout, ripple, pf
 
 
