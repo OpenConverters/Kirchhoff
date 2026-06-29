@@ -693,8 +693,22 @@ def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_
     # zero (chasing an unreachable +target). |Vout| is monotonic in the control for both polarities,
     # so we hit |Vout| = |target| and report the SIGNED Vout (the gate sees the true negative rail).
     tmag = abs(float(target_vout)) or 1.0
-    N = 9
-    pts = [p for p in (sample(lo + (hi - lo) * k / (N - 1)) for k in range(N)) if p is not None]
+    # Seed grid. For a FREQUENCY-controlled resonant deck the gain is NON-monotonic: it PEAKS just
+    # below the design fsw (~0.85-0.95·fr) and falls monotonically above. A uniform grid over
+    # [0.8,2.2]·fsw spends most of its points on the flat falling tail and samples the sub-resonance
+    # BOOST region only twice (0.8, 0.975·fsw), MISSING the peak where the extra gain that covers
+    # real losses lives (abt #62: e.g. cllc's 0.90·fr boost branch reaches 12.4 V while the regulator
+    # would otherwise stall at 0.975·fr ≈ 11.9 V). Concentrate the grid below ~1.1·fsw — fine enough
+    # to land on and straddle the peak — and cover the falling tail sparsely. Other controls
+    # (duty/phase) are monotonic, so a uniform grid is fine for them.
+    if ctrl == "frequency":
+        dense_hi = min(hi, 1.1 * fsw)
+        grid = [lo + (dense_hi - lo) * k / 6 for k in range(7)]               # 7 pts across [lo, 1.1·fsw]
+        grid += [dense_hi + (hi - dense_hi) * (k + 1) / 4 for k in range(4)]  # 4 pts across (1.1·fsw, hi]
+    else:
+        grid = [lo + (hi - lo) * k / 8 for k in range(9)]                     # uniform 9-pt grid
+    N = len(grid)
+    pts = [p for p in (sample(x) for x in grid) if p is not None]
     if not pts:
         return {"converged": False, "regulated": False, "control": ctrl, "topology": topology,
                 "target_vout": target_vout}
