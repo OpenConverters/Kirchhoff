@@ -110,13 +110,14 @@ def _set_control(tas, field, value, topology=None):
     phaseDeg: a phase-shifted bridge has a FIXED reference leg (phases 0 / 180) and a LAGGING leg whose two
         switches sit at φ and φ+180. We hold the reference leg and move only the lagging leg, so `value` is the
         bridge phase-shift φ — not a blanket overwrite (which would collapse the bridge).
-    fsbb: the 4-switch buck-boost is a COORDINATED modulation, not uniform duty — the charge switches (Q1/Q4,
-        designed at phase 0) run at duty D=value while the discharge switches (Q2/Q3) run the complementary
-        (1−D)−2·dt at phase (D+dt)·360 (dt = the per-leg dead-time, stashed from the design by
-        _stash_fsbb_modulation). A blanket duty overwrite drives all four legs the same → the bridge collapses
-        and Vout never reaches target. Charge legs keep phase 0 throughout, so phase==0 vs ≠0 stays a stable
-        partition across the bisection."""
-    if topology == "fsbb" and field == "dutyCycle":
+    fsbb / ahb: a COORDINATED-COMPLEMENTARY modulation, not uniform duty — the charge switch(es) (designed
+        at phase 0) run at duty D=value while the complementary switch(es) run (1−D)−2·dt at phase (D+dt)·360
+        (dt = the per-leg dead-time, stashed from the design by _stash_fsbb_modulation). A blanket duty
+        overwrite drives BOTH halves at the same duty → for the fsbb the bridge collapses; for the asymmetric
+        half-bridge (ahb) the two complementary switches OVERLAP and SHOOT THROUGH (vin→gnd) the moment the
+        bisected duty exceeds the design duty, so the input current runs away. The charge leg keeps phase 0
+        throughout, so phase==0 vs ≠0 stays a stable partition across the bisection."""
+    if topology in ("fsbb", "ahb") and field == "dutyCycle":
         dt = float(tas.get("_fsbbDeadFraction", 0.0))
         for st in tas.get("simulation", {}).get("stimulus", []):
             wf = st.get("waveform", {})
@@ -617,8 +618,8 @@ def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_
         raise ValueError(f"no control-variable mapping for topology '{topology}'")
     if topology not in _SELF_REGULATED:
         field, bracket = _CONTROL[ctrl]
-    if topology == "fsbb":
-        _stash_fsbb_modulation(tas)   # capture dead-time before the bisection overwrites duties
+    if topology in ("fsbb", "ahb"):
+        _stash_fsbb_modulation(tas)   # capture dead-time before the bisection overwrites duties (complementary)
     # A magnetic that can't give a valid regulated point (the deck collapses across the whole bracket): either
     # a genuinely saturated core, OR a sound core whose exported Isat disagrees with calculate_saturation_
     # current (an exporter bug that collapses the deck spuriously). Surface the right verdict instead of an
@@ -720,7 +721,19 @@ def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_
         if r is not None:
             pts.append(r)
 
-    bx, vout, pin, pout, ripple = min(pts, key=lambda p: abs(abs(p[1]) - tmag))
+    # Pick the reported operating point. By default the closest-to-target sample. But a FREQUENCY-controlled
+    # resonant gain curve PEAKS at fr: two frequencies give the same Vout, and the far-below-resonance branch
+    # carries large circulating current (poor efficiency). So among the samples that ALREADY meet target
+    # within tol, prefer the MOST EFFICIENT one (highest pout/pin) — that is the near-/above-resonance branch.
+    # (Other controls are monotonic, so their on-target set collapses to one point; leave them unchanged.)
+    on_target = [p for p in pts if abs(abs(p[1]) - tmag) <= tol * tmag]
+    if ctrl == "frequency" and on_target:
+        def _eff(p):
+            _x, _v, _pin, _pout, _r = p
+            return (_pout / _pin) if (_pin and _pout == _pout and _pout > 0) else -1.0
+        bx, vout, pin, pout, ripple = max(on_target, key=_eff)
+    else:
+        bx, vout, pin, pout, ripple = min(pts, key=lambda p: abs(abs(p[1]) - tmag))
     steady = ripple <= steady_ripple_frac
     return {
         "converged": True,

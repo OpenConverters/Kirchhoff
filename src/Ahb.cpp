@@ -12,7 +12,16 @@ using nlohmann::json;
 namespace {
 double nominal(const json& j) { return PEAS::resolve_dimensional_values(j); }
 
-constexpr double kDuty       = 0.45;   // operating duty D (MKF AHB maximumDutyCycle default / OP duty)
+// Operating duty D the turns ratio is sized at. The AHB gain Vo=2*Vin*D*(1-D)/n is NON-MONOTONIC,
+// peaking at D=0.5. n is sized so the secondary delivers (Vo+Vd) at THIS duty, so the open-loop deck
+// hits Vo at D regardless of D's value (mkf-equivalence). But the closed-loop regulator (real DATASHEET
+// deck) must climb the gain curve toward the D=0.5 peak to cover the REAL rectifier drop (~2-3 V, far
+// more than the ideal-diode Vd the turns ratio compensates) + transformer leakage. Sizing at D=0.45 put
+// the design point right next to the peak -> the peak/design gain ratio is ~1.01 (zero headroom) and the
+// real deck tops out ~11 V, never reaching 12 V. Sizing LOWER (0.30) moves the design point away from the
+// peak: peak/design = 0.5/(2*D*(1-D)) ~= 1.19 -> ~19 % headroom, so the lossy real deck reaches Vo at a
+// stable duty (~0.40) BELOW the high-duty circulating-current cliff (pin runs away as D->0.5). (abt #58)
+constexpr double kDuty       = 0.30;
 constexpr double kDeadFrac   = 0.01;   // 100ns dead time at 100kHz between the complementary switches
 constexpr double kRippleRatio = 0.30;  // output-inductor current ripple
 
@@ -53,7 +62,9 @@ AhbDesign design_ahb(const json& tasInputs) {
     // delivers the target Vo there. FULL_BRIDGE: Vo + 2*Vd = 2*D*(1-D)*Vin_nom/n. (MKF sizes at Vin_min
     // and runs the deck at Vin_nom, landing slightly under Vo — both are within the equivalence band.)
     double n = 2.0 * D * (1.0 - D) * d.inputVoltage / (Vo + Vdtot);
-    d.turnsRatio = std::round(n * 100.0) / 100.0;
+    // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
+    // the duty-derived value so the rest of the stage is sized around the fixed transformer.
+    d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(std::round(n * 100.0) / 100.0);
     n = d.turnsRatio;
 
     // Magnetizing inductance for ZVS assist: target Im_pk = 10% of reflected load current, sized at
@@ -127,13 +138,13 @@ json build_ahb_tas(const AhbDesign& d) {
     // Primary half-bridge switches Q1/Q2: each blocks the full bus (Vin_max) when off; they carry the
     // primary current (reflected load + magnetizing), peak = IpriPk, rms = IpriRms. Anti-parallel D1/D2
     // are the FETs' body diodes (left requirement-less).
-    const double ratedVds = d.inputVoltageMax / cfg::v_derate(d.config);
+    const double ratedVds = d.inputVoltageMax / cfg::v_derate_mosfet(d.config);
     const double maxRdsOn  = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IpriRms * IpriRms);
     json mosfetReq; mosfetReq["semiconductor"]["mosfet"] = json::object();
     mosfetReq["inputs"]["designRequirements"] = req::mosfet("mainSwitch", ratedVds, IpriPk, maxRdsOn, 125.0);
     // Secondary full-bridge rectifier Dr1..Dr4: each off diode blocks the secondary winding voltage
     // (peak Vs); each carries the output current while conducting. REAL rectifiers -> req::diode.
-    const double ratedVr  = vSecPk / cfg::v_derate(d.config);
+    const double ratedVr  = vSecPk / cfg::v_derate_diode(d.config);
     const double maxVf    = (ratedVr < 100.0) ? 0.6 : 1.2;
     json diodeReq; diodeReq["semiconductor"]["diode"] = json::object();
     diodeReq["inputs"]["designRequirements"] = req::diode(ratedVr, Io / 0.7, maxVf, 0.05 * Tsw);
@@ -150,7 +161,11 @@ json build_ahb_tas(const AhbDesign& d) {
         req::winding_excitation("ahbPrimary",   fsw, IpriPk, IpriRms, 0.0, dILm, Dn,
                                 vPriPk, vPriRms, 0.0, vPriPkPk),
         req::winding_excitation("ahbSecondary", fsw, IsecPk, IsecRms, 0.0, dIsecRefl, Dn,
-                                vSecPk, vSecRms, 0.0, vSecPkPk)});
+                                vSecPk, vSecRms, 0.0, vSecPkPk)},
+        /*turnsRatioIsCeiling=*/{}, /*lmIsMinimum (AHB transformer is a forward-class ENERGY-TRANSFER
+          transformer with a SEPARATE output inductor; Lm is only ZVS assist -> maximise it UNGAPPED so the
+          adviser does not gap the core and overfill the winding into a high-leakage, high-DCR degenerate
+          coil that drops the real-deck gain below target. K 0.94->0.999. Same fix as PSFB, abt #56/#58)=*/true);
 
     // Output inductor Lo (single-winding magnetic, DC-biased at Io).
     json lout; lout["magnetic"] = json::object();
