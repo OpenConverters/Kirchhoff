@@ -60,9 +60,20 @@ PshbDesign design_pshb(const json& tasInputs) {
         n = nNew;
     }
     d.effectiveDuty = Deff;
-    d.turnsRatio = std::round(n * 100.0) / 100.0;
+    // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
+    // the duty-derived value so the rest of the stage is sized around the fixed transformer.
+    d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(std::round(n * 100.0) / 100.0);
     d.outputInductance = Vo * (1.0 - Deff) / (Fs * cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Io);
-    double ImTarget = 0.1 * Io / d.turnsRatio;
+    // Magnetizing inductance from a target magnetizing-current FRACTION of the reflected load current.
+    // A small fraction maximises Lm — but Lm = N^2*AL ungapped, so a large Lm forces MANY primary turns,
+    // and the absolute leakage scales ~N^2: a 10% target gave Lm~940uH / ~110 turns / ~80uH leakage, whose
+    // series reactance exceeds the reflected load and STRANGLES power transfer (abt #65/#66 — and unlike
+    // the buck/forward family, MKF's candidate pool offers no low-turns escape at a high-voltage bus). A
+    // larger fraction gives a SMALLER Lm -> fewer turns -> low absolute leakage, at a modest circulating-
+    // current cost (the magnetizing current also helps the NPC legs ZVS). 0.3 keeps the leakage well below
+    // the reflected load while bounding the magnetizing current.
+    const double imFrac = cfg::get(d.config, "magnetizingCurrentFraction", 0.3);
+    double ImTarget = imFrac * Io / d.turnsRatio;
     d.magnetizingInductance = req::provided_inductance(dr).value_or(
         std::max((ImTarget > 0) ? Vhb * Deff / (4.0 * Fs * ImTarget) : 20.0 * Lr, 20.0 * Lr));
     d.splitCapacitance = 470e-6;
@@ -118,19 +129,19 @@ json build_pshb_tas(const PshbDesign& d) {
     // 3-level NPC stack switches S1..S4: each device blocks the split-cap half bus (Vhb = Vin/2) when
     // off; they carry the primary current (reflected load + magnetizing), peak = IpriPk, rms = IpriRms.
     // Anti-parallel Db1..Db4 are the FETs' body diodes (left requirement-less).
-    const double ratedVds = Vhb / cfg::v_derate(d.config);
+    const double ratedVds = Vhb / cfg::v_derate_mosfet(d.config);
     const double maxRdsOn  = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IpriRms * IpriRms);
     json mosfetReq; mosfetReq["semiconductor"]["mosfet"] = json::object();
     mosfetReq["inputs"]["designRequirements"] = req::mosfet("mainSwitch", ratedVds, IpriPk, maxRdsOn, 125.0);
     // NPC neutral-point clamp diodes DC1/DC2: REAL diodes (not anti-parallel to any single FET) that
     // clamp the inner nodes to the cap midpoint and freewheel the primary current; each blocks Vhb.
-    const double ratedVrClamp = Vhb / cfg::v_derate(d.config);
+    const double ratedVrClamp = Vhb / cfg::v_derate_diode(d.config);
     const double maxVfClamp    = (ratedVrClamp < 100.0) ? 0.6 : 1.2;
     json clampDiodeReq; clampDiodeReq["semiconductor"]["diode"] = json::object();
     clampDiodeReq["inputs"]["designRequirements"] = req::diode(ratedVrClamp, IpriPk, maxVfClamp, 0.05 * Tsw);
     // Secondary full-bridge rectifier Dr1..Dr4: each off diode blocks the secondary winding voltage
     // (peak Vs); each carries the output current while conducting. REAL rectifiers -> req::diode.
-    const double ratedVr  = vSecPk / cfg::v_derate(d.config);
+    const double ratedVr  = vSecPk / cfg::v_derate_diode(d.config);
     const double maxVf    = (ratedVr < 100.0) ? 0.6 : 1.2;
     json diodeReq; diodeReq["semiconductor"]["diode"] = json::object();
     diodeReq["inputs"]["designRequirements"] = req::diode(ratedVr, Io / 0.7, maxVf, 0.05 * Tsw);
