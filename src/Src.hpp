@@ -13,13 +13,14 @@
 
 #include <nlohmann/json.hpp>
 #include "Fidelity.hpp"
+#include "Rectifier.hpp"
 
 namespace Kirchhoff {
 
 struct SrcDesign {
     double inputVoltage, inputVoltageMin, inputVoltageMax;
     double outputVoltage, outputPower, switchingFrequency, efficiency;
-    double turnsRatio;                // n = (k_bridge·Vin_nom) / Vout, per CT half-winding
+    double turnsRatio;                // n = (k_bridge·Vin_nom) / Vout (per CT half-winding)
     double resonantInductance;        // Lr
     double resonantCapacitance;       // Cr
     double magnetizingInductance;     // Lm ≈ 10·Lr (large, non-resonant)
@@ -27,6 +28,8 @@ struct SrcDesign {
     double switchDuty;                // per-switch on-fraction (~0.45, complementary with dead time)
     double loadResistance;
     double outputCapacitance;
+    RectifierType rectifierType = RectifierType::CenterTapped;  // CT default (matches MKF Src + the fixture)
+    double outputInductance;          // CURRENT_DOUBLER only: each of the two output inductors
     nlohmann::json config;
 };
 

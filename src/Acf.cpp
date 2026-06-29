@@ -44,7 +44,9 @@ AcfDesign design_acf(const json& tasInputs) {
 
     // Turns ratio n = Vin_min*D/(Vo+Vd) so the forward gain reaches Vo at min input (MKF). Vd=0.
     double n = d.inputVoltage * D / (Vo + d.diodeDrop);  // operating Vin (open-loop hits spec at the op point, not +5% at vinMin)
-    d.turnsRatio = std::round(n * 100.0) / 100.0;
+    // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
+    // the duty-derived value so the rest of the stage is sized around the fixed transformer.
+    d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(std::round(n * 100.0) / 100.0);
     n = d.turnsRatio;
 
     // Magnetizing inductance: Lm = Vin_min * n / (Fs * Io)  (reflected secondary current Io/n).
@@ -112,7 +114,7 @@ json build_acf_tas(const AcfDesign& d) {
     //   VdsStress = Vin_max + Vin_max*D/(1-D)   (Vreset at the worst-case rail).
     const double VresetMax = d.inputVoltageMax * Dn / (1.0 - Dn);
     const double VdsStress = d.inputVoltageMax + VresetMax;
-    const double ratedVds  = VdsStress / cfg::v_derate(d.config);
+    const double ratedVds  = VdsStress / cfg::v_derate_mosfet(d.config);
     const double maxRdsOnMain  = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IrmsPri * IrmsPri);
     // Clamp switch carries the magnetizing reset current (peak ImagPk, rms ImagRms); size its RdsOn to
     // its own conduction loss budget. It is a REAL FET (req::mosfet), not a body diode.
@@ -120,7 +122,7 @@ json build_acf_tas(const AcfDesign& d) {
         ? cfg::rds_on_loss_fraction(d.config) * d.outputPower / (ImagRms * ImagRms)
         : maxRdsOnMain;
     // Output forward/freewheel rectifiers reverse-block the secondary peak Vin_max/n, carry ~Iout.
-    const double ratedVrSec = (d.inputVoltageMax / n) / cfg::v_derate(d.config);
+    const double ratedVrSec = (d.inputVoltageMax / n) / cfg::v_derate_diode(d.config);
     const double maxVfSec    = (ratedVrSec < 100.0) ? 0.6 : 1.2;
     const double maxTrr      = 0.05 * T;
     json mainSw = mosfet();

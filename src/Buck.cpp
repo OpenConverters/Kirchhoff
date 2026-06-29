@@ -77,7 +77,7 @@ json build_buck_tas(const BuckDesign& d) {
     const double IswRms = std::sqrt(Dmax) * IrmsL;
     const double IdiodeAvg = iout * (1.0 - Dmax);
     const double IcoutRms = dIL / (2.0 * std::sqrt(3.0));               // triangular ripple into Cout
-    const double ratedVds = d.inputVoltageMax / cfg::v_derate(d.config);          // switch + diode both block Vin
+    const double ratedVds = d.inputVoltageMax / cfg::v_derate_mosfet(d.config);          // switch + diode both block Vin
     const double maxRdsOn = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IswRms * IswRms);
     const double maxVf = (ratedVds < 100.0) ? 0.6 : 1.2;
 
@@ -96,7 +96,7 @@ json build_buck_tas(const BuckDesign& d) {
     diode["inputs"]["designRequirements"] = req::diode(ratedVds, IdiodeAvg / 0.7, maxVf, 0.05 * T);
     json capd; capd["capacitor"] = json::object();
     capd["inputs"]["designRequirements"] = req::capacitor(
-        d.outputCapacitance, d.outputVoltage / cfg::v_derate(d.config), IcoutRms,
+        d.outputCapacitance, d.outputVoltage / cfg::v_derate_capacitor(d.config), IcoutRms,
         req::ESR_RIPPLE_FRACTION * d.outputVoltage / IpkL, "outputFilter");
 
     // --- switching cell brick (Q high-side + L + freewheeling D) ---

@@ -97,16 +97,16 @@ json build_sepic_tas(const SepicDesign& d) {
     json L2 = inductor(d.inductanceL2, iout, dIL2);
     json cs; cs["capacitor"] = json::object();
     cs["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.couplingCapacitance;
-    cs["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) / cfg::v_derate(d.config);
+    cs["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) / cfg::v_derate_capacitor(d.config);
     json capd; capd["capacitor"] = json::object();
     capd["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;
-    capd["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage / cfg::v_derate(d.config);
+    capd["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage / cfg::v_derate_capacitor(d.config);
     json mq = mosfet();
-    mq["inputs"]["designRequirements"] = req::mosfet("mainSwitch", vSwing / cfg::v_derate(d.config),
+    mq["inputs"]["designRequirements"] = req::mosfet("mainSwitch", vSwing / cfg::v_derate_mosfet(d.config),
                                                      iout + iout * d.dutyCycle / (1.0 - d.dutyCycle),
                                                      0.01 * d.outputPower, 125.0);
     json md = diode();
-    md["inputs"]["designRequirements"] = req::diode(vSwing / cfg::v_derate(d.config), iout / 0.7,
+    md["inputs"]["designRequirements"] = req::diode(vSwing / cfg::v_derate_diode(d.config), iout / 0.7,
                                                     (vSwing < 100.0) ? 0.6 : 1.2, 0.05 / fsw);
 
     json cell; cell["name"] = "sepic-cell";

@@ -109,7 +109,7 @@ json build_fsbb_tas(const FsbbDesign& d) {
     // Buck leg Q1/Q2 nodes swing 0..Vin_max; boost leg Q3/Q4 nodes swing 0..Vout. Worst-case block
     // voltage = max(Vin_max, Vout). Each switch carries the inductor current (IpkL / IrmsL).
     const double Vblock   = std::max(d.inputVoltageMax, Vo);
-    const double ratedVds = Vblock / cfg::v_derate(d.config);
+    const double ratedVds = Vblock / cfg::v_derate_mosfet(d.config);
     const double maxRdsOn = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IrmsL * IrmsL);
 
     json capd; capd["capacitor"] = json::object();

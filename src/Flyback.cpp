@@ -63,8 +63,9 @@ FlybackDesign design_flyback(const json& tasInputs) {
         averageInputCurrent * (1.0 - maxDutyCycle) / maxDutyCycle;
     double n = maxEffectiveLoadCurrent / maxEffectiveLoadCurrentReflected;
     n = std::round(n * 100.0) / 100.0;   // MKF roundFloat(turnsRatio, 2)
-    d.turnsRatio = n;
-
+    // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
+    // the duty-derived value so the rest of the stage is sized around the fixed transformer.
+    d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(n);
     // Steady-state CCM duty at the nominal operating Vin (the open-loop PWM duty). The secondary must
     // produce Vout+Vd so the output AFTER the rectifier drop is the spec'd Vout:
     //   Vout+Vd = Vin·D / (n·(1-D))  ->  D = n·(Vout+Vd) / (Vin + n·(Vout+Vd)).
@@ -220,8 +221,8 @@ json build_flyback_tas(const FlybackDesign& d) {
     const double VdsStress = d.inputVoltageMax + n * d.outputVoltage;
     const double VrStress  = d.outputVoltage + d.inputVoltageMax / n;
 
-    const double ratedVds = VdsStress / cfg::v_derate(d.config);
-    const double ratedVr  = VrStress  / cfg::v_derate(d.config);
+    const double ratedVds = VdsStress / cfg::v_derate_mosfet(d.config);
+    const double ratedVr  = VrStress  / cfg::v_derate_diode(d.config);
     const double maxRdsOn = 0.01 * d.outputPower / (IrmsPri * IrmsPri);   // <=1% of Pout conduction
     const double maxVf    = (ratedVr < 100.0) ? 0.6 : 1.2;               // Schottky-class if low V_R
     const double maxTrr   = 0.05 * T;
@@ -254,11 +255,11 @@ json build_flyback_tas(const FlybackDesign& d) {
 
     json capCin; capCin["capacitor"] = json::object();
     capCin["inputs"]["designRequirements"] = req::capacitor(
-        d.inputCapacitance, d.inputVoltageMax / cfg::v_derate(d.config), IcinRms,
+        d.inputCapacitance, d.inputVoltageMax / cfg::v_derate_capacitor(d.config), IcinRms,
         req::ESR_RIPPLE_FRACTION * d.inputVoltage / IpkPri, "inputFilter");
     json capCout; capCout["capacitor"] = json::object();
     capCout["inputs"]["designRequirements"] = req::capacitor(
-        d.outputCapacitance, d.outputVoltage / cfg::v_derate(d.config), IcoutRms,
+        d.outputCapacitance, d.outputVoltage / cfg::v_derate_capacitor(d.config), IcoutRms,
         req::ESR_RIPPLE_FRACTION * d.outputVoltage / IpkSec, "outputFilter");
     // --- stage bricks ---
     json inv; inv["name"] = "primary-switch";

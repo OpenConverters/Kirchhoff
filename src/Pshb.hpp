@@ -12,6 +12,7 @@
 
 #include <nlohmann/json.hpp>
 #include "Fidelity.hpp"
+#include "Rectifier.hpp"
 
 namespace Kirchhoff {
 
@@ -30,6 +31,7 @@ struct PshbDesign {
     double splitCapacitance;       // split-cap each (sets mid_cap = Vin/2)
     double loadResistance;
     double outputCapacitance;
+    RectifierType rectifierType = RectifierType::FullBridge;  // FB default
     nlohmann::json config;
 };
 

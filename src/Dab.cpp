@@ -52,8 +52,9 @@ DabDesign design_dab(const json& tasInputs) {
 
     // 1. Turns ratio N = V1_nom / V2_nom (MKF rounds to 2 decimals).
     double N = Vin / Vo;
-    d.turnsRatio = std::round(N * 100.0) / 100.0;
-
+    // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
+    // the duty-derived value so the rest of the stage is sized around the fixed transformer.
+    d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(std::round(N * 100.0) / 100.0);
     // 2. Series inductance L for the rated power at D3 = 25° (SPS):
     //    L = N·V1·V2·D3·(π−|D3|) / (2π²·Fs·P).  (MKF Dab::compute_series_inductance — the exact ideal SPS
     //    power, not FHA.) With minimal dead time (above) the open-loop output lands on spec; no derating.
@@ -137,8 +138,8 @@ json build_dab_tas(const DabDesign& d) {
     // QE..QH (secondary active bridge) block Vout and carry the reflected tank current (IrmsSec).
     // All eight are real, independently-driven switches (no passive rectifier — the secondary is a driven
     // bridge, the phase shift sets the power transfer); their anti-parallel diodes DA..DH are BODY diodes.
-    const double ratedVdsPri = d.inputVoltageMax / cfg::v_derate(d.config);
-    const double ratedVdsSec = d.outputVoltage  / cfg::v_derate(d.config);
+    const double ratedVdsPri = d.inputVoltageMax / cfg::v_derate_mosfet(d.config);
+    const double ratedVdsSec = d.outputVoltage  / cfg::v_derate_mosfet(d.config);
     const double maxRdsOnPri = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IrmsTank * IrmsTank);
     const double maxRdsOnSec = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IrmsSec  * IrmsSec);
     std::vector<std::string> isoSides{"primary", "secondary"};
@@ -148,6 +149,9 @@ json build_dab_tas(const DabDesign& d) {
                                 vPriPk, vPriRms, 0.0, vPriPkPk),
         req::winding_excitation("dabSecondary", fsw, IpkSec,  IrmsSec,  0.0, dITankSec, std::nullopt,
                                 vSecPk, vSecRms, 0.0, vSecPkPk)});
+        // NB: DAB keeps its DESIGNED (nominal) Lm — unlike the other transformers it ties Lm to the
+        // series inductor (Lm = max(.., 10*Lr)) for the magnetizing-ripple/ZVS, so maximising Lm
+        // (lmIsMinimum) detunes its operating point and it stops regulating (verified). abt #56.
 
     json capd; capd["capacitor"] = json::object();
     capd["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;

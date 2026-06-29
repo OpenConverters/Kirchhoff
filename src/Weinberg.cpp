@@ -49,8 +49,9 @@ WeinbergDesign design_weinberg(const json& tasInputs) {
 const double Vd = req::dideal_diode_drop(d.outputPower / Vo);  // DIDEAL Vf at the rectifier current
     const double Mmax = (Vo + Vd) / (vinMax * eta);
     double n = 1.0 / (2.0 * Mmax * (1.0 - cfg::get(d.config, "boostDutyTarget", kDTarget)));
-    d.turnsRatio = std::round(n * 1000.0) / 1000.0;
-
+    // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
+    // the duty-derived value so the rest of the stage is sized around the fixed transformer.
+    d.turnsRatio = req::provided_turns_ratio(dr, 1).value_or(std::round(n * 1000.0) / 1000.0);
     // Boost-regime duty at nominal Vin (the deck simulates at nominal Vin).
 d.dutyCycle = duty_boost(Vin, Vo + Vd, d.turnsRatio, eta);
     d.switchDuty = d.dutyCycle;
@@ -137,8 +138,8 @@ json build_weinberg_tas(const WeinbergDesign& d) {
     // rectifiers Dpos/Dneg are REAL output rectifiers: each blocks the full secondary pk-pk (2·Vout)
     // when its partner conducts, and supplies Iout on alternate half-cycles. (No anti-parallel FET;
     // the energy-recovery path is the series-RC snubber, so no separate recovery diode here.)
-    const double ratedVdsW = vPriPkPk / cfg::v_derate(d.config);   // S1/S2 block ~2*Vout/n reflected
-    const double ratedVrW  = vSecPkPk / cfg::v_derate(d.config);   // Dpos/Dneg block ~2*Vout
+    const double ratedVdsW = vPriPkPk / cfg::v_derate_mosfet(d.config);   // S1/S2 block ~2*Vout/n reflected
+    const double ratedVrW  = vSecPkPk / cfg::v_derate_diode(d.config);   // Dpos/Dneg block ~2*Vout
     const double maxRdsOnW = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IrmsPri * IrmsPri);
     const double maxVfW    = (ratedVrW < 100.0) ? 0.6 : 1.2;
     const double maxTrrW   = 0.05 / fsw;

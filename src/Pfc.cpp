@@ -139,9 +139,9 @@ json build_pfc_tas(const PfcDesign& d) {
     // The boost MOSFET SW and the boost diode D5 both block the DC bus Vout. The four bridge
     // diodes D1..D4 rectify the AC line; the off diode blocks ~Vout (the bus rail sits across the
     // off-side bridge legs). All carry the boost-inductor / line current envelope already computed.
-    const double ratedVdsP = d.outputVoltage / cfg::v_derate(d.config);   // SW blocks Vout
-    const double ratedVrBoost = d.outputVoltage / cfg::v_derate(d.config);// D5 blocks Vout
-    const double ratedVrBridge = d.outputVoltage / cfg::v_derate(d.config);// bridge diode blocks Vbus
+    const double ratedVdsP = d.outputVoltage / cfg::v_derate_mosfet(d.config);   // SW blocks Vout
+    const double ratedVrBoost = d.outputVoltage / cfg::v_derate_diode(d.config);// D5 blocks Vout
+    const double ratedVrBridge = d.outputVoltage / cfg::v_derate_diode(d.config);// bridge diode blocks Vbus
     const double maxRdsOnP = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IrmsL * IrmsL);
     const double maxVfBoost  = (ratedVrBoost  < 100.0) ? 0.6 : 1.2;
     const double maxVfBridge = (ratedVrBridge < 100.0) ? 0.6 : 1.2;

@@ -42,8 +42,9 @@ IsolatedBuckDesign design_isolated_buck(const json& tasInputs) {
     // D = V_pri / (Vin·η).  N = V_pri / (V_sec + Vd), ideal Vd=0.  (MKF IsolatedBuck.)
     d.dutyCycle  = Vpri / (Vin * d.efficiency);
     double N = Vpri / Vsec;  // measured output is the primary buck rail (no rectifier drop); secondary is internal
-    d.turnsRatio = std::round(N * 100.0) / 100.0;
-
+    // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
+    // the duty-derived value so the rest of the stage is sized around the fixed transformer.
+    d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(std::round(N * 100.0) / 100.0);
     // Lmag = (Vin_max − V_pri)·V_pri / (Vin_max·Fs·ΔI),  ΔI = ripple·(I_pri + ΣI_sec/N) (reflected).
     const double Imax = Ipri + Isec / d.turnsRatio;
     const double dI = cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Imax;
@@ -105,10 +106,10 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
     // --- semiconductor stresses (max-stress corner Vin_max) ---
     // Synchronous buck pair QS1 (high-side) / QS2 (low-side): the switch node swings 0..Vin, so each
     // blocks Vin_max. Both carry the primary-winding (buck-inductor) current.
-    const double ratedVds = d.inputVoltageMax / cfg::v_derate(d.config);
+    const double ratedVds = d.inputVoltageMax / cfg::v_derate_mosfet(d.config);
     const double maxRdsOn = cfg::rds_on_loss_fraction(d.config) * d.primaryPower / (IrmsPri * IrmsPri);
     // Dsec (isolated secondary flyback rectifier): blocks Vsec + reflected (Vin−Vpri)/N; carries Isec.
-    const double VrSec    = (d.secondaryVoltage + (d.inputVoltageMax - d.primaryVoltage) / N) / cfg::v_derate(d.config);
+    const double VrSec    = (d.secondaryVoltage + (d.inputVoltageMax - d.primaryVoltage) / N) / cfg::v_derate_diode(d.config);
     const double maxVfSec = (VrSec < 100.0) ? 0.6 : 1.2;
 
     // Coupled inductor (2-winding magnetic): primary winding = the buck inductor (Lmag), secondary

@@ -71,6 +71,8 @@
  *
  * Most topologies produce a positive output. Two exceptions:
  *  - **Cuk** is inverting: its output voltage/current are negative.
+ *  - **Isolated buck-boost** (inverting Fly-Buck-Boost) has an inverting primary
+ *    rail V_pri = -Vin*D/(1-D); it is compared on magnitude (like Cuk).
  * Component-terminal naming used inside the generated circuit: resistor/capacitor
  * pins are "1"/"2"; MOSFET pins are "drain"/"gate"/"source"; diode pins are
  * "anode"/"cathode"; transformer/inductor winding pins are "primary_start",
@@ -158,6 +160,14 @@
  * | LLC resonant              | `design_llc`            / `build_llc_tas`                | half-bridge Lr-Cr-Lm resonant tank, CT rectifier, freq gain |
  * | SRC series resonant       | `design_src`            / `build_src_tas`                | half-bridge Lr-Cr series tank (no resonant Lm), step-down |
  * | CLLC resonant             | `design_cllc`           / `build_cllc_tas`               | bidirectional, active bridges both sides, dual resonant tanks |
+ * | CLLLC resonant            | `design_clllc`          / `build_clllc_tas`              | bidirectional symmetric 5-element tank, current-aware SR in CIAS † |
+ * | PFC (boost)               | `design_pfc`            / `build_pfc_tas`                | AC-input, 1-phase hysteretic boost PFC, closed-loop control in CIAS † |
+ * | Vienna rectifier          | `design_vienna`         / `build_vienna_tas`            | AC-input, 3-phase 3-level boost PFC, per-phase current shaping in CIAS † |
+ *
+ * The first 21 topologies are gated by the MKF-equivalence suite (MKF is the
+ * reference). The three marked **†** diverge from MKF by design — AC input
+ * and/or closed-loop control expressed in CIAS — so they are validated
+ * standalone (their own demos + tests), not against an MKF fixture.
  *
  * @section fidelity Component fidelity
  *
@@ -208,3 +218,6 @@
 #include "Llc.hpp"
 #include "Src.hpp"
 #include "Cllc.hpp"
+#include "Clllc.hpp"
+#include "Pfc.hpp"
+#include "Vienna.hpp"

@@ -41,6 +41,11 @@ PushPullDesign design_push_pull(const json& tasInputs) {
     d.diodeDrop = req::dideal_diode_drop(d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
     double N = d.maxDutyCycle * 2.0 * vinMin / (d.outputVoltage + d.diodeDrop);
     N = std::round(N * 100.0) / 100.0;
+    // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
+    // the duty-derived value, so the rest of the stage is sized around the fixed transformer. The
+    // primary:secondary step-down ratio is turnsRatios[1] — index 0 is the centre-tapped primary-half
+    // ratio (1.0), so read index 1 (matches the order build_push_pull_tas emits to magnetic_inputs).
+    N = req::provided_turns_ratio(dr, 1).value_or(N);
     d.turnsRatio = N;
     // Magnetizing inductance per half (MKF): Lm = Vin_min * tOn / Iprimary, tOn = D_max*T,
     // Iprimary = Pout / Vin_min / eff.
@@ -113,14 +118,14 @@ json build_push_pull_tas(const PushPullDesign& d) {
     // such that the off switch drain sees the rail (Vin) plus the reflected opposite half (Vin) = 2*Vin.
     // Worst case at the max input corner: ratedVds = 2*Vin_max / V_DERATE.
     const double VdsStress = 2.0 * d.inputVoltageMax;
-    const double ratedVds  = VdsStress / cfg::v_derate(d.config);
+    const double ratedVds  = VdsStress / cfg::v_derate_mosfet(d.config);
     const double maxRdsOn  = (IrmsPri > 0.0)
         ? cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IrmsPri * IrmsPri)
         : cfg::rds_on_loss_fraction(d.config) * d.outputPower;
     // Center-tapped full-wave output rectifiers Dtop/Dbot are REAL rectifiers (not FET body diodes):
     // each reverse-blocks the FULL secondary swing 2*N*Vin (the non-conducting diode sees both half
     // windings in series) and carries the inductor current during its half-cycle (~Iout).
-    const double ratedVr  = (2.0 * N * d.inputVoltageMax) / cfg::v_derate(d.config);
+    const double ratedVr  = (2.0 * N * d.inputVoltageMax) / cfg::v_derate_diode(d.config);
     const double maxVf    = (ratedVr < 100.0) ? 0.6 : 1.2;
     const double Tsw      = 1.0 / fsw;
     const double maxTrr   = 0.05 * Tsw;

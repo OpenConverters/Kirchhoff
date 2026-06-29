@@ -40,6 +40,16 @@ inline double get(const json& config, const char* key, double fallback) {
     return fallback;
 }
 
+// String variant of get(...) — for categorical design knobs supplied as strings (e.g. "rectifierType":
+// "centerTapped" | "fullBridge" | "currentDoubler" | "voltageDoubler"). Same no-magic policy: the
+// topology passes its principled default; the user may override via the config object. Comparison is
+// done case-insensitively by the consumer (see rectifierType parsing in the resonant/bridge topologies).
+inline std::string get_str(const json& config, const char* key, const char* fallback) {
+    if (config.is_object() && config.contains(key) && config.at(key).is_string())
+        return config.at(key).get<std::string>();
+    return fallback;
+}
+
 // ── Documented, overridable dimensionless design-parameter defaults ──────────────────────────────────
 // (These are the *rule* knobs. A user who wants a different policy sets them in config; nothing in a
 //  topology hardcodes them.)
@@ -121,8 +131,18 @@ inline double loop_breaker_res(const json& in, double Rload) {
     return get(in, "loopBreakerRes", frac * Rload);
 }
 
-// Device voltage derating (required rating = peak stress / derate).
+// Device voltage derating (required rating = peak stress / derate). Default kVoltageDerate (0.8,
+// IPC-9592 1.25x). The general "vDerate" sets all device classes at once.
 inline double v_derate(const json& in) { return get(in, "vDerate", kVoltageDerate); }
+
+// Per-device-class voltage derating, so a consumer (e.g. HS's realism gate) can drive a DIFFERENT
+// derating per class — FET 1.5x, diode 1.3x, capacitor 1.5x — instead of one uniform factor. Each
+// per-class knob falls back to the general "vDerate", then to the class default, so existing configs
+// that set only "vDerate" (or nothing) are unchanged. required rating = peak stress / derate, so a
+// SMALLER derate fraction => a LARGER required rating (stricter).
+inline double v_derate_mosfet(const json& in)    { return get(in, "vDerateMosfet",    v_derate(in)); }
+inline double v_derate_diode(const json& in)     { return get(in, "vDerateDiode",     v_derate(in)); }
+inline double v_derate_capacitor(const json& in) { return get(in, "vDerateCapacitor", v_derate(in)); }
 
 // ── Per-topology design knobs (externally configurable so HS can drive the design) ────────────────────
 // Each takes the topology's principled default and lets config override it. HS sets these in

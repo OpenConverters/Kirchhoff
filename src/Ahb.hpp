@@ -16,6 +16,7 @@
 
 #include <nlohmann/json.hpp>
 #include "Fidelity.hpp"
+#include "Rectifier.hpp"
 
 namespace Kirchhoff {
 
@@ -30,6 +31,7 @@ struct AhbDesign {
     double outputInductance;      // Lo
     double loadResistance;
     double outputCapacitance;
+    RectifierType rectifierType = RectifierType::FullBridge;  // FB default (MKF AHB also lists AHB_FLYBACK)
     nlohmann::json config;     // Cout (output filter)
 };
 

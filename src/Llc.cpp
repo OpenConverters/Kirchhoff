@@ -5,6 +5,7 @@
 #include <cmath>
 #include <algorithm>
 #include <vector>
+#include <stdexcept>
 
 namespace Kirchhoff {
 using nlohmann::json;
@@ -45,11 +46,30 @@ LlcDesign design_llc(const json& tasInputs) {
     const double Vin = d.inputVoltage, Vo = d.outputVoltage;
     const double Iout = d.outputPower / Vo;
 
-    // Turns ratio (per CT half-winding): n = Vo_fha/(Vout+Vd), Vo_fha = k_bridge·Vin_nom. The +Vd
-    // compensates the center-tapped rectifier drop so the settled output (unity gain at fr) meets spec —
-    // a 0.85 V DIDEAL drop is ~7% of a 12 V rail but negligible at 48 V (diverges from MKF's Vd=0).
+    // Rectifier variant (CT default, matching MKF Llc + the equivalence fixture). Selected from the
+    // optional config override — no schema change. See Rectifier.hpp / docs/MKF_MIGRATION.md.
+    d.rectifierType = parse_rectifier_type(cfg::get_str(d.config, "rectifierType", "centerTapped"),
+                                           RectifierType::CenterTapped);
+
+    // Turns ratio per secondary winding: n = Vo_fha/(Vout+Vd), Vo_fha = k_bridge·Vin_nom. The +Vd
+    // compensates the rectifier drop so the settled output (unity gain at fr) meets spec — a 0.85 V
+    // DIDEAL drop is ~7% of a 12 V rail but negligible at 48 V (diverges from MKF's Vd=0). Per variant:
+    // CT conducts through ONE diode (Vout+Vd); FB stacks TWO (Vout+2Vd); VD's stacked-cap output delivers
+    // 2·Vsec_pk so the ratio DOUBLES (n = 2·Vo_fha/(Vout+2Vd)); CD's inductor averaging delivers Vsec_pk/2
+    // so the ratio HALVES (n = Vo_fha/(2·(Vout+Vd)) — the dual of VD: double current, half voltage).
     const double Vd = req::dideal_diode_drop(Iout);
-    double n = (cfg::get(d.config, "bridgeFactor", kBridgeFactor) * Vin) / (Vo + Vd);
+    const double Vbridge = cfg::get(d.config, "bridgeFactor", kBridgeFactor) * Vin;   // Vo_fha
+    double n;
+    switch (d.rectifierType) {
+        case RectifierType::FullBridge:     n = Vbridge / (Vo + 2.0 * Vd);       break;
+        case RectifierType::VoltageDoubler: n = 2.0 * Vbridge / (Vo + 2.0 * Vd); break;
+        case RectifierType::CurrentDoubler:
+            // CD delivers ~half the winding peak; the REALIZED factor (≈0.465) sits a bit below the
+            // ideal 0.5 from rectifier conduction + sinusoidal averaging at fr. Documented + config-
+            // overridable (cdOutputFactor), in the spirit of the KirchhoffConfig numerical constants.
+            n = cfg::get(d.config, "cdOutputFactor", 0.465) * Vbridge / (Vo + Vd); break;
+        case RectifierType::CenterTapped:   n = Vbridge / (Vo + Vd);             break;
+    }
     // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
     // the duty-derived value so the rest of the stage is sized around the fixed transformer.
     d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(std::round(n * 100.0) / 100.0);
@@ -85,6 +105,10 @@ LlcDesign design_llc(const json& tasInputs) {
     d.switchDuty = cfg::get(d.config, "switchDutyFraction", kSwitchDuty);
     d.loadResistance = Rload;
     d.outputCapacitance = 47e-6;    // matches MKF LLC (Cout=47u)
+    // CURRENT_DOUBLER output inductors Lo1/Lo2 (each carries Iout/2, ripple cancels at 2·fr): MKF sizing
+    // Lo = Vout/(4·fr·ΔI·Iout). Harmless to compute for the other variants (unused).
+    d.outputInductance = d.outputVoltage /
+        (4.0 * d.resonantFrequency * cfg::ripple_ratio(d.config, 0.30) * Iout);
     return d;
 }
 
@@ -128,15 +152,25 @@ json build_llc_tas(const LlcDesign& d) {
     const double ItankRms  = std::sqrt(IloadRms * IloadRms + ImagRms * ImagRms);  // primary winding current
     const double ItankPk   = std::sqrt(2.0) * ItankRms;                 // sinusoidal peak
     const double ItankPkPk = 2.0 * ItankPk;
-    // Each CT secondary half conducts a rectified half-sine of the reflected tank current; combined the
-    // two halves deliver Iout. Half-sine present 50%: peak = (π/2)·Iout, rms = (π/4)·Iout per half.
-    const double IsecPk   = (M_PI / 2.0) * Iout, IsecRms = (M_PI / 4.0) * Iout, IsecPkPk = IsecPk;
+    const int wpo = rectifier_windings_per_output(d.rectifierType);  // 2 (CT) | 1 (FB/CD/VD)
+    // Secondary winding current/voltage stresses (per rectifier variant). CT: two half-windings, each a
+    // rectified half-sine (pk=(π/2)Iout, rms=(π/4)Iout) clamped to ±Vo. Single-winding variants (FB/CD/VD):
+    // one secondary carrying the full bipolar reflected current (rms=(π/2√2)Iout); VD's winding clamps to
+    // a per-cap ±Vo/2 (its turns ratio is doubled to compensate).
+    double IsecPk, IsecRms, IsecPkPk, vSecPk;
+    if (d.rectifierType == RectifierType::CenterTapped) {
+        IsecPk = (M_PI / 2.0) * Iout; IsecRms = (M_PI / 4.0) * Iout; IsecPkPk = IsecPk;
+        vSecPk = d.outputVoltage;
+    } else {
+        IsecPk = (M_PI / 2.0) * Iout; IsecRms = (M_PI / (2.0 * std::sqrt(2.0))) * Iout; IsecPkPk = 2.0 * IsecPk;
+        vSecPk = (d.rectifierType == RectifierType::VoltageDoubler) ? d.outputVoltage / 2.0 : d.outputVoltage;
+    }
     // Winding voltages (sinusoidal at fr): the resonant inductor sees i·Zr (Zr=2π·fr·Lr); the transformer
-    // primary clamps to the reflected output ±n·Vo; each CT secondary half clamps to ±Vo.
+    // primary clamps to the reflected secondary ±n·vSecPk.
     const double Zr     = 2.0 * M_PI * fr * d.resonantInductance;
     const double vLrPk  = ItankPk * Zr, vLrRms = vLrPk / std::sqrt(2.0), vLrPkPk = 2.0 * vLrPk;
-    const double vPriPk = n * d.outputVoltage, vPriRms = vPriPk / std::sqrt(2.0), vPriPkPk = 2.0 * vPriPk;
-    const double vSecPk = d.outputVoltage,     vSecRms = vSecPk / std::sqrt(2.0), vSecPkPk = 2.0 * vSecPk;
+    const double vPriPk = n * vSecPk, vPriRms = vPriPk / std::sqrt(2.0), vPriPkPk = 2.0 * vPriPk;
+    const double vSecRms = vSecPk / std::sqrt(2.0), vSecPkPk = 2.0 * vSecPk;
 
     // --- semiconductor requirements (sourceable) ---
     // Primary half-bridge MOSFETs Q1/Q2 each block the full bus Vin when off and carry the resonant
@@ -167,18 +201,23 @@ json build_llc_tas(const LlcDesign& d) {
             req::winding_excitation("sinusoidal", fr, ItankPk, ItankRms, 0.0, ItankPkPk, std::nullopt,
                                     vLrPk, vLrRms, 0.0, vLrPkPk)});
 
-    // Transformer: primary Lpri = Lm, two CT secondary halves (turnsRatios=[n,n]), K=0.999 (MKF).
-    // 3 physical windings = turnsRatios.size()+1: primary (tank current) + two CT secondary halves.
-    std::vector<std::string> isoSides{"primary", "secondary", "secondary"};
+    // Transformer: primary Lpri = Lm; CT has TWO secondary half-windings (turnsRatios=[n,n]), the
+    // single-winding variants (FB/CD/VD) have ONE (turnsRatios=[n]). K=0.999 (MKF). windings = primary
+    // + wpo secondaries; physical winding count = turnsRatios.size()+1.
+    std::vector<std::string> isoSides{"primary"};
+    std::vector<double> turnsRatios;
+    std::vector<json> windings{
+        req::winding_excitation("sinusoidal", fr, ItankPk, ItankRms, 0.0, ItankPkPk, std::nullopt,
+                                vPriPk, vPriRms, 0.0, vPriPkPk)};
+    for (int w = 0; w < wpo; ++w) {
+        isoSides.push_back("secondary");
+        turnsRatios.push_back(n);
+        windings.push_back(req::winding_excitation("sinusoidal", fr, IsecPk, IsecRms, 0.0, IsecPkPk,
+                            std::nullopt, vSecPk, vSecRms, 0.0, vSecPkPk));
+    }
     json t1; t1["magnetic"] = json::object();
-    t1["inputs"] = req::magnetic_inputs(d.magnetizingInductance, 0.1, {n, n}, isoSides,
-        std::nullopt, 25.0, {
-            req::winding_excitation("sinusoidal", fr, ItankPk, ItankRms, 0.0, ItankPkPk, std::nullopt,
-                                    vPriPk, vPriRms, 0.0, vPriPkPk),
-            req::winding_excitation("sinusoidal", fr, IsecPk, IsecRms, 0.0, IsecPkPk, std::nullopt,
-                                    vSecPk, vSecRms, 0.0, vSecPkPk),
-            req::winding_excitation("sinusoidal", fr, IsecPk, IsecRms, 0.0, IsecPkPk, std::nullopt,
-                                    vSecPk, vSecRms, 0.0, vSecPkPk)});
+    t1["inputs"] = req::magnetic_inputs(d.magnetizingInductance, 0.1, turnsRatios, isoSides,
+        std::nullopt, 25.0, windings);
     // Leakage requirement (MAS field) instead of a raw coupling: L_leak = L_mag*(1-k^2) referred to
     // the magnetizing winding; the emitter recovers k = sqrt(1 - L_leak/L_mag).
     { const double kCpl = cfg::get(d.config, "transformerCoupling", 0.999);
@@ -228,45 +267,137 @@ json build_llc_tas(const LlcDesign& d) {
     auto swSnub = [&]() { json c; c["capacitor"] = json::object();
         c["inputs"]["designRequirements"]["capacitance"]["nominal"] = 100e-12;
         c["inputs"]["designRequirements"]["ratedVoltage"] = d.inputVoltage * 2; return c; };
+    // CURRENT_DOUBLER output inductor: a single-winding magnetic carrying Iout/2 DC with 2·fr ripple
+    // (the two inductors' ripples cancel at the output). Lo = d.outputInductance (sized in design_llc).
+    auto outInductor = [&]() { json m; m["magnetic"] = json::object();
+        const double Idc = Iout / 2.0, Irip = cfg::ripple_ratio(d.config, 0.30) * Idc;
+        m["inputs"] = req::magnetic_inputs(d.outputInductance, 0.3, {}, {"primary"}, std::nullopt, 25.0, {
+            req::winding_excitation("triangular", 2.0 * fr, Idc + Irip / 2.0, Idc, Idc, Irip, std::nullopt,
+                                    d.outputVoltage, d.outputVoltage / std::sqrt(2.0), 0.0, 2.0 * d.outputVoltage)});
+        return m; };
+    // VOLTAGE_DOUBLER stacked output cap: two in series across the output, each holds ~Vout/2. Sized
+    // 2·Cout so the series pair ≈ the nominal output filter; rated > Vout/2 with margin.
+    auto vdCap = [&]() { json c; c["capacitor"] = json::object();
+        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = 2.0 * d.outputCapacitance;
+        c["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage; return c; };
+    // VOLTAGE_DOUBLER midpoint balancing R: defines the cap-stack midpoint vout_mid at DC (otherwise it
+    // floats on the two caps + the secondary winding → singular node, same failure mode as msplit, abt #54).
+    auto vdBalR = [&]() { json c; c["resistor"] = json::object();
+        auto& dr = c["inputs"]["designRequirements"]; dr["deviceType"] = "resistor";
+        dr["resistance"]["nominal"] = 100000.0; dr["powerRating"] = 0.5; dr["role"] = "balancing"; return c; };
+    // CURRENT_DOUBLER loop-breaker R: the secondary winding + Lo1 + Lo2 form an all-inductor loop whose
+    // mesh current is undefined at DC → ngspice "singular matrix". A tiny series resistance (a fraction
+    // of the reflected load, ~mΩ) in one output-inductor leg breaks it without dissipating (abt #33-style).
+    auto loopBreakR = [&]() { json c; c["resistor"] = json::object();
+        auto& dr = c["inputs"]["designRequirements"]; dr["deviceType"] = "resistor";
+        dr["resistance"]["nominal"] = cfg::loop_breaker_res(d.config, d.loadResistance);
+        dr["powerRating"] = 0.25; dr["role"] = "balancing"; return c; };
 
     json cell; cell["name"] = "llc-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("g1"), port("g2")});
-    cell["components"] = json::array({
+
+    // Primary side: half-bridge leg + bus split + series resonant tank. Identical for every rectifier
+    // variant. Q1 (vbus->sw), Q2 (sw->gnd) complementary; Dq1/Dq2 are the ZVS body diodes; the tank
+    // returns to the split midpoint msplit (= Vbus/2): sw_node -> Cr -> Lr -> Lpri(=Lm) -> msplit.
+    // NOTE: this resonant split-cap deck is numerically fragile (abt #54) — ngspice's operating point
+    // is sensitive to element/node order, so the CT branch below reproduces the original card ORDER
+    // exactly (Csw1 between Cout and the snubbers; gate nets last) to stay on the validated solution.
+    std::vector<json> comps{
         comp("Q1", mosfetReq(reqQ)), comp("Q2", mosfetReq(reqQ)),
         comp("Dq1", diode()), comp("Dq2", diode()),   // Dq1/Dq2 = Q1/Q2 body diodes -> bare seed (deferred)
         comp("Chi", busCap()), comp("Clo", busCap()),
         comp("Rbal_hi", balR()), comp("Rbal_lo", balR()),   // define the bus-split midpoint at DC (abt #54)
-        comp("Cr", cr), comp("Lr", lr), comp("T1", t1),
-        comp("D1", diodeReq(reqD)), comp("D2", diodeReq(reqD)), comp("Cout", cout),
-        comp("Csw1", swSnub()),   // half-bridge sw_node dV/dt snubber (stripped when Coss is real)
-        comp("Rsn1", snubR()), comp("Csn1", snubC()), comp("Rsn2", snubR()), comp("Csn2", snubC())});
-    cell["connections"] = json::array({
-        // Half-bridge leg + bus split. Q1 (vbus->sw), Q2 (sw->gnd) complementary; Dq1/Dq2 are the ZVS
-        // body diodes. The tank returns to the split midpoint msplit (= Vbus/2).
+        comp("Cr", cr), comp("Lr", lr), comp("T1", t1)};
+    std::vector<json> conns{
         conn("vin_net",  {pin("Q1", "drain"), pin("Dq1", "cathode"), pin("Chi", "1"),
                           pin("Rbal_hi", "1"), prt("vin")}),
         conn("sw_node",  {pin("Q1", "source"), pin("Q2", "drain"),
-                          pin("Dq1", "anode"), pin("Dq2", "cathode"), pin("Cr", "1"),
-                          pin("Csw1", "1")}),
+                          pin("Dq1", "anode"), pin("Dq2", "cathode"), pin("Cr", "1"), pin("Csw1", "1")}),
         conn("msplit",   {pin("Chi", "2"), pin("Clo", "1"), pin("T1", "primary_end"),
                           pin("Rbal_hi", "2"), pin("Rbal_lo", "1")}),
-        // Series resonant tank: sw_node -> Cr -> Lr -> Lpri(=Lm) -> msplit.
         conn("cr_mid",   {pin("Cr", "2"), pin("Lr", "primary_start")}),
-        conn("pri_top",  {pin("Lr", "primary_end"), pin("T1", "primary_start")}),
-        // Center-tapped full-wave rectifier. sec halves -> D1/D2 -> vout; secondary CT = gnd.
-        conn("sec_top",  {pin("T1", "secondary1_start"), pin("D1", "anode"),
-                          pin("Rsn1", "1"), pin("Csn1", "1")}),
-        conn("sec_bot",  {pin("T1", "secondary2_end"), pin("D2", "anode"),
-                          pin("Rsn2", "1"), pin("Csn2", "1")}),
-        conn("vout_net", {pin("D1", "cathode"), pin("D2", "cathode"),
+        conn("pri_top",  {pin("Lr", "primary_end"), pin("T1", "primary_start")})};
+    // Primary-return endpoints shared by every variant's gnd_net (original order).
+    const std::vector<json> gndPrimary{pin("Q2", "source"), pin("Dq2", "anode"), pin("Clo", "2"),
+                                       pin("Rbal_lo", "2"), pin("Csw1", "2")};
+
+    // --- secondary rectifier (per variant; see Rectifier.hpp) ---
+    switch (d.rectifierType) {
+    case RectifierType::CenterTapped: {
+        // Two half-windings -> 2 diodes -> vout; secondary CT = gnd. RC snubber across each diode.
+        // Card order matches the original validated deck exactly: [D1,D2,Cout], Csw1, [Rsn1,Csn1,Rsn2,Csn2].
+        comps.insert(comps.end(), {comp("D1", diodeReq(reqD)), comp("D2", diodeReq(reqD)), comp("Cout", cout),
+            comp("Csw1", swSnub()),   // half-bridge sw_node dV/dt snubber (stripped when Coss is real)
+            comp("Rsn1", snubR()), comp("Csn1", snubC()), comp("Rsn2", snubR()), comp("Csn2", snubC())});
+        conns.push_back(conn("sec_top", {pin("T1", "secondary1_start"), pin("D1", "anode"),
+                                         pin("Rsn1", "1"), pin("Csn1", "1")}));
+        conns.push_back(conn("sec_bot", {pin("T1", "secondary2_end"), pin("D2", "anode"),
+                                         pin("Rsn2", "1"), pin("Csn2", "1")}));
+        conns.push_back(conn("vout_net", {pin("D1", "cathode"), pin("D2", "cathode"),
                           pin("Rsn1", "2"), pin("Csn1", "2"), pin("Rsn2", "2"), pin("Csn2", "2"),
-                          pin("Cout", "1"), prt("vout")}),
-        conn("gnd_net",  {pin("Q2", "source"), pin("Dq2", "anode"), pin("Clo", "2"),
-                          pin("Rbal_lo", "2"), pin("Csw1", "2"),
-                          pin("T1", "secondary1_end"), pin("T1", "secondary2_start"),
-                          pin("Cout", "2"), prt("gnd")}),
-        conn("g1_net", {pin("Q1", "gate"), prt("g1")}),
-        conn("g2_net", {pin("Q2", "gate"), prt("g2")})});
+                          pin("Cout", "1"), prt("vout")}));
+        std::vector<json> g = gndPrimary;
+        g.insert(g.end(), {pin("T1", "secondary1_end"), pin("T1", "secondary2_start"),
+                           pin("Cout", "2"), prt("gnd")});
+        conns.push_back(conn("gnd_net", g));
+        break; }
+    case RectifierType::FullBridge: {
+        // One secondary winding (sec_a=secondary1_start, sec_b=secondary1_end) into a 4-diode bridge:
+        // Dh1/Dh2 cathodes = vout, Dl1/Dl2 anodes = gnd; sec_a between Dh1/Dl1, sec_b between Dh2/Dl2.
+        comps.insert(comps.end(), {comp("Dh1", diodeReq(reqD)), comp("Dh2", diodeReq(reqD)),
+            comp("Dl1", diodeReq(reqD)), comp("Dl2", diodeReq(reqD)), comp("Cout", cout),
+            comp("Csw1", swSnub()), comp("Rsn1", snubR()), comp("Csn1", snubC())});
+        conns.push_back(conn("sec_a", {pin("T1", "secondary1_start"), pin("Dh1", "anode"),
+                                       pin("Dl1", "cathode"), pin("Rsn1", "1"), pin("Csn1", "1")}));
+        conns.push_back(conn("sec_b", {pin("T1", "secondary1_end"), pin("Dh2", "anode"),
+                                       pin("Dl2", "cathode")}));
+        conns.push_back(conn("vout_net", {pin("Dh1", "cathode"), pin("Dh2", "cathode"),
+                          pin("Rsn1", "2"), pin("Csn1", "2"), pin("Cout", "1"), prt("vout")}));
+        std::vector<json> g = gndPrimary;
+        g.insert(g.end(), {pin("Dl1", "anode"), pin("Dl2", "anode"), pin("Cout", "2"), prt("gnd")});
+        conns.push_back(conn("gnd_net", g));
+        break; }
+    case RectifierType::CurrentDoubler: {
+        // One winding -> 2 catch diodes (cathode at each winding end, anode at gnd) + 2 output inductors
+        // Lo1 (node_a -> vout), Lo2 (node_b -> vout). When node_a is driven high, Lo1 delivers and Lo2
+        // freewheels through D2 (gnd -> node_b); roles swap each half. Each Lo carries Iout/2.
+        comps.insert(comps.end(), {comp("D1", diodeReq(reqD)), comp("D2", diodeReq(reqD)),
+            comp("Lo1", outInductor()), comp("Lo2", outInductor()), comp("Rlb", loopBreakR()),
+            comp("Cout", cout), comp("Csw1", swSnub())});
+        conns.push_back(conn("node_a", {pin("T1", "secondary1_start"), pin("D1", "cathode"),
+                                        pin("Lo1", "primary_start")}));
+        conns.push_back(conn("node_b", {pin("T1", "secondary1_end"), pin("D2", "cathode"),
+                                        pin("Lo2", "primary_start")}));
+        // Rlb (tiny) sits between Lo2's output and vout to break the winding+Lo1+Lo2 all-inductor loop.
+        conns.push_back(conn("lo2_out", {pin("Lo2", "primary_end"), pin("Rlb", "1")}));
+        conns.push_back(conn("vout_net", {pin("Lo1", "primary_end"), pin("Rlb", "2"),
+                          pin("Cout", "1"), prt("vout")}));
+        std::vector<json> g = gndPrimary;
+        g.insert(g.end(), {pin("D1", "anode"), pin("D2", "anode"), pin("Cout", "2"), prt("gnd")});
+        conns.push_back(conn("gnd_net", g));
+        break; }
+    case RectifierType::VoltageDoubler: {
+        // One winding: end A = the diode junction (Dh.anode / Dl.cathode), end B = the cap-stack midpoint
+        // vout_mid. Dh charges Cohi (vout -> vout_mid) on the positive half, Dl charges Colo (vout_mid ->
+        // gnd) on the negative half; the load sees the full stack (vout -> gnd, ~2·Vsec_pk, n is doubled).
+        comps.insert(comps.end(), {comp("Dh", diodeReq(reqD)), comp("Dl", diodeReq(reqD)),
+            comp("Cohi", vdCap()), comp("Colo", vdCap()),
+            comp("Rvd_hi", vdBalR()), comp("Rvd_lo", vdBalR()), comp("Csw1", swSnub())});
+        conns.push_back(conn("node_a", {pin("T1", "secondary1_start"), pin("Dh", "anode"),
+                                        pin("Dl", "cathode")}));
+        conns.push_back(conn("vout_mid", {pin("T1", "secondary1_end"), pin("Cohi", "2"),
+                          pin("Colo", "1"), pin("Rvd_hi", "2"), pin("Rvd_lo", "1")}));
+        conns.push_back(conn("vout_net", {pin("Dh", "cathode"), pin("Cohi", "1"),
+                          pin("Rvd_hi", "1"), prt("vout")}));
+        std::vector<json> g = gndPrimary;
+        g.insert(g.end(), {pin("Dl", "anode"), pin("Colo", "2"), pin("Rvd_lo", "2"), prt("gnd")});
+        conns.push_back(conn("gnd_net", g));
+        break; }
+    }
+    conns.push_back(conn("g1_net", {pin("Q1", "gate"), prt("g1")}));
+    conns.push_back(conn("g2_net", {pin("Q2", "gate"), prt("g2")}));
+    cell["components"] = comps;
+    cell["connections"] = conns;
 
     json tas;
     json& dreq = tas["inputs"]["designRequirements"];

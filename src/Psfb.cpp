@@ -5,6 +5,7 @@
 #include <cmath>
 #include <algorithm>
 #include <vector>
+#include <stdexcept>
 
 namespace Kirchhoff {
 using nlohmann::json;
@@ -58,7 +59,16 @@ PsfbDesign design_psfb(const json& tasInputs) {
     const double Io = d.outputPower / Vo;
     const double Dcmd = cfg::get(d.config, "commandedDuty", kCommandedDuty);
     d.commandedDuty = Dcmd;
-    const double Vdtot = 2.0 * req::dideal_diode_drop(Io);   // full-bridge rectifier: two diodes in series
+    // Rectifier variant (FB default — MKF's CT deck is a fake CT; Kirchhoff's CT uses two REAL secondary
+    // half-windings so it delivers full Vout). Selected from the config override; no schema change.
+    d.rectifierType = parse_rectifier_type(cfg::get_str(d.config, "rectifierType", "fullBridge"),
+                                           RectifierType::FullBridge);
+    if (d.rectifierType == RectifierType::VoltageDoubler)
+        throw std::runtime_error("Kirchhoff PSFB: voltageDoubler rectifier not supported "
+                                 "(PSFB variants: fullBridge, centerTapped, currentDoubler)");
+    // Diodes in the conduction path set the turns-ratio drop compensation: FB stacks two (Vo+2Vd); the
+    // center-tapped and current-doubler secondaries conduct through one at a time (Vo+Vd).
+    const double Vdtot = rectifier_path_diodes(d.rectifierType) * req::dideal_diode_drop(Io);
 
     // Series (resonant + leakage) inductor Lr: the smaller of a 2 uH default and the value giving
     // <= 2% duty loss at rated load (MKF Psfb::process_design_requirements).
@@ -79,8 +89,14 @@ PsfbDesign design_psfb(const json& tasInputs) {
         n = nNew;
     }
     d.effectiveDuty = Deff;
-    d.turnsRatio = std::round(n * 100.0) / 100.0;
-
+    // CURRENT_DOUBLER delivers ~half the winding-reflected voltage (the two inductors each conduct half
+    // the period), so the turns ratio must be halved to hit the same Vo. cdOutputFactor (~0.5) is
+    // documented + config-overridable (rectifier conduction nudges the realized factor slightly).
+    if (d.rectifierType == RectifierType::CurrentDoubler)
+        n *= cfg::get(d.config, "cdOutputFactor", 0.5);
+    // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
+    // the duty-derived value so the rest of the stage is sized around the fixed transformer.
+    d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(std::round(n * 100.0) / 100.0);
     // Output inductor: Lo = Vo*(1 - Deff)/(Fs * ripple * Io).
     d.outputInductance = Vo * (1.0 - Deff) / (Fs * cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Io);
 
@@ -147,13 +163,13 @@ json build_psfb_tas(const PsfbDesign& d) {
     // Primary full-bridge switches QA..QD: each blocks the full bus (Vin_max) when off; they carry the
     // primary current (reflected load + magnetizing), peak = IpriPk, rms = IpriRms. Anti-parallel DA..DD
     // are the FETs' body diodes (left requirement-less).
-    const double ratedVds = d.inputVoltageMax / cfg::v_derate(d.config);
+    const double ratedVds = d.inputVoltageMax / cfg::v_derate_mosfet(d.config);
     const double maxRdsOn  = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IpriRms * IpriRms);
     json mosfetReq; mosfetReq["semiconductor"]["mosfet"] = json::object();
     mosfetReq["inputs"]["designRequirements"] = req::mosfet("mainSwitch", ratedVds, IpriPk, maxRdsOn, 125.0);
     // Secondary full-bridge rectifier Dr1..Dr4: each off diode blocks the secondary winding voltage
     // (peak Vs); each carries the output current while conducting. REAL rectifiers -> req::diode.
-    const double ratedVr  = vSecPk / cfg::v_derate(d.config);
+    const double ratedVr  = vSecPk / cfg::v_derate_diode(d.config);
     const double maxVf    = (ratedVr < 100.0) ? 0.6 : 1.2;
     json diodeReq; diodeReq["semiconductor"]["diode"] = json::object();
     diodeReq["inputs"]["designRequirements"] = req::diode(ratedVr, Io / 0.7, maxVf, 0.05 * Tsw);
@@ -167,14 +183,24 @@ json build_psfb_tas(const PsfbDesign& d) {
             req::winding_excitation("triangular", fsw, IlrPk, IlrRms, 0.0, 2.0 * IpriCtr, std::nullopt,
                                     Vin, std::sqrt(Deff) * Vin, 0.0, 2.0 * Vin)});
 
-    // 2-winding transformer (primary + one full secondary), turnsRatios = [N] -> 2 excitations.
-    std::vector<std::string> isoSides{"primary", "secondary"};
+    // Transformer windings: FULL_BRIDGE has ONE full secondary (turnsRatios=[N]); CENTER_TAPPED and
+    // CURRENT_DOUBLER have TWO secondary half-windings (turnsRatios=[N,N]). primary + wpo secondaries.
+    const int wpo = rectifier_windings_per_output(d.rectifierType);
+    std::vector<std::string> isoSides{"primary"};
+    std::vector<double> turnsRatios;
+    std::vector<json> xwindings{
+        req::winding_excitation("psfbPrimary", fsw, IpriPk, IpriRms, 0.0, dILm, Deff,
+                                vPriPk, vPriRms, 0.0, vPriPkPk)};
+    for (int w = 0; w < wpo; ++w) {
+        isoSides.push_back("secondary");
+        turnsRatios.push_back(N);
+        xwindings.push_back(req::winding_excitation("psfbSecondary", fsw, IsecPk, IsecRms, 0.0, dILo, Deff,
+                                vSecPk, vSecRms, 0.0, vSecPkPk));
+    }
     json xfmr; xfmr["magnetic"] = json::object();
-    xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, {N}, isoSides, std::nullopt, 25.0, {
-        req::winding_excitation("psfbPrimary",   fsw, IpriPk, IpriRms, 0.0, dILm, Deff,
-                                vPriPk, vPriRms, 0.0, vPriPkPk),
-        req::winding_excitation("psfbSecondary", fsw, IsecPk, IsecRms, 0.0, dILo, Deff,
-                                vSecPk, vSecRms, 0.0, vSecPkPk)});
+    xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, turnsRatios, isoSides, std::nullopt, 25.0, xwindings,
+        /*turnsRatioIsCeiling=*/{}, /*lmIsMinimum (PSFB transformer: maximise Lm ungapped -> K~0.999,
+          low leakage; PSFB has a SEPARATE series Lr for ZVS so it does NOT tie Lm to Lr like DAB. abt #56)=*/true);
 
     // Output inductor Lo (single-winding magnetic, DC-biased at Io).
     json lout; lout["magnetic"] = json::object();
@@ -199,19 +225,27 @@ json build_psfb_tas(const PsfbDesign& d) {
         c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) * 3;
         return c; };
 
+    // CURRENT_DOUBLER second output inductor + loop-breaker (CD uses Lout as Lo1 plus a second Lo2).
+    auto outInductor2 = [&]() { json m; m["magnetic"] = json::object();
+        m["inputs"] = req::magnetic_inputs(d.outputInductance, 0.2, {}, {"primary"}, std::nullopt, 25.0, {
+            req::winding_excitation("triangular", fsw, IloPk, IloRms, Io, dILo, std::nullopt,
+                                    vLoPk, vLoRms, 0.0, vLoPkPk)});
+        return m; };
+    auto loopBreakR = [&]() { json c; c["resistor"] = json::object();
+        auto& dr = c["inputs"]["designRequirements"]; dr["deviceType"] = "resistor";
+        dr["resistance"]["nominal"] = cfg::loop_breaker_res(d.config, d.loadResistance);
+        dr["powerRating"] = 0.25; dr["role"] = "balancing"; return c; };
+
     json cell; cell["name"] = "psfb-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"),
                                  port("gateA"), port("gateB"), port("gateC"), port("gateD")});
-    cell["components"] = json::array({
+
+    // Primary full bridge + Lr + transformer primary — identical for every rectifier variant.
+    std::vector<json> comps{
         comp("QA", mosfetReq), comp("QB", mosfetReq), comp("QC", mosfetReq), comp("QD", mosfetReq),
         comp("DA", diode()),  comp("DB", diode()),  comp("DC", diode()),  comp("DD", diode()),
-        comp("Lr", lr), comp("T1", xfmr),
-        comp("Dr1", diodeReq), comp("Dr2", diodeReq), comp("Dr3", diodeReq), comp("Dr4", diodeReq),
-        comp("Lout", lout), comp("CsnA", snub()), comp("CsnC", snub()),
-        comp("CsnSA", snub()), comp("CsnSB", snub())});
-    cell["connections"] = json::array({
-        // Primary full bridge. QA/QC high-side (vin->mid), QB/QD low-side (mid->gnd); anti-parallel
-        // body diodes DA..DD give the floating midpoints a freewheel/clamp path during dead time.
+        comp("Lr", lr), comp("T1", xfmr)};
+    std::vector<json> conns{
         conn("vin_net",  {pin("QA", "drain"), pin("QC", "drain"),
                           pin("DA", "cathode"), pin("DC", "cathode"), prt("vin")}),
         conn("midA_net", {pin("QA", "source"), pin("QB", "drain"),
@@ -220,26 +254,71 @@ json build_psfb_tas(const PsfbDesign& d) {
         conn("midC_net", {pin("QC", "source"), pin("QD", "drain"),
                           pin("DC", "anode"), pin("DD", "cathode"),
                           pin("T1", "primary_end"), pin("CsnC", "1")}),
-        conn("pri_x",    {pin("Lr", "primary_end"), pin("T1", "primary_start")}),
-        // Secondary -> full-bridge rectifier (4 diodes) -> output inductor.
-        conn("sec_a",    {pin("T1", "secondary1_start"), pin("Dr1", "anode"), pin("Dr3", "cathode"),
-                          pin("CsnSA", "1")}),
-        conn("sec_b",    {pin("T1", "secondary1_end"),   pin("Dr2", "anode"), pin("Dr4", "cathode"),
-                          pin("CsnSB", "1")}),
-        conn("out_rect", {pin("Dr1", "cathode"), pin("Dr2", "cathode"), pin("Lout", "primary_start")}),
-        conn("vout_net", {pin("Lout", "primary_end"), prt("vout")}),
-        // Shared ground: low-side switch sources + their body-diode anodes + the two rectifier return
-        // diodes (Dr3/Dr4 anodes) + snubber returns. Secondary return is tied to primary gnd (sim
-        // convenience; isolation is provided by the transformer coupling — MKF ties out_gnd to 0 too).
-        conn("gnd_net",  {pin("QB", "source"), pin("QD", "source"),
-                          pin("DB", "anode"), pin("DD", "anode"),
-                          pin("Dr3", "anode"), pin("Dr4", "anode"),
-                          pin("CsnA", "2"), pin("CsnC", "2"),
-                          pin("CsnSA", "2"), pin("CsnSB", "2"), prt("gnd")}),
-        conn("gateA_net", {pin("QA", "gate"), prt("gateA")}),
-        conn("gateB_net", {pin("QB", "gate"), prt("gateB")}),
-        conn("gateC_net", {pin("QC", "gate"), prt("gateC")}),
-        conn("gateD_net", {pin("QD", "gate"), prt("gateD")})});
+        conn("pri_x",    {pin("Lr", "primary_end"), pin("T1", "primary_start")})};
+    // gnd_net base: low-side switch sources + body-diode anodes + bridge-midpoint snubber returns. Each
+    // rectifier variant appends its own secondary returns before the net is emitted.
+    std::vector<json> gndEps{pin("QB", "source"), pin("QD", "source"),
+                             pin("DB", "anode"), pin("DD", "anode"),
+                             pin("CsnA", "2"), pin("CsnC", "2")};
+
+    switch (d.rectifierType) {
+    case RectifierType::FullBridge: {
+        // One secondary -> 4-diode bridge -> output inductor. (Original validated topology.)
+        comps.insert(comps.end(), {comp("Dr1", diodeReq), comp("Dr2", diodeReq), comp("Dr3", diodeReq),
+            comp("Dr4", diodeReq), comp("Lout", lout), comp("CsnA", snub()), comp("CsnC", snub()),
+            comp("CsnSA", snub()), comp("CsnSB", snub())});
+        conns.push_back(conn("sec_a", {pin("T1", "secondary1_start"), pin("Dr1", "anode"),
+                                       pin("Dr3", "cathode"), pin("CsnSA", "1")}));
+        conns.push_back(conn("sec_b", {pin("T1", "secondary1_end"), pin("Dr2", "anode"),
+                                       pin("Dr4", "cathode"), pin("CsnSB", "1")}));
+        conns.push_back(conn("out_rect", {pin("Dr1", "cathode"), pin("Dr2", "cathode"),
+                                          pin("Lout", "primary_start")}));
+        conns.push_back(conn("vout_net", {pin("Lout", "primary_end"), prt("vout")}));
+        gndEps.insert(gndEps.end(), {pin("Dr3", "anode"), pin("Dr4", "anode"),
+                                     pin("CsnSA", "2"), pin("CsnSB", "2"), prt("gnd")});
+        conns.push_back(conn("gnd_net", gndEps));
+        break; }
+    case RectifierType::CenterTapped: {
+        // Two REAL secondary half-windings -> 2 diodes -> output inductor; secondary CT = gnd. (A proper
+        // center tap — not MKF's fake one — so it delivers full Vout.)
+        comps.insert(comps.end(), {comp("Dr1", diodeReq), comp("Dr2", diodeReq),
+            comp("Lout", lout), comp("CsnA", snub()), comp("CsnC", snub()),
+            comp("CsnSA", snub()), comp("CsnSB", snub())});
+        conns.push_back(conn("sec_a", {pin("T1", "secondary1_start"), pin("Dr1", "anode"), pin("CsnSA", "1")}));
+        conns.push_back(conn("sec_b", {pin("T1", "secondary2_end"),   pin("Dr2", "anode"), pin("CsnSB", "1")}));
+        conns.push_back(conn("out_rect", {pin("Dr1", "cathode"), pin("Dr2", "cathode"),
+                                          pin("Lout", "primary_start")}));
+        conns.push_back(conn("vout_net", {pin("Lout", "primary_end"), prt("vout")}));
+        gndEps.insert(gndEps.end(), {pin("T1", "secondary1_end"), pin("T1", "secondary2_start"),
+                                     pin("CsnSA", "2"), pin("CsnSB", "2"), prt("gnd")});
+        conns.push_back(conn("gnd_net", gndEps));
+        break; }
+    case RectifierType::CurrentDoubler: {
+        // ONE secondary winding (its two ends = node_a/node_b) -> 2 catch diodes (cathode at each end,
+        // anode at gnd) + 2 output inductors Lout(=Lo1) and Lo2. Each carries Io/2; a tiny loop-breaker R
+        // between Lo2 and vout breaks the winding+Lo1+Lo2 all-inductor loop. (wpo=1, like the LLC CD.)
+        comps.insert(comps.end(), {comp("Dr1", diodeReq), comp("Dr2", diodeReq),
+            comp("Lout", lout), comp("Lo2", outInductor2()), comp("Rlb", loopBreakR()),
+            comp("CsnA", snub()), comp("CsnC", snub()), comp("CsnSA", snub()), comp("CsnSB", snub())});
+        conns.push_back(conn("node_a", {pin("T1", "secondary1_start"), pin("Dr1", "cathode"),
+                                        pin("Lout", "primary_start"), pin("CsnSA", "1")}));
+        conns.push_back(conn("node_b", {pin("T1", "secondary1_end"), pin("Dr2", "cathode"),
+                                        pin("Lo2", "primary_start"), pin("CsnSB", "1")}));
+        conns.push_back(conn("lo2_out", {pin("Lo2", "primary_end"), pin("Rlb", "1")}));
+        conns.push_back(conn("vout_net", {pin("Lout", "primary_end"), pin("Rlb", "2"), prt("vout")}));
+        gndEps.insert(gndEps.end(), {pin("Dr1", "anode"), pin("Dr2", "anode"),
+                                     pin("CsnSA", "2"), pin("CsnSB", "2"), prt("gnd")});
+        conns.push_back(conn("gnd_net", gndEps));
+        break; }
+    case RectifierType::VoltageDoubler:
+        throw std::runtime_error("Kirchhoff PSFB: voltageDoubler rectifier not supported");
+    }
+    conns.push_back(conn("gateA_net", {pin("QA", "gate"), prt("gateA")}));
+    conns.push_back(conn("gateB_net", {pin("QB", "gate"), prt("gateB")}));
+    conns.push_back(conn("gateC_net", {pin("QC", "gate"), prt("gateC")}));
+    conns.push_back(conn("gateD_net", {pin("QD", "gate"), prt("gateD")}));
+    cell["components"] = comps;
+    cell["connections"] = conns;
 
     json filt; filt["name"] = "output-filter";
     filt["ports"] = json::array({port("in"), port("rtn")});

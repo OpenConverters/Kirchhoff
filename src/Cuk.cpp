@@ -96,16 +96,16 @@ json build_cuk_tas(const CukDesign& d) {
     json L2 = inductor(d.inductanceL2, iout, dIL2);
     json c1; c1["capacitor"] = json::object();
     c1["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.couplingCapacitance;
-    c1["inputs"]["designRequirements"]["ratedVoltage"] = vSwing / cfg::v_derate(d.config);
+    c1["inputs"]["designRequirements"]["ratedVoltage"] = vSwing / cfg::v_derate_capacitor(d.config);
     json capd; capd["capacitor"] = json::object();
     capd["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;
-    capd["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltageMag / cfg::v_derate(d.config);
+    capd["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltageMag / cfg::v_derate_capacitor(d.config);
     json mq = mosfet();
-    mq["inputs"]["designRequirements"] = req::mosfet("mainSwitch", vSwing / cfg::v_derate(d.config),
+    mq["inputs"]["designRequirements"] = req::mosfet("mainSwitch", vSwing / cfg::v_derate_mosfet(d.config),
                                                      iout + iout * d.dutyCycle / (1.0 - d.dutyCycle),
                                                      0.01 * d.outputPower, 125.0);
     json md = diode();
-    md["inputs"]["designRequirements"] = req::diode(vSwing / cfg::v_derate(d.config), iout / 0.7,
+    md["inputs"]["designRequirements"] = req::diode(vSwing / cfg::v_derate_diode(d.config), iout / 0.7,
                                                     (vSwing < 100.0) ? 0.6 : 1.2, 0.05 / fsw);
 
     // RC snubber across the freewheel diode — a REAL component (the DAB cell snubs its switches the same
@@ -122,7 +122,7 @@ json build_cuk_tas(const CukDesign& d) {
     rsnub["inputs"]["designRequirements"]["role"] = "snubber";
     json csnub; csnub["capacitor"] = json::object();
     csnub["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::diode_snubber_cap(d.config);
-    csnub["inputs"]["designRequirements"]["ratedVoltage"] = vSwing / cfg::v_derate(d.config);
+    csnub["inputs"]["designRequirements"]["ratedVoltage"] = vSwing / cfg::v_derate_capacitor(d.config);
 
     // Cuk cell — inverting. Dot/orientation mirror MKF: D1 anode at nodeB, cathode at gnd; L2 nodeB->vout(neg).
     json cell; cell["name"] = "cuk-cell";

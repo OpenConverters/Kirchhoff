@@ -5,6 +5,7 @@
 #include <cmath>
 #include <algorithm>
 #include <vector>
+#include <stdexcept>
 
 namespace Kirchhoff {
 using nlohmann::json;
@@ -56,12 +57,22 @@ AhbDesign design_ahb(const json& tasInputs) {
     const double D = cfg::get(d.config, "operatingDutyCycle", kDuty);
     d.dutyCycle = D;
     d.deadFraction = cfg::get(d.config, "deadTimeFraction", kDeadFrac);
-    const double Vdtot = 2.0 * req::dideal_diode_drop(Io);   // full-bridge rectifier: two diodes in series
+    // Rectifier variant (FB default; AHB's natural fourth MAS variant is AHB_FLYBACK, not voltage-doubler).
+    d.rectifierType = parse_rectifier_type(cfg::get_str(d.config, "rectifierType", "fullBridge"),
+                                           RectifierType::FullBridge);
+    if (d.rectifierType == RectifierType::VoltageDoubler)
+        throw std::runtime_error("Kirchhoff AHB: voltageDoubler rectifier not supported "
+                                 "(AHB variants: fullBridge, centerTapped, currentDoubler)");
+    // Path diodes set the drop compensation: FB stacks two (Vo+2Vd); CT/CD conduct through one (Vo+Vd).
+    const double Vdtot = rectifier_path_diodes(d.rectifierType) * req::dideal_diode_drop(Io);
 
     // Turns ratio sized at NOMINAL Vin (the operating point the open-loop deck runs at) so Kirchhoff
-    // delivers the target Vo there. FULL_BRIDGE: Vo + 2*Vd = 2*D*(1-D)*Vin_nom/n. (MKF sizes at Vin_min
-    // and runs the deck at Vin_nom, landing slightly under Vo — both are within the equivalence band.)
+    // delivers the target Vo there. Vo + Vdtot = 2*D*(1-D)*Vin_nom/n. (MKF sizes at Vin_min and runs the
+    // deck at Vin_nom, landing slightly under Vo — both are within the equivalence band.)
     double n = 2.0 * D * (1.0 - D) * d.inputVoltage / (Vo + Vdtot);
+    // CURRENT_DOUBLER delivers ~half the winding-reflected voltage, so halve n to hit the same Vo.
+    if (d.rectifierType == RectifierType::CurrentDoubler)
+        n *= cfg::get(d.config, "cdOutputFactor", 0.5);
     // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
     // the duty-derived value so the rest of the stage is sized around the fixed transformer.
     d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(std::round(n * 100.0) / 100.0);
@@ -154,14 +165,22 @@ json build_ahb_tas(const AhbDesign& d) {
     cb["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.dcBlockingCapacitance;
     cb["inputs"]["designRequirements"]["ratedVoltage"] = d.inputVoltage * 2;
 
-    // 2-winding transformer (primary + one full secondary), turnsRatios = [N] -> 2 excitations.
-    std::vector<std::string> isoSides{"primary", "secondary"};
+    // Transformer windings: FULL_BRIDGE has ONE full secondary (turnsRatios=[N]); CENTER_TAPPED has TWO
+    // half-windings (turnsRatios=[N,N]); CURRENT_DOUBLER uses ONE (wpo=1, both ends drive the inductors).
+    const int wpo = rectifier_windings_per_output(d.rectifierType);
+    std::vector<std::string> isoSides{"primary"};
+    std::vector<double> turnsRatios;
+    std::vector<json> xwindings{
+        req::winding_excitation("ahbPrimary", fsw, IpriPk, IpriRms, 0.0, dILm, Dn,
+                                vPriPk, vPriRms, 0.0, vPriPkPk)};
+    for (int w = 0; w < wpo; ++w) {
+        isoSides.push_back("secondary");
+        turnsRatios.push_back(N);
+        xwindings.push_back(req::winding_excitation("ahbSecondary", fsw, IsecPk, IsecRms, 0.0, dIsecRefl, Dn,
+                                vSecPk, vSecRms, 0.0, vSecPkPk));
+    }
     json xfmr; xfmr["magnetic"] = json::object();
-    xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, {N}, isoSides, std::nullopt, 25.0, {
-        req::winding_excitation("ahbPrimary",   fsw, IpriPk, IpriRms, 0.0, dILm, Dn,
-                                vPriPk, vPriRms, 0.0, vPriPkPk),
-        req::winding_excitation("ahbSecondary", fsw, IsecPk, IsecRms, 0.0, dIsecRefl, Dn,
-                                vSecPk, vSecRms, 0.0, vSecPkPk)},
+    xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, turnsRatios, isoSides, std::nullopt, 25.0, xwindings,
         /*turnsRatioIsCeiling=*/{}, /*lmIsMinimum (AHB transformer is a forward-class ENERGY-TRANSFER
           transformer with a SEPARATE output inductor; Lm is only ZVS assist -> maximise it UNGAPPED so the
           adviser does not gap the core and overfill the winding into a high-leakage, high-DCR degenerate
@@ -186,33 +205,80 @@ json build_ahb_tas(const AhbDesign& d) {
         c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) * 3;
         return c; };
 
+    // CURRENT_DOUBLER second output inductor + loop-breaker.
+    auto outInductor2 = [&]() { json m; m["magnetic"] = json::object();
+        m["inputs"] = req::magnetic_inputs(d.outputInductance, 0.2, {}, {"primary"}, std::nullopt, 25.0, {
+            req::winding_excitation("triangular", fsw, IloPk, IloRms, Io, dILo, std::nullopt,
+                                    vLoPk, vLoRms, 0.0, vLoPkPk)});
+        return m; };
+    auto loopBreakR = [&]() { json c; c["resistor"] = json::object();
+        auto& dr = c["inputs"]["designRequirements"]; dr["deviceType"] = "resistor";
+        dr["resistance"]["nominal"] = cfg::loop_breaker_res(d.config, d.loadResistance);
+        dr["powerRating"] = 0.25; dr["role"] = "balancing"; return c; };
+
     json cell; cell["name"] = "ahb-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate1"), port("gate2")});
-    cell["components"] = json::array({
+
+    // Half bridge + DC-blocking cap + transformer primary — identical for every rectifier variant.
+    std::vector<json> comps{
         comp("Q1", mosfetReq), comp("Q2", mosfetReq), comp("D1", diode()), comp("D2", diode()),
-        comp("Cb", cb), comp("T1", xfmr),
-        comp("Dr1", diodeReq), comp("Dr2", diodeReq), comp("Dr3", diodeReq), comp("Dr4", diodeReq),
-        comp("Lout", lout), comp("Csw", snub()), comp("CsnSA", snub()), comp("CsnSB", snub())});
-    cell["connections"] = json::array({
-        // Half bridge: Q1 high-side (vin->sw), Q2 low-side (sw->gnd) + anti-parallel body diodes.
+        comp("Cb", cb), comp("T1", xfmr), comp("Csw", snub())};
+    std::vector<json> conns{
         conn("vin_net",  {pin("Q1", "drain"), pin("D1", "cathode"), pin("Cb", "1"), prt("vin")}),
         conn("sw_net",   {pin("Q1", "source"), pin("Q2", "drain"),
                           pin("D1", "anode"), pin("D2", "cathode"),
                           pin("T1", "primary_end"), pin("Csw", "1")}),
-        // DC-blocking cap in series with the primary: vin -> Cb -> primary(cb_mid->sw).
-        conn("cb_mid",   {pin("Cb", "2"), pin("T1", "primary_start")}),
-        // Secondary -> full-bridge rectifier (4 diodes) -> output inductor.
-        conn("sec_a",    {pin("T1", "secondary1_start"), pin("Dr1", "anode"), pin("Dr3", "cathode"),
-                          pin("CsnSA", "1")}),
-        conn("sec_b",    {pin("T1", "secondary1_end"),   pin("Dr2", "anode"), pin("Dr4", "cathode"),
-                          pin("CsnSB", "1")}),
-        conn("out_rect", {pin("Dr1", "cathode"), pin("Dr2", "cathode"), pin("Lout", "primary_start")}),
-        conn("vout_net", {pin("Lout", "primary_end"), prt("vout")}),
-        conn("gnd_net",  {pin("Q2", "source"), pin("D2", "anode"),
-                          pin("Dr3", "anode"), pin("Dr4", "anode"),
-                          pin("Csw", "2"), pin("CsnSA", "2"), pin("CsnSB", "2"), prt("gnd")}),
-        conn("gate1_net", {pin("Q1", "gate"), prt("gate1")}),
-        conn("gate2_net", {pin("Q2", "gate"), prt("gate2")})});
+        conn("cb_mid",   {pin("Cb", "2"), pin("T1", "primary_start")})};
+    std::vector<json> gndEps{pin("Q2", "source"), pin("D2", "anode"), pin("Csw", "2")};
+
+    switch (d.rectifierType) {
+    case RectifierType::FullBridge: {
+        comps.insert(comps.end(), {comp("Dr1", diodeReq), comp("Dr2", diodeReq), comp("Dr3", diodeReq),
+            comp("Dr4", diodeReq), comp("Lout", lout), comp("CsnSA", snub()), comp("CsnSB", snub())});
+        conns.push_back(conn("sec_a", {pin("T1", "secondary1_start"), pin("Dr1", "anode"),
+                                       pin("Dr3", "cathode"), pin("CsnSA", "1")}));
+        conns.push_back(conn("sec_b", {pin("T1", "secondary1_end"), pin("Dr2", "anode"),
+                                       pin("Dr4", "cathode"), pin("CsnSB", "1")}));
+        conns.push_back(conn("out_rect", {pin("Dr1", "cathode"), pin("Dr2", "cathode"),
+                                          pin("Lout", "primary_start")}));
+        conns.push_back(conn("vout_net", {pin("Lout", "primary_end"), prt("vout")}));
+        gndEps.insert(gndEps.end(), {pin("Dr3", "anode"), pin("Dr4", "anode"),
+                                     pin("CsnSA", "2"), pin("CsnSB", "2"), prt("gnd")});
+        conns.push_back(conn("gnd_net", gndEps));
+        break; }
+    case RectifierType::CenterTapped: {
+        comps.insert(comps.end(), {comp("Dr1", diodeReq), comp("Dr2", diodeReq), comp("Lout", lout),
+            comp("CsnSA", snub()), comp("CsnSB", snub())});
+        conns.push_back(conn("sec_a", {pin("T1", "secondary1_start"), pin("Dr1", "anode"), pin("CsnSA", "1")}));
+        conns.push_back(conn("sec_b", {pin("T1", "secondary2_end"),   pin("Dr2", "anode"), pin("CsnSB", "1")}));
+        conns.push_back(conn("out_rect", {pin("Dr1", "cathode"), pin("Dr2", "cathode"),
+                                          pin("Lout", "primary_start")}));
+        conns.push_back(conn("vout_net", {pin("Lout", "primary_end"), prt("vout")}));
+        gndEps.insert(gndEps.end(), {pin("T1", "secondary1_end"), pin("T1", "secondary2_start"),
+                                     pin("CsnSA", "2"), pin("CsnSB", "2"), prt("gnd")});
+        conns.push_back(conn("gnd_net", gndEps));
+        break; }
+    case RectifierType::CurrentDoubler: {
+        comps.insert(comps.end(), {comp("Dr1", diodeReq), comp("Dr2", diodeReq),
+            comp("Lout", lout), comp("Lo2", outInductor2()), comp("Rlb", loopBreakR()),
+            comp("CsnSA", snub()), comp("CsnSB", snub())});
+        conns.push_back(conn("node_a", {pin("T1", "secondary1_start"), pin("Dr1", "cathode"),
+                                        pin("Lout", "primary_start"), pin("CsnSA", "1")}));
+        conns.push_back(conn("node_b", {pin("T1", "secondary1_end"), pin("Dr2", "cathode"),
+                                        pin("Lo2", "primary_start"), pin("CsnSB", "1")}));
+        conns.push_back(conn("lo2_out", {pin("Lo2", "primary_end"), pin("Rlb", "1")}));
+        conns.push_back(conn("vout_net", {pin("Lout", "primary_end"), pin("Rlb", "2"), prt("vout")}));
+        gndEps.insert(gndEps.end(), {pin("Dr1", "anode"), pin("Dr2", "anode"),
+                                     pin("CsnSA", "2"), pin("CsnSB", "2"), prt("gnd")});
+        conns.push_back(conn("gnd_net", gndEps));
+        break; }
+    case RectifierType::VoltageDoubler:
+        throw std::runtime_error("Kirchhoff AHB: voltageDoubler rectifier not supported");
+    }
+    conns.push_back(conn("gate1_net", {pin("Q1", "gate"), prt("gate1")}));
+    conns.push_back(conn("gate2_net", {pin("Q2", "gate"), prt("gate2")}));
+    cell["components"] = comps;
+    cell["connections"] = conns;
 
     json filt; filt["name"] = "output-filter";
     filt["ports"] = json::array({port("in"), port("rtn")});

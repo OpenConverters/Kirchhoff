@@ -39,7 +39,9 @@ TwoSwitchForwardDesign design_two_switch_forward(const json& tasInputs) {
     d.diodeDrop = req::dideal_diode_drop(d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
     double n = vinMin * cfg::get(d.config, "maxDutyCycle", kMaxDuty) / (d.outputVoltage + d.diodeDrop);
     n = std::round(n * 100.0) / 100.0;
-    d.turnsRatio = n;
+    // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
+    // the duty-derived value so the rest of the stage is sized around the fixed transformer.
+    d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(n);
     d.magnetizingInductance = req::provided_inductance(dr).value_or(
         vinMin * n / (d.switchingFrequency * iout));
     const double tOn = cfg::get(d.config, "maxDutyCycle", kMaxDuty) / d.switchingFrequency;
@@ -98,15 +100,15 @@ json build_two_switch_forward_tas(const TwoSwitchForwardDesign& d) {
     // --- semiconductor stresses (two-switch forward) ---
     // Each primary switch blocks Vin_max: the two clamp diodes D1/D2 hold the switch nodes to the rails
     // during reset, so neither MOSFET sees more than the input bus. ratedVds = Vin_max / V_DERATE.
-    const double ratedVds = d.inputVoltageMax / cfg::v_derate(d.config);
+    const double ratedVds = d.inputVoltageMax / cfg::v_derate_mosfet(d.config);
     const double maxRdsOn = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IrmsPri * IrmsPri);
     // Clamp/reset diodes D1,D2 are REAL rectifiers (not FET body diodes): they steer the magnetizing
     // reset current back to the rails and reverse-block the full input bus Vin_max. They carry the
     // magnetizing reset current (peak ImagPk).
-    const double ratedVrClamp = d.inputVoltageMax / cfg::v_derate(d.config);
+    const double ratedVrClamp = d.inputVoltageMax / cfg::v_derate_diode(d.config);
     const double maxVfClamp    = (ratedVrClamp < 100.0) ? 0.6 : 1.2;
     // Output forward/freewheel rectifiers reverse-block the secondary peak Vin_max/n, carry ~Iout.
-    const double ratedVrSec = (d.inputVoltageMax / n) / cfg::v_derate(d.config);
+    const double ratedVrSec = (d.inputVoltageMax / n) / cfg::v_derate_diode(d.config);
     const double maxVfSec    = (ratedVrSec < 100.0) ? 0.6 : 1.2;
     const double maxTrr      = 0.05 * T;
     const auto mreq = req::mosfet("mainSwitch", ratedVds, IpkPri, maxRdsOn, 125.0);

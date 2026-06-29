@@ -126,7 +126,7 @@ double rerun_mkf_vout(const json& fx, const std::string& tag) {
 struct KirchhoffResult { double vout, iout, eff; };
 
 KirchhoffResult run_kirchhoff(const json& tasInputs, const json& tas, double loadResistance,
-                    double outputCapacitance, double vin, const std::string& tag) {
+                    double outputCapacitance, double vin, const std::string& tag, int measPeriods = 1) {
     PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
     std::string deck = Kirchhoff::tas_to_ngspice(tas, ideal);
     // fsw from the stimulus (period sets the timestep + measurement window).
@@ -148,7 +148,11 @@ KirchhoffResult run_kirchhoff(const json& tasInputs, const json& tas, double loa
         ".tran " + fmt(tstep) + " " + fmt(settleTime) + " 0 " + fmt(tstep));
 
     const double tstop = settleTime;
-    const double from = tstop - period;   // last switching period (matches MKF's extraction window)
+    // Average over measPeriods switching periods. Default 1 matches MKF's extraction window; a rectifier
+    // with an LC output filter (e.g. the current-doubler's two output inductors + Cout) rings at a SUB-
+    // switching-frequency, so a 1-period average samples one phase of that envelope and biases Vout/iin —
+    // such cases pass a window long enough to span the LC envelope.
+    const double from = tstop - measPeriods * period;
 
     auto cpos = deck.rfind("\n.control");
     if (cpos != std::string::npos) deck = deck.substr(0, cpos);
@@ -440,6 +444,40 @@ TEST_CASE("PSFB: Kirchhoff design+simulation matches MKF ideal reference", "[equ
     CHECK(r.eff <= 1.05);
 }
 
+TEST_CASE("PSFB center-tapped rectifier variant settles to spec Vout", "[equivalence][psfb][rectifier]") {
+    // No MKF fixture for the non-default rectifier (MKF's CT is a fake CT). Kirchhoff's CT uses two REAL
+    // secondary half-windings + 2 diodes -> a proper center tap delivering full Vout. Validate to spec.
+    json fx = load_fixture("psfb");
+    const json& in = fx.at("inputs");
+    json di = kirchhoff_inputs(in);
+    di["simStimulusFsw"] = json::array({in.at("switchingFrequency").get<double>()});
+    di["config"]["rectifierType"] = "centerTapped";
+    Kirchhoff::PsfbDesign d = Kirchhoff::design_psfb(di);
+    REQUIRE(d.rectifierType == Kirchhoff::RectifierType::CenterTapped);
+    json tas = Kirchhoff::build_psfb_tas(d);
+    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "psfb_ct");
+    INFO("PSFB center-tapped: Vout=" << r.vout << " Iout=" << r.iout << " eff=" << r.eff);
+    check_close("Vout (center-tapped)", r.vout, in.at("outputVoltage").get<double>(), kSpecTol);
+    CHECK(r.eff <= 1.05);
+}
+
+TEST_CASE("PSFB current-doubler rectifier variant settles to spec Vout", "[equivalence][psfb][rectifier]") {
+    // Current-doubler: two half-windings + 2 catch diodes + 2 output inductors (each carries Io/2).
+    // Validate to spec. PSFB's output inductors are buck-sized (well-damped), so a 1-period average suffices.
+    json fx = load_fixture("psfb");
+    const json& in = fx.at("inputs");
+    json di = kirchhoff_inputs(in);
+    di["simStimulusFsw"] = json::array({in.at("switchingFrequency").get<double>()});
+    di["config"]["rectifierType"] = "currentDoubler";
+    Kirchhoff::PsfbDesign d = Kirchhoff::design_psfb(di);
+    REQUIRE(d.rectifierType == Kirchhoff::RectifierType::CurrentDoubler);
+    json tas = Kirchhoff::build_psfb_tas(d);
+    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "psfb_cd", 8);
+    INFO("PSFB current-doubler: Vout=" << r.vout << " Iout=" << r.iout << " eff=" << r.eff);
+    check_close("Vout (current-doubler)", r.vout, in.at("outputVoltage").get<double>(), kSpecTol);
+    CHECK(r.eff <= 1.05);
+}
+
 TEST_CASE("AHB: Kirchhoff design+simulation matches MKF ideal reference", "[equivalence][ahb]") {
     // Asymmetric half-bridge: 2-switch isolated leg with COMPLEMENTARY duty (D / 1-D), a DC-blocking
     // cap in series with the primary, and a full-bridge secondary rectifier. Gain Vo=2*D*(1-D)*Vin/n is
@@ -465,6 +503,40 @@ TEST_CASE("AHB: Kirchhoff design+simulation matches MKF ideal reference", "[equi
     const double mkfEff = sim.at("efficiency").get<double>();
     INFO("ahb efficiency: Kirchhoff(ideal switch)=" << r.eff << " vs MKF(lossy diodes+snubbers)=" << mkfEff);
     CHECK(r.eff >= mkfEff);
+    CHECK(r.eff <= 1.05);
+}
+
+TEST_CASE("AHB center-tapped rectifier variant settles to spec Vout", "[equivalence][ahb][rectifier]") {
+    // No MKF fixture for the non-default rectifier. Two real secondary half-windings + 2 diodes -> a
+    // proper center tap delivering full Vout. Validate to spec.
+    json fx = load_fixture("ahb");
+    const json& in = fx.at("inputs");
+    json di = kirchhoff_inputs(in);
+    di["simStimulusFsw"] = json::array({in.at("switchingFrequency").get<double>()});
+    di["config"]["rectifierType"] = "centerTapped";
+    Kirchhoff::AhbDesign d = Kirchhoff::design_ahb(di);
+    REQUIRE(d.rectifierType == Kirchhoff::RectifierType::CenterTapped);
+    json tas = Kirchhoff::build_ahb_tas(d);
+    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "ahb_ct");
+    INFO("AHB center-tapped: Vout=" << r.vout << " Iout=" << r.iout << " eff=" << r.eff);
+    check_close("Vout (center-tapped)", r.vout, in.at("outputVoltage").get<double>(), kSpecTol);
+    CHECK(r.eff <= 1.05);
+}
+
+TEST_CASE("AHB current-doubler rectifier variant settles to spec Vout", "[equivalence][ahb][rectifier]") {
+    // Current-doubler: one secondary winding + 2 catch diodes + 2 output inductors (each carries Io/2),
+    // turns ratio halved. Buck-sized output inductors are well-damped, so a few-period average suffices.
+    json fx = load_fixture("ahb");
+    const json& in = fx.at("inputs");
+    json di = kirchhoff_inputs(in);
+    di["simStimulusFsw"] = json::array({in.at("switchingFrequency").get<double>()});
+    di["config"]["rectifierType"] = "currentDoubler";
+    Kirchhoff::AhbDesign d = Kirchhoff::design_ahb(di);
+    REQUIRE(d.rectifierType == Kirchhoff::RectifierType::CurrentDoubler);
+    json tas = Kirchhoff::build_ahb_tas(d);
+    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "ahb_cd", 8);
+    INFO("AHB current-doubler: Vout=" << r.vout << " Iout=" << r.iout << " eff=" << r.eff);
+    check_close("Vout (current-doubler)", r.vout, in.at("outputVoltage").get<double>(), kSpecTol);
     CHECK(r.eff <= 1.05);
 }
 
@@ -544,6 +616,39 @@ TEST_CASE("PSHB: Kirchhoff design+simulation matches MKF ideal reference", "[equ
     const double mkfEff = sim.at("efficiency").get<double>();
     INFO("pshb efficiency: Kirchhoff=" << r.eff << " vs MKF=" << mkfEff);
     CHECK(r.eff >= mkfEff);
+    CHECK(r.eff <= 1.05);
+}
+
+TEST_CASE("PSHB center-tapped rectifier variant settles to spec Vout", "[equivalence][pshb][rectifier]") {
+    // No MKF fixture for the non-default rectifier. Two real secondary half-windings + 2 diodes ->
+    // proper center tap delivering full Vout. Validate to spec.
+    json fx = load_fixture("pshb");
+    const json& in = fx.at("inputs");
+    json di = kirchhoff_inputs(in);
+    di["simStimulusFsw"] = json::array({in.at("switchingFrequency").get<double>()});
+    di["config"]["rectifierType"] = "centerTapped";
+    Kirchhoff::PshbDesign d = Kirchhoff::design_pshb(di);
+    REQUIRE(d.rectifierType == Kirchhoff::RectifierType::CenterTapped);
+    json tas = Kirchhoff::build_pshb_tas(d);
+    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "pshb_ct");
+    INFO("PSHB center-tapped: Vout=" << r.vout << " Iout=" << r.iout << " eff=" << r.eff);
+    check_close("Vout (center-tapped)", r.vout, in.at("outputVoltage").get<double>(), kSpecTol);
+    CHECK(r.eff <= 1.05);
+}
+
+TEST_CASE("PSHB current-doubler rectifier variant settles to spec Vout", "[equivalence][pshb][rectifier]") {
+    // Current-doubler: one secondary winding + 2 catch diodes + 2 output inductors, turns ratio halved.
+    json fx = load_fixture("pshb");
+    const json& in = fx.at("inputs");
+    json di = kirchhoff_inputs(in);
+    di["simStimulusFsw"] = json::array({in.at("switchingFrequency").get<double>()});
+    di["config"]["rectifierType"] = "currentDoubler";
+    Kirchhoff::PshbDesign d = Kirchhoff::design_pshb(di);
+    REQUIRE(d.rectifierType == Kirchhoff::RectifierType::CurrentDoubler);
+    json tas = Kirchhoff::build_pshb_tas(d);
+    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "pshb_cd", 8);
+    INFO("PSHB current-doubler: Vout=" << r.vout << " Iout=" << r.iout << " eff=" << r.eff);
+    check_close("Vout (current-doubler)", r.vout, in.at("outputVoltage").get<double>(), kSpecTol);
     CHECK(r.eff <= 1.05);
 }
 
@@ -737,6 +842,61 @@ TEST_CASE("LLC: Kirchhoff design+simulation matches MKF ideal reference", "[equi
     CHECK(r.eff <= 1.05);
 }
 
+TEST_CASE("LLC full-bridge rectifier variant settles to spec Vout", "[equivalence][llc][rectifier]") {
+    // The rectifier variants (config.rectifierType) have NO MKF fixture — MKF defaults LLC to center-
+    // tapped. Validate STANDALONE: the full-bridge secondary (single winding + 4-diode bridge, with n
+    // compensated for two diode drops) must still settle the open-loop converter to its 48 V spec when
+    // driven at fr. Same fragile split-cap deck, so this also guards the variant's netlist ordering.
+    json fx = load_fixture("llc");
+    const json& in = fx.at("inputs");
+    json di = kirchhoff_inputs(in);
+    di["simStimulusFsw"] = json::array({in.at("switchingFrequency").get<double>()});
+    di["config"]["rectifierType"] = "fullBridge";
+    Kirchhoff::LlcDesign d = Kirchhoff::design_llc(di);
+    REQUIRE(d.rectifierType == Kirchhoff::RectifierType::FullBridge);
+    json tas = Kirchhoff::build_llc_tas(d);
+    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "llc_fb");
+    INFO("LLC full-bridge: Vout=" << r.vout << " Iout=" << r.iout << " eff=" << r.eff);
+    check_close("Vout (full-bridge)", r.vout, in.at("outputVoltage").get<double>(), kSpecTol);
+    CHECK(r.eff <= 1.05);
+}
+
+TEST_CASE("LLC current-doubler rectifier variant settles to spec Vout", "[equivalence][llc][rectifier]") {
+    // Current-doubler: single secondary winding + 2 catch diodes + 2 output inductors (each carries
+    // Iout/2). No MKF fixture; validate the open-loop converter settles to the 48 V spec at fr.
+    json fx = load_fixture("llc");
+    const json& in = fx.at("inputs");
+    json di = kirchhoff_inputs(in);
+    di["simStimulusFsw"] = json::array({in.at("switchingFrequency").get<double>()});
+    di["config"]["rectifierType"] = "currentDoubler";
+    Kirchhoff::LlcDesign d = Kirchhoff::design_llc(di);
+    REQUIRE(d.rectifierType == Kirchhoff::RectifierType::CurrentDoubler);
+    json tas = Kirchhoff::build_llc_tas(d);
+    // The current-doubler's Lo1/Lo2 + Cout ring well below fsw; average over 64 switching periods so the
+    // DC Vout / input current are extracted across the full LC envelope (not one phase of it).
+    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "llc_cd", 64);
+    INFO("LLC current-doubler: Vout=" << r.vout << " Iout=" << r.iout << " eff=" << r.eff);
+    check_close("Vout (current-doubler)", r.vout, in.at("outputVoltage").get<double>(), kSpecTol);
+    CHECK(r.eff <= 1.05);
+}
+
+TEST_CASE("LLC voltage-doubler rectifier variant settles to spec Vout", "[equivalence][llc][rectifier]") {
+    // Voltage-doubler: single secondary winding + 2 diodes + stacked output caps (load across the stack,
+    // n doubled to compensate). No MKF fixture; validate the open-loop converter settles to 48 V at fr.
+    json fx = load_fixture("llc");
+    const json& in = fx.at("inputs");
+    json di = kirchhoff_inputs(in);
+    di["simStimulusFsw"] = json::array({in.at("switchingFrequency").get<double>()});
+    di["config"]["rectifierType"] = "voltageDoubler";
+    Kirchhoff::LlcDesign d = Kirchhoff::design_llc(di);
+    REQUIRE(d.rectifierType == Kirchhoff::RectifierType::VoltageDoubler);
+    json tas = Kirchhoff::build_llc_tas(d);
+    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "llc_vd");
+    INFO("LLC voltage-doubler: Vout=" << r.vout << " Iout=" << r.iout << " eff=" << r.eff);
+    check_close("Vout (voltage-doubler)", r.vout, in.at("outputVoltage").get<double>(), kSpecTol);
+    CHECK(r.eff <= 1.05);
+}
+
 TEST_CASE("SRC: Kirchhoff design+simulation matches MKF ideal reference", "[equivalence][src]") {
     // Series resonant converter (half-bridge, center-tapped rectifier): a two-element Lr+Cr series tank
     // (no resonant Lm — the transformer magnetizing is made large) operated at fsw=fr (series
@@ -769,6 +929,43 @@ TEST_CASE("SRC: Kirchhoff design+simulation matches MKF ideal reference", "[equi
     check_close("Iout (headroom·MKF)", r.iout, sim.at("ioutMean").get<double>() * kGainHeadroom, kResTol);
     // Efficiency not compared (MKF's ideal-bipolar-source bridge draws ~no vin_dc current); sanity only.
     INFO("src efficiency (Kirchhoff real bridge): " << r.eff);
+    CHECK(r.eff <= 1.05);
+}
+
+TEST_CASE("SRC full-bridge rectifier variant settles to headroom target", "[equivalence][src][rectifier]") {
+    // No MKF fixture for the non-default rectifier. SRC keeps its 8% gain headroom for every variant, so
+    // the open-loop output sits at ~1.08·Vo; the full-bridge (single winding + 4-diode bridge, n
+    // compensated for two diode drops) must track the same headroom-scaled target.
+    constexpr double kGainHeadroom = 1.08;
+    json fx = load_fixture("src");
+    const json& in = fx.at("inputs"); const json& sim = fx.at("sim");
+    json di = kirchhoff_inputs(in);
+    di["simStimulusFsw"] = json::array({in.at("switchingFrequency").get<double>()});
+    di["config"]["rectifierType"] = "fullBridge";
+    Kirchhoff::SrcDesign d = Kirchhoff::design_src(di);
+    REQUIRE(d.rectifierType == Kirchhoff::RectifierType::FullBridge);
+    json tas = Kirchhoff::build_src_tas(d);
+    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "src_fb");
+    INFO("SRC full-bridge: Vout=" << r.vout << " (target " << sim.at("voutMean").get<double>()*kGainHeadroom << ")");
+    check_close("Vout (full-bridge)", r.vout, sim.at("voutMean").get<double>() * kGainHeadroom, kSpecTol);
+    CHECK(r.eff <= 1.05);
+}
+
+TEST_CASE("SRC current-doubler rectifier variant settles to headroom target", "[equivalence][src][rectifier]") {
+    // Current-doubler (single winding + 2 catch diodes + 2 output inductors). LC output filter rings below
+    // fsw → average over 64 switching periods. Tracks the same ~1.08·Vo headroom target.
+    constexpr double kGainHeadroom = 1.08;
+    json fx = load_fixture("src");
+    const json& in = fx.at("inputs"); const json& sim = fx.at("sim");
+    json di = kirchhoff_inputs(in);
+    di["simStimulusFsw"] = json::array({in.at("switchingFrequency").get<double>()});
+    di["config"]["rectifierType"] = "currentDoubler";
+    Kirchhoff::SrcDesign d = Kirchhoff::design_src(di);
+    REQUIRE(d.rectifierType == Kirchhoff::RectifierType::CurrentDoubler);
+    json tas = Kirchhoff::build_src_tas(d);
+    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "src_cd", 64);
+    INFO("SRC current-doubler: Vout=" << r.vout << " (target " << sim.at("voutMean").get<double>()*kGainHeadroom << ")");
+    check_close("Vout (current-doubler)", r.vout, sim.at("voutMean").get<double>() * kGainHeadroom, kSpecTol);
     CHECK(r.eff <= 1.05);
 }
 

@@ -43,8 +43,9 @@ IsolatedBuckBoostDesign design_isolated_buck_boost(const json& tasInputs) {
 const double Vd = req::dideal_diode_drop(Ipri);  // DIDEAL Vf at the primary rectifier current
     d.dutyCycle  = (Vpri + Vd) / (Vin * d.efficiency + Vpri + Vd);
     double N = Vpri / Vsec;  // measured output is the primary buck rail (no rectifier drop); secondary is internal
-    d.turnsRatio = std::round(N * 100.0) / 100.0;
-
+    // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
+    // the duty-derived value so the rest of the stage is sized around the fixed transformer.
+    d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(std::round(N * 100.0) / 100.0);
     // Lmag = V_pri·Vin_max / ((V_pri + Vin_max)·2·Fs·ΔI),  ΔI = ripple·(I_pri + ΣI_sec/N) (reflected).
     const double Imax = Ipri + Isec / d.turnsRatio;
     const double dI = cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Imax;
@@ -106,13 +107,13 @@ json build_isolated_buck_boost_tas(const IsolatedBuckBoostDesign& d) {
     // --- semiconductor stresses (flyback-class, max-stress corner Vin_max) ---
     // QS1 blocks Vin_max + the reflected primary-rail voltage during OFF (clamp-limited).
     const double VdsStress = d.inputVoltageMax + d.primaryVoltage;
-    const double ratedVds  = VdsStress / cfg::v_derate(d.config);
+    const double ratedVds  = VdsStress / cfg::v_derate_mosfet(d.config);
     const double maxRdsOn  = cfg::rds_on_loss_fraction(d.config) * d.primaryPower / (IrmsPri * IrmsPri);
     // Dpri (primary inverting-rail rectifier): blocks Vin during ON; carries the primary load current.
-    const double VrPri    = d.inputVoltageMax / cfg::v_derate(d.config);
+    const double VrPri    = d.inputVoltageMax / cfg::v_derate_diode(d.config);
     const double maxVfPri = (VrPri < 100.0) ? 0.6 : 1.2;
     // Dsec (isolated secondary flyback rectifier): blocks Vsec + reflected Vin/N; carries Isec.
-    const double VrSec    = (d.secondaryVoltage + d.inputVoltageMax / N) / cfg::v_derate(d.config);
+    const double VrSec    = (d.secondaryVoltage + d.inputVoltageMax / N) / cfg::v_derate_diode(d.config);
     const double maxVfSec = (VrSec < 100.0) ? 0.6 : 1.2;
 
     // Coupled inductor (2-winding flyback magnetic): primary winding = flyback primary (Lmag, tied to

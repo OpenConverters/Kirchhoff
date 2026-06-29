@@ -76,8 +76,8 @@ json build_boost_tas(const BoostDesign& d) {
     const double IdiodeRms = std::sqrt(1.0 - Dmax) * IrmsL;               // diode conducts during 1-D
     const double IcoutRms = std::sqrt(std::max(0.0, IdiodeRms * IdiodeRms - Iout * Iout));
     // VOLTAGES at Vin_max: switch and diode both block Vout.
-    const double ratedVds = d.outputVoltage / cfg::v_derate(d.config);
-    const double ratedVr  = d.outputVoltage / cfg::v_derate(d.config);
+    const double ratedVds = d.outputVoltage / cfg::v_derate_mosfet(d.config);
+    const double ratedVr  = d.outputVoltage / cfg::v_derate_diode(d.config);
     const double maxRdsOn = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IswRms * IswRms);
     const double maxVf    = (ratedVr < 100.0) ? 0.6 : 1.2;
 
@@ -97,7 +97,7 @@ json build_boost_tas(const BoostDesign& d) {
     diode["inputs"]["designRequirements"] = req::diode(ratedVr, Iout / 0.7, maxVf, 0.05 * T);
     json capd; capd["capacitor"] = json::object();
     capd["inputs"]["designRequirements"] = req::capacitor(
-        d.outputCapacitance, d.outputVoltage / cfg::v_derate(d.config), IcoutRms,
+        d.outputCapacitance, d.outputVoltage / cfg::v_derate_capacitor(d.config), IcoutRms,
         req::ESR_RIPPLE_FRACTION * d.outputVoltage / IpkL, "outputFilter");
 
     // The boost power stage is ONE functional block (the switching cell): inductor + switch + diode.

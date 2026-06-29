@@ -17,6 +17,7 @@
 
 #include <nlohmann/json.hpp>
 #include "Fidelity.hpp"
+#include "Rectifier.hpp"
 
 namespace Kirchhoff {
 
@@ -33,6 +34,7 @@ struct PsfbDesign {
     double outputInductance;       // Lo
     double loadResistance;
     double outputCapacitance;
+    RectifierType rectifierType = RectifierType::FullBridge;  // FB default (MKF's CT is a fake CT; see .hpp)
     nlohmann::json config;         // tasInputs["config"] — user overrides for otherwise-derived values
 };
 

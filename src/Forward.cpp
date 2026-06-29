@@ -40,7 +40,9 @@ ForwardDesign design_forward(const json& tasInputs) {
     d.diodeDrop = req::dideal_diode_drop(d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
     double n = vinMin * cfg::get(d.config, "maxDutyCycle", kMaxDuty) / (d.outputVoltage + d.diodeDrop);
     n = std::round(n * 100.0) / 100.0;
-    d.turnsRatio = n;
+    // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
+    // the duty-derived value so the rest of the stage is sized around the fixed transformer.
+    d.turnsRatio = req::provided_turns_ratio(dr, 1).value_or(n);
     // Magnetizing inductance: Lm = Vin_min / (fsw * reflected secondary current), reflected = Iout/n.
     d.magnetizingInductance = req::provided_inductance(dr).value_or(
         vinMin * n / (d.switchingFrequency * iout));
@@ -123,13 +125,13 @@ json build_forward_tas(const ForwardDesign& d) {
     // resets at -Vin, so during reset the open switch sees Vin_max (rail) + Vin_max (reflected demag)
     // = 2*Vin_max. Evaluated at the max-input corner. ratedVds = stress / V_DERATE.
     const double VdsStress = 2.0 * d.inputVoltageMax;
-    const double ratedVds  = VdsStress / cfg::v_derate(d.config);
+    const double ratedVds  = VdsStress / cfg::v_derate_mosfet(d.config);
     const double maxRdsOn  = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IrmsPri * IrmsPri);
     // Forward/freewheel rectifiers block the secondary peak voltage Vin_max/n (the other diode clamps
     // the rectified node). The 1:1 demag/reset diode blocks Vin_max (it sees the primary rail during ON).
     const double VrSec     = d.inputVoltageMax / n;
-    const double ratedVrSec   = VrSec / cfg::v_derate(d.config);
-    const double ratedVrDemag = d.inputVoltageMax / cfg::v_derate(d.config);
+    const double ratedVrSec   = VrSec / cfg::v_derate_diode(d.config);
+    const double ratedVrDemag = d.inputVoltageMax / cfg::v_derate_diode(d.config);
     const double maxVfSec   = (ratedVrSec   < 100.0) ? 0.6 : 1.2;
     const double maxVfDemag = (ratedVrDemag < 100.0) ? 0.6 : 1.2;
     const double maxTrr     = 0.05 * T;

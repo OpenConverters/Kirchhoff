@@ -93,16 +93,16 @@ json build_zeta_tas(const ZetaDesign& d) {
     json L2 = inductor(d.inductanceL2, iout, dIL2);
     json cc; cc["capacitor"] = json::object();
     cc["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.couplingCapacitance;
-    cc["inputs"]["designRequirements"]["ratedVoltage"] = vSwing / cfg::v_derate(d.config);
+    cc["inputs"]["designRequirements"]["ratedVoltage"] = vSwing / cfg::v_derate_capacitor(d.config);
     json capd; capd["capacitor"] = json::object();
     capd["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;
-    capd["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage / cfg::v_derate(d.config);
+    capd["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage / cfg::v_derate_capacitor(d.config);
     json mq = mosfet();
-    mq["inputs"]["designRequirements"] = req::mosfet("mainSwitch", vSwing / cfg::v_derate(d.config),
+    mq["inputs"]["designRequirements"] = req::mosfet("mainSwitch", vSwing / cfg::v_derate_mosfet(d.config),
                                                      iout + iout * d.dutyCycle / (1.0 - d.dutyCycle),
                                                      0.01 * d.outputPower, 125.0);
     json md = diode();
-    md["inputs"]["designRequirements"] = req::diode(vSwing / cfg::v_derate(d.config), iout / 0.7,
+    md["inputs"]["designRequirements"] = req::diode(vSwing / cfg::v_derate_diode(d.config), iout / 0.7,
                                                     (vSwing < 100.0) ? 0.6 : 1.2, 0.05 / fsw);
 
     // Zeta cell — high-side switch, non-inverting. D1 catch: anode at gnd, cathode at node_X.
