@@ -63,6 +63,30 @@ ViennaDesign design_vienna(const json& tasInputs) {
     const double wBal = 2.0 * kPi * d.lineFrequency / 6.0;
     d.balanceGain  = wBal * wBal * d.busCapacitance * d.senseResistance / cfg::get(d.config, "balanceModulation", kBalanceModulation);
     d.balanceClamp = 0.5 * d.referenceGain * vpeak;
+
+    // ── Outer voltage loop: a DESIGNED PI compensator (mirrors design_pfc; derived from the plant). The
+    // per-phase hysteretic current loop makes each leg emulate a conductance Ge = g/Rsense (g the dynamic
+    // analog of the fixed kref), so the small-signal plant from the control g to the FULL bus (busP−busN)
+    // is a single pole — the split bus (two rail caps C in series across the full bus → C/2) loaded by
+    // Rload, fed by all THREE phases:  P(s) = K0/(s+ωp),  K0 = 3·Vrms²/(Rsense·(C/2)·Vbus) = 6·Vrms²/
+    // (Rsense·C·Vbus),  ωp = 2/(Rload·(C/2)) = 4/(Rload·C) (load pole). A PI g = g0 − kp·busScaled − ki·∫
+    // (busScaled − vref)dt places its zero ωz = ki/kp at the load pole ωp (pole/zero cancellation → clean
+    // single-integrator loop, ~90° phase margin). Crossover ωc is a DECADE BELOW the line frequency so the
+    // slow bus loop does not fight the per-phase current shaping. Unity loop gain at ωc fixes kp; ki = kp·ωp.
+    // (Sign: bus high → g down → less current, i.e. NEGATIVE feedback — opposite sense to PFC's complement
+    // gv, so the proportional/integral terms SUBTRACT here.)  kp = ωc/(kv·K0),  ki = kp·ωp.
+    d.outputDividerGain = cfg::get(d.config, "outputDividerGain", 0.005);   // kv: ~4 V at 800 V
+    const double kv  = d.outputDividerGain;
+    const double Ceff = 0.5 * d.busCapacitance;                            // two rail caps in series
+    const double K0v = 3.0 * d.inputVoltageRms * d.inputVoltageRms
+                       / (d.senseResistance * Ceff * d.outputVoltage);
+    const double wpv = 2.0 / (d.loadResistance * Ceff);                    // load pole
+    // Crossover: a 3-phase bus has only a tiny 6·fline ripple (no 2·fline term to fight, unlike single-phase
+    // PFC), so the bus loop can run a few times FASTER than fline without distorting the per-phase shaping —
+    // and it must, to settle the precharged bus within the few-line-cycle sim window.
+    const double wcv = 2.0 * kPi * d.lineFrequency / 3.0;
+    d.proportionalGain = wcv / (kv * K0v);
+    d.integralGain     = d.proportionalGain * wpv;
     return d;
 }
 
@@ -117,11 +141,14 @@ json build_vienna_tas(const ViennaDesign& d) {
 
     // ── per-phase semiconductor requirements (worst-case corner) ──
     // Each Vienna leg's bidirectional switch SW* steers its phase to the midpoint; when off it blocks
-    // the HALF bus (Vout/2, the 3-level step). The per-phase rectifier diodes Dp*/Dn* clamp node X to
-    // ±half-bus and are REAL line/phase rectifiers (Dp: X->busP, Dn: busN->X — neither is anti-parallel
-    // to SW*, which shunts X->gnd). All carry the per-phase line-current envelope already computed.
-    const double ratedVdsV = Vhalf / cfg::v_derate(d.config);   // switch blocks the half-bus
-    const double ratedVrV  = Vhalf / cfg::v_derate(d.config);   // each diode blocks the half-bus
+    // the HALF bus (Vout/2, the 3-level step). The per-phase rectifier diodes Dp*/Dn* (Dp: X->busP,
+    // Dn: busN->X — neither anti-parallel to SW*, which shunts X->gnd) block the FULL bus, NOT the half
+    // bus: while one is conducting, node X sits at its rail, so the OTHER diode sees busP−busN = Vout
+    // reverse (the canonical Vienna diode rating = the full DC link; only the switches see Vout/2). Rating
+    // them for the half bus picks a part that AVALANCHES at ~0.6·Vout and clamps the bus there (it can
+    // never boost to target). All carry the per-phase line-current envelope already computed.
+    const double ratedVdsV = Vhalf / cfg::v_derate_mosfet(d.config);          // switch blocks the half-bus
+    const double ratedVrV  = d.outputVoltage / cfg::v_derate_diode(d.config); // each diode blocks the FULL bus
     const double maxRdsOnV = cfg::rds_on_loss_fraction(d.config) * (d.outputPower / 3.0) / (IrmsLV * IrmsLV);
     const double maxVfV    = (ratedVrV < 100.0) ? 0.6 : 1.2;
     const double IfV       = IavgLV / 0.7;   // per-phase rectifier average current with margin
@@ -147,30 +174,50 @@ json build_vienna_tas(const ViennaDesign& d) {
     const char* ph[3] = {"a", "b", "c"};
     for (int i = 0; i < 3; ++i) {
         const std::string p = ph[i];
-        const std::string RS="Rs"+p, L="L"+p, SW="SW"+p, DP="Dp"+p, DN="Dn"+p, X="x"+p, G="g"+p, NL="nl"+p;
+        const std::string RS="Rs"+p, L="L"+p, SW="SW"+p, SW2="SQ"+p, DP="Dp"+p, DN="Dn"+p,
+                          X="x"+p, G="g"+p, NL="nl"+p, CS="cs"+p;
         comps.push_back(comp(RS, resBrick(d.senseResistance)));
         comps.push_back(comp(L, indBrick(d.boostInductance, indExcV)));
-        comps.push_back(comp(SW, mosfet(reqSWV)));
+        // Bidirectional midpoint switch = TWO MOSFETs in common-source back-to-back (drains at node X and at
+        // the midpoint, sources tied together, BOTH gates = G). A SINGLE MOSFET cannot realise the Vienna
+        // bidirectional steering switch: its intrinsic body diode (source→drain) clamps node X to the
+        // midpoint on the half-cycle X swings negative, shunting the boost inductor straight to the midpoint
+        // with no controllable off-state — the inductor sees the full phase voltage continuously and the
+        // current (and so the input power) runs away while the rails collapse. Sharing a source puts the two
+        // body diodes back-to-back so the pair BLOCKS both polarities when off and conducts both when on —
+        // the true 3-level steering switch. (Ideal/REQUIREMENTS parts carry no body diode, so this reduces
+        // to two series switches with unchanged closed-loop behaviour; the fix matters only for real
+        // DATASHEET MOSFETs, which DO carry a body diode.)
+        comps.push_back(comp(SW,  mosfet(reqSWV)));   // drain=X,        source=CS
+        comps.push_back(comp(SW2, mosfet(reqSWV)));   // drain=midpoint, source=CS
         comps.push_back(comp(DP, diode(reqDV)));
         comps.push_back(comp(DN, diode(reqDV)));
         conns.push_back(conn("phin_"+p, {pin(RS,"1"), prt(p)}));                   // phase source -> Rsense
         conns.push_back(conn(NL, {pin(RS,"2"), pin(L,"primary_start"), prt(NL)})); // sense node -> L
         conns.push_back(conn(X, {pin(L,"primary_end"), pin(SW,"drain"),
                                  pin(DP,"anode"), pin(DN,"cathode")}));            // node X
-        conns.push_back(conn("swret_"+p, {pin(SW,"source"), prt("gnd")}));         // switch -> midpoint
+        conns.push_back(conn(CS, {pin(SW,"source"), pin(SW2,"source")}));          // common source (floating)
+        conns.push_back(conn("swret_"+p, {pin(SW2,"drain"), prt("gnd")}));         // switch pair -> midpoint
         conns.push_back(conn("dp_"+p, {pin(DP,"cathode"), prt("busP")}));          // X -> +bus
         conns.push_back(conn("dn_"+p, {pin(DN,"anode"), prt("busN")}));            // -bus -> X
-        conns.push_back(conn(G+"_net", {pin(SW,"gate"), prt(G)}));
+        conns.push_back(conn(G+"_net", {pin(SW,"gate"), pin(SW2,"gate"), prt(G)}));
     }
     ports.push_back(port("nla")); ports.push_back(port("nlb")); ports.push_back(port("nlc"));
     ports.push_back(port("ga")); ports.push_back(port("gb")); ports.push_back(port("gc"));
     pcell["ports"] = ports; pcell["components"] = comps; pcell["connections"] = conns;
 
-    // ──────────── CONTROL stage (swappable): per-phase current shaping ────────────
-    // For each phase, gate the switch on V(phase)·(iref − iL·Rsense) > 0 — same sign as
-    // sign(v)·error, which handles the Vienna polarity flip. The current error folds into ONE weighted
-    // difference: err = V(nL) − (1−kref)·V(phase) = iref − iL·Rsense (a summer); multiply by V(phase)
-    // (a multiplier); a hysteretic comparator gates the switch. Holds iL ≈ V(phase)/rEmul → unity PF.
+    // ──────────── CONTROL stage (swappable): per-phase current shaping + outer VOLTAGE loop ────────────
+    // INNER per-phase current loop: gate the switch on V(phase)·(g·V(phase) − iL·Rsense) > 0 — same sign as
+    // sign(v)·error, which handles the Vienna polarity flip. The error is
+    //   err = V(nL) − (1−g)·V(phase) = g·V(phase) − iL·Rsense          (V(nL) = V(phase) − iL·Rsense),
+    // so the leg emulates a conductance g/Rsense and holds iL ≈ g·V(phase)/Rsense → unity PF. It is formed
+    // from g·V(phase) (a multiplier) summed with (V(nL) − V(phase)) (a difference); multiply the result by
+    // V(phase) (a multiplier) and a hysteretic comparator gates the switch.
+    // OUTER voltage loop: a DESIGNED PI (see design_vienna) drives the DYNAMIC conductance g from the
+    // full-bus error so the bus REGULATES to target. A FIXED g cannot — with real-part losses the bus sags
+    // below the boost-feasible region (half-bus < phase peak) and collapses to passive rectification
+    // (~600 V, huge circulating current). g = vInt − kp·busScaled, vInt = clamp(gInit − ki·∫(busScaled −
+    // vref)dt); bus low → g rises → more current → bus boosts back up. One loop, shared by the three phases.
     auto comparator = [&](double hyst) { json j; json& e = j["analog"]["comparator"]["behavioral"];
         e["outputHigh"] = 5.0; e["outputLow"] = 0.0; e["threshold"] = 0.0; e["hysteresis"] = hyst; return j; };
     auto multiplier = [&]() { json j; j["analog"]["multiplier"]["behavioral"]["gain"] = 1.0; return j; };
@@ -179,42 +226,64 @@ json build_vienna_tas(const ViennaDesign& d) {
     auto integrator = [&](double gain, double init, double ref, double lo, double hi) {
         json j; json& e = j["analog"]["integrator"]["behavioral"];
         e["gain"]=gain; e["initial"]=init; e["reference"]=ref; e["outputLow"]=lo; e["outputHigh"]=hi; return j; };
-    const double oneMinusKref = 1.0 - d.referenceGain;
     json ccell; ccell["name"] = "vienna-control";
     json cports = json::array({port("gnd"), port("busP"), port("busN")});
     json ccomps = json::array();
     json cconns = json::array();
     json gndEps = json::array({prt("gnd")});
-    // ACTIVE midpoint/rail balancing: bal = ∫(−kbal·(busP+busN)) is added to EVERY phase current
-    // reference (a common, zero-sequence term). When the top rail sags (busP+busN<0), bal rises -> the
-    // positive half of each phase draws more (charging C+) and the negative half less (sparing C−),
-    // restoring busP ≈ −busN under an unbalanced half-load. (The grounded neutral fixes the midpoint
-    // node; this balances the two RAIL voltages.)
-    ccomps.push_back(comp("Simb", summer(1.0, 1.0)));                          // imb = busP + busN
-    ccomps.push_back(comp("Ibal", integrator(-d.balanceGain, 0.0, 0.0,        // bal (derived gain + clamp)
-                                             -d.balanceClamp, d.balanceClamp)));
-    cconns.push_back(conn("busP", {pin("Simb","inA"), prt("busP")}));
-    cconns.push_back(conn("busN", {pin("Simb","inB"), prt("busN")}));
-    cconns.push_back(conn("imb",  {pin("Simb","out"), pin("Ibal","in")}));
+
+    // Outer bus-voltage PI → dynamic emulated conductance g (shared by all three phases). The integrator's
+    // initial holds g(0)=g0 (the nominal conductance, = the old fixed kref) at the precharge (bus=target);
+    // its clamp is the anti-windup rail (g held to 0.25×–4× the design conductance).
+    const double kv     = d.outputDividerGain;
+    const double vref   = kv * d.outputVoltage;                  // scaled full-bus setpoint
+    const double g0     = d.referenceGain;                       // nominal conductance (old fixed kref)
+    const double kp     = d.proportionalGain;
+    const double gInit  = g0 + kp * vref;                        // so g(0)=g0 at the precharge point
+    const double gLo = 0.25 * g0, gHi = 4.0 * g0;               // conductance draw range
+    const double vIntLo = gLo + kp * vref, vIntHi = gHi + kp * vref;   // integrator clamp = g rail + offset
+    ccomps.push_back(comp("Svs",   summer(kv, -kv)));            // busScaled = kv·(busP − busN)
+    ccomps.push_back(comp("Ivolt", integrator(-d.integralGain, gInit, vref, vIntLo, vIntHi)));
+    ccomps.push_back(comp("Sg",    summer(1.0, -kp)));           // g = vInt − kp·busScaled (PI: I + P paths)
+
+    // ACTIVE midpoint/rail balancing: bal = ∫(−kbal·(busP+busN)) is added to EVERY phase current reference
+    // (a common, zero-sequence term). When the top rail sags (busP+busN<0), bal rises → the positive half
+    // of each phase draws more (charging C+) and the negative half less (sparing C−), restoring busP ≈ −busN
+    // under an unbalanced half-load. (The grounded neutral fixes the midpoint; this balances the two RAILS.)
+    ccomps.push_back(comp("Simb", summer(1.0, 1.0)));           // imb = busP + busN
+    ccomps.push_back(comp("Ibal", integrator(-d.balanceGain, 0.0, 0.0, -d.balanceClamp, d.balanceClamp)));
+
+    cconns.push_back(conn("busP_net",  {pin("Svs","inA"), pin("Simb","inA"), prt("busP")}));
+    cconns.push_back(conn("busN_net",  {pin("Svs","inB"), pin("Simb","inB"), prt("busN")}));
+    cconns.push_back(conn("busScaled", {pin("Svs","out"), pin("Ivolt","in"), pin("Sg","inB")}));
+    cconns.push_back(conn("vInt",      {pin("Ivolt","out"), pin("Sg","inA")}));
+    cconns.push_back(conn("imb",       {pin("Simb","out"), pin("Ibal","in")}));
+    json gEps   = json::array({pin("Sg","out")});               // the dynamic conductance g, fanned to phases
     json balEps = json::array({pin("Ibal","out")});
     for (int i = 0; i < 3; ++i) {
         const std::string p = ph[i];
-        const std::string SUM="Sum"+p, ADD="Add"+p, MUL="Mul"+p, CMP="Cmp"+p,
-                          NL="nl"+p, ERR="err"+p, ERP="errp"+p, M="m"+p, G="g"+p;
-        ccomps.push_back(comp(SUM, summer(1.0, -oneMinusKref)));   // err = V(nL) − (1−kref)·V(phase)
+        const std::string GVM="Gvm"+p, SUB="Sub"+p, SUM="Sum"+p, ADD="Add"+p, MUL="Mul"+p, CMP="Cmp"+p,
+                          NL="nl"+p, GVP="gvp"+p, NMP="nmp"+p, ERR="err"+p, ERP="errp"+p, M="m"+p, G="g"+p;
+        ccomps.push_back(comp(GVM, multiplier()));                 // gvp = V(phase)·g   (dynamic iref·Rsense)
+        ccomps.push_back(comp(SUB, summer(1.0, -1.0)));            // nmp = V(nL) − V(phase) = −iL·Rsense
+        ccomps.push_back(comp(SUM, summer(1.0, 1.0)));             // err = nmp + gvp = g·V(phase) − iL·Rsense
         ccomps.push_back(comp(ADD, summer(1.0, 1.0)));             // err' = err + bal  (balancing)
         ccomps.push_back(comp(MUL, multiplier()));                 // m = V(phase)·err'
         ccomps.push_back(comp(CMP, comparator(d.currentHysteresis)));
         cports.push_back(port(p)); cports.push_back(port(NL)); cports.push_back(port(G));
-        cconns.push_back(conn(p,   {pin(SUM,"inB"), pin(MUL,"inA"), prt(p)}));      // V(phase)
-        cconns.push_back(conn(NL,  {pin(SUM,"inA"), prt(NL)}));                     // V(nL)
+        cconns.push_back(conn(p,   {pin(GVM,"inA"), pin(SUB,"inB"), pin(MUL,"inA"), prt(p)})); // V(phase)
+        cconns.push_back(conn(NL,  {pin(SUB,"inA"), prt(NL)}));                                // V(nL)
+        cconns.push_back(conn(GVP, {pin(GVM,"out"), pin(SUM,"inB")}));
+        cconns.push_back(conn(NMP, {pin(SUB,"out"), pin(SUM,"inA")}));
         cconns.push_back(conn(ERR, {pin(SUM,"out"), pin(ADD,"inA")}));
         cconns.push_back(conn(ERP, {pin(ADD,"out"), pin(MUL,"inB")}));
         cconns.push_back(conn(M,   {pin(MUL,"out"), pin(CMP,"inPlus")}));
         cconns.push_back(conn(G,   {pin(CMP,"out"), prt(G)}));
         gndEps.push_back(pin(CMP,"inMinus"));
         balEps.push_back(pin(ADD,"inB"));
+        gEps.push_back(pin(GVM,"inB"));
     }
+    cconns.push_back(json{{"name","gcond"},{"endpoints",gEps}});
     cconns.push_back(json{{"name","bal"},{"endpoints",balEps}});
     cconns.push_back(json{{"name","gnd"},{"endpoints",gndEps}});
     ccell["ports"] = cports; ccell["components"] = ccomps; ccell["connections"] = cconns;

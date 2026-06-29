@@ -37,6 +37,13 @@ struct ViennaDesign {
     double currentHysteresis;   // hysteresis on the gating signal V(phase)·(iref − iL·Rsense)
     double balanceGain;         // rail-balancing integral gain (kbal), derived from the balance plant
     double balanceClamp;        // ±limit on the common balancing term (anti-windup rail)
+    // ── Outer VOLTAGE loop (DESIGNED PI, mirrors Pfc): drives the dynamic emulated conductance g from the
+    // bus error so the bus REGULATES to target against real-part losses (a fixed kref cannot — it sags
+    // below the boost-feasible region and collapses to passive rectification). g modulates each phase's
+    // current reference iref = g·V(phase)/Rsense; bus low → g up → more current → bus boosts back to target.
+    double outputDividerGain;   // kv: V(busScaled) = kv·(busP−busN)
+    double proportionalGain;    // kp of the bus-voltage PI
+    double integralGain;        // ki of the bus-voltage PI (zero placed at the load pole)
 };
 
 /** Design a three-phase Vienna rectifier (open-loop boost; see header on control status). */

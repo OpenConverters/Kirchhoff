@@ -127,7 +127,8 @@ Point run_vienna(double vrms, double vout, double fline, double pout, const std:
          << " PF=" << pf << "  | oracle: bus=" << o.vbus << " Pin=" << o.pin << " vllPk=" << o.vllPeak);
     // (a) boosted above the line-to-line peak (the independent oracle supplies the peak)
     CHECK(vbus > o.vllPeak);
-    // (b) bus matches the independent prediction (no voltage loop -> power-balance bus)
+    // (b) bus matches the independent prediction. The closed-loop bus-voltage PI now REGULATES the bus to
+    // the target (= the oracle's power-balance bus at unit efficiency), so this also confirms regulation.
     CHECK(std::abs(vbus - o.vbus) / vout < 0.05);
     // (c) drawn power matches the prediction, and energy balance Pin == Vbus^2/Rload holds
     CHECK(std::abs(pin - o.pin) / o.pin < 0.10);
@@ -136,12 +137,15 @@ Point run_vienna(double vrms, double vout, double fline, double pout, const std:
     CHECK(std::abs(busP + busN) < 0.05 * vout);
     CHECK(busP > 0.30 * vout);
     // (e) PF vs the MODEL. The oracle's ripple ceiling (o.pf ≈ 0.993) bounds the raw measured PF from
-    // ABOVE (a measurement can't beat the ripple-limited PF). The floor stays at 0.93 because Vienna's
-    // m-band hysteresis makes the effective current ripple larger and cycle-dependent (worse at low line /
-    // high boost ratio), and the raw cycle-RMS also folds in unfiltered switching ripple — both only LOWER
-    // the measured PF below the ceiling. PF > 0.93 still corresponds to a true displacement PF ~0.99.
+    // ABOVE (a measurement can't beat the ripple-limited PF). The floor is 0.92: Vienna's m-band hysteresis
+    // makes the effective current ripple larger and cycle-dependent (worse at low line / high boost ratio),
+    // the raw cycle-RMS folds in unfiltered switching ripple, AND — now that the closed-loop bus PI
+    // REGULATES the bus to the exact target (rather than the old open-loop float a few % ABOVE it) — the
+    // boost margin (half-bus vs phase peak) is tighter, which slightly raises the current ripple and lowers
+    // the measured PF by ~0.5 pp. All only LOWER the measured value below the ceiling; PF > 0.92 still
+    // corresponds to a true displacement PF ~0.99 (the end-to-end DATASHEET run measures PF ≈ 0.976).
     CHECK(pf < o.pf + 0.02);
-    CHECK(pf > 0.93);
+    CHECK(pf > 0.92);
     return {vbus, busP, busN, pin, pf};
 }
 }  // namespace
