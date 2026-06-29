@@ -136,6 +136,13 @@ json build_src_tas(const SrcDesign& d) {
     json cr; cr["capacitor"] = json::object();
     cr["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.resonantCapacitance;
     cr["inputs"]["designRequirements"]["ratedVoltage"] = d.inputVoltage * 2;
+    // RESONANT cap: it sets the series-tank frequency, so it must be sourced CLOSE to nominal. The default
+    // fill treats capacitance as a ripple MINIMUM and oversizes up to 2x (and may pick a lossy electrolytic),
+    // which detunes the SRC tank — fr drops below fsw, so the converter is dragged far below resonance with
+    // large circulating current (poor efficiency). role=resonant picks the NEAREST film value (abt #54, as
+    // the LLC Cr already does). NOTE: unlike LLC/CLLC the SRC magnetizing Lm is deliberately kept LARGE
+    // (10·Lr, out of the resonance), so a pinned Lm does NOT detune the Lr–Cr tank — no Lr/Cr re-sizing here.
+    cr["inputs"]["designRequirements"]["role"] = "resonant";
 
     // Resonant inductor Lr: its OWN single-winding magnetic (carries the full sinusoidal tank current).
     json lr; lr["magnetic"] = json::object();

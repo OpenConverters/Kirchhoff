@@ -62,8 +62,25 @@ LlcDesign design_llc(const json& tasInputs) {
     d.resonantFrequency = fr;
     d.resonantInductance = Zr / (2.0 * M_PI * fr);
     d.resonantCapacitance = 1.0 / (2.0 * M_PI * fr * Zr);
-    d.magnetizingInductance = req::provided_inductance(dr).value_or(
+    const auto pinnedLm = req::provided_inductance(dr);
+    d.magnetizingInductance = pinnedLm.value_or(
         cfg::get(d.config, "inductanceRatio", kInductanceRatio) * d.resonantInductance);
+    // della-Pollock resonant tank CO-DESIGN (the closed-loop realize pins Lm to the REALIZED magnetizing
+    // inductance of the chosen transformer core — typically larger than the duty-derived Ln·Lr because the
+    // core is sized for a saturation margin). Once Lm is fixed it no longer equals Ln·Lr, so the tank is
+    // DETUNED: Ln=Lm/Lr drifts, the FHA gain curve shifts, and the regulator is forced far off resonance
+    // (high circulating current → poor efficiency, or simply unable to reach target Vout). Re-size the
+    // SERIES tank around the pinned Lm to PRESERVE the design Ln AND keep Lr–Cr resonant at fr:
+    //   Lr = Lm/Ln,  Cr = 1/((2π·fr)²·Lr).
+    // Lr is its OWN freshly-designed magnetic and Cr a near-nominal (role="resonant") sourced cap, so both
+    // track the new values; only the pinned transformer is fixed. (No pin → original Q·Rac sizing stands,
+    // so the ideal-deck mkf_equivalence path is unchanged.)
+    if (pinnedLm) {
+        const double Ln = cfg::get(d.config, "inductanceRatio", kInductanceRatio);
+        const double wr = 2.0 * M_PI * fr;
+        d.resonantInductance = *pinnedLm / Ln;
+        d.resonantCapacitance = 1.0 / (wr * wr * d.resonantInductance);
+    }
 
     d.switchDuty = cfg::get(d.config, "switchDutyFraction", kSwitchDuty);
     d.loadResistance = Rload;

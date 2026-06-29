@@ -50,8 +50,23 @@ ClllcDesign design_clllc(const json& tasInputs) {
     const double wr = 2.0 * M_PI * fr;
     d.primaryResonantCapacitance = 1.0 / (2.0 * M_PI * cfg::get(d.config, "qualityFactor", kQualityFactor) * fr * Ro);
     d.primaryResonantInductance = 1.0 / (wr * wr * d.primaryResonantCapacitance);
-    d.magnetizingInductance = req::provided_inductance(dr).value_or(
+    const auto pinnedLm = req::provided_inductance(dr);
+    d.magnetizingInductance = pinnedLm.value_or(
         cfg::get(d.config, "inductanceRatio", kInductanceRatio) * d.primaryResonantInductance);
+    // della-Pollock resonant tank CO-DESIGN: the closed-loop realize pins Lm to the REALIZED magnetizing
+    // inductance of the chosen transformer core (sized for a saturation margin, so typically larger than
+    // k·Lr1). Once Lm is fixed it no longer equals k·Lr1, so the tank is DETUNED (k=Lm/Lr1 drifts, the gain
+    // curve shifts, the converter is pushed off resonance and can't reach target Vout). Re-size the PRIMARY
+    // tank around the pinned Lm to PRESERVE the design ratio k AND keep Lr1–Cr1 resonant at fr:
+    //   Lr1 = Lm/k,  Cr1 = 1/((2π·fr)²·Lr1).  The secondary tank (Lr2/Cr2 below) follows, staying symmetric
+    // (Lr2·Cr2 = Lr1·Cr1 → same fr). Lr1/Lr2 are their own freshly-designed magnetics and Cr1/Cr2
+    // near-nominal (role="resonant") sourced caps, so all track the new values; only the pinned transformer
+    // is fixed. (No pin → original Q·Ro sizing stands; the mkf_equivalence ideal deck never pins Lm.)
+    if (pinnedLm) {
+        const double k = cfg::get(d.config, "inductanceRatio", kInductanceRatio);
+        d.primaryResonantInductance = *pinnedLm / k;
+        d.primaryResonantCapacitance = 1.0 / (wr * wr * d.primaryResonantInductance);
+    }
     d.secondaryResonantInductance = d.primaryResonantInductance / (n * n);
     d.secondaryResonantCapacitance = n * n * d.primaryResonantCapacitance;
     d.switchDuty = cfg::get(d.config, "switchDutyFraction", kSwitchDuty);
@@ -83,6 +98,13 @@ json build_clllc_tas(const ClllcDesign& d) {
     auto capBrick = [&](double c, double vr) { json j; j["capacitor"] = json::object();
         j["inputs"]["designRequirements"]["capacitance"]["nominal"] = c;
         j["inputs"]["designRequirements"]["ratedVoltage"] = vr; return j; };
+    // RESONANT caps set the tank frequency, so they must be sourced CLOSE to nominal — the default fill
+    // treats capacitance as a ripple MINIMUM and oversizes up to 2x (and may pick a lossy electrolytic),
+    // which detunes the tank and drops fr below the regulator's bracket (the converter can then never reach
+    // target). role=resonant tells the HS fill to pick the NEAREST value with a proper (film) dielectric,
+    // not oversize (abt #54, as the LLC Cr already does).
+    auto resCap = [&](double c, double vr) { json j = capBrick(c, vr);
+        j["inputs"]["designRequirements"]["role"] = "resonant"; return j; };
     auto resBrick = [&](double r) { json j; j["resistor"] = json::object();
         auto& dr = j["inputs"]["designRequirements"];
         dr["deviceType"] = "resistor";
@@ -166,10 +188,10 @@ json build_clllc_tas(const ClllcDesign& d) {
         comp("Q1", mosfetReq(reqPri)), comp("Q2", mosfetReq(reqPri)),
         comp("Q3", mosfetReq(reqPri)), comp("Q4", mosfetReq(reqPri)),
         comp("DS1", diode()), comp("DS2", diode()), comp("DS3", diode()), comp("DS4", diode()),
-        comp("Cr1", capBrick(d.primaryResonantCapacitance, d.inputVoltage * 2)),
+        comp("Cr1", resCap(d.primaryResonantCapacitance, d.inputVoltage * 2)),
         comp("Lr1", lr1), comp("T1", t1),
         comp("Lr2", lr2),
-        comp("Cr2", capBrick(d.secondaryResonantCapacitance, d.outputVoltage * 2)),
+        comp("Cr2", resCap(d.secondaryResonantCapacitance, d.outputVoltage * 2)),
         comp("Rsense", resBrick(cfg::get(d.config, "senseResistance", kSenseResistance))),
         // secondary SR full bridge + body diodes (DSE..DSH = QE..QH body diodes -> bare seed, deferred)
         comp("QE", mosfetReq(reqSec)), comp("QF", mosfetReq(reqSec)),

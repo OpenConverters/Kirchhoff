@@ -41,7 +41,9 @@ CllcDesign design_cllc(const json& tasInputs) {
 
     // n = Vin_nom/Vout (full bridge both sides). fr = fsw (operated at resonance).
     double n = Vin / Vo;
-    d.turnsRatio = n;
+    // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
+    // the duty-derived value so the rest of the stage is sized around the fixed transformer.
+    d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(n);
     const double fr = d.switchingFrequency;
     d.resonantFrequency = fr;
 
@@ -52,8 +54,24 @@ CllcDesign design_cllc(const json& tasInputs) {
     const double wr = 2.0 * M_PI * fr;
     d.primaryResonantCapacitance = 1.0 / (2.0 * M_PI * cfg::get(d.config, "qualityFactor", kQualityFactor) * fr * Ro);
     d.primaryResonantInductance = 1.0 / (wr * wr * d.primaryResonantCapacitance);
-    d.magnetizingInductance = req::provided_inductance(dr).value_or(
+    const auto pinnedLm = req::provided_inductance(dr);
+    d.magnetizingInductance = pinnedLm.value_or(
         cfg::get(d.config, "inductanceRatio", kInductanceRatio) * d.primaryResonantInductance);
+    // della-Pollock resonant tank CO-DESIGN: the closed-loop realize pins Lm to the REALIZED magnetizing
+    // inductance of the chosen transformer core (sized for a saturation margin, so typically larger than
+    // k·Lr1). Once Lm is fixed it no longer equals k·Lr1, so the tank is DETUNED (k=Lm/Lr1 drifts, the gain
+    // curve shifts, the converter is pushed off resonance and can't reach target Vout). Re-size the PRIMARY
+    // tank around the pinned Lm to PRESERVE the design ratio k AND keep Lr1–Cr1 resonant at fr:
+    //   Lr1 = Lm/k,  Cr1 = 1/((2π·fr)²·Lr1).  The secondary tank (Lr2/Cr2 below) follows from the new
+    // Lr1/Cr1, staying symmetric (Lr2·Cr2 = Lr1·Cr1 → same fr). Lr1/Lr2 are their own freshly-designed
+    // magnetics and Cr1/Cr2 near-nominal (role="resonant") sourced caps, so all track the new values; only
+    // the pinned transformer is fixed. (No pin → original Q·Ro sizing stands; the mkf_equivalence ideal
+    // deck never pins Lm and is unchanged.)
+    if (pinnedLm) {
+        const double k = cfg::get(d.config, "inductanceRatio", kInductanceRatio);
+        d.primaryResonantInductance = *pinnedLm / k;
+        d.primaryResonantCapacitance = 1.0 / (wr * wr * d.primaryResonantInductance);
+    }
     d.secondaryResonantInductance = d.primaryResonantInductance / (n * n);
     d.secondaryResonantCapacitance = n * n * d.primaryResonantCapacitance;
 
@@ -119,16 +137,22 @@ json build_cllc_tas(const CllcDesign& d) {
     // MOSFETs both sides); the only diodes (DS1..DS4, DSa..DSd) are FET body diodes -> left bare/deferred.
     // Primary full-bridge Q1..Q4: each blocks the full bus Vin when off, carries the primary tank current
     // (peak ItankPk, rms ItankRms — the same primary current that drives the magnetic).
-    const double ratedVdsPri = d.inputVoltageMax / cfg::v_derate(d.config);
+    const double ratedVdsPri = d.inputVoltageMax / cfg::v_derate_mosfet(d.config);
     const double maxRdsOnPri  = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (ItankRms * ItankRms);
     const json reqPri = req::mosfet("mainSwitch", ratedVdsPri, ItankPk, maxRdsOnPri, 125.0);
     // Secondary SR full-bridge Qa..Qd: each blocks the output rail Vout when off, carries the secondary
     // (reflected) tank current (peak IsecPk, rms IsecRms).
-    const double ratedVdsSec = d.outputVoltage / cfg::v_derate(d.config);
+    const double ratedVdsSec = d.outputVoltage / cfg::v_derate_mosfet(d.config);
     const double maxRdsOnSec  = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IsecRms * IsecRms);
     const json reqSec = req::mosfet("mainSwitch", ratedVdsSec, IsecPk, maxRdsOnSec, 125.0);
 
     json cr1 = capBrick(d.primaryResonantCapacitance, d.inputVoltage * 2);
+    // RESONANT caps set the tank frequency, so they must be sourced CLOSE to nominal — the default fill
+    // treats capacitance as a ripple MINIMUM and oversizes up to 2x (and may pick a lossy electrolytic),
+    // which detunes the CLLC tank (a 1.9nF Cr1 sourced at 3.3nF dropped fr 126→97kHz, below the regulator's
+    // bracket, so the converter could never boost to target). role=resonant tells the HS fill to pick the
+    // NEAREST value with a proper (film) dielectric, not oversize (abt #54, as the LLC Cr already does).
+    cr1["inputs"]["designRequirements"]["role"] = "resonant";
     // Primary resonant inductor Lr1: its OWN single-winding magnetic (full primary tank current).
     json lr1; lr1["magnetic"] = json::object();
     lr1["inputs"] = req::magnetic_inputs(d.primaryResonantInductance, 0.2, {}, {"primary"},
@@ -142,6 +166,7 @@ json build_cllc_tas(const CllcDesign& d) {
             req::winding_excitation("sinusoidal", fr, IsecPk, IsecRms, 0.0, IsecPkPk, std::nullopt,
                                     vLr2Pk, vLr2Rms, 0.0, vLr2PkPk)});
     json cr2 = capBrick(d.secondaryResonantCapacitance, d.outputVoltage * 2);
+    cr2["inputs"]["designRequirements"]["role"] = "resonant";   // secondary tank cap — source near nominal (abt #54)
     json cout = capBrick(d.outputCapacitance, d.outputVoltage * 2);
 
     // Transformer: primary Lpri = Lm, single secondary, turnsRatios=[n], K=0.9999.
