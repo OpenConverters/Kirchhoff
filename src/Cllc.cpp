@@ -14,6 +14,8 @@ double nominal(const json& j) { return PEAS::resolve_dimensional_values(j); }
 constexpr double kQualityFactor   = 0.3;   // MKF Cllc default (Infineon AN: 0.2–0.4)
 constexpr double kInductanceRatio = 4.45;  // k = Lm/Lr1 (MKF defaultInductanceRatio)
 constexpr double kSwitchDuty      = 0.47;  // ~50% minus dead time
+constexpr double kGainHeadroom    = 1.08;  // size n for M=1 at fr -> 1.08·Vo, so the nominal operating
+                                           // point sits just ABOVE fr (efficient) not at the M=1 peak
 } // namespace
 
 CllcDesign design_cllc(const json& tasInputs) {
@@ -39,8 +41,13 @@ CllcDesign design_cllc(const json& tasInputs) {
 
     const double Vin = d.inputVoltage, Vo = d.outputVoltage;
 
-    // n = Vin_nom/Vout (full bridge both sides). fr = fsw (operated at resonance).
-    double n = Vin / Vo;
+    // n = Vin_nom/(headroom·Vout) (full bridge both sides). fr = fsw. With zero headroom (n=Vin/Vo) the
+    // nominal point sits exactly at the fr gain PEAK (M=1), so any real loss (FET Rds, magnetic DCR/core,
+    // rectifier drop) sags Vout below target and the regulator must dive FAR below resonance to recover —
+    // high circulating current, ~50% efficiency (abt #62). Sizing ~8% gain headroom puts the nominal point
+    // just ABOVE fr on the efficient monotonic edge: the regulator trims frequency DOWN toward fr to cover
+    // losses while staying near resonance. The realized headroom n flows into the pinned turnsRatio below.
+    double n = Vin / (cfg::get(d.config, "gainHeadroom", kGainHeadroom) * Vo);
     // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
     // the duty-derived value so the rest of the stage is sized around the fixed transformer.
     d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(n);

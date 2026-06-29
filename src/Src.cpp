@@ -12,8 +12,11 @@ using nlohmann::json;
 namespace {
 double nominal(const json& j) { return PEAS::resolve_dimensional_values(j); }
 constexpr double kBridgeFactor  = 0.5;   // half-bridge: Vo_fha = 0.5·Vin
-constexpr double kQualityFactor = 2.0;   // MKF Src default
+constexpr double kQualityFactor = 0.8;   // broader, lower-loss tank (was 2.0: a sharp high-Q tank carries
+                                         // large circulating current -> heavy loss-driven Vout sag, abt #62)
 constexpr double kLmRatio       = 10.0;  // Lm = 10·Lr (large, keeps Lm out of the resonance)
+constexpr double kGainHeadroom  = 1.08;  // size n so the fr peak delivers 1.08·Vo, giving the regulator
+                                         // room to hit Vo just ABOVE fr (the SRC tank only steps DOWN)
 constexpr double kSwitchDuty    = 0.45;
 } // namespace
 
@@ -48,7 +51,12 @@ SrcDesign design_src(const json& tasInputs) {
     // lands ~11.1 V and reports regulated=False). Compensating Vd puts the fr peak at Vo so the regulator
     // can hit target just off resonance. (Mirrors the LLC n; Vd is negligible at 48 V, ~7% at 12 V.)
     const double Vd = req::dideal_diode_drop(Iout);
-    double n = (cfg::get(d.config, "bridgeFactor", kBridgeFactor) * Vin) / (Vo + Vd);
+    // Gain headroom: the SRC tank peaks at M=1 at fr and can only step DOWN. Sizing n for the fr peak to
+    // deliver 1.08·(Vo+Vd) lets the regulator hit Vo just ABOVE fr (efficient, monotonic) instead of pinning
+    // the nominal point at the M=1 peak where any loss sags Vout below target and cannot be recovered (the
+    // sub-fr boost region diverges in ngspice) — abt #62. The realized headroom n flows into the pinned ratio.
+    double n = (cfg::get(d.config, "bridgeFactor", kBridgeFactor) * Vin)
+               / (cfg::get(d.config, "gainHeadroom", kGainHeadroom) * (Vo + Vd));
     // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
     // the duty-derived value so the rest of the stage is sized around the fixed transformer.
     d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(std::round(n * 100.0) / 100.0);

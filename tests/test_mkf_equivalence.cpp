@@ -756,8 +756,17 @@ TEST_CASE("SRC: Kirchhoff design+simulation matches MKF ideal reference", "[equi
     json tas = Kirchhoff::build_src_tas(d);
     KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "src");
 
-    check_close("Vout", r.vout, sim.at("voutMean").get<double>(), kResTol);
-    check_close("Iout", r.iout, sim.at("ioutMean").get<double>(), kResTol);
+    // Kirchhoff now designs the SRC tank with ~8% GAIN HEADROOM (n sized so the fr peak delivers
+    // kGainHeadroom·Vo, plus a lower tank Q) so the closed-loop regulator can hit Vo just ABOVE fr where
+    // the tank is efficient, instead of pinning the nominal point at the M=1 peak (abt #62). MKF's
+    // converter model had NO headroom, so Kirchhoff's OPEN-LOOP output at fr now overshoots MKF's by that
+    // factor BY DESIGN — the della-Pollock cutover makes Kirchhoff the authoritative resonant designer, so
+    // it deliberately no longer matches the (retired) MKF converter model. The closed-loop regulator trims
+    // this overshoot back to Vo in production (verified: src reaches verdict=pass). Compare the open-loop
+    // figures against the headroom-scaled MKF reference.
+    constexpr double kGainHeadroom = 1.08;   // mirrors Src.cpp kGainHeadroom
+    check_close("Vout (headroom·MKF)", r.vout, sim.at("voutMean").get<double>() * kGainHeadroom, kResTol);
+    check_close("Iout (headroom·MKF)", r.iout, sim.at("ioutMean").get<double>() * kGainHeadroom, kResTol);
     // Efficiency not compared (MKF's ideal-bipolar-source bridge draws ~no vin_dc current); sanity only.
     INFO("src efficiency (Kirchhoff real bridge): " << r.eff);
     CHECK(r.eff <= 1.05);
@@ -784,8 +793,15 @@ TEST_CASE("CLLC: Kirchhoff design+simulation matches MKF ideal reference", "[equ
     json tas = Kirchhoff::build_cllc_tas(d);
     KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "cllc");
 
-    check_close("Vout vs spec", r.vout, in.at("outputVoltage").get<double>(), kSpecTol);
-    check_close("Iout vs spec", r.iout, in.at("outputPower").get<double>()/in.at("outputVoltage").get<double>(), kSpecTol);
+    // Kirchhoff now designs the CLLC with ~8% GAIN HEADROOM (n sized so the fr peak delivers
+    // kGainHeadroom·Vo) so the closed-loop regulator hits Vo just above fr (abt #62). MKF had no headroom,
+    // so the OPEN-LOOP output at fr overshoots spec by that factor BY DESIGN — the cutover makes Kirchhoff
+    // the authoritative resonant designer (it no longer matches the retired MKF model). The closed-loop
+    // regulator trims this to Vo in production. Compare open-loop figures against headroom-scaled spec.
+    constexpr double kGainHeadroom = 1.08;   // mirrors Cllc.cpp kGainHeadroom
+    check_close("Vout vs headroom·spec", r.vout, in.at("outputVoltage").get<double>() * kGainHeadroom, kSpecTol);
+    check_close("Iout vs headroom·spec", r.iout,
+                (in.at("outputPower").get<double>()/in.at("outputVoltage").get<double>()) * kGainHeadroom, kSpecTol);
     // Efficiency directional: both decks are all-active-switch (no rectifier diode drop), but MKF senses
     // input at the primary switch drains while Kirchhoff senses the true source current; Kirchhoff's is
     // the cleaner figure -> >= MKF's, with a sub-unity ceiling to catch a gross energy-balance bug.
