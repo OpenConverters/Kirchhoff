@@ -220,6 +220,13 @@ json build_pshb_tas(const PshbDesign& d) {
     { json op; op["name"]="full_load"; op["inputVoltage"]=d.inputVoltage; op["ambientTemperature"]=25.0;
       json o; o["name"]="out"; o["power"]=d.outputPower; op["outputs"]=json::array({o});
       tas["inputs"]["operatingPoints"]=json::array({op}); }
+    // PSHB needs a larger ngspice node-shunt cap than the global 1e-12 default: the low turns ratio the
+    // realism gate pins makes MKF pick a stiff GAPPED core whose sub-100nH R-L-ladder MKF_MODEL leaves
+    // the fast primary/Lr nodes (vvin#branch, pri_x) without a defined dV/dt, so the transient collapses
+    // to "timestep too small" across the whole control bracket (abt #66). 1e-9 is electrically negligible
+    // (~1.6 MOhm at fsw) but gives those nodes a solvable dV/dt. Scoped to PSHB so the tuned resonant
+    // decks (llc/src) keep their 1e-12; a user config override still wins.
+    tas["inputs"]["config"]["nodeShuntCap"] = cfg::get(d.config, "nodeShuntCap", 1e-9);
     tas["topology"]["stages"]=json::array({
         req::control_stage("pwmController"),
         req::control_stage("gateDriver", "gate-driver", "UDR"),
