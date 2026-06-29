@@ -431,7 +431,7 @@ json build_llc_tas(const LlcDesign& d) {
         st["waveform"]["dutyCycle"] = d.switchDuty; st["waveform"]["phase"] = phaseDeg;
         return st; };
     tas["simulation"]["stimulus"] = json::array({stim("Q1", 0.0), stim("Q2", 180.0)});
-    req::finalize_control_seeds(tas, "llcResonantConverter");  // CTAS seed: topology+fsw for switching controllers
+    req::finalize_control_seeds(tas, Topology::LLC_RESONANT_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

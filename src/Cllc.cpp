@@ -271,7 +271,7 @@ json build_cllc_tas(const CllcDesign& d) {
     // with use-initial-conditions (skipping the resonant tank's singular DC operating point).
     { json ic; ic["node"] = "Vout"; ic["voltage"] = d.outputVoltage;
       tas["simulation"]["initialConditions"] = json::array({ic}); }
-    req::finalize_control_seeds(tas, "cllcResonantConverter");  // CTAS seed: topology+fsw for switching controllers
+    req::finalize_control_seeds(tas, Topology::CLLC_RESONANT_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

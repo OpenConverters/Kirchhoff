@@ -318,7 +318,7 @@ json build_pshb_tas(const PshbDesign& d) {
         stim("S2", 0.5 - dt, 0.0),
         stim("S3", 0.5 - dt, (0.5 + dt) * 360.0),
         stim("S4", outer, 180.0)});
-    req::finalize_control_seeds(tas, "phaseShiftedHalfBridgeConverter");  // CTAS seed: topology+fsw for switching controllers
+    req::finalize_control_seeds(tas, Topology::PHASE_SHIFTED_HALF_BRIDGE_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

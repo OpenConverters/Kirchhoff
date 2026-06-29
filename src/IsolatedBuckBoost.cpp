@@ -195,7 +195,7 @@ json build_isolated_buck_boost_tas(const IsolatedBuckBoostDesign& d) {
       st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;
       st["waveform"]["dutyCycle"] = d.dutyCycle; st["waveform"]["phase"] = 0.0;
       tas["simulation"]["stimulus"] = json::array({st}); }
-    req::finalize_control_seeds(tas, "isolatedBuckBoostConverter");  // CTAS seed: topology+fsw for switching controllers
+    req::finalize_control_seeds(tas, Topology::ISOLATED_BUCK_BOOST_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

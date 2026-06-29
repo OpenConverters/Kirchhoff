@@ -330,7 +330,7 @@ json build_vienna_tas(const ViennaDesign& d) {
     { json ic; ic["node"]="busP"; ic["voltage"]= 0.5*d.outputVoltage; ics.push_back(ic); }
     { json ic; ic["node"]="busN"; ic["voltage"]=-0.5*d.outputVoltage; ics.push_back(ic); }
     tas["simulation"]["initialConditions"] = ics;
-    req::finalize_control_seeds(tas, "viennaRectifierConverter");  // CTAS seed: topology+fsw for switching controllers
+    req::finalize_control_seeds(tas, Topology::VIENNA_RECTIFIER_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

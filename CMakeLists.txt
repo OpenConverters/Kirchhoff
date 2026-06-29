@@ -31,7 +31,11 @@ target_include_directories(kirchhoff PUBLIC
     "${PSMA_ROOT}/PEAS/src"
     "${PSMA_ROOT}/RAS/src" "${PSMA_ROOT}/CAS/src" "${PSMA_ROOT}/SAS/src"
     "${PSMA_ROOT}/AAS/src" "${PSMA_ROOT}/CTAS/src"
-    "${PSMA_ROOT}/MAS/src" "${PSMA_ROOT}/CIAS/src")
+    "${PSMA_ROOT}/MAS/src" "${PSMA_ROOT}/CIAS/src"
+    # The generated MAS.hpp (typed MAS::Topology enum, used by src/Topology.hpp) is exported by
+    # MAS_kirchhoff, but it does `#include "json.hpp"`, so its consumers also need the nlohmann
+    # single-header dir on the path (MAS_kirchhoff keeps that PRIVATE).
+    "${nlohmann_json_SOURCE_DIR}/include/nlohmann")
 target_link_libraries(kirchhoff PUBLIC RAS CAS SAS AAS CTAS MAS_kirchhoff CIAS nlohmann_json::nlohmann_json)
 
 add_executable(flyback_demo examples/flyback_demo.cpp)

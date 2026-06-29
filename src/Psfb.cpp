@@ -361,7 +361,7 @@ json build_psfb_tas(const PsfbDesign& d) {
     tas["simulation"]["stimulus"] = json::array({
         stim("QA", 0.0), stim("QB", 180.0),
         stim("QC", d.phaseDeg), stim("QD", 180.0 + d.phaseDeg)});
-    req::finalize_control_seeds(tas, "phaseShiftedFullBridgeConverter");  // CTAS seed: topology+fsw for switching controllers
+    req::finalize_control_seeds(tas, Topology::PHASE_SHIFTED_FULL_BRIDGE_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

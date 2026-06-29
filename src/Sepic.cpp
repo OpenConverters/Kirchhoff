@@ -157,7 +157,7 @@ json build_sepic_tas(const SepicDesign& d) {
     st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;
     st["waveform"]["dutyCycle"] = d.dutyCycle;
     tas["simulation"]["stimulus"] = json::array({st});
-    req::finalize_control_seeds(tas, "sepicConverter");  // CTAS seed: topology+fsw for switching controllers
+    req::finalize_control_seeds(tas, Topology::SEPIC_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

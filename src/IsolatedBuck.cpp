@@ -204,7 +204,7 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
     tas["simulation"]["stimulus"] = json::array({
         stim("QS1", d.dutyCycle, 0.0),
         stim("QS2", (1.0 - d.dutyCycle) - 2.0 * deadFrac, (d.dutyCycle + deadFrac) * 360.0)});
-    req::finalize_control_seeds(tas, "isolatedBuckConverter");  // CTAS seed: topology+fsw for switching controllers
+    req::finalize_control_seeds(tas, Topology::ISOLATED_BUCK_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

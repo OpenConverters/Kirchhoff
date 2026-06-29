@@ -228,7 +228,7 @@ json build_acf_tas(const AcfDesign& d) {
     tas["simulation"]["stimulus"] = json::array({
         stim("Q1", "gate", D, 0.0),
         stim("Sc", "gate", (1.0 - D) - 2.0 * dt, (D + dt) * 360.0)});
-    req::finalize_control_seeds(tas, "activeClampForwardConverter");  // CTAS seed: topology+fsw for switching controllers
+    req::finalize_control_seeds(tas, Topology::ACTIVE_CLAMP_FORWARD_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

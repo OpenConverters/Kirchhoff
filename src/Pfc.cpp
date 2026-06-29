@@ -244,7 +244,7 @@ json build_pfc_tas(const PfcDesign& d) {
     // state is reached in a few line cycles (the bus-cap RC is far longer than the sim window).
     { json ic; ic["node"] = "Vout"; ic["voltage"] = d.outputVoltage;
       tas["simulation"]["initialConditions"] = json::array({ic}); }
-    req::finalize_control_seeds(tas, "powerFactorCorrection");  // CTAS seed: topology+fsw for switching controllers
+    req::finalize_control_seeds(tas, Topology::POWER_FACTOR_CORRECTION);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

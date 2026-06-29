@@ -282,7 +282,7 @@ json build_dab_tas(const DabDesign& d) {
     tas["simulation"]["stimulus"] = json::array({
         stim("QA", 0.0),       stim("QB", 180.0),       stim("QC", 180.0),       stim("QD", 0.0),
         stim("QE", p3),        stim("QF", 180.0 + p3),  stim("QG", 180.0 + p3),  stim("QH", p3)});
-    req::finalize_control_seeds(tas, "dualActiveBridgeConverter");  // CTAS seed: topology+fsw for switching controllers
+    req::finalize_control_seeds(tas, Topology::DUAL_ACTIVE_BRIDGE_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

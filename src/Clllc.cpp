@@ -285,7 +285,7 @@ json build_clllc_tas(const ClllcDesign& d) {
     tas["simulation"]["stimulus"] = json::array({stim("Q1", 0.0), stim("Q2", 180.0)});
     { json ic; ic["node"] = "Vout"; ic["voltage"] = d.outputVoltage;
       tas["simulation"]["initialConditions"] = json::array({ic}); }
-    req::finalize_control_seeds(tas, "clllcResonantConverter");  // CTAS seed: topology+fsw for switching controllers
+    req::finalize_control_seeds(tas, Topology::CLLLC_RESONANT_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

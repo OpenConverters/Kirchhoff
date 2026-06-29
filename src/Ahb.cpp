@@ -323,7 +323,7 @@ json build_ahb_tas(const AhbDesign& d) {
     tas["simulation"]["stimulus"] = json::array({
         stim("Q1", D, 0.0),
         stim("Q2", (1.0 - D) - 2.0 * dt, (D + dt) * 360.0)});
-    req::finalize_control_seeds(tas, "asymmetricHalfBridgeConverter");  // CTAS seed: topology+fsw for switching controllers
+    req::finalize_control_seeds(tas, Topology::ASYMMETRIC_HALF_BRIDGE_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 

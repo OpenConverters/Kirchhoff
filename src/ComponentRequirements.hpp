@@ -22,6 +22,7 @@
 #include <algorithm>
 #include "SasConverter.hpp"   // SAS::ideal_diode_drop — single source for the DIDEAL forward drop
 #include "DimensionJson.hpp"      // PEAS::resolve_dimensional_values — canonical {nominal,min,max} resolver
+#include "Topology.hpp"           // Kirchhoff::Topology (= MAS::Topology) + topology_to_string
 
 namespace Kirchhoff {
 namespace req {
@@ -131,9 +132,12 @@ inline bool is_switching_controller_category(const std::string& category) {
 
 // Inject the topology + switching frequency that switching-controller seeds require, reading the
 // frequency from the assembled doc's top-level designRequirements. Call once per build_*_tas after
-// the stages and top-level designRequirements are set, passing the converter's peas `topology` enum
-// value (e.g. "flybackConverter"). Non-switching controller seeds are left untouched.
-inline void finalize_control_seeds(json& tas, const std::string& topology) {
+// the stages and top-level designRequirements are set, passing the converter's typed
+// Kirchhoff::Topology (= MAS::Topology) value (e.g. Topology::FLYBACK_CONVERTER). The enum serializes
+// to the canonical CTAS string ("flybackConverter") via topology_to_string. Non-switching controller
+// seeds are left untouched.
+inline void finalize_control_seeds(json& tas, Topology topologyEnum) {
+    const std::string topology = topology_to_string(topologyEnum);
     if (!tas.contains("topology") || !tas.at("topology").contains("stages")) return;
     const json& dreq = tas.at("inputs").at("designRequirements");
     for (auto& st : tas["topology"]["stages"]) {

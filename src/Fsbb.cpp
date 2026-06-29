@@ -197,7 +197,7 @@ json build_fsbb_tas(const FsbbDesign& d) {
         stim("Q4", "g4", D, 0.0),
         stim("Q2", "g2", (1.0 - D) - 2.0 * dt, (D + dt) * 360.0),
         stim("Q3", "g3", (1.0 - D) - 2.0 * dt, (D + dt) * 360.0)});
-    req::finalize_control_seeds(tas, "fourSwitchBuckBoostConverter");  // CTAS seed: topology+fsw for switching controllers
+    req::finalize_control_seeds(tas, Topology::FOUR_SWITCH_BUCK_BOOST_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
 
