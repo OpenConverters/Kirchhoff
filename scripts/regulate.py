@@ -46,15 +46,21 @@ except Exception:  # pragma: no cover - PyOM not installed -> verdict falls back
 # auto-detected (sampling the bracket ends), so we never hardcode a possibly-wrong monotonicity.
 _CONTROL = {
     "duty":      ("dutyCycle", (0.04, 0.96)),   # buck family
-    "phase":     ("phase",     (15.0, 170.0)),  # psfb/pshb/dab: phase-shift of the lagging leg, ~0..180 deg
+    "phase":     ("phase",     (15.0, 170.0)),  # psfb/dab: phase-shift of the lagging leg, ~0..180 deg
                                                  # (waveform field is "phase" — matches TasAssembler + the KH designs)
     "frequency": ("frequency", None),           # resonant: bracket derived from the design fsw
+    # pshb: the 3-level NPC stack is NOT a phase-shifted bridge — its output is set by the OUTER pair's
+    # (S1/S4) power-transfer width (duty = D/2 of the period), with the inner pair (S2/S3) held ~50%
+    # complementary. The control is that outer DUTY, bounded below the inner ~0.5 (above it the outer
+    # switches overlap the inner and the NPC mis-commutates). abt #66.
+    "pshbDuty":  ("dutyCycle", (0.08, 0.49)),
 }
 _TOPO_CONTROL = {
     **{t: "duty" for t in ("boost", "buck", "flyback", "forward", "two_switch_forward", "sepic", "cuk",
                            "zeta", "ahb", "acf", "fsbb", "weinberg", "isolated_buck", "isolated_buck_boost",
                            "push_pull")},
-    **{t: "phase" for t in ("psfb", "pshb", "dab")},
+    **{t: "phase" for t in ("psfb", "dab")},
+    "pshb": "pshbDuty",   # 3-level NPC: control the outer-pair width, not a leg phase (abt #66)
     **{t: "frequency" for t in ("llc", "src", "cllc", "clllc")},
 }
 
@@ -117,6 +123,18 @@ def _set_control(tas, field, value, topology=None):
         half-bridge (ahb) the two complementary switches OVERLAP and SHOOT THROUGH (vin→gnd) the moment the
         bisected duty exceeds the design duty, so the input current runs away. The charge leg keeps phase 0
         throughout, so phase==0 vs ≠0 stays a stable partition across the bisection."""
+    if topology == "pshb" and field == "dutyCycle":
+        # 3-level NPC half-bridge: drive ONLY the OUTER power-transfer pair (S1/S4) at the bisected width;
+        # the inner pair (S2/S3) stays at its designed ~50% complementary duty/phase. A blanket overwrite
+        # (the generic loop below) would set the inner pair's duty too, collapsing the NPC's neutral-point
+        # commutation — which is exactly why mapping pshb to a leg "phase" gave an inverted, ~5%-efficient,
+        # un-regulating response (abt #66). The outer pair was stashed from the pristine deck.
+        outer = set(tas.get("_pshbOuter", []))
+        for st in tas.get("simulation", {}).get("stimulus", []):
+            wf = st.get("waveform", {})
+            if wf.get("type") == "pwm" and st.get("component") in outer:
+                wf["dutyCycle"] = value
+        return
     if topology in ("fsbb", "ahb") and field == "dutyCycle":
         dt = float(tas.get("_fsbbDeadFraction", 0.0))
         for st in tas.get("simulation", {}).get("stimulus", []):
@@ -140,6 +158,18 @@ def _set_control(tas, field, value, topology=None):
             wf["phase"] = value if p < 180.0 else (value + 180.0)   # lagging leg: φ and φ+180
         else:
             wf[field] = value
+
+
+def _stash_pshb_modulation(tas):
+    """Record the PSHB 3-level-NPC OUTER pair from the pristine designed stimulus (before the bisection
+    overwrites duties). The inner pair runs ~50% complementary (duty ≈ 0.5−dt); the outer power-transfer
+    pair is designed NARROWER (duty = D/2), so the two pwm switches with the smallest duty ARE the outer
+    pair whose width the regulator controls (abt #66)."""
+    stims = [st for st in tas.get("simulation", {}).get("stimulus", [])
+             if st.get("waveform", {}).get("type") == "pwm" and st.get("component")]
+    if len(stims) >= 4:
+        outer = sorted(stims, key=lambda st: float(st["waveform"].get("dutyCycle", 0.5)))[:2]
+        tas["_pshbOuter"] = [st.get("component") for st in outer]
 
 
 def _stash_fsbb_modulation(tas):
@@ -620,6 +650,8 @@ def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_
         field, bracket = _CONTROL[ctrl]
     if topology in ("fsbb", "ahb"):
         _stash_fsbb_modulation(tas)   # capture dead-time before the bisection overwrites duties (complementary)
+    elif topology == "pshb":
+        _stash_pshb_modulation(tas)   # capture the NPC outer pair before the bisection overwrites duties (abt #66)
     # A magnetic that can't give a valid regulated point (the deck collapses across the whole bracket): either
     # a genuinely saturated core, OR a sound core whose exported Isat disagrees with calculate_saturation_
     # current (an exporter bug that collapses the deck spuriously). Surface the right verdict instead of an
