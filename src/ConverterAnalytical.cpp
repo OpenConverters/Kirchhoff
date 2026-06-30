@@ -1,0 +1,59 @@
+#include "ConverterAnalytical.hpp"
+#include "AnalyticalDsp.hpp"
+
+#include <cmath>
+#include <stdexcept>
+#include <vector>
+
+namespace Kirchhoff {
+namespace analytical {
+
+// Ported from MKF converter_models/Buck.cpp (calculate_duty_cycle + process_operating_points_for_input_voltage).
+MAS::OperatingPoint analytical_buck(double inputVoltage, double outputVoltage, double outputCurrent,
+                                    double switchingFrequency, double inductance,
+                                    double diodeVoltageDrop, double efficiency) {
+    using Lbl = MAS::WaveformLabel;
+
+    double dutyCycle = (outputVoltage + diodeVoltageDrop) / ((inputVoltage + diodeVoltageDrop) * efficiency);
+    if (dutyCycle >= 1.0)
+        throw std::invalid_argument("analytical_buck: required duty cycle >= 1 (Vout too close to Vin)");
+
+    const double period = 1.0 / switchingFrequency;
+    double tOn = dutyCycle / switchingFrequency;
+    double primaryCurrentPeakToPeak = (inputVoltage - outputVoltage) * tOn / inductance;
+    const double minimumCurrent = outputCurrent - primaryCurrentPeakToPeak / 2.0;
+    const double primaryVoltageMinimum = -outputVoltage - diodeVoltageDrop;
+    const double primaryVoltageMaximum = inputVoltage - outputVoltage;
+    const double primaryVoltagePeakToPeak = primaryVoltageMaximum - primaryVoltageMinimum;
+
+    MAS::Waveform currentWaveform, voltageWaveform;
+    if (minimumCurrent >= 0) {  // CCM
+        currentWaveform = create_waveform(Lbl::TRIANGULAR, primaryCurrentPeakToPeak, switchingFrequency,
+                                          dutyCycle, outputCurrent);
+        voltageWaveform = create_waveform(Lbl::RECTANGULAR, primaryVoltagePeakToPeak, switchingFrequency,
+                                          dutyCycle, 0.0);
+    } else {  // DCM — recompute the conduction interval (the CCM duty would overrun the period)
+        tOn = std::sqrt(2 * outputCurrent * inductance * (outputVoltage + diodeVoltageDrop) /
+                        (switchingFrequency * (inputVoltage - outputVoltage) * (inputVoltage + diodeVoltageDrop)));
+        const double tOff = tOn * ((inputVoltage + diodeVoltageDrop) / (outputVoltage + diodeVoltageDrop) - 1);
+        const double deadTime = period - tOn - tOff;
+        primaryCurrentPeakToPeak = (inputVoltage - outputVoltage) * tOn / inductance;
+        const double iAvg = primaryCurrentPeakToPeak / 2.0;       // area balance: avg = ΔIL/2
+        const double dcmDutyCycle = tOn * switchingFrequency;
+        currentWaveform = create_waveform(Lbl::TRIANGULAR_WITH_DEADTIME, primaryCurrentPeakToPeak,
+                                          switchingFrequency, dcmDutyCycle, iAvg, deadTime);
+        // The DCM voltage needs explicit levels/times (a single duty can't express tOn + the level split).
+        voltageWaveform.set_data(std::vector<double>{primaryVoltageMaximum, primaryVoltageMaximum,
+                                                     primaryVoltageMinimum, primaryVoltageMinimum, 0, 0});
+        voltageWaveform.set_time(std::vector<double>{0, tOn, tOn, tOn + tOff, tOn + tOff, period});
+        voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
+    }
+
+    MAS::OperatingPoint operatingPoint;
+    operatingPoint.get_mutable_excitations_per_winding().push_back(
+        complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Primary"));
+    return operatingPoint;
+}
+
+} // namespace analytical
+} // namespace Kirchhoff

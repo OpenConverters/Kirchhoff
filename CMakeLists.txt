@@ -37,7 +37,7 @@ if (NGSPICE_LIB AND NGSPICE_INCLUDE_DIR AND NOT DEFINED CACHE{ENABLE_NGSPICE_SET
     set(ENABLE_NGSPICE_SET ON CACHE INTERNAL "")
 endif()
 
-add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/Dab.cpp src/IsolatedBuck.cpp src/IsolatedBuckBoost.cpp src/Weinberg.cpp src/Llc.cpp src/Src.cpp src/Cllc.cpp src/Clllc.cpp src/Pfc.cpp src/Vienna.cpp src/TasAssembler.cpp src/NgspiceRunner.cpp src/Analytical.cpp src/AnalyticalDsp.cpp)
+add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/Dab.cpp src/IsolatedBuck.cpp src/IsolatedBuckBoost.cpp src/Weinberg.cpp src/Llc.cpp src/Src.cpp src/Cllc.cpp src/Clllc.cpp src/Pfc.cpp src/Vienna.cpp src/TasAssembler.cpp src/NgspiceRunner.cpp src/Analytical.cpp src/AnalyticalDsp.cpp src/ConverterAnalytical.cpp)
 target_include_directories(kirchhoff PUBLIC
     src
     "${PSMA_ROOT}/PEAS/src"
@@ -151,6 +151,9 @@ target_link_libraries(test_ptp PRIVATE kirchhoff Catch2::Catch2WithMain)
 
 add_executable(test_analytical_dsp tests/test_analytical_dsp.cpp)
 target_link_libraries(test_analytical_dsp PRIVATE kirchhoff Catch2::Catch2WithMain)
+
+add_executable(test_converter_analytical tests/test_converter_analytical.cpp)
+target_link_libraries(test_converter_analytical PRIVATE kirchhoff Catch2::Catch2WithMain)
 
 add_executable(test_settings tests/test_settings.cpp)
 target_link_libraries(test_settings PRIVATE kirchhoff Catch2::Catch2WithMain)
