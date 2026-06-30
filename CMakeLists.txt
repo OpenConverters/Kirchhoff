@@ -145,6 +145,9 @@ target_link_libraries(test_ngspice_runner PRIVATE kirchhoff Catch2::Catch2WithMa
 
 add_executable(test_analytical tests/test_analytical.cpp)
 target_link_libraries(test_analytical PRIVATE kirchhoff Catch2::Catch2WithMain)
+
+add_executable(test_settings tests/test_settings.cpp)
+target_link_libraries(test_settings PRIVATE kirchhoff Catch2::Catch2WithMain)
 # Lets the test locate the independent Python averaged-model oracle (tests/averaged_model.py).
 target_compile_definitions(test_pfc PRIVATE KIRCHHOFF_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests")
 

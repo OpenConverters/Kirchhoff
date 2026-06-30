@@ -17,11 +17,9 @@
 #include <string>
 #include <vector>
 
-namespace Kirchhoff {
+#include "Settings.hpp"   // Kirchhoff::RunEngine (config home is Settings)
 
-// Which engine produced (or should produce) an operating point. SPICE = run the ngspice deck (CLI or
-// the in-process libngspice runner); ANALYTICAL = analytical_operating_point() below (no simulator).
-enum class RunEngine { SPICE, ANALYTICAL };
+namespace Kirchhoff {
 
 // One magnetic winding's predicted stresses (the design-time closed-form excitation).
 struct WindingStress {
