@@ -144,6 +144,13 @@ NgspiceRunResult run_ngspice_in_process(const std::string& deck, double timeoutS
                      kh_send_data, kh_send_initdata, kh_bg_running, &cap) != 0)
         throw std::runtime_error("libngspice: ngSpice_Init failed");
 
+    // WASM workaround #1: under emscripten there is no /proc/meminfo, so ngspice's available-memory
+    // probe returns 0 and aborts with a false "not enough memory". Disabling the check is harmless on
+    // native (where memory is plentiful) and required for the in-browser run. (Workaround #2 — treating
+    // a non-empty time vector as completion when the sync WASM build's `run` returns without firing the
+    // bg-thread callback — is handled by the wait loop below via ngSpice_running() + cap.time.)
+    ngSpice_Command(const_cast<char*>("set no_mem_check"));
+
     // Build the circuit line array. ngspice treats line 1 as the title, so prepend one so the first
     // real card is not swallowed. Storage must outlive the char* array (no realloc after .data()).
     std::vector<std::string> lines;

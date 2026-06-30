@@ -105,17 +105,21 @@ Ranked by value × time-sensitivity:
    The real-magnetic co-sim (`simulate_magnetic_circuit`, `extract_operating_point(Magnetic)`) is NOT
    ported — it stays in MKF (Decision 1). **WASM half (P5) pending** — see below.
 
-   **WASM (in-browser) ngspice — pending, heavy.** The system has libngspice 0.0.9 + the header (so
-   the native path works today), and emsdk is at `/home/alf/emsdk` (needs `emsdk_env.sh` sourced;
-   `emcc` not yet on PATH). MKF's recipe (its CMake `ENABLE_NGSPICE` block) builds ngspice-45.2 via
-   `ExternalProject_Add` with `emconfigure --with-ngshared`, a fragile ngspice-version-specific
-   `apply_wasm_patches.sh` (4 seds: accept `.wasm`, guard `main()`, disable `getrusage`, skip the
-   init-file read), `-fwasm-exceptions -sSUPPORT_LONGJMP=wasm`, plus two runtime workarounds already
-   coded into KH's runner-ready shape: `set no_mem_check` (no `/proc` under WASM) and treating a
-   non-empty time vector as completion (the sync build's `run` returns without firing the bg-thread
-   callback). This is unvalidated here (MKF's own WASM install dir is empty) and is the P5 long-pole;
-   the ANALYTICAL engine below is the lighter "runs anywhere, no libngspice" alternative for the
-   browser.
+   **WASM (in-browser) ngspice — ✅ VALIDATED end-to-end (2026-06-30).** ngspice 45.2 compiles to
+   WebAssembly and `Kirchhoff::run_ngspice_in_process` runs a deck through it under node. Reproducible:
+   `scripts/build_ngspice_wasm.sh` (emscripten 3.1.51, `emconfigure --with-ngshared` + the four ngspice
+   source patches — accept `.wasm`, guard `main()`, drop `getrusage`/init-file read under
+   `__EMSCRIPTEN__` — and `-fwasm-exceptions -sSUPPORT_LONGJMP=wasm`) builds `libngspice.so.0.0.14` (a
+   WASM static archive); `scripts/run_wasm_ngspice_smoke.sh` emcc-compiles `tests/wasm_ngspice_smoke.cpp`
+   + `src/NgspiceRunner.cpp` against it and runs under node → **RC v(out) = 10.000000 V, 10008 time
+   samples, exit 0.** The runner carries the two WASM workarounds: `set no_mem_check` (no `/proc/meminfo`
+   under WASM, harmless on native) and treating a non-empty time vector as completion (the sync WASM
+   build's `run` returns without firing the bg-thread callback) — the runner's wait loop handles the
+   latter via `ngSpice_running()` + the captured time vector. Remaining productionization (not blocking):
+   a CMake `EMSCRIPTEN`-gated `ExternalProject_Add(ngspice …)` + an embind module that exposes the full
+   `design → tas_to_ngspice → run` pipeline to JS (today the WASM run is proven via the standalone smoke;
+   the scripts are the recipe to fold into CMake). The ANALYTICAL engine (item 3) remains the lighter
+   no-libngspice browser path.
 5. **Magnetics-independent analytical kernels.** `PwmBridgeSolver.h` (piecewise sub-interval tank
    solver for DAB/PSFB/PSHB), `PfcControllerDesign.*`, `PfcControllerSubcircuits.h` (ideal opamp /
    comparator `.subckt` primitives). Consolidate with KH's own re-derivations.
