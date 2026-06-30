@@ -239,25 +239,20 @@ governance rule is respected). Both KH and MKF already generate their `MAS::Topo
 `PEAS/schemas/utils.json` in the quicktype `-S` graph, i.e. they were *already* consuming the
 PEAS-owned vocabulary; only the C++ namespace *label* was `MAS::`.
 
-**The enum now lives in PEAS — there is one type, `PEAS::Topology`, and NO `MAS::Topology` type.**
-quicktype always emits `MAS::Topology` (the `$def` is reachable from `MAS::DesignRequirements`), so the
-generated `MAS.hpp` is post-processed to remove that enum and repoint the struct at the single
-`::PEAS::Topology` — a genuine MOVE, not an alias.
+**The C++ type is `MAS::Topology`, exactly as quicktype emits it — used directly everywhere.** The
+taxonomy is PEAS-owned at the SCHEMA layer (`PEAS/schemas/utils.json#/$defs/topology`, which MAS
+`$ref`s), so `MAS::Topology`'s values + JSON serialization are already PEAS-owned; the `MAS::` C++
+namespace label (quicktype's output) is fine. **There is NO `PEAS::Topology` C++ type and NEVER any
+post-processing of MAS.hpp** — generated headers are consumed as-emitted. (Attempts to introduce a
+second `PEAS::Topology` — generated, aliased, or via a `maslift` post-process — were all reverted; see
+the `never-postprocess-generated-headers` rule.)
 
-- **PEAS (done, `ef1f644`):** `deps/PEAS/src/PeasTopology.hpp` ships `enum class PEAS::Topology`
-  (+ to_json/from_json), generated from `schemas/utils.json#/$defs/topology` (the $def PEAS owns).
-  This is the single C++ definition.
-- **MAS generation (done, `ad8bd24`):** `deps/MAS/kirchhoff/CMakeLists.txt` runs
-  `scripts/maslift_topology.py` after quicktype: it strips the emitted `enum class MAS::Topology`
-  + its to_json/from_json and replaces every standalone `Topology` type token with `::PEAS::Topology`,
-  injecting `#include "PeasTopology.hpp"`. So `MAS::DesignRequirements::get_topology()` returns
-  `std::optional<::PEAS::Topology>`; there is no `MAS::Topology` type. (Fail-loud + idempotent.)
-- **KH (done):** `src/Topology.hpp` includes `PeasTopology.hpp` and exposes
-  `using Topology = PEAS::Topology` (`Kirchhoff::Topology` is a brevity name for the one type —
-  `static_assert(std::is_same<Kirchhoff::Topology, PEAS::Topology>)`). Byte-identical JSON; suite 134/32.
-- **MKF (to do):** mirror the same maslift in MKF's MAS.hpp generation + `sed` its ~70 `MAS::Topology`
-  sites → `PEAS::Topology`, and make `PeasTopology.hpp` reachable (MKF includes PEAS/src). One type
-  throughout, no alias.
+- **KH:** `src/Topology.hpp` includes `MAS.hpp` and exposes `using Topology = MAS::Topology`
+  (`Kirchhoff::Topology` is a brevity name for the one type —
+  `static_assert(std::is_same<Kirchhoff::Topology, MAS::Topology>)`). Suite 134/32.
+- **MKF / PyOM:** use `MAS::Topology` directly (their existing state). No change needed.
+- **Old JSONs:** valid unchanged — the topology strings (`"flybackConverter"`, …) are the same; only
+  the schema-level ownership note changed, not the data.
 
 ## Dependency versions (checked 2026-06-29)
 
