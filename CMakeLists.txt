@@ -37,6 +37,20 @@ if (NGSPICE_LIB AND NGSPICE_INCLUDE_DIR AND NOT DEFINED CACHE{ENABLE_NGSPICE_SET
     set(ENABLE_NGSPICE_SET ON CACHE INTERNAL "")
 endif()
 
+# Generate PEAS_Topology.hpp (typed enum class PEAS::Topology) from the canonical PEAS schema $def
+# utils.json#/$defs/topology — the topology taxonomy is PEAS-owned vocabulary, so its C++ type lives in
+# namespace PEAS. Build-time generation (like MAS.hpp) so it never drifts from the schema.
+find_program(QUICKTYPE quicktype REQUIRED)
+set(PEAS_TOPOLOGY_HPP "${CMAKE_BINARY_DIR}/peas-gen/PEAS_Topology.hpp")
+add_custom_command(
+    OUTPUT "${PEAS_TOPOLOGY_HPP}"
+    COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/scripts/gen_peas_topology.sh"
+            "${PSMA_ROOT}/PEAS/schemas/utils.json" "${PEAS_TOPOLOGY_HPP}"
+    DEPENDS "${PSMA_ROOT}/PEAS/schemas/utils.json"
+            "${CMAKE_CURRENT_SOURCE_DIR}/scripts/gen_peas_topology.sh"
+    COMMENT "Generating PEAS_Topology.hpp (PEAS::Topology) via quicktype")
+add_custom_target(peas_topology_header DEPENDS "${PEAS_TOPOLOGY_HPP}")
+
 add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/Dab.cpp src/IsolatedBuck.cpp src/IsolatedBuckBoost.cpp src/Weinberg.cpp src/Llc.cpp src/Src.cpp src/Cllc.cpp src/Clllc.cpp src/Pfc.cpp src/Vienna.cpp src/TasAssembler.cpp src/NgspiceRunner.cpp src/Analytical.cpp)
 target_include_directories(kirchhoff PUBLIC
     src
@@ -44,10 +58,12 @@ target_include_directories(kirchhoff PUBLIC
     "${PSMA_ROOT}/RAS/src" "${PSMA_ROOT}/CAS/src" "${PSMA_ROOT}/SAS/src"
     "${PSMA_ROOT}/AAS/src" "${PSMA_ROOT}/CTAS/src"
     "${PSMA_ROOT}/MAS/src" "${PSMA_ROOT}/CIAS/src"
-    # The generated MAS.hpp (typed MAS::Topology enum, used by src/Topology.hpp) is exported by
-    # MAS_kirchhoff, but it does `#include "json.hpp"`, so its consumers also need the nlohmann
-    # single-header dir on the path (MAS_kirchhoff keeps that PRIVATE).
-    "${nlohmann_json_SOURCE_DIR}/include/nlohmann")
+    # The generated MAS.hpp (used by MasConverter) does `#include "json.hpp"`, so consumers also need the
+    # nlohmann single-header dir on the path (MAS_kirchhoff keeps that PRIVATE).
+    "${nlohmann_json_SOURCE_DIR}/include/nlohmann"
+    # Generated PEAS_Topology.hpp (PEAS::Topology — the canonical taxonomy used by src/Topology.hpp).
+    "${CMAKE_BINARY_DIR}/peas-gen")
+add_dependencies(kirchhoff peas_topology_header)
 target_link_libraries(kirchhoff PUBLIC RAS CAS SAS AAS CTAS MAS_kirchhoff CIAS nlohmann_json::nlohmann_json)
 if (ENABLE_NGSPICE AND NGSPICE_LIB AND NGSPICE_INCLUDE_DIR)
     target_compile_definitions(kirchhoff PUBLIC ENABLE_NGSPICE)

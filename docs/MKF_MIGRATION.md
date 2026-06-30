@@ -228,6 +228,34 @@ belongs in **PEAS** (the power-electronics schema). Plan:
 Recommendation: do **Step 1 now** (KH adopts `MAS::Topology`), schedule **Step 2** via RFC timed with
 the migration (ownership of "what a converter topology is" shifts to the power-electronics side then).
 
+### Status (2026-06-30) — the schema move was ALREADY DONE; KH now uses `PEAS::Topology`
+
+Investigation finding: **the taxonomy enum already lives in the PEAS schema**, not MAS. It is defined
+once at `PEAS/schemas/utils.json#/$defs/topology` (verified: `flybackConverter` has **zero** hits in
+either repo's `MAS/schemas/`, one hit in `PEAS/schemas/utils.json`); the `$def`'s own description says
+*"PEAS HOSTS this shared vocabulary … MAS OWNS its content."* MAS's `designRequirements` only `$ref`s it
+transitively via `designRequirementsBase`. So **no schema edit is needed** (and none was made — the
+governance rule is respected). Both KH and MKF already generate their `MAS::Topology` C++ enum with
+`PEAS/schemas/utils.json` in the quicktype `-S` graph, i.e. they were *already* consuming the
+PEAS-owned vocabulary; only the C++ namespace *label* was `MAS::`.
+
+- **KH (done, `<commit>`):** `PEAS_Topology.hpp` is now generated at build time from the canonical
+  `$def` (`scripts/gen_peas_topology.sh` → quicktype `--namespace PEAS`, wired as a CMake custom
+  command like MAS.hpp). `src/Topology.hpp` repoints `using Topology = PEAS::Topology`. The ~24
+  converter `.cpp` and `ComponentRequirements.hpp` are unchanged (they use the `Kirchhoff::Topology`
+  alias + JSON only — verified no `get_topology()` struct coupling). Identical values + serialization
+  → byte-identical assembled JSON; full suite unchanged (134/32).
+- **MKF (no change — deliberately):** MKF is **already** consuming the PEAS-owned enum (its generated
+  `MAS::Topology` values come from `PEAS/schemas/utils.json`). A C++ repoint of MKF to `PEAS::Topology`
+  is **NOT done**: ~67 files use `MAS::Topology`, and ~14 are *bound to the generated struct field*
+  (`DesignRequirements::get_topology()/set_topology()` are typed `MAS::Topology` by quicktype and can't
+  be repointed without regenerating MAS.hpp itself). Introducing a second, identical-but-distinct
+  `PEAS::Topology` alongside `MAS::Topology` across 30+ `switch`/`map` sites is exactly the
+  dual-enum / total-switch hazard the numeric-correctness guardrails warn about, for **zero functional
+  gain** (values + JSON are identical). Recommended: leave MKF on the `MAS::`-labelled enum (it already
+  IS the PEAS vocabulary); revisit only if/when MKF drops converters and the MAS.hpp generation itself
+  is changed. **Flagged as a decision** — say the word to force the MKF C++ repoint despite the risk.
+
 ## Dependency versions (checked 2026-06-29)
 
 - **PEAS** — working copy & KH's recorded gitlink both at `02c49d1` = `origin/main` tip → **on latest
