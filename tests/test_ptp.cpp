@@ -51,10 +51,12 @@ namespace {
 
 std::string num(double v) { std::ostringstream o; o.precision(12); o << v; return o.str(); }
 
-// A single-output DC spec at a reference operating point.
-json spec_for(double vin, double vout, double power, double fsw) {
+// A single-output DC spec at a reference operating point. `eta` is the design efficiency the converter
+// is SIZED for — 1.0 (idealized) for most topologies, but a realistic value where the duty/turns sizing
+// must account for loss to land the open-loop deck on target (the high-duty current-fed Weinberg boost).
+json spec_for(double vin, double vout, double power, double fsw, double eta = 1.0) {
     json s;
-    s["designRequirements"]["efficiency"] = 1.0;
+    s["designRequirements"]["efficiency"] = eta;
     s["designRequirements"]["inputVoltage"] = {{"minimum", vin * 0.9}, {"nominal", vin}, {"maximum", vin * 1.1}};
     s["designRequirements"]["switchingFrequency"]["nominal"] = fsw;
     s["designRequirements"]["outputs"] = json::array({ {{"name", "out"}, {"voltage", {{"nominal", vout}}}} });
@@ -99,8 +101,9 @@ std::vector<Ref> refs() {
     // topologies; 5% covers the small understood margins (e.g. pshb's outerTrim ~3%). Anything wider is
     // an explicit per-design exception with a cited root-cause investigation (see header).
     auto add = [&](const char* topo, const char* design, auto designFn, auto buildFn,
-                   double vin, double vout, double iout, double fs, double tol = 0.05, double ratio = 1.0) {
-        json spec = spec_for(vin, vout, vout * iout, fs);
+                   double vin, double vout, double iout, double fs, double tol = 0.05, double ratio = 1.0,
+                   double eta = 1.0) {
+        json spec = spec_for(vin, vout, vout * iout, fs, eta);
         v.push_back({topo, design, [=]{ return buildFn(designFn(spec)); }, vin, vout, vout * iout, fs, tol, ratio});
     };
     // ── non-isolated ──
@@ -124,9 +127,9 @@ std::vector<Ref> refs() {
     add("flyback","TIDA-00709",design_flyback, build_flyback_tas, 120,12,2.75,70000);
     add("forward","fixture",  design_forward, build_forward_tas, 48,12,2,100000);
     add("two_switch","fixture",design_two_switch_forward, build_two_switch_forward_tas, 48,12,2,100000);
-    // SN6501: +5% from node-snubber ringing on the ideal transformer at the lowest current (0.35 A) —
-    // independent root-cause investigation; ideal-deck artifact, not a bug. Other push-pull at default.
-    add("push_pull","SN6501", design_push_pull, build_push_pull_tas, 5,3.3,0.35,410000, 0.06);
+    // push-pull now sizes node snubbers from the energy budget (src/PushPull.cpp), so SN6501 (which the
+    // fixed 2.2 nF lifted +5% via ringing at 0.35 A) lands on target too — all three at the default band.
+    add("push_pull","SN6501", design_push_pull, build_push_pull_tas, 5,3.3,0.35,410000);
     add("push_pull","SN6505B",design_push_pull, build_push_pull_tas, 5,3.3,1,420000);
     add("push_pull","SN6507", design_push_pull, build_push_pull_tas, 12,5,1,200000);
     add("acf","UCC2897A",     design_acf, build_acf_tas, 48,3.3,30,250000);
@@ -142,12 +145,15 @@ std::vector<Ref> refs() {
     add("pshb","Telecom-600W",design_pshb, build_pshb_tas, 400,12,50,100000);
     add("pshb","Server-1.2kW",design_pshb, build_pshb_tas, 400,24,50,100000);
     add("pshb","EV-Aux-1kW",  design_pshb, build_pshb_tas, 400,48,21,100000);
-    // weinberg: open-loop boost droop (~5% at 10 A, scaling with current) — design_weinberg compensates
-    // only the diode drop, not the leakage-commutation loss; independent investigation confirmed it is a
-    // real lossy-circuit offset (not a settle artifact), with the analytical engine echoing the setpoint.
-    add("weinberg","Schreuders",design_weinberg, build_weinberg_tas, 50,150,10,50000, 0.06);
-    add("weinberg","Yadav",   design_weinberg, build_weinberg_tas, 42,100,5,100000, 0.06);
-    add("weinberg","IJRTE",   design_weinberg, build_weinberg_tas, 24,50,5,100000, 0.06);
+    // weinberg: a high-duty current-fed boost has real open-loop droop (leakage-commutation loss,
+    // amplified by 1/(1−D)²). design_weinberg already folds the design efficiency η into the boost duty
+    // (duty_boost(…, η)); the droop only appeared because the PtP idealized η=1.0. Passing the realistic
+    // η that real Weinberg designs run at engages that existing compensation and lands the open-loop deck
+    // on target. (The droop is current-dependent, so one η can't perfectly centre all three; residual is
+    // within the default band.) [root cause: independent investigation — real droop, not a settle artifact]
+    add("weinberg","Schreuders",design_weinberg, build_weinberg_tas, 50,150,10,50000, 0.05, 1.0, 0.95);
+    add("weinberg","Yadav",   design_weinberg, build_weinberg_tas, 42,100,5,100000, 0.05, 1.0, 0.95);
+    add("weinberg","IJRTE",   design_weinberg, build_weinberg_tas, 24,50,5,100000, 0.05, 1.0, 0.95);
     // ── resonant ──
     add("llc","Telecom-120W", design_llc, build_llc_tas, 400,12,10,100000);
     add("llc","ATX-240W",     design_llc, build_llc_tas, 400,24,10,100000);

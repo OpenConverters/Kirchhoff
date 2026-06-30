@@ -164,10 +164,15 @@ json build_push_pull_tas(const PushPullDesign& d) {
     // magnetizing current without a path during the dead time between the two 180-deg phases; with an
     // IDEAL transformer (no parasitic C) the node voltage runs away and ngspice fails (timestep too
     // small). A small node-to-gnd snubber cap gives that current a finite-dV/dt path — physically real
-    // in any push-pull, and small enough (2.2 nF) to leave Vout within ~2% (energy is reactive, ~no
-    // loss). MKF's reference deck uses the same technique (switch + rectifier snubbers).
+    // in any push-pull. It is sized from the ENERGY BUDGET (snubber_cap = eps·P/(Vblock²·fsw), the
+    // off-switch blocks ~2·Vin) rather than a fixed 2.2 nF: the fixed value over-sizes 7–39× at these
+    // operating points and, ringing against the ideal lossless transformer, injects a load-independent
+    // reactive charge that lifts Vout a few % (worst at the lowest current). The energy-budget cap is
+    // still large enough to give the dead-time magnetizing current a finite-dV/dt path (decks converge),
+    // while keeping the open-loop Vout on the analytical target. Overridable via config "snubberCap".
     auto snub = [&]() { json c; c["capacitor"] = json::object();
-        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::node_snubber_cap(d.config);
+        c["inputs"]["designRequirements"]["capacitance"]["nominal"] =
+            cfg::snubber_cap(d.config, d.outputPower, 2.0 * d.inputVoltage, d.switchingFrequency);
         c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) * 3;
         return c; };
 
