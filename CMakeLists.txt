@@ -25,7 +25,19 @@ add_subdirectory("${PSMA_ROOT}/CTAS"     "${CMAKE_BINARY_DIR}/CTAS")
 add_subdirectory("${PSMA_ROOT}/MAS/kirchhoff" "${CMAKE_BINARY_DIR}/MAS")
 add_subdirectory("${PSMA_ROOT}/CIAS"     "${CMAKE_BINARY_DIR}/CIAS")
 
-add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/Dab.cpp src/IsolatedBuck.cpp src/IsolatedBuckBoost.cpp src/Weinberg.cpp src/Llc.cpp src/Src.cpp src/Cllc.cpp src/Clllc.cpp src/Pfc.cpp src/Vienna.cpp src/TasAssembler.cpp)
+# Optional in-process ngspice runner (libngspice shared-library API). When ON, CMake locates
+# libngspice + <ngspice/sharedspice.h> and src/NgspiceRunner.cpp is compiled with ENABLE_NGSPICE; when
+# OFF (or the lib is absent) the runner stub throws and callers use the ngspice CLI. Default: auto —
+# ON if the library is found. The same libngspice path feeds the future WASM in-browser run (P5).
+option(ENABLE_NGSPICE "Build the in-process libngspice runner (src/NgspiceRunner.cpp)" OFF)
+find_library(NGSPICE_LIB ngspice)
+find_path(NGSPICE_INCLUDE_DIR ngspice/sharedspice.h)
+if (NGSPICE_LIB AND NGSPICE_INCLUDE_DIR AND NOT DEFINED CACHE{ENABLE_NGSPICE_SET})
+    set(ENABLE_NGSPICE ON CACHE BOOL "" FORCE)   # auto-enable when libngspice is present
+    set(ENABLE_NGSPICE_SET ON CACHE INTERNAL "")
+endif()
+
+add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/Dab.cpp src/IsolatedBuck.cpp src/IsolatedBuckBoost.cpp src/Weinberg.cpp src/Llc.cpp src/Src.cpp src/Cllc.cpp src/Clllc.cpp src/Pfc.cpp src/Vienna.cpp src/TasAssembler.cpp src/NgspiceRunner.cpp src/Analytical.cpp)
 target_include_directories(kirchhoff PUBLIC
     src
     "${PSMA_ROOT}/PEAS/src"
@@ -37,6 +49,14 @@ target_include_directories(kirchhoff PUBLIC
     # single-header dir on the path (MAS_kirchhoff keeps that PRIVATE).
     "${nlohmann_json_SOURCE_DIR}/include/nlohmann")
 target_link_libraries(kirchhoff PUBLIC RAS CAS SAS AAS CTAS MAS_kirchhoff CIAS nlohmann_json::nlohmann_json)
+if (ENABLE_NGSPICE AND NGSPICE_LIB AND NGSPICE_INCLUDE_DIR)
+    target_compile_definitions(kirchhoff PUBLIC ENABLE_NGSPICE)
+    target_include_directories(kirchhoff PUBLIC "${NGSPICE_INCLUDE_DIR}")
+    target_link_libraries(kirchhoff PUBLIC "${NGSPICE_LIB}")
+    message(STATUS "Kirchhoff: in-process libngspice runner ENABLED (${NGSPICE_LIB})")
+else()
+    message(STATUS "Kirchhoff: in-process libngspice runner disabled (CLI fallback)")
+endif()
 
 add_executable(flyback_demo examples/flyback_demo.cpp)
 target_link_libraries(flyback_demo PRIVATE kirchhoff)
@@ -119,6 +139,12 @@ target_link_libraries(pfc_demo PRIVATE kirchhoff)
 
 add_executable(test_pfc tests/test_pfc.cpp)
 target_link_libraries(test_pfc PRIVATE kirchhoff Catch2::Catch2WithMain)
+
+add_executable(test_ngspice_runner tests/test_ngspice_runner.cpp)
+target_link_libraries(test_ngspice_runner PRIVATE kirchhoff Catch2::Catch2WithMain)
+
+add_executable(test_analytical tests/test_analytical.cpp)
+target_link_libraries(test_analytical PRIVATE kirchhoff Catch2::Catch2WithMain)
 # Lets the test locate the independent Python averaged-model oracle (tests/averaged_model.py).
 target_compile_definitions(test_pfc PRIVATE KIRCHHOFF_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests")
 

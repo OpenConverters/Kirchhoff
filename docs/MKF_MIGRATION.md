@@ -61,9 +61,28 @@ Ranked by value × time-sensitivity:
 3. **Multi-simulator exporters.** `processors/CircuitSimulator{Ltspice,Plecs,Simba,Nl5}.cpp` +
    `CircuitSimulatorExporterHelpers.h`. KH's README already promises "LTspice/PSIM/Simba/NL5 to
    follow"; moving these into CIAS/KH delivers the "simulate in general, any simulator" goal.
-4. **`NgspiceRunner` (shared-library/libngspice path) + results parser.** `processors/NgspiceRunner.*`.
-   KH currently shells out via the deck's `.control` block; MKF's runner has the libngspice
-   shared-lib API KH's P5 roadmap needs for in-browser WASM runs.
+4. **`NgspiceRunner` (shared-library/libngspice path) + results parser.** ✅ **Native half DONE
+   (2026-06-30).** KH now has `src/NgspiceRunner.{hpp,cpp}` — an in-process libngspice runner
+   (`run_ngspice_in_process(deck)`) using the `<ngspice/sharedspice.h>` API (`ngSpice_Init` with a
+   per-run `userData` capture struct, `ngSpice_Circ` → `run` → data-callback vector capture →
+   `remcirc`), with `NgspiceRunResult::average()` reproducing `meas tran AVG` by trapezoidal
+   integration. CMake gates it behind `ENABLE_NGSPICE` (auto-ON when libngspice + the header are found;
+   the stub throws when OFF — no silent no-op). Validated: `test_ngspice_runner` runs an RC deck and a
+   boost deck in-process and matches the `ngspice -b` CLI exactly (boost Vout 23.9595 V both ways).
+   The real-magnetic co-sim (`simulate_magnetic_circuit`, `extract_operating_point(Magnetic)`) is NOT
+   ported — it stays in MKF (Decision 1). **WASM half (P5) pending** — see below.
+
+   **WASM (in-browser) ngspice — pending, heavy.** The system has libngspice 0.0.9 + the header (so
+   the native path works today), and emsdk is at `/home/alf/emsdk` (needs `emsdk_env.sh` sourced;
+   `emcc` not yet on PATH). MKF's recipe (its CMake `ENABLE_NGSPICE` block) builds ngspice-45.2 via
+   `ExternalProject_Add` with `emconfigure --with-ngshared`, a fragile ngspice-version-specific
+   `apply_wasm_patches.sh` (4 seds: accept `.wasm`, guard `main()`, disable `getrusage`, skip the
+   init-file read), `-fwasm-exceptions -sSUPPORT_LONGJMP=wasm`, plus two runtime workarounds already
+   coded into KH's runner-ready shape: `set no_mem_check` (no `/proc` under WASM) and treating a
+   non-empty time vector as completion (the sync build's `run` returns without firing the bg-thread
+   callback). This is unvalidated here (MKF's own WASM install dir is empty) and is the P5 long-pole;
+   the ANALYTICAL engine below is the lighter "runs anywhere, no libngspice" alternative for the
+   browser.
 5. **Magnetics-independent analytical kernels.** `PwmBridgeSolver.h` (piecewise sub-interval tank
    solver for DAB/PSFB/PSHB), `PfcControllerDesign.*`, `PfcControllerSubcircuits.h` (ideal opamp /
    comparator `.subckt` primitives). Consolidate with KH's own re-derivations.
