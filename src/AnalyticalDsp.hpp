@@ -34,5 +34,26 @@ MAS::Waveform create_waveform(MAS::WaveformLabel label, double peakToPeak, doubl
                               double dutyCycle, double offset = 0.0, double deadTime = 0.0,
                               double skew = 0.0, double phase = 0.0, size_t numberOfPoints = 128);
 
+// Resample a piecewise-linear (data, time) waveform to a uniform grid of `numberPoints` samples over one
+// period, by linear interpolation (ported from MKF Inputs.cpp::calculate_sampled_waveform). The result
+// is what calculate_harmonics_data FFTs, so numberPoints should be a power of 2. Handles zero-length
+// segments (e.g. FLYBACK_PRIMARY's repeated time points). Throws on malformed input (no silent fill).
+MAS::Waveform calculate_sampled_waveform(const MAS::Waveform& waveform, double frequency,
+                                         size_t numberPoints = 128);
+
+// Compute the processed scalars (rms, peak, +/- peak, peak-to-peak, average/offset, THD, effective
+// frequencies) of a synthesized waveform (ported from MKF Inputs.cpp::calculate_processed_data, advanced
+// path). Resamples internally; reads the shape from the waveform's ancillaryLabel rather than guessing it
+// (we synthesized it). Mirrors MKF's FLYBACK peak-to-peak offset adjustment.
+MAS::ProcessedWaveform calculate_processed_data(const MAS::Waveform& waveform, double frequency);
+
+// Assemble one winding's excitation from its current + voltage waveforms: for each, store the resampled
+// (power-of-2) waveform, its harmonics, and its processed scalars (ported from
+// MKF Topology.cpp::complete_excitation). This is the glue every per-topology process_operating_points
+// funnels each (current, voltage) pair through.
+MAS::OperatingPointExcitation complete_excitation(const MAS::Waveform& currentWaveform,
+                                                  const MAS::Waveform& voltageWaveform,
+                                                  double switchingFrequency, const std::string& name);
+
 } // namespace analytical
 } // namespace Kirchhoff

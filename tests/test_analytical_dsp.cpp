@@ -9,6 +9,7 @@
 #include <cmath>
 #include <complex>
 constexpr double kPi = 3.14159265358979323846;
+#include <algorithm>
 #include <vector>
 
 using Kirchhoff::analytical::fft;
@@ -85,4 +86,53 @@ TEST_CASE("create_waveform builds the expected control points", "[analytical][ds
     CHECK(h.get_amplitudes()[1] == Catch::Approx(2.0).margin(1e-6));   // peak = peakToPeak/2
 
     CHECK_THROWS(create_waveform(MAS::WaveformLabel::TRIANGULAR, 2.0, fsw, 0.5, 0, 0, /*skew*/1e-7));
+}
+
+TEST_CASE("calculate_sampled_waveform resamples a triangle to a power-of-2 grid", "[analytical][dsp]") {
+    using Kirchhoff::analytical::create_waveform;
+    using Kirchhoff::analytical::calculate_sampled_waveform;
+    const double fsw = 100000.0;
+    // TRIANGULAR pp=2, offset=0, duty=0.5 -> ramps -1 -> +1 over [0, T/2], back to -1 over [T/2, T].
+    MAS::Waveform tri = create_waveform(MAS::WaveformLabel::TRIANGULAR, 2.0, fsw, 0.5, 0.0);
+    MAS::Waveform s = calculate_sampled_waveform(tri, fsw, 128);
+    REQUIRE(s.get_data().size() == 128);
+    const auto& d = s.get_data();
+    CHECK(d.front() == Catch::Approx(-1.0).margin(1e-9));                 // t=0 -> min
+    CHECK(*std::max_element(d.begin(), d.end()) == Catch::Approx(1.0).margin(0.02)); // peak ~ +1 near T/2
+    CHECK(*std::min_element(d.begin(), d.end()) == Catch::Approx(-1.0).margin(0.02));
+    // It is a power of 2, so it round-trips through the FFT and has zero DC (symmetric triangle).
+    MAS::Harmonics h = calculate_harmonics_data(s, fsw);
+    CHECK(h.get_amplitudes()[0] == Catch::Approx(0.0).margin(1e-3));      // no DC
+}
+
+TEST_CASE("calculate_processed_data: symmetric triangle stats", "[analytical][dsp]") {
+    using Kirchhoff::analytical::create_waveform;
+    using Kirchhoff::analytical::calculate_processed_data;
+    const double fsw = 100000.0;
+    // Symmetric triangle, peak +/-1: RMS = peak/sqrt(3), peak=1, avg=0, peak-to-peak=2.
+    MAS::Waveform tri = create_waveform(MAS::WaveformLabel::TRIANGULAR, 2.0, fsw, 0.5, 0.0);
+    MAS::ProcessedWaveform p = calculate_processed_data(tri, fsw);
+    REQUIRE(p.get_rms().has_value());
+    CHECK(*p.get_rms() == Catch::Approx(1.0 / std::sqrt(3.0)).margin(0.01));
+    CHECK(*p.get_peak() == Catch::Approx(1.0).margin(0.02));
+    CHECK(*p.get_average() == Catch::Approx(0.0).margin(1e-6));
+    CHECK(*p.get_peak_to_peak() == Catch::Approx(2.0).margin(0.02));
+    CHECK(*p.get_thd() == Catch::Approx(0.121).margin(0.02));   // ideal triangle THD ~12.1%
+}
+
+TEST_CASE("complete_excitation assembles current + voltage signals", "[analytical][dsp]") {
+    using Kirchhoff::analytical::create_waveform;
+    using Kirchhoff::analytical::complete_excitation;
+    const double fsw = 100000.0;
+    MAS::Waveform cur = create_waveform(MAS::WaveformLabel::TRIANGULAR, 4.0, fsw, 0.5, 10.0);  // 10 A avg, 4 App
+    MAS::Waveform vol = create_waveform(MAS::WaveformLabel::RECTANGULAR, 48.0, fsw, 0.4, 0.0);
+    MAS::OperatingPointExcitation e = complete_excitation(cur, vol, fsw, "primary");
+    REQUIRE(e.get_current().has_value());
+    REQUIRE(e.get_voltage().has_value());
+    CHECK(e.get_frequency() == Catch::Approx(fsw));
+    REQUIRE(e.get_current()->get_processed().has_value());
+    CHECK(*e.get_current()->get_processed()->get_average() == Catch::Approx(10.0).margin(0.05));  // current DC
+    REQUIRE(e.get_current()->get_harmonics().has_value());
+    REQUIRE(e.get_current()->get_waveform().has_value());
+    CHECK(e.get_current()->get_waveform()->get_data().size() == 128);   // resampled to power of 2
 }

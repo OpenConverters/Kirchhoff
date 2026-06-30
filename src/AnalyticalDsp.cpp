@@ -8,7 +8,32 @@
 namespace Kirchhoff {
 namespace analytical {
 
-namespace { constexpr double kPi = 3.14159265358979323846264338327950288; }  // C++17: no std::numbers
+namespace {
+constexpr double kPi = 3.14159265358979323846264338327950288;  // C++17: no std::numbers
+
+double lerp_(double a, double b, double t) { return a + t * (b - a); }  // C++17: no std::lerp
+
+std::vector<double> linear_spaced_array(double start, double end, size_t n) {
+    std::vector<double> v;
+    if (n == 0) return v;
+    if (n == 1) { v.push_back(start); return v; }
+    const double step = (end - start) / static_cast<double>(n - 1);
+    v.reserve(n);
+    for (size_t i = 0; i < n; ++i) v.push_back(start + step * static_cast<double>(i));
+    return v;
+}
+
+double round_float(double x, int decimals) {
+    const double f = std::pow(10.0, decimals);
+    return std::round(x * f) / f;
+}
+
+size_t round_up_to_power_of_2(size_t n) {
+    size_t p = 1;
+    while (p < n) p <<= 1;
+    return p;
+}
+} // namespace
 
 // Ported verbatim from MKF processors/Inputs.cpp::fft (in-place radix-2 Cooley-Tukey).
 void fft(std::vector<std::complex<double>>& x) {
@@ -158,6 +183,127 @@ MAS::Waveform create_waveform(MAS::WaveformLabel label, double peakToPeak, doubl
         throw std::invalid_argument("create_waveform: skew != 0 requires calculate_sampled_waveform "
                                     "(analytical solver port Phase 1.3); not yet available");
     return waveform;
+}
+
+// Ported from MKF processors/Inputs.cpp::calculate_sampled_waveform.
+MAS::Waveform calculate_sampled_waveform(const MAS::Waveform& waveform, double frequency, size_t numberPoints) {
+    const std::vector<double>& data = waveform.get_data();
+    if (data.size() < 2)
+        throw std::invalid_argument("calculate_sampled_waveform: waveform needs >= 2 data points");
+
+    std::vector<double> time;
+    if (!waveform.get_time()) {  // equidistant
+        if (!std::isfinite(frequency) || frequency < 1.0)
+            throw std::invalid_argument("calculate_sampled_waveform: invalid frequency");
+        time = linear_spaced_array(0, 1.0 / round_float(frequency, 9), data.size());
+    } else {
+        time = waveform.get_time().value();
+        const double period = time.back() - time.front();
+        if (period <= 0) throw std::invalid_argument("calculate_sampled_waveform: non-positive period");
+        frequency = 1.0 / period;
+    }
+
+    size_t pts = numberPoints;
+    if (data.size() > pts)  // never down-sample below the control points
+        pts = ((data.size() & (data.size() - 1)) == 0) ? data.size() : round_up_to_power_of_2(data.size());
+
+    std::vector<double> sampledTime = linear_spaced_array(0, 1.0 / round_float(frequency, 9), pts + 1);
+    std::vector<double> sampledData;
+    sampledData.reserve(pts);
+
+    for (size_t i = 0; i < pts; ++i) {
+        bool found = false;
+        for (size_t j = 0; j + 1 < data.size(); ++j) {
+            if (time[j + 1] == time[j]) {                    // zero-length segment (repeated time point)
+                if (sampledTime[i] == time[j]) { sampledData.push_back(data[j]); found = true; break; }
+                continue;
+            }
+            if (time[j] <= sampledTime[i] && sampledTime[i] <= time[j + 1]) {
+                double p = (sampledTime[i] - time[j]) / (time[j + 1] - time[j]);
+                sampledData.push_back(lerp_(data[j], data[j + 1], p));
+                found = true; break;
+            }
+        }
+        if (!found) throw std::invalid_argument("calculate_sampled_waveform: unsampled point " + std::to_string(i));
+    }
+    sampledTime.pop_back();
+
+    MAS::Waveform out;
+    out.set_data(sampledData);
+    out.set_time(sampledTime);
+    if (waveform.get_ancillary_label()) out.set_ancillary_label(waveform.get_ancillary_label().value());
+    return out;
+}
+
+// Ported from MKF processors/Inputs.cpp::calculate_processed_data (the synthesized-waveform advanced
+// path). Stats are computed directly from the resampled data + harmonics; the shape label is read from
+// the waveform (we synthesized it) rather than guessed.
+MAS::ProcessedWaveform calculate_processed_data(const MAS::Waveform& waveform, double frequency) {
+    MAS::Waveform sampled = calculate_sampled_waveform(waveform, frequency);
+    MAS::Harmonics harmonics = calculate_harmonics_data(sampled, frequency);
+    const std::vector<double>& d = sampled.get_data();
+    if (d.empty()) throw std::invalid_argument("calculate_processed_data: empty sampled waveform");
+
+    double sum = 0, sumsq = 0, mx = d[0], mn = d[0];
+    for (double v : d) { sum += v; sumsq += v * v; mx = std::max(mx, v); mn = std::min(mn, v); }
+    const double avg = sum / static_cast<double>(d.size());
+
+    MAS::ProcessedWaveform p;
+    if (waveform.get_ancillary_label()) p.set_label(waveform.get_ancillary_label().value());
+    p.set_average(avg);
+    p.set_offset(avg);                                  // DC component == mean for a periodic waveform
+    p.set_positive_peak(mx);
+    p.set_negative_peak(mn);
+    p.set_peak(std::max(std::abs(mx), std::abs(mn)));
+    double pp = mx - mn;
+    auto lbl = waveform.get_ancillary_label();
+    if (lbl && (*lbl == MAS::WaveformLabel::FLYBACK_PRIMARY || *lbl == MAS::WaveformLabel::FLYBACK_SECONDARY))
+        pp -= avg;                                      // MKF: the 0-floor overstates the ramp pk-pk
+    p.set_peak_to_peak(pp);
+    p.set_rms(std::sqrt(sumsq / static_cast<double>(d.size())));
+
+    // Effective (RMS-weighted harmonic) frequencies + THD, from the harmonic spectrum.
+    const auto& A = harmonics.get_amplitudes();
+    const auto& F = harmonics.get_frequencies();
+    auto eff_freq = [&](size_t startIdx) {
+        double num = 0, den = 0;
+        for (size_t i = startIdx; i < A.size(); ++i) { double a2 = A[i] * A[i]; num += a2 * F[i] * F[i]; den += a2; }
+        return den > 0 ? std::sqrt(num / den) : 0.0;
+    };
+    p.set_effective_frequency(eff_freq(0));
+    p.set_ac_effective_frequency(eff_freq(1));
+    if (A.size() > 1 && A[1] > 0) {
+        double num = 0;
+        for (size_t i = 2; i < A.size(); ++i) num += A[i] * A[i];
+        p.set_thd(std::sqrt(num) / A[1]);
+    } else {
+        p.set_thd(0.0);
+    }
+    return p;
+}
+
+// Ported from MKF converter_models/Topology.cpp::complete_excitation.
+MAS::OperatingPointExcitation complete_excitation(const MAS::Waveform& currentWaveform,
+                                                  const MAS::Waveform& voltageWaveform,
+                                                  double switchingFrequency, const std::string& name) {
+    if (switchingFrequency <= 0 || !std::isfinite(switchingFrequency))
+        throw std::invalid_argument("complete_excitation: invalid switchingFrequency");
+
+    auto build = [&](const MAS::Waveform& w) {
+        MAS::SignalDescriptor s;
+        MAS::Waveform sampled = calculate_sampled_waveform(w, switchingFrequency);
+        s.set_waveform(sampled);                                            // store the power-of-2 waveform
+        s.set_processed(calculate_processed_data(w, switchingFrequency));
+        s.set_harmonics(calculate_harmonics_data(sampled, switchingFrequency));
+        return s;
+    };
+
+    MAS::OperatingPointExcitation excitation;
+    excitation.set_frequency(switchingFrequency);
+    excitation.set_current(build(currentWaveform));
+    excitation.set_voltage(build(voltageWaveform));
+    excitation.set_name(name);
+    return excitation;
 }
 
 } // namespace analytical
