@@ -12,7 +12,7 @@
 #include "Kirchhoff.hpp"
 #include "Analytical.hpp"
 #include "NgspiceRunner.hpp"
-#include "Topology.hpp"      // MAS::Topology + PEAS::Topology + Kirchhoff::Topology (single enum)
+#include "Topology.hpp"      // the single MAS::Topology enum (Kirchhoff::Topology names it)
 #include <type_traits>
 
 #include <cmath>
@@ -24,12 +24,10 @@
 
 using nlohmann::json;
 
-// The topology taxonomy is a SINGLE enum type: PEAS::Topology is an alias of the one generated
-// MAS::Topology, not a second enum. (Guards against the dual-enum regression.)
-static_assert(std::is_same<MAS::Topology, PEAS::Topology>::value,
-              "PEAS::Topology must alias the single MAS::Topology enum — no second enum type");
-static_assert(std::is_same<Kirchhoff::Topology, PEAS::Topology>::value,
-              "Kirchhoff::Topology must be PEAS::Topology");
+// There is a SINGLE topology enum: Kirchhoff::Topology IS the one generated MAS::Topology (a name in
+// the Kirchhoff namespace, not a second type). Guards against any dual-enum regression.
+static_assert(std::is_same<Kirchhoff::Topology, MAS::Topology>::value,
+              "Kirchhoff::Topology must be the single MAS::Topology enum — no second enum type");
 
 namespace {
 

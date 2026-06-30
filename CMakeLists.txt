@@ -44,9 +44,9 @@ target_include_directories(kirchhoff PUBLIC
     "${PSMA_ROOT}/RAS/src" "${PSMA_ROOT}/CAS/src" "${PSMA_ROOT}/SAS/src"
     "${PSMA_ROOT}/AAS/src" "${PSMA_ROOT}/CTAS/src"
     "${PSMA_ROOT}/MAS/src" "${PSMA_ROOT}/CIAS/src"
-    # MAS.hpp (the single generated MAS::Topology, aliased as PEAS::Topology in src/PEAS_Topology.hpp) is
-    # exported by MAS_kirchhoff but does `#include "json.hpp"`, so consumers also need the nlohmann
-    # single-header dir on the path (MAS_kirchhoff keeps that PRIVATE).
+    # MAS.hpp (the single generated MAS::Topology enum, used by src/Topology.hpp) is exported by
+    # MAS_kirchhoff but does `#include "json.hpp"`, so consumers also need the nlohmann single-header
+    # dir on the path (MAS_kirchhoff keeps that PRIVATE).
     "${nlohmann_json_SOURCE_DIR}/include/nlohmann")
 target_link_libraries(kirchhoff PUBLIC RAS CAS SAS AAS CTAS MAS_kirchhoff CIAS nlohmann_json::nlohmann_json)
 if (ENABLE_NGSPICE AND NGSPICE_LIB AND NGSPICE_INCLUDE_DIR)
