@@ -58,9 +58,42 @@ Ranked by value × time-sensitivity:
    ngspice element-order-sensitive (the CT branch must reproduce the validated card order); the
    current-doubler needs a loop-breaker R (winding+Lo1+Lo2 is an all-inductor loop), a multi-period
    measurement window (its LC filter rings below fsw), and a halved turns ratio (delivers ~½ Vsec).
-3. **Multi-simulator exporters.** `processors/CircuitSimulator{Ltspice,Plecs,Simba,Nl5}.cpp` +
-   `CircuitSimulatorExporterHelpers.h`. KH's README already promises "LTspice/PSIM/Simba/NL5 to
-   follow"; moving these into CIAS/KH delivers the "simulate in general, any simulator" goal.
+3. **Multi-simulator exporters.** KH's README promises "LTspice/PSIM/Simba/NL5 to follow"; delivering
+   these into CIAS is the "simulate in general, any simulator" goal. **Status (2026-06-30): designed,
+   not yet built — gated on validation tooling (a deliberate decision, not papered over).**
+
+   - **Template to mirror:** `CIAS::CiasToNgspiceConverter::to_cards` (`deps/CIAS/src/CiasCircuitConverter.cpp`)
+     — build a `(component,pin)→node` map from `circuit.connections` (a net exposed at a port takes the
+     port name, else the connection's local name), then dispatch on the PEAS discriminator
+     (`resistor` / `capacitor` / `semiconductor`{mosfet,diode} / `magnetic` / `analog`{comparator,
+     multiplier,summer,integrator}), pulling values with the throwing `nominal_at` (no fallbacks).
+   - **Already present:** ngspice + LTspice, both as `SpiceDialect` values of the same emitter (the only
+     card-level delta is the behavioural ternary `(c)?(a):(b)` vs `if(c,a,b)`). So the *SPICE-text* half
+     of the README promise is effectively met.
+   - **The hard part (PLECS / Simba / NL5):** none of these use shared net names. PLECS is a
+     brace-delimited schematic, Simba is JSON with GUID device IDs, NL5 is XML with **integer** nodes —
+     all three reference components by **per-instance terminal index + synthesized XY geometry** (PLECS
+     and Simba also need routed wire/connector points). So a CIAS shared-net `connections` model must be
+     *lowered* to terminal pairs + an **auto-layout pass** (assign coordinates; route wires). They cannot
+     be a third `SpiceDialect` value; each needs its own `CiasTo<Format>Converter` class and a parallel
+     `tas_to_<format>` assembler path (the SPICE deck-wrapper — sources, `.tran`/`.options`/`.control` —
+     is SPICE-shaped and must be re-expressed per format).
+   - **Why not shipped overnight:** (a) **no validation tooling** — PLECS/Simba/NL5 are not installed, so
+     an exporter can only be checked *structurally* (element + node-incidence histogram, like
+     `tests/test_ltspice_backend.cpp`), NOT confirmed to actually open/run in the target tool; and (b) the
+     **analog control blocks** (comparator/multiplier/integrator) and the **magnetic coupling (K)** have
+     non-obvious, tool-specific representations that cannot be verified blind. Shipping guessed-at,
+     tool-unvalidated format code to a shared submodule `main` would violate the verify-before-push /
+     no-papering-over rules. **Recommended order when a tool is available: NL5 first** (integer nodes,
+     XML string-templated, closest to the netlist model → highest structural confidence), then Simba
+     (structured `ordered_json`), then PLECS (hardest — full geometry + base64 init blocks). Effort
+     ranking: LTspice ≪ NL5 < Simba ≲ PLECS.
+   - **Recommended architecture (low-risk groundwork, independent of the tools):** factor the shared
+     net-resolution + `nominal_at` value-extraction out of `CiasToNgspiceConverter` into a reusable
+     internal `CiasCircuitWalk` header, so every backend shares one correct, tested net model and only
+     supplies a per-component emission table. This refactor is behavior-preserving (guarded by the
+     existing ngspice/ltspice/cias tests) and can land before any new format. **Open decision for the
+     user (see end):** build NL5 now with structural-only validation, or wait for a tool + the layout pass.
 4. **`NgspiceRunner` (shared-library/libngspice path) + results parser.** ✅ **Native half DONE
    (2026-06-30).** KH now has `src/NgspiceRunner.{hpp,cpp}` — an in-process libngspice runner
    (`run_ngspice_in_process(deck)`) using the `<ngspice/sharedspice.h>` API (`ngSpice_Init` with a
@@ -202,3 +235,30 @@ the migration (ownership of "what a converter topology is" shifts to the power-e
 - **Open question:** both repos have a `feat/peas-family-consolidation` branch ahead of `main`, and
   CIAS's *default* branch is that feature branch. Decide whether KH tracks `main` (stable) or the
   consolidation line (active). This may overlap with the enum→PEAS move above.
+
+## Migration progress log (2026-06-30, overnight)
+
+Done + on `main` (all tested):
+- **Item 1 — MAS::Topology typed-enum adoption (Step 1)** ✅ `25e397d`. `src/Topology.hpp`;
+  `finalize_control_seeds` takes the enum; 24 call sites converted; byte-identical JSON; suite 134/32.
+- **Item 3 — ANALYTICAL run engine** ✅ `9370f3a`. `src/Analytical.{hpp,cpp}`; simulator-free
+  operating-point prediction from the TAS doc; `test_analytical` 162 assertions / 15 topologies +
+  analytical-vs-SPICE cross-check.
+- **Item 4 — native in-process libngspice runner** ✅ `9370f3a`. `src/NgspiceRunner.{hpp,cpp}`;
+  ENABLE_NGSPICE-gated; validated equal to the CLI.
+
+Open decisions for the user (collected; not blocking):
+1. **Item 2 multi-sim exporters** — build **NL5** now with structural-only validation (element +
+   node-incidence histogram; cannot confirm it opens in NL5 — not installed), or wait for the tool +
+   the auto-layout pass? PLECS/Simba are heavier still. Recommended: do the behavior-preserving
+   `CiasCircuitWalk` refactor first regardless, then NL5 when a tool is available.
+2. **Item 4 WASM ngspice (P5)** — proceed with the emscripten libngspice `ExternalProject` (needs
+   `emsdk_env.sh` sourced, the fragile ngspice-45.2 patch script, unvalidatable here), or rely on the
+   **ANALYTICAL engine** (item 3, already WASM-clean) for the in-browser path and defer WASM ngspice?
+3. **Enum → PEAS (Step 2)** — schedule the governed MAS→PEAS taxonomy RFC; until then `Topology.hpp`
+   stays `using Topology = MAS::Topology`.
+4. **Selectable-engine API surface** — want a single `operating_point(tas, RunEngine)` dispatcher
+   (ANALYTICAL → `analytical_operating_point`; SPICE → deck + `run_ngspice_in_process`/CLI), or keep
+   the two entry points separate as now?
+5. **deps/CIAS gitlink + `feat/peas-family-consolidation`** — track `main` or the consolidation line
+   (carried over from above).
