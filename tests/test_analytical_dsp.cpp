@@ -59,3 +59,30 @@ TEST_CASE("calculate_harmonics_data rejects non-power-of-2 data", "[analytical][
     w.set_data(std::vector<double>(100, 0.0));
     CHECK_THROWS(calculate_harmonics_data(w, 100000.0));
 }
+
+TEST_CASE("create_waveform builds the expected control points", "[analytical][dsp]") {
+    using Kirchhoff::analytical::create_waveform;
+    const double fsw = 100000.0, period = 1.0 / fsw;
+
+    // TRIANGULAR: peakToPeak=2, offset=1, duty=0.5 -> min=0, max=2 at t={0, period/2, period}.
+    MAS::Waveform tri = create_waveform(MAS::WaveformLabel::TRIANGULAR, 2.0, fsw, 0.5, 1.0);
+    REQUIRE(tri.get_data() == std::vector<double>{0.0, 2.0, 0.0});
+    REQUIRE(tri.get_time().has_value());
+    CHECK((*tri.get_time())[1] == Catch::Approx(period / 2));
+    CHECK(tri.get_ancillary_label().has_value());
+
+    // RECTANGULAR: peakToPeak=10, duty=0.4, offset=0 -> max=10*0.6=6, min=-10*0.4=-4.
+    MAS::Waveform rect = create_waveform(MAS::WaveformLabel::RECTANGULAR, 10.0, fsw, 0.4, 0.0);
+    REQUIRE(rect.get_data() == std::vector<double>{-4.0, 6.0, 6.0, -4.0, -4.0});
+
+    // SINUSOIDAL through the harmonic analysis: a power-of-2 sample count -> clean fundamental.
+    MAS::Waveform sine = create_waveform(MAS::WaveformLabel::SINUSOIDAL, 4.0, fsw, 0.5, 1.0, 0, 0, 0, 129);
+    // 129 points = 128 unique + wrap; drop the last to get a power-of-2 period for the FFT.
+    auto d = sine.get_data(); d.pop_back();
+    MAS::Waveform sineP; sineP.set_data(d);
+    MAS::Harmonics h = calculate_harmonics_data(sineP, fsw);
+    CHECK(h.get_amplitudes()[0] == Catch::Approx(1.0).margin(1e-6));   // offset
+    CHECK(h.get_amplitudes()[1] == Catch::Approx(2.0).margin(1e-6));   // peak = peakToPeak/2
+
+    CHECK_THROWS(create_waveform(MAS::WaveformLabel::TRIANGULAR, 2.0, fsw, 0.5, 0, 0, /*skew*/1e-7));
+}

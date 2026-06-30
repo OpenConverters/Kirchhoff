@@ -25,5 +25,14 @@ void fft(std::vector<std::complex<double>>& x);
 // "imported", so that path never runs.)
 MAS::Harmonics calculate_harmonics_data(const MAS::Waveform& waveform, double frequency);
 
+// Synthesize one period of a converter waveform as piecewise-linear (data, time) control points, keyed
+// by WaveformLabel (ported from MKF Inputs.cpp::create_waveform). `peakToPeak`, `offset`, `dutyCycle`,
+// `deadTime`, `phase` parameterize the shape; SINUSOIDAL is sampled at `numberOfPoints`. The waveform's
+// ancillaryLabel is set. (The MKF `skew` rotation path needs calculate_sampled_waveform — ported in a
+// later increment — so skew != 0 throws here rather than silently ignoring it.)
+MAS::Waveform create_waveform(MAS::WaveformLabel label, double peakToPeak, double frequency,
+                              double dutyCycle, double offset = 0.0, double deadTime = 0.0,
+                              double skew = 0.0, double phase = 0.0, size_t numberOfPoints = 128);
+
 } // namespace analytical
 } // namespace Kirchhoff

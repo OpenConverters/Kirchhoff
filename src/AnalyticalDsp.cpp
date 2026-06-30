@@ -1,5 +1,6 @@
 #include "AnalyticalDsp.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -65,6 +66,98 @@ MAS::Harmonics calculate_harmonics_data(const MAS::Waveform& waveform, double fr
         harmonics.get_mutable_frequencies().push_back(frequency * static_cast<double>(i));
 
     return harmonics;
+}
+
+// Ported from MKF processors/Inputs.cpp::create_waveform. Each WaveformLabel produces piecewise-linear
+// (data, time) control points for one period. (The skew rotation path is deferred — see header.)
+MAS::Waveform create_waveform(MAS::WaveformLabel label, double peakToPeak, double frequency,
+                              double dutyCycle, double offset, double deadTime,
+                              double skew, double phase, size_t numberOfPoints) {
+    using L = MAS::WaveformLabel;
+    MAS::Waveform waveform;
+    std::vector<double> data, time;
+    const double period = 1.0 / frequency;
+
+    switch (label) {
+        case L::TRIANGULAR: {
+            double max = peakToPeak / 2 + offset, min = -peakToPeak / 2 + offset, dc = dutyCycle * period;
+            data = {min, max, min}; time = {0, dc, period}; break;
+        }
+        case L::TRIANGULAR_WITH_DEADTIME: {
+            double max = peakToPeak / 2 + offset, min = -peakToPeak / 2 + offset, dc = dutyCycle * period;
+            data = {min, max, min, 0}; time = {0, dc, period - deadTime, period}; break;
+        }
+        case L::UNIPOLAR_TRIANGULAR: {
+            double max = peakToPeak + offset, min = offset, dc = dutyCycle * period;
+            data = {min, max, min, min}; time = {0, dc, dc, period}; break;
+        }
+        case L::RECTANGULAR: {
+            double max = peakToPeak * (1 - dutyCycle) + offset, min = -peakToPeak * dutyCycle + offset, dc = dutyCycle * period;
+            data = {min, max, max, min, min}; time = {0, 0, dc, dc, period}; break;
+        }
+        case L::RECTANGULAR_WITH_DEADTIME: {
+            double max = peakToPeak * (1 - dutyCycle) + offset, min = -peakToPeak * dutyCycle + offset, dc = dutyCycle * period;
+            data = {0, max, max, min, min, 0, 0}; time = {0, 0, dc, dc, period - deadTime, period - deadTime, period}; break;
+        }
+        case L::SECONDARY_RECTANGULAR: {
+            double max = -peakToPeak * (1 - dutyCycle) + offset, min = peakToPeak * dutyCycle + offset, dc = dutyCycle * period;
+            data = {min, max, max, min, min}; time = {0, 0, dc, dc, period}; break;
+        }
+        case L::SECONDARY_RECTANGULAR_WITH_DEADTIME: {
+            double max = -peakToPeak * (1 - dutyCycle) + offset, min = peakToPeak * dutyCycle + offset, dc = dutyCycle * period;
+            data = {0, max, max, min, min, 0, 0}; time = {0, 0, dc, dc, period - deadTime, period - deadTime, period}; break;
+        }
+        case L::UNIPOLAR_RECTANGULAR: {
+            double max = peakToPeak + offset, min = offset, dc = std::min(0.5, dutyCycle) * period;
+            data = {min, max, max, min, min}; time = {0, 0, dc, dc, period}; break;
+        }
+        case L::BIPOLAR_RECTANGULAR: {
+            double max = +peakToPeak / 2, min = -peakToPeak / 2, dc = dutyCycle * period;
+            data = {0, 0, max, max, 0, 0, min, min, 0, 0};
+            time = {0, 0.25 * period - dc / 2, 0.25 * period - dc / 2, 0.25 * period + dc / 2, 0.25 * period + dc / 2,
+                    0.75 * period - dc / 2, 0.75 * period - dc / 2, 0.75 * period + dc / 2, 0.75 * period + dc / 2, period};
+            break;
+        }
+        case L::BIPOLAR_TRIANGULAR: {
+            double max = +peakToPeak / 2, min = -peakToPeak / 2, dc = std::min(0.5, dutyCycle) * period;
+            data = {min, min, max, max, min, min};
+            time = {0, 0.25 * period - dc / 2, 0.25 * period + dc / 2, 0.75 * period - dc / 2, 0.75 * period + dc / 2, period};
+            break;
+        }
+        case L::FLYBACK_PRIMARY: {
+            double max = peakToPeak + offset, min = offset, dc = dutyCycle * period;
+            data = {0, min, max, 0, 0}; time = {0, 0, dc, dc, period}; break;
+        }
+        case L::FLYBACK_SECONDARY: {
+            double max = peakToPeak + offset, min = offset, dc = dutyCycle * period;
+            data = {0, 0, max, min, 0}; time = {0, dc, dc, period, period}; break;
+        }
+        case L::FLYBACK_SECONDARY_WITH_DEADTIME: {
+            double max = peakToPeak + offset, min = offset, dc = dutyCycle * period;
+            data = {0, 0, max, min, 0, 0}; time = {0, dc, dc, period - deadTime, period - deadTime, period}; break;
+        }
+        case L::SINUSOIDAL: {
+            const size_t pts = (numberOfPoints < 2) ? 2 : numberOfPoints;
+            for (size_t i = 0; i < pts; ++i) {
+                double angle = i * 2 * kPi / (pts - 1);
+                time.push_back(i * period / (pts - 1));
+                data.push_back((std::sin(angle + phase) * peakToPeak / 2) + offset);
+            }
+            break;
+        }
+        default:
+            throw std::invalid_argument("create_waveform: unsupported WaveformLabel (CUSTOM / "
+                                        "RECTANGULAR_DCM must be built by the topology directly)");
+    }
+
+    waveform.set_ancillary_label(label);
+    waveform.set_data(data);
+    waveform.set_time(time);
+
+    if (skew != 0.0)
+        throw std::invalid_argument("create_waveform: skew != 0 requires calculate_sampled_waveform "
+                                    "(analytical solver port Phase 1.3); not yet available");
+    return waveform;
 }
 
 } // namespace analytical
