@@ -166,5 +166,61 @@ MAS::OperatingPoint analytical_active_clamp_forward(double inputVoltage,
                                                     double mainOutputInductance, double currentRippleRatio,
                                                     double dutyCycle = 0.45, double diodeVoltageDrop = 0.0);
 
+// ── Phase 4: the phase-shifted bridge family ────────────────────────────────
+// Each function reuses the shared header-only kernel OpenMagnetics::PwmBridgeSolver
+// (duty-cycle loss + three-segment sub-interval breakdown) exactly as the MKF bridge
+// solvers do. The rectifier is fixed to CENTER_TAPPED (the MKF default). The ZVS /
+// ngspice *diagnostic* outputs MKF also produces do not change any winding waveform
+// and are omitted; the duty-cycle-loss kernel result (which DOES shape the waveforms)
+// is kept. The effective duty cycle is derived from `phaseShiftDegrees` (D_cmd =
+// |phi|/180); a non-positive phase shift throws (no default duty is substituted).
+
+// Phase-shifted full bridge (CCM, center-tapped). The primary swings ±Vin; pushes
+// Primary + a center-tapped pair "Secondary i a"/"Secondary i b" per output (each
+// half-winding carries the reflected output-inductor current on alternate half-cycles
+// and reverse-blocks on the other). `seriesInductance` is the resonant/leakage Lr
+// (must be > 0 — feeds the Sabate duty-cycle loss and the freewheel decay);
+// `outputInductance` Lo sets the output-inductor ripple ΔILo = Vo·(1−Deff)/(Fs·Lo)
+// (Lo ≤ 0 ⇒ zero ripple). Ported from MKF PhaseShiftedFullBridge.cpp:359. Throws on
+// non-positive Vin / turns ratio / Fs / Lm / Lr / phase shift.
+MAS::OperatingPoint analytical_psfb(double inputVoltage,
+                                    const std::vector<double>& outputVoltages,
+                                    const std::vector<double>& outputCurrents,
+                                    const std::vector<double>& turnsRatios,
+                                    double switchingFrequency, double magnetizingInductance,
+                                    double seriesInductance, double outputInductance,
+                                    double phaseShiftDegrees, double diodeVoltageDrop = 0.0);
+
+// Phase-shifted half bridge (3-level NPC, CCM, center-tapped). Identical sub-interval
+// model to the PSFB but the primary swings ±Vin/2 (BRIDGE_VOLTAGE_FACTOR = 0.5) and the
+// freewheel decay is MOSFET-RON-limited rather than diode-limited. Same winding set
+// (Primary + center-tapped pairs) and same parameters as `analytical_psfb`. Ported from
+// MKF PhaseShiftedHalfBridge.cpp:318. Throws on the same non-positive conditions.
+MAS::OperatingPoint analytical_pshb(double inputVoltage,
+                                    const std::vector<double>& outputVoltages,
+                                    const std::vector<double>& outputCurrents,
+                                    const std::vector<double>& turnsRatios,
+                                    double switchingFrequency, double magnetizingInductance,
+                                    double seriesInductance, double outputInductance,
+                                    double phaseShiftDegrees, double diodeVoltageDrop = 0.0);
+
+// Asymmetric half bridge (CCM, center-tapped). Complementary-duty half bridge with a
+// series DC-blocking cap Cb. Pushes Primary + center-tapped "Secondary 0a"/"Secondary 0b"
+// (single output), or per-output load-share "Secondary k" (multi-output). Key AHB physics:
+// the Cb forces mean(i_pri)=0, so the magnetizing current carries a DC bias
+// mean(i_Lm)=(Io/n)(1−2D); the primary voltage is +(1−D)Vin during D·Tsw and −D·Vin during
+// (1−D)·Tsw (volt-second balanced). `dutyCycle` D ∈ (0,1) is explicit; `currentRippleRatio`
+// sizes the output inductor via compute_lo_min (the actual ΔILo is smaller, set by the
+// AHB secondary-voltage geometry). Ported from MKF AsymmetricHalfBridge.cpp:460 (the
+// CENTER_TAPPED standard path; AHB-Flyback/V5 and FB/CD rectifiers are NOT ported).
+// Throws if D ∉ (0,1), any turns ratio ≤ 0, Vin/Vo/Fs/Lm ≤ 0, or vector sizes mismatch.
+MAS::OperatingPoint analytical_asymmetric_half_bridge(double inputVoltage,
+                                                      const std::vector<double>& outputVoltages,
+                                                      const std::vector<double>& outputCurrents,
+                                                      const std::vector<double>& turnsRatios,
+                                                      double switchingFrequency, double magnetizingInductance,
+                                                      double dutyCycle, double currentRippleRatio,
+                                                      double diodeVoltageDrop = 0.0);
+
 } // namespace analytical
 } // namespace Kirchhoff

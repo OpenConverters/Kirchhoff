@@ -290,3 +290,50 @@ TEST_CASE("analytical_active_clamp_forward rejects t1 > T/2", "[analytical][solv
     // n=8 -> t1 = period*5/(48/8) = 0.83*period > period/2.
     CHECK_THROWS(analytical_active_clamp_forward(48, {5}, {10}, {8}, 100000, 1e-3, 10e-6, 0.3));
 }
+
+// ─── Phase 4: phase-shifted bridge family (structural invariants) ───────────
+// NOTE: these check the invariants that hold by construction (antisymmetric primary
+// => zero-mean V and I; winding counts; throw guards). The secondary-winding current
+// FIDELITY (freewheel attribution, ZVS freewheel-tau constants) is NOT asserted here
+// pending the independent MKF-fidelity review + the ngspice NRMSE cross-check.
+
+TEST_CASE("analytical_psfb: antisymmetric primary, 3 windings", "[analytical][solver][psfb]") {
+    using Kirchhoff::analytical::analytical_psfb;
+    // 400 V -> 12 V, 20 A, 100 kHz, n=27, Lm=1 mH, Lr=5 uH, Lo=5 uH, phase=144 deg (D_cmd=0.8).
+    MAS::OperatingPoint op = analytical_psfb(400, {12}, {20}, {27}, 100000, 1e-3, 5e-6, 5e-6, 144);
+    REQUIRE(op.get_excitations_per_winding().size() == 3);            // Primary + Secondary 0a + 0b
+    CHECK(*processed_current(op, 0).get_average() == Catch::Approx(0.0).margin(0.5));   // antisymmetric
+    CHECK(voltage_average(op, 0) == Catch::Approx(0.0).margin(5.0));                    // volt-second balance
+}
+
+TEST_CASE("analytical_psfb rejects zero phase shift / bad inputs", "[analytical][solver][psfb]") {
+    using Kirchhoff::analytical::analytical_psfb;
+    CHECK_THROWS(analytical_psfb(400, {12}, {20}, {27}, 100000, 1e-3, 5e-6, 5e-6, 0));    // D_cmd=0
+    CHECK_THROWS(analytical_psfb(0,   {12}, {20}, {27}, 100000, 1e-3, 5e-6, 5e-6, 144));  // Vin=0
+}
+
+TEST_CASE("analytical_pshb: antisymmetric primary (+/-Vin/2), 3 windings", "[analytical][solver][pshb]") {
+    using Kirchhoff::analytical::analytical_pshb;
+    MAS::OperatingPoint op = analytical_pshb(400, {12}, {20}, {14}, 100000, 1e-3, 5e-6, 5e-6, 144);
+    REQUIRE(op.get_excitations_per_winding().size() == 3);
+    CHECK(*processed_current(op, 0).get_average() == Catch::Approx(0.0).margin(0.5));
+    CHECK(voltage_average(op, 0) == Catch::Approx(0.0).margin(5.0));
+}
+
+TEST_CASE("analytical_asymmetric_half_bridge: zero-mean primary (Cb blocks DC), 3 windings",
+          "[analytical][solver][ahb]") {
+    using Kirchhoff::analytical::analytical_asymmetric_half_bridge;
+    // 48 V -> 12 V, 5 A, 100 kHz, n=2, Lm=200 uH, D=0.4, ripple=0.3.
+    MAS::OperatingPoint op = analytical_asymmetric_half_bridge(48, {12}, {5}, {2}, 100000, 200e-6, 0.4, 0.3);
+    REQUIRE(op.get_excitations_per_winding().size() == 3);            // Primary + Secondary 0a + 0b
+    // Series blocking cap forces zero-mean primary current; primary voltage volt-second balanced
+    // ((1-D)*Vin during D*T, -D*Vin during (1-D)*T).
+    CHECK(*processed_current(op, 0).get_average() == Catch::Approx(0.0).margin(0.3));
+    CHECK(voltage_average(op, 0) == Catch::Approx(0.0).margin(0.5));
+}
+
+TEST_CASE("analytical_asymmetric_half_bridge rejects duty outside (0,1)", "[analytical][solver][ahb]") {
+    using Kirchhoff::analytical::analytical_asymmetric_half_bridge;
+    CHECK_THROWS(analytical_asymmetric_half_bridge(48, {12}, {5}, {2}, 100000, 200e-6, 1.0, 0.3));
+    CHECK_THROWS(analytical_asymmetric_half_bridge(48, {12}, {5}, {2}, 100000, 200e-6, 0.0, 0.3));
+}
