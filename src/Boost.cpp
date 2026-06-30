@@ -3,6 +3,8 @@
 #include "ComponentRequirements.hpp"
 #include "KirchhoffConfig.hpp"
 #include <vector>
+#include <stdexcept>
+#include <string>
 
 namespace Kirchhoff {
 using nlohmann::json;
@@ -32,6 +34,15 @@ BoostDesign design_boost(const json& tasInputs) {
     d.diodeDrop = req::dideal_diode_drop(d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
     const double Vo = d.outputVoltage + d.diodeDrop;
     d.dutyCycle = 1.0 - d.inputVoltage * d.efficiency / Vo;  // MKF Boost::calculate_duty_cycle
+    // A boost can only STEP UP: it needs Vout > Vin/efficiency, otherwise the duty goes <= 0 and the
+    // sized output capacitance (iout*D/(fsw*ripple*Vo)) flips NEGATIVE (abt #68). Fail loud rather than
+    // emit a degraded/negative design (CLAUDE.md no-fallback rule) — a mis-specced step-down boost is a
+    // spec error the caller must fix, not silently clamp.
+    if (d.dutyCycle <= 0.0)
+        throw std::runtime_error(
+            "Kirchhoff boost: requires Vout > Vin/efficiency (boost cannot step down); got Vin="
+            + std::to_string(d.inputVoltage) + " V, Vout=" + std::to_string(d.outputVoltage)
+            + " V, efficiency=" + std::to_string(d.efficiency) + " -> duty <= 0");
 
     // Inductance — faithful port of MKF Boost::process_design_requirements():
     //   maximumCurrentRiple = currentRippleRatio · Iout

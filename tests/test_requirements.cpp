@@ -564,6 +564,21 @@ TEST_CASE("Buck synchronous rectifier regulates (abt #67)", "[requirements][buck
     CHECK(std::fabs(vS - vReq) / vReq <= kReqTol);
 }
 TEST_CASE("Boost PtP reference designs deliver spec", "[requirements][ptp][boost]")         { check_topo_points("boost"); }
+// abt #68: a boost can only step UP. A mis-specced step-down request (Vin*eff >= Vout) used to emit a
+// NEGATIVE output capacitance (duty <= 0); design_boost must now THROW a clear error instead. A valid
+// step-up still designs fine with a positive Cout.
+TEST_CASE("Boost rejects a step-down spec (abt #68)", "[requirements][boost]") {
+    auto in = [](double vin, double vout) {
+        json i; i["inputVoltage"] = vin; i["outputVoltage"] = vout;
+        i["outputPower"] = 24.0; i["switchingFrequency"] = 250e3; return i; };
+    // valid step-up 12 -> 48 V: designs, positive duty + capacitance.
+    auto good = Kirchhoff::design_boost(kirchhoff_inputs(in(12.0, 48.0)));
+    CHECK(good.dutyCycle > 0.0);
+    CHECK(good.outputCapacitance > 0.0);
+    // invalid step-down requests (Vout < Vin): both must throw (no negative Cout).
+    REQUIRE_THROWS_AS(Kirchhoff::design_boost(kirchhoff_inputs(in(48.0, 12.0))), std::runtime_error);
+    REQUIRE_THROWS_AS(Kirchhoff::design_boost(kirchhoff_inputs(in(24.0, 18.0))), std::runtime_error);
+}
 TEST_CASE("Flyback PtP reference designs deliver spec", "[requirements][ptp][flyback]")     { check_topo_points("flyback"); }
 TEST_CASE("SEPIC PtP reference designs deliver spec", "[requirements][ptp][sepic]")         { check_topo_points("sepic"); }
 TEST_CASE("Zeta PtP reference designs deliver spec", "[requirements][ptp][zeta]")           { check_topo_points("zeta"); }
