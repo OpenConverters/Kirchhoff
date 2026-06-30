@@ -12,10 +12,12 @@ namespace Kirchhoff {
 struct BoostDesign {
     double inputVoltage, outputVoltage, outputPower, switchingFrequency, efficiency, diodeDrop;
     double inputVoltageMin, inputVoltageMax;   // design corners (min V: max current; max V: max stress)
-    double dutyCycle;       // D = 1 - Vin/(Vout+Vd)
+    double dutyCycle;       // D = 1 - Vin*eff/(Vout+Vd) (diode); D = 1 - Vin*eff/Vout (synchronous, no Vf)
     double inductance;      // boost inductor (H)
     double loadResistance;  // Vout^2/Pout
     double outputCapacitance;
+    double deadFraction;    // sync-rectifier dead-time fraction of the period (synchronous only)
+    bool synchronousRectifier;  // output rectifier = high-side MOSFET (config "rectifier"="synchronous")
     nlohmann::json config;
 };
 

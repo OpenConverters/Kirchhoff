@@ -31,9 +31,19 @@ BoostDesign design_boost(const json& tasInputs) {
         d.outputPower = nominal(dr.at("outputs").at(0).at("power"));
     }
 
+    // Output rectifier variant (config-gated, no schema change; default = diode for back-compat).
+    // "synchronous" replaces the high-side output diode with a high-side MOSFET (abt #67) — lower
+    // conduction loss (I^2*Rds vs I*Vf) -> higher efficiency.
+    d.synchronousRectifier = (cfg::get_str(d.config, "rectifier", "diode") == std::string("synchronous"));
+    d.deadFraction = cfg::get(d.config, "deadTimeFraction", 0.01);   // 1% of the period per dead band
+
     d.diodeDrop = req::dideal_diode_drop(d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
     const double Vo = d.outputVoltage + d.diodeDrop;
-    d.dutyCycle = 1.0 - d.inputVoltage * d.efficiency / Vo;  // MKF Boost::calculate_duty_cycle
+    // With a synchronous rectifier the output path is a near-ideal MOSFET (no Vf), so NO diode-drop
+    // compensation: D = 1 - Vin*eff/Vout. With a diode, compensate for its forward drop as MKF does.
+    d.dutyCycle = d.synchronousRectifier
+        ? 1.0 - d.inputVoltage * d.efficiency / d.outputVoltage
+        : 1.0 - d.inputVoltage * d.efficiency / Vo;  // MKF Boost::calculate_duty_cycle
     // A boost can only STEP UP: it needs Vout > Vin/efficiency, otherwise the duty goes <= 0 and the
     // sized output capacitance (iout*D/(fsw*ripple*Vo)) flips NEGATIVE (abt #68). Fail loud rather than
     // emit a degraded/negative design (CLAUDE.md no-fallback rule) — a mis-specced step-down boost is a
@@ -106,6 +116,13 @@ json build_boost_tas(const BoostDesign& d) {
     mosfet["inputs"]["designRequirements"] = req::mosfet("mainSwitch", ratedVds, IpkL, maxRdsOn, 125.0);
     json diode;  diode["semiconductor"]["diode"] = json::object();
     diode["inputs"]["designRequirements"] = req::diode(ratedVr, Iout / 0.7, maxVf, 0.05 * T);
+    // Synchronous output rectifier (abt #67): a HIGH-SIDE MOSFET Q2 (drain=vout, source=sw_node) carries
+    // the off-time output current through its channel (I^2*Rds, much less than a diode's I*Vf) plus its own
+    // body diode D2 across the dead time. Sized like the main switch (blocks Vout, carries the inductor pk).
+    json syncFet; syncFet["semiconductor"]["mosfet"] = json::object();
+    syncFet["inputs"]["designRequirements"] = req::mosfet("synchronousRectifier", ratedVds, IpkL, maxRdsOn, 125.0);
+    json bodyD; bodyD["semiconductor"]["diode"] = json::object();
+    bodyD["inputs"]["designRequirements"] = req::body_diode(ratedVds, Iout / 0.7);
     json capd; capd["capacitor"] = json::object();
     capd["inputs"]["designRequirements"] = req::capacitor(
         d.outputCapacitance, d.outputVoltage / cfg::v_derate_capacitor(d.config), IcoutRms,
@@ -114,15 +131,31 @@ json build_boost_tas(const BoostDesign& d) {
     // The boost power stage is ONE functional block (the switching cell): inductor + switch + diode.
     // A canonical TAS power stage is a series two-port (dcBus in -> pulsatingDc out); the shunt switch
     // and the inductor are internal to it, not separate stages. (sw_node stays brick-internal.)
+    // DEFAULT: high-side output diode D1 (sw_node->vout). SYNCHRONOUS: high-side MOSFET Q2 (drain=vout,
+    // source=sw_node) + its body diode D2 (anode=sw_node, cathode=vout, same orientation as D1).
     json cell; cell["name"] = "boost-switching-cell";
-    cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate")});
-    cell["components"] = json::array({comp("L1", ind), comp("Q1", mosfet), comp("D1", diode)});
-    cell["connections"] = json::array({
-        conn("vin_net",  {pin("L1", "primary_start"), prt("vin")}),
-        conn("sw_node",  {pin("L1", "primary_end"), pin("Q1", "drain"), pin("D1", "anode")}),
-        conn("gnd_net",  {pin("Q1", "source"), prt("gnd")}),
-        conn("vout_net", {pin("D1", "cathode"), prt("vout")}),
-        conn("gate_net", {pin("Q1", "gate"), prt("gate")})});
+    if (d.synchronousRectifier) {
+        cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate"), port("gate2")});
+        cell["components"] = json::array({comp("L1", ind), comp("Q1", mosfet),
+                                          comp("Q2", syncFet), comp("D2", bodyD)});
+        cell["connections"] = json::array({
+            conn("vin_net",  {pin("L1", "primary_start"), prt("vin")}),
+            conn("sw_node",  {pin("L1", "primary_end"), pin("Q1", "drain"),
+                              pin("Q2", "source"), pin("D2", "anode")}),
+            conn("gnd_net",  {pin("Q1", "source"), prt("gnd")}),
+            conn("vout_net", {pin("Q2", "drain"), pin("D2", "cathode"), prt("vout")}),
+            conn("gate_net", {pin("Q1", "gate"), prt("gate")}),
+            conn("gate2_net",{pin("Q2", "gate"), prt("gate2")})});
+    } else {
+        cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate")});
+        cell["components"] = json::array({comp("L1", ind), comp("Q1", mosfet), comp("D1", diode)});
+        cell["connections"] = json::array({
+            conn("vin_net",  {pin("L1", "primary_start"), prt("vin")}),
+            conn("sw_node",  {pin("L1", "primary_end"), pin("Q1", "drain"), pin("D1", "anode")}),
+            conn("gnd_net",  {pin("Q1", "source"), prt("gnd")}),
+            conn("vout_net", {pin("D1", "cathode"), prt("vout")}),
+            conn("gate_net", {pin("Q1", "gate"), prt("gate")})});
+    }
 
     // Output filter = Cout only; the LOAD is synthesized from the outputs requirement by the
     // assembler (it is a boundary condition, not a converter stage — the dual of the input source).
@@ -165,6 +198,18 @@ json build_boost_tas(const BoostDesign& d) {
     st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;
     st["waveform"]["dutyCycle"] = d.dutyCycle;
     tas["simulation"]["stimulus"] = json::array({st});
+    if (d.synchronousRectifier) {
+        // Q2 drives complementary to the low-side main switch Q1 with a dead band on each edge; the body
+        // diode D2 carries the inductor current across the dead time (prevents shoot-through vout->gnd).
+        // duty = (1-D) - 2*dt, phased to start after Q1 turns off. The gate is ground-referenced like Q1
+        // (the deck models the switch as a gate-to-ground VC-switch, so the floating source is transparent).
+        const double dt = d.deadFraction;
+        json st2; st2["stage"] = "switchingCell"; st2["component"] = "Q2"; st2["signal"] = "gate";
+        st2["waveform"]["type"] = "pwm"; st2["waveform"]["frequency"] = d.switchingFrequency;
+        st2["waveform"]["dutyCycle"] = std::max(0.0, (1.0 - d.dutyCycle) - 2.0 * dt);
+        st2["waveform"]["phase"] = (d.dutyCycle + dt) * 360.0;
+        tas["simulation"]["stimulus"].push_back(st2);
+    }
     req::finalize_control_seeds(tas, Topology::BOOST_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
