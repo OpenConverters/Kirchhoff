@@ -13,20 +13,24 @@
 // The enum's canonical JSON string is the exact camelCase the CTAS controller-seed `topology` field
 // expects (Topology::FLYBACK_CONVERTER -> "flybackConverter"), so the assembled JSON is byte-identical
 // to the old hand-written strings — a pure type-safety win (compiler-checked vs typo-prone literals).
+//
+// There is exactly ONE enum type: MAS.hpp holds the single quicktype-generated definition, and
+// PEAS_Topology.hpp aliases it as PEAS::Topology (the PEAS-owned name). Kirchhoff uses PEAS::Topology.
 
-#include "PEAS_Topology.hpp"   // generated: enum class PEAS::Topology (+ to_json/from_json)
+#include "MAS.hpp"            // the single generated Topology enum definition (+ its to_json/from_json)
+#include "PEAS_Topology.hpp"  // PEAS::Topology — alias of that one enum (no second type)
 #include <nlohmann/json.hpp>
 #include <string>
 
 namespace Kirchhoff {
 
-// The canonical taxonomy — PEAS-owned.
+// The canonical taxonomy — PEAS-owned name for the single Topology enum.
 using Topology = PEAS::Topology;
 
-// Serialize a topology to its canonical JSON string (PEAS's to_json map). THROWS via nlohmann if the
-// enum value has no mapping — no silent fallback (per the no-fallbacks rule).
+// Serialize a topology to its canonical JSON string. THROWS via nlohmann if the enum value has no
+// mapping — no silent fallback (per the no-fallbacks rule).
 inline std::string topology_to_string(Topology t) {
-    nlohmann::json j = t;            // PEAS::to_json(json&, const Topology&) via ADL
+    nlohmann::json j = t;            // to_json(json&, const Topology&) via ADL (the one generated map)
     return j.get<std::string>();
 }
 

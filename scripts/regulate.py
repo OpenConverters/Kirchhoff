@@ -135,13 +135,14 @@ def _set_control(tas, field, value, topology=None):
             if wf.get("type") == "pwm" and st.get("component") in outer:
                 wf["dutyCycle"] = value
         return
-    if topology in ("fsbb", "ahb", "buck") and field == "dutyCycle":
-        # fsbb/ahb: coordinated 4-/2-switch complementary modulation. SYNCHRONOUS buck (abt #67): the
-        # high-side Q1 (phase 0) runs at the bisected duty D=value while the low-side sync rectifier Q2
-        # (phase (D+dt)·360 ≠ 0) runs the COMPLEMENT (1−D)−2·dt — a blanket uniform overwrite would drive
-        # Q2 at the SAME duty as Q1, leaving the body diode to conduct the rest of the freewheel period
-        # (worse than the diode it replaced). A DIODE buck has only the single phase-0 switch, so this
-        # branch sets just its duty — identical to the generic loop (no behaviour change for the default).
+    if topology in ("fsbb", "ahb", "buck", "boost") and field == "dutyCycle":
+        # fsbb/ahb: coordinated 4-/2-switch complementary modulation. SYNCHRONOUS buck/boost (abt #67): the
+        # phase-0 main switch (buck high-side Q1 / boost low-side Q1) runs at the bisected duty D=value while
+        # the sync rectifier Q2 (phase (D+dt)·360 ≠ 0; buck low-side / boost high-side) runs the COMPLEMENT
+        # (1−D)−2·dt — a blanket uniform overwrite would drive Q2 at the SAME duty as Q1, leaving the body
+        # diode to conduct the rest of the rectifier period (worse than the diode it replaced). A DIODE
+        # buck/boost has only the single phase-0 switch, so this branch sets just its duty — identical to
+        # the generic loop (no behaviour change for the default).
         dt = float(tas.get("_fsbbDeadFraction", 0.0))
         for st in tas.get("simulation", {}).get("stimulus", []):
             wf = st.get("waveform", {})
@@ -654,9 +655,9 @@ def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_
         raise ValueError(f"no control-variable mapping for topology '{topology}'")
     if topology not in _SELF_REGULATED:
         field, bracket = _CONTROL[ctrl]
-    if topology in ("fsbb", "ahb", "buck"):
+    if topology in ("fsbb", "ahb", "buck", "boost"):
         _stash_fsbb_modulation(tas)   # capture dead-time before the bisection overwrites duties (complementary;
-                                       # buck = synchronous-rectifier variant, no-op for the diode buck)
+                                       # buck/boost = synchronous-rectifier variant, no-op for the diode default)
     elif topology == "pshb":
         _stash_pshb_modulation(tas)   # capture the NPC outer pair before the bisection overwrites duties (abt #66)
     # A magnetic that can't give a valid regulated point (the deck collapses across the whole bracket): either

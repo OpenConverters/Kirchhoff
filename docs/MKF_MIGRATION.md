@@ -239,22 +239,24 @@ governance rule is respected). Both KH and MKF already generate their `MAS::Topo
 `PEAS/schemas/utils.json` in the quicktype `-S` graph, i.e. they were *already* consuming the
 PEAS-owned vocabulary; only the C++ namespace *label* was `MAS::`.
 
-- **KH (done, `<commit>`):** `PEAS_Topology.hpp` is now generated at build time from the canonical
-  `$def` (`scripts/gen_peas_topology.sh` → quicktype `--namespace PEAS`, wired as a CMake custom
-  command like MAS.hpp). `src/Topology.hpp` repoints `using Topology = PEAS::Topology`. The ~24
-  converter `.cpp` and `ComponentRequirements.hpp` are unchanged (they use the `Kirchhoff::Topology`
-  alias + JSON only — verified no `get_topology()` struct coupling). Identical values + serialization
-  → byte-identical assembled JSON; full suite unchanged (134/32).
-- **MKF (no change — deliberately):** MKF is **already** consuming the PEAS-owned enum (its generated
-  `MAS::Topology` values come from `PEAS/schemas/utils.json`). A C++ repoint of MKF to `PEAS::Topology`
-  is **NOT done**: ~67 files use `MAS::Topology`, and ~14 are *bound to the generated struct field*
-  (`DesignRequirements::get_topology()/set_topology()` are typed `MAS::Topology` by quicktype and can't
-  be repointed without regenerating MAS.hpp itself). Introducing a second, identical-but-distinct
-  `PEAS::Topology` alongside `MAS::Topology` across 30+ `switch`/`map` sites is exactly the
-  dual-enum / total-switch hazard the numeric-correctness guardrails warn about, for **zero functional
-  gain** (values + JSON are identical). Recommended: leave MKF on the `MAS::`-labelled enum (it already
-  IS the PEAS vocabulary); revisit only if/when MKF drops converters and the MAS.hpp generation itself
-  is changed. **Flagged as a decision** — say the word to force the MKF C++ repoint despite the risk.
+**There is exactly ONE enum type.** quicktype always emits the single `MAS::Topology` (the `$def` is
+reachable from `MAS::DesignRequirements` and quicktype has no cross-namespace type sharing). Rather
+than generate a *second*, identical `PEAS::Topology` enum — a distinct C++ type that would invite
+silent `switch`/`map` mismatches — **`PEAS::Topology` is a type ALIAS of that one enum**
+(`src/PEAS_Topology.hpp`: `namespace MAS { enum class Topology : int; } namespace PEAS { using
+Topology = ::MAS::Topology; }`). A `static_assert(std::is_same<MAS::Topology, PEAS::Topology>)` guards
+the invariant.
+
+- **KH (done):** `src/Topology.hpp` includes `MAS.hpp` (the one definition) + `PEAS_Topology.hpp` (the
+  alias) and exposes `using Topology = PEAS::Topology`. The ~24 converter `.cpp` + `ComponentRequirements.hpp`
+  are unchanged (they use the `Kirchhoff::Topology` alias + JSON only). Byte-identical assembled JSON;
+  full suite 134/32; the static_assert proves no dual enum.
+- **MKF (to do, same approach):** add the same `PEAS_Topology.hpp` alias header and `sed` the ~67
+  hand-written `MAS::Topology` sites → `PEAS::Topology`. Because it is an *alias* (one type), the
+  ~14 struct-bound sites (`get_topology()/set_topology()` return/take `MAS::Topology` = `PEAS::Topology`)
+  keep working with **no MAS.hpp regeneration** and **no dual-enum hazard** — `switch`/`map` over the
+  single type stays total. The generated `MAS.hpp` is untouched (it keeps the one definition; MKF code
+  just refers to it by the `PEAS::` alias).
 
 ## Dependency versions (checked 2026-06-29)
 
