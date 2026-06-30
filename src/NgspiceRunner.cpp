@@ -15,14 +15,18 @@ std::string to_lower(std::string s) {
     return s;
 }
 
-// Strip a "v(...)" / "i(...)" wrapper and any "plot." prefix, lower-cased — so average("v(Vout)") and
-// average("vout") both resolve to the captured vector "vout" (ngspice may name it "tran1.vout").
+// Canonicalize a vector name for matching: lower-case; strip a "v(...)" / "i(...)" wrapper; strip any
+// "plot." prefix (ngspice may name a vector "tran1.vout"); and strip a trailing "#branch" (ngspice names
+// a source's current "VVin#branch"). So average("v(Vout)")/"vout"/"tran1.vout" and
+// average("i(VVin)")/"VVin#branch" all resolve to their captured vector.
 std::string canonical_vec(std::string name) {
     name = to_lower(name);
     if (name.size() > 3 && (name.compare(0,2,"v(")==0 || name.compare(0,2,"i(")==0) && name.back()==')')
         name = name.substr(2, name.size() - 3);
     auto dot = name.rfind('.');
     if (dot != std::string::npos) name = name.substr(dot + 1);
+    auto br = name.rfind("#branch");
+    if (br != std::string::npos && br + 7 == name.size()) name = name.substr(0, br);
     return name;
 }
 
