@@ -1370,5 +1370,204 @@ MAS::OperatingPoint analytical_asymmetric_half_bridge(double inputVoltage,
     return operatingPoint;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 4: Dual Active Bridge (DAB) — triple-phase-shift (SPS/EPS/DPS/TPS).
+// The closed-form 8-segment sub-interval propagator below is a faithful port of
+// MKF Dab.cpp:156-349: both bridge voltages Vab(θ)/Vcd(θ) are piecewise-constant,
+// so the tank current iL(θ) and magnetizing current Im(θ) are exactly piecewise-
+// linear; iL(0)/Im(0) are fixed by half-wave antisymmetry x(π)=−x(0). The MKF
+// ZVS/modulation-type diagnostics do not shape a winding waveform and are omitted.
+// ─────────────────────────────────────────────────────────────────────────────
+namespace {
+
+double dab_Vab_at(double theta, double V1, double D1) {
+    theta = std::fmod(theta, 2.0 * M_PI);
+    if (theta < 0) theta += 2.0 * M_PI;
+    if (theta < D1)        return 0.0;
+    if (theta < M_PI)      return  V1;
+    if (theta < M_PI + D1) return 0.0;
+    return -V1;
+}
+double dab_Vcd_at(double theta, double V2, double D2, double D3) {
+    double ts = std::fmod(theta - D3, 2.0 * M_PI);
+    if (ts < 0) ts += 2.0 * M_PI;
+    if (ts < D2)        return 0.0;
+    if (ts < M_PI)      return  V2;
+    if (ts < M_PI + D2) return 0.0;
+    return -V2;
+}
+struct DabSubInterval { double theta_start, theta_end, Vab, Vcd; };
+
+std::vector<double> dab_boundary_angles(double D1, double D2, double D3) {
+    auto wrap = [](double a) { a = std::fmod(a, 2.0 * M_PI); if (a < 0) a += 2.0 * M_PI; return a; };
+    std::vector<double> raw = {0.0, wrap(D1), wrap(M_PI), wrap(M_PI + D1),
+                               wrap(D3), wrap(D3 + D2), wrap(D3 + M_PI), wrap(D3 + M_PI + D2)};
+    std::sort(raw.begin(), raw.end());
+    std::vector<double> out;
+    out.reserve(raw.size() + 1);
+    constexpr double EPS = 1e-9;
+    for (double a : raw) if (out.empty() || a - out.back() > EPS) out.push_back(a);
+    if (out.empty() || out.back() < 2.0 * M_PI - EPS) out.push_back(2.0 * M_PI);
+    return out;
+}
+std::vector<DabSubInterval> dab_build_subintervals(double V1, double V2, double D1, double D2, double D3) {
+    auto angles = dab_boundary_angles(D1, D2, D3);
+    std::vector<DabSubInterval> segs;
+    segs.reserve(angles.size());
+    for (size_t k = 0; k + 1 < angles.size(); ++k) {
+        double a0 = angles[k], a1 = angles[k + 1], mid = 0.5 * (a0 + a1);
+        segs.push_back({a0, a1, dab_Vab_at(mid, V1, D1), dab_Vcd_at(mid, V2, D2, D3)});
+    }
+    return segs;
+}
+// iL(0)/Im(0) from half-wave antisymmetry x(π) = −x(0): x(0) = −½·∫₀^π (dx/dt) dt.
+void dab_initial_conditions(const std::vector<DabSubInterval>& segs, double N, double L, double Lm,
+                            double Fs, double& iL0, double& Im0) {
+    double inv_iL = 1.0 / (L * 2.0 * M_PI * Fs);
+    double inv_Im = 1.0 / (Lm * 2.0 * M_PI * Fs);
+    double sum_iL = 0.0, sum_Im = 0.0;
+    for (const auto& s : segs) {
+        if (s.theta_start >= M_PI) break;
+        double end = std::min(s.theta_end, M_PI);
+        double dtheta = end - s.theta_start;
+        if (dtheta <= 0) continue;
+        double vL = s.Vab - N * s.Vcd;
+        sum_iL += vL * inv_iL * dtheta;
+        sum_Im += s.Vab * inv_Im * dtheta;
+    }
+    iL0 = -0.5 * sum_iL;
+    Im0 = -0.5 * sum_Im;
+}
+void dab_propagate_period(const std::vector<DabSubInterval>& segs, double N, double L, double Lm, double Fs,
+                          double iL0, double Im0, std::vector<double>& bt, std::vector<double>& bi,
+                          std::vector<double>& bm) {
+    double inv_iL = 1.0 / (L * 2.0 * M_PI * Fs);
+    double inv_Im = 1.0 / (Lm * 2.0 * M_PI * Fs);
+    bt.clear(); bi.clear(); bm.clear();
+    bt.reserve(segs.size() + 1); bi.reserve(segs.size() + 1); bm.reserve(segs.size() + 1);
+    double iL = iL0, Im = Im0;
+    bt.push_back(0.0); bi.push_back(iL); bm.push_back(Im);
+    for (const auto& s : segs) {
+        double dtheta = s.theta_end - s.theta_start;
+        double vL = s.Vab - N * s.Vcd;
+        iL += vL * inv_iL * dtheta;
+        Im += s.Vab * inv_Im * dtheta;
+        bt.push_back(s.theta_end); bi.push_back(iL); bm.push_back(Im);
+    }
+}
+double dab_sample(double theta, const std::vector<double>& bt, const std::vector<double>& by) {
+    if (bt.empty()) return 0.0;
+    if (theta <= bt.front()) return by.front();
+    if (theta >= bt.back())  return by.back();
+    auto it = std::upper_bound(bt.begin(), bt.end(), theta);
+    size_t hi = static_cast<size_t>(it - bt.begin()), lo = hi - 1;
+    double t = (theta - bt[lo]) / (bt[hi] - bt[lo]);
+    return by[lo] + t * (by[hi] - by[lo]);
+}
+
+}  // anonymous namespace
+
+// Ported from MKF converter_models/Dab.cpp:701 (process_operating_point_for_input_voltage).
+MAS::OperatingPoint analytical_dab(double inputVoltage,
+                                   const std::vector<double>& outputVoltages,
+                                   const std::vector<double>& outputCurrents,
+                                   const std::vector<double>& turnsRatios,
+                                   double switchingFrequency, double magnetizingInductance,
+                                   double seriesInductance,
+                                   double innerPhaseShiftD1Degrees,
+                                   double innerPhaseShiftD2Degrees,
+                                   double outerPhaseShiftD3Degrees) {
+    using Lbl = MAS::WaveformLabel;
+    if (outputVoltages.empty() || outputVoltages.size() != outputCurrents.size() ||
+        outputVoltages.size() != turnsRatios.size())
+        throw std::invalid_argument("analytical_dab: outputVoltages/outputCurrents/turnsRatios "
+                                    "must be non-empty and equal length");
+    const double Fs = switchingFrequency;
+    if (Fs <= 0) throw std::invalid_argument("analytical_dab: switching frequency must be positive");
+    const double Lm = magnetizingInductance;
+    if (Lm <= 0) throw std::invalid_argument("analytical_dab: magnetizing inductance must be positive");
+    const double L = seriesInductance;
+    if (L <= 0) throw std::invalid_argument("analytical_dab: series inductance must be positive");
+
+    const double V1 = inputVoltage;
+    const double N_main = turnsRatios[0];
+    const double V2_main = outputVoltages[0];
+    const double D1_rad = innerPhaseShiftD1Degrees * M_PI / 180.0;
+    const double D2_rad = innerPhaseShiftD2Degrees * M_PI / 180.0;
+    const double D3_rad = outerPhaseShiftD3Degrees * M_PI / 180.0;
+
+    const double period = 1.0 / Fs;
+    const double Thalf = period / 2.0;
+
+    auto segs = dab_build_subintervals(V1, V2_main, D1_rad, D2_rad, D3_rad);
+    double iL_start = 0.0, Im_start = 0.0;
+    dab_initial_conditions(segs, N_main, L, Lm, Fs, iL_start, Im_start);
+    std::vector<double> bnd_theta, bnd_iL, bnd_Im;
+    dab_propagate_period(segs, N_main, L, Lm, Fs, iL_start, Im_start, bnd_theta, bnd_iL, bnd_Im);
+
+    const int N_samples = 256;
+    const int totalSamples = 2 * N_samples + 1;
+    const double dt = Thalf / N_samples;
+    const double angle_per_time = 2.0 * M_PI * Fs;
+
+    std::vector<double> time_full(totalSamples), iL_full(totalSamples),
+        Vab_full(totalSamples), Im_full(totalSamples);
+    for (int k = 0; k < totalSamples; ++k) {
+        double t = k * dt;
+        double theta = std::fmod(t * angle_per_time, 2.0 * M_PI);
+        if (theta < 0) theta += 2.0 * M_PI;
+        time_full[k] = t;
+        Vab_full[k] = dab_Vab_at(theta, V1, D1_rad);
+        iL_full[k]  = dab_sample(theta, bnd_theta, bnd_iL);
+        Im_full[k]  = dab_sample(theta, bnd_theta, bnd_Im);
+    }
+
+    MAS::OperatingPoint operatingPoint;
+    // Primary: total current = tank iL + magnetizing Im; voltage = Vab (primary bridge square wave).
+    {
+        std::vector<double> I_primary(totalSamples);
+        for (int k = 0; k < totalSamples; ++k) I_primary[k] = iL_full[k] + Im_full[k];
+        MAS::Waveform currentWaveform;
+        currentWaveform.set_ancillary_label(Lbl::CUSTOM);
+        currentWaveform.set_data(I_primary);
+        currentWaveform.set_time(time_full);
+        MAS::Waveform voltageWaveform;
+        voltageWaveform.set_ancillary_label(Lbl::BIPOLAR_RECTANGULAR);
+        voltageWaveform.set_data(Vab_full);
+        voltageWaveform.set_time(time_full);
+        operatingPoint.get_mutable_excitations_per_winding().push_back(
+            WP::complete_excitation(currentWaveform, voltageWaveform, Fs, "Primary"));
+    }
+    // Secondaries: load-share projection of the tank current onto each output (matches MKF).
+    double total_g = 0.0;
+    for (size_t i = 0; i < turnsRatios.size(); ++i)
+        if (outputVoltages[i] > 0 && outputCurrents[i] > 0) total_g += outputCurrents[i] / outputVoltages[i];
+    if (total_g <= 0) total_g = 1.0;
+    for (size_t secIdx = 0; secIdx < turnsRatios.size(); ++secIdx) {
+        double n_i = turnsRatios[secIdx];
+        if (n_i <= 0) continue;
+        double V2_i = outputVoltages[secIdx];
+        double Io_i = outputCurrents[secIdx];
+        double share = (V2_i > 0 && Io_i > 0) ? (Io_i / V2_i) / total_g : (secIdx == 0 ? 1.0 : 0.0);
+        std::vector<double> iSecData(totalSamples), vSecData(totalSamples);
+        for (int k = 0; k < totalSamples; ++k) {
+            iSecData[k] = n_i * iL_full[k] * share;
+            double theta = time_full[k] * angle_per_time;   // Vcd_at wraps internally (matches MKF)
+            vSecData[k] = dab_Vcd_at(theta, V2_i, D2_rad, D3_rad);
+        }
+        MAS::Waveform secCurrentWfm;
+        secCurrentWfm.set_ancillary_label(Lbl::CUSTOM);
+        secCurrentWfm.set_data(iSecData);
+        secCurrentWfm.set_time(time_full);
+        MAS::Waveform secVoltageWfm;
+        secVoltageWfm.set_ancillary_label(Lbl::BIPOLAR_RECTANGULAR);
+        secVoltageWfm.set_data(vSecData);
+        secVoltageWfm.set_time(time_full);
+        operatingPoint.get_mutable_excitations_per_winding().push_back(
+            WP::complete_excitation(secCurrentWfm, secVoltageWfm, Fs, "Secondary " + std::to_string(secIdx)));
+    }
+    return operatingPoint;
+}
+
 } // namespace analytical
 } // namespace Kirchhoff

@@ -222,5 +222,25 @@ MAS::OperatingPoint analytical_asymmetric_half_bridge(double inputVoltage,
                                                       double dutyCycle, double currentRippleRatio,
                                                       double diodeVoltageDrop = 0.0);
 
+// Dual Active Bridge (DAB) — triple-phase-shift (SPS/EPS/DPS/TPS). Both sides are full bridges
+// driving a series-inductor (Lr) tank through the transformer; bidirectional isolated power flow.
+// Phase shifts in DEGREES: D1/D2 are the intra-bridge (primary/secondary leg) shifts, D3 the
+// inter-bridge shift that sets the transferred power and its DIRECTION (sign of D3). `seriesInductance`
+// is the tank Lr, `magnetizingInductance` Lm. Both bridge voltages are piecewise-constant, so the tank
+// current iL(θ) and magnetizing current Im(θ) are exactly piecewise-linear, with iL(0)/Im(0) fixed by
+// half-wave antisymmetry x(π)=−x(0). Pushes Primary (BIPOLAR_RECTANGULAR Vab + tank current iL+Im) +
+// one Secondary i per output (load-share projection of the tank current — exact for a matched single
+// output, approximate for multi-output, as in MKF). Ported from MKF Dab.cpp:701 with its closed-form
+// 8-segment sub-interval propagator (Dab.cpp:156-349). Throws on non-positive Fs / Lm / series inductance.
+MAS::OperatingPoint analytical_dab(double inputVoltage,
+                                   const std::vector<double>& outputVoltages,
+                                   const std::vector<double>& outputCurrents,
+                                   const std::vector<double>& turnsRatios,
+                                   double switchingFrequency, double magnetizingInductance,
+                                   double seriesInductance,
+                                   double innerPhaseShiftD1Degrees = 0.0,
+                                   double innerPhaseShiftD2Degrees = 0.0,
+                                   double outerPhaseShiftD3Degrees = 0.0);
+
 } // namespace analytical
 } // namespace Kirchhoff

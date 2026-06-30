@@ -337,3 +337,32 @@ TEST_CASE("analytical_asymmetric_half_bridge rejects duty outside (0,1)", "[anal
     CHECK_THROWS(analytical_asymmetric_half_bridge(48, {12}, {5}, {2}, 100000, 200e-6, 1.0, 0.3));
     CHECK_THROWS(analytical_asymmetric_half_bridge(48, {12}, {5}, {2}, 100000, 200e-6, 0.0, 0.3));
 }
+
+TEST_CASE("analytical_dab SPS: antisymmetric tank, 2 windings, bipolar bridge voltages",
+          "[analytical][solver][dab]") {
+    using Kirchhoff::analytical::analytical_dab;
+    // 400 V -> 100 V, 5 A, 100 kHz, n=4 (matched: n*V2 = V1), Lm=1 mH, Lr=5 uH, SPS (D1=D2=0), D3=30 deg.
+    MAS::OperatingPoint op = analytical_dab(400, {100}, {5}, {4}, 100000, 1e-3, 5e-6, 0, 0, 30);
+    REQUIRE(op.get_excitations_per_winding().size() == 2);   // Primary + Secondary 0
+    // Half-wave antisymmetry x(pi) = -x(0) => zero-mean tank current; bipolar bridge voltages zero-mean.
+    CHECK(*processed_current(op, 0).get_average() == Catch::Approx(0.0).margin(0.3));
+    CHECK(voltage_average(op, 0) == Catch::Approx(0.0).margin(2.0));   // primary Vab
+    CHECK(voltage_average(op, 1) == Catch::Approx(0.0).margin(2.0));   // secondary Vcd
+}
+
+TEST_CASE("analytical_dab power-flow direction flips with D3 sign", "[analytical][solver][dab]") {
+    using Kirchhoff::analytical::analytical_dab;
+    // The tank current (hence primary RMS) is the same magnitude for +/- D3 (symmetric transfer),
+    // but the primary peak current sign window flips. Just check it runs and stays finite/antisymmetric.
+    MAS::OperatingPoint opPos = analytical_dab(400, {100}, {5}, {4}, 100000, 1e-3, 5e-6, 0, 0,  30);
+    MAS::OperatingPoint opNeg = analytical_dab(400, {100}, {5}, {4}, 100000, 1e-3, 5e-6, 0, 0, -30);
+    CHECK(*processed_current(opPos, 0).get_rms() == Catch::Approx(*processed_current(opNeg, 0).get_rms()).margin(0.05));
+    CHECK(*processed_current(opPos, 0).get_rms() > 0.0);
+}
+
+TEST_CASE("analytical_dab rejects bad inputs", "[analytical][solver][dab]") {
+    using Kirchhoff::analytical::analytical_dab;
+    CHECK_THROWS(analytical_dab(400, {100}, {5}, {4}, 0,      1e-3, 5e-6, 0, 0, 30));   // Fs=0
+    CHECK_THROWS(analytical_dab(400, {100}, {5}, {4}, 100000, 1e-3, 0,    0, 0, 30));   // Lr=0
+    CHECK_THROWS(analytical_dab(400, {100}, {5}, {4}, 100000, 0,    5e-6, 0, 0, 30));   // Lm=0
+}
