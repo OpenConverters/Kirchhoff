@@ -3,6 +3,7 @@
 #include "ComponentRequirements.hpp"
 #include "KirchhoffConfig.hpp"
 #include <cmath>
+#include <string>
 #include <vector>
 
 namespace Kirchhoff {
@@ -34,10 +35,20 @@ BuckDesign design_buck(const json& tasInputs) {
     d.inputVoltageMin = vinMin;
     d.inputVoltageMax = vinMax;
 
+    // Freewheel rectifier variant (config-gated, no schema change; default = diode for back-compat).
+    // "synchronous" replaces the freewheeling diode with a low-side MOSFET (abt #67) — lower conduction
+    // loss (I^2*Rds vs I*Vf) -> higher efficiency.
+    d.synchronousRectifier = (cfg::get_str(d.config, "rectifier", "diode") == std::string("synchronous"));
+    d.deadFraction = cfg::get(d.config, "deadTimeFraction", 0.01);   // 1% of the period per dead band
+
     // Buck duty (MKF): D = (Vout+Vd) / ((Vin+Vd)*eff). Ideal -> Vout/Vin.
     d.diodeDrop = req::dideal_diode_drop(d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
     const double Vo = d.outputVoltage + d.diodeDrop;
-    d.dutyCycle = Vo / ((d.inputVoltage + d.diodeDrop) * d.efficiency);
+    // With a synchronous rectifier the freewheel path is a near-ideal MOSFET (no Vf), so NO diode-drop
+    // compensation: D = Vout/(Vin*eff). With a diode, compensate for its forward drop as MKF does.
+    d.dutyCycle = d.synchronousRectifier
+        ? d.outputVoltage / (d.inputVoltage * d.efficiency)
+        : Vo / ((d.inputVoltage + d.diodeDrop) * d.efficiency);
 
     // Inductance (MKF Buck::process_design_requirements):
     //   maximumCurrentRiple = currentRippleRatio * Iout
@@ -94,21 +105,43 @@ json build_buck_tas(const BuckDesign& d) {
     mosfet["inputs"]["designRequirements"] = req::mosfet("mainSwitch", ratedVds, IpkL, maxRdsOn, 125.0);
     json diode; diode["semiconductor"]["diode"] = json::object();
     diode["inputs"]["designRequirements"] = req::diode(ratedVds, IdiodeAvg / 0.7, maxVf, 0.05 * T);
+    // Synchronous freewheel rectifier (abt #67): a low-side MOSFET Q2 (drain=sw_node, source=gnd) carries
+    // the freewheel current through its channel (I^2*Rds, much less than a diode's I*Vf) plus its own body
+    // diode D2 across the dead time. Sized like the main switch (blocks Vin, carries the inductor current).
+    json syncFet; syncFet["semiconductor"]["mosfet"] = json::object();
+    syncFet["inputs"]["designRequirements"] = req::mosfet("synchronousRectifier", ratedVds, IpkL, maxRdsOn, 125.0);
+    json bodyD; bodyD["semiconductor"]["diode"] = json::object();
+    bodyD["inputs"]["designRequirements"] = req::body_diode(ratedVds, IdiodeAvg / 0.7);
     json capd; capd["capacitor"] = json::object();
     capd["inputs"]["designRequirements"] = req::capacitor(
         d.outputCapacitance, d.outputVoltage / cfg::v_derate_capacitor(d.config), IcoutRms,
         req::ESR_RIPPLE_FRACTION * d.outputVoltage / IpkL, "outputFilter");
 
-    // --- switching cell brick (Q high-side + L + freewheeling D) ---
+    // --- switching cell brick (Q high-side + L + freewheel rectifier) ---
+    // DEFAULT: freewheeling diode D1 (sw_node->gnd). SYNCHRONOUS: low-side MOSFET Q2 + its body diode D2.
     json cell; cell["name"] = "buck-switching-cell";
-    cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate")});
-    cell["components"] = json::array({comp("Q1", mosfet), comp("L1", ind), comp("D1", diode)});
-    cell["connections"] = json::array({
-        conn("vin_net",  {pin("Q1", "drain"), prt("vin")}),
-        conn("sw_node",  {pin("Q1", "source"), pin("L1", "primary_start"), pin("D1", "cathode")}),
-        conn("gnd_net",  {pin("D1", "anode"), prt("gnd")}),
-        conn("vout_net", {pin("L1", "primary_end"), prt("vout")}),
-        conn("gate_net", {pin("Q1", "gate"), prt("gate")})});
+    if (d.synchronousRectifier) {
+        cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate"), port("gate2")});
+        cell["components"] = json::array({comp("Q1", mosfet), comp("L1", ind),
+                                          comp("Q2", syncFet), comp("D2", bodyD)});
+        cell["connections"] = json::array({
+            conn("vin_net",  {pin("Q1", "drain"), prt("vin")}),
+            conn("sw_node",  {pin("Q1", "source"), pin("L1", "primary_start"),
+                              pin("Q2", "drain"), pin("D2", "cathode")}),
+            conn("gnd_net",  {pin("Q2", "source"), pin("D2", "anode"), prt("gnd")}),
+            conn("vout_net", {pin("L1", "primary_end"), prt("vout")}),
+            conn("gate_net", {pin("Q1", "gate"), prt("gate")}),
+            conn("gate2_net",{pin("Q2", "gate"), prt("gate2")})});
+    } else {
+        cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate")});
+        cell["components"] = json::array({comp("Q1", mosfet), comp("L1", ind), comp("D1", diode)});
+        cell["connections"] = json::array({
+            conn("vin_net",  {pin("Q1", "drain"), prt("vin")}),
+            conn("sw_node",  {pin("Q1", "source"), pin("L1", "primary_start"), pin("D1", "cathode")}),
+            conn("gnd_net",  {pin("D1", "anode"), prt("gnd")}),
+            conn("vout_net", {pin("L1", "primary_end"), prt("vout")}),
+            conn("gate_net", {pin("Q1", "gate"), prt("gate")})});
+    }
 
     // Output filter = Cout only; the LOAD is synthesized from the outputs requirement by the assembler.
     json filt; filt["name"] = "output-filter";
@@ -145,6 +178,17 @@ json build_buck_tas(const BuckDesign& d) {
     st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;
     st["waveform"]["dutyCycle"] = d.dutyCycle;
     tas["simulation"]["stimulus"] = json::array({st});
+    if (d.synchronousRectifier) {
+        // Q2 drives complementary to Q1 with a dead band on each edge; the body diode D2 carries the
+        // inductor current across the dead time (prevents shoot-through). duty = (1-D) - 2*dt, phased to
+        // start after Q1 turns off. Mirrors the FSBB low-side complementary drive.
+        const double dt = d.deadFraction;
+        json st2; st2["stage"] = "switchingCell"; st2["component"] = "Q2"; st2["signal"] = "gate";
+        st2["waveform"]["type"] = "pwm"; st2["waveform"]["frequency"] = d.switchingFrequency;
+        st2["waveform"]["dutyCycle"] = std::max(0.0, (1.0 - d.dutyCycle) - 2.0 * dt);
+        st2["waveform"]["phase"] = (d.dutyCycle + dt) * 360.0;
+        tas["simulation"]["stimulus"].push_back(st2);
+    }
     req::finalize_control_seeds(tas, Topology::BUCK_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }

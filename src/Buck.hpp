@@ -12,10 +12,13 @@ namespace Kirchhoff {
 struct BuckDesign {
     double inputVoltage, outputVoltage, outputPower, switchingFrequency, efficiency, diodeDrop;
     double inputVoltageMin, inputVoltageMax;   // design corners
-    double dutyCycle;       // D = (Vout+Vd)/((Vin+Vd)*eff)  (MKF Buck::calculate_duty_cycle)
+    double dutyCycle;       // D = (Vout+Vd)/((Vin+Vd)*eff)  (MKF Buck::calculate_duty_cycle);
+                            // synchronous rectifier uses D = Vout/(Vin*eff) (no diode-drop compensation)
     double inductance;      // buck inductor (H)
     double loadResistance;  // Vout^2/Pout
     double outputCapacitance;
+    double deadFraction;    // sync-rectifier dead-time fraction of the period (synchronous only)
+    bool synchronousRectifier;  // freewheel rectifier = low-side MOSFET (config "rectifier"="synchronous")
     nlohmann::json config;
 };
 

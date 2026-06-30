@@ -528,6 +528,41 @@ TEST_CASE("magnetic seed complete: all topologies", "[magseed]") {
 
 // Multi-point: each topology at its MKF PtP reference-design operating points (validated our way).
 TEST_CASE("Buck PtP reference designs deliver spec", "[requirements][ptp][buck]")           { check_topo_points("buck"); }
+// abt #67: config-gated SYNCHRONOUS rectifier. The DEFAULT (diode) deck is unchanged; the synchronous
+// variant replaces the freewheel diode with a low-side MOSFET Q2 (+ its body diode D2) and must STILL
+// regulate to spec. (Efficiency improvement is verified at the Heaviside e2e level with real parts.)
+TEST_CASE("Buck synchronous rectifier regulates (abt #67)", "[requirements][buck]") {
+    auto count_comp = [](const json& tas, const std::string& cname) {
+        for (const auto& st : tas.at("topology").at("stages"))
+            if (st.contains("circuit") && st.at("circuit").is_object())
+                for (const auto& c : st.at("circuit").at("components"))
+                    if (c.at("name") == cname) return true;
+        return false; };
+    json fx = load_fixture("buck");
+    const json& in = fx.at("inputs");
+    const double vReq = in.at("outputVoltage").get<double>();
+    json di = kirchhoff_inputs(in);
+
+    // DEFAULT (diode) path: a sync FET must NOT be present (back-compat).
+    auto dd = Kirchhoff::design_buck(di);
+    CHECK_FALSE(dd.synchronousRectifier);
+    json tasD = Kirchhoff::build_buck_tas(dd);
+    CHECK(count_comp(tasD, "D1"));
+    CHECK_FALSE(count_comp(tasD, "Q2"));
+
+    // SYNCHRONOUS path: low-side MOSFET Q2 + body diode D2 present; deck still regulates to Vout.
+    json dis = di; dis["config"]["rectifier"] = "synchronous";
+    auto ds = Kirchhoff::design_buck(dis);
+    REQUIRE(ds.synchronousRectifier);
+    json tasS = Kirchhoff::build_buck_tas(ds);
+    CHECK(count_comp(tasS, "Q2"));
+    CHECK(count_comp(tasS, "D2"));
+    CHECK_FALSE(count_comp(tasS, "D1"));
+    CHECK(tasS.at("simulation").at("stimulus").size() == 2);  // Q1 + complementary Q2
+    const double vS = std::fabs(simulate_vout(dis, tasS, ds.loadResistance, ds.outputCapacitance, "buck_sync"));
+    INFO("sync buck Vout=" << vS << " V (req " << vReq << ")");
+    CHECK(std::fabs(vS - vReq) / vReq <= kReqTol);
+}
 TEST_CASE("Boost PtP reference designs deliver spec", "[requirements][ptp][boost]")         { check_topo_points("boost"); }
 TEST_CASE("Flyback PtP reference designs deliver spec", "[requirements][ptp][flyback]")     { check_topo_points("flyback"); }
 TEST_CASE("SEPIC PtP reference designs deliver spec", "[requirements][ptp][sepic]")         { check_topo_points("sepic"); }
