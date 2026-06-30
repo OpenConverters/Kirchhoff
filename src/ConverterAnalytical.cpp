@@ -1,5 +1,5 @@
 #include "ConverterAnalytical.hpp"
-#include "AnalyticalDsp.hpp"
+#include "processors/WaveformProcessor.h"   // the shared DSP (MKF), reused — not re-implemented
 
 #include <cmath>
 #include <stdexcept>
@@ -7,6 +7,10 @@
 
 namespace Kirchhoff {
 namespace analytical {
+
+// The converter solvers compute only the topology PHYSICS (the per-winding waveform parameters); the
+// waveform construction, harmonics, and processed stresses come from OpenMagnetics::WaveformProcessor.
+using WP = OpenMagnetics::WaveformProcessor;
 
 // Ported from MKF converter_models/Buck.cpp (calculate_duty_cycle + process_operating_points_for_input_voltage).
 MAS::OperatingPoint analytical_buck(double inputVoltage, double outputVoltage, double outputCurrent,
@@ -28,9 +32,9 @@ MAS::OperatingPoint analytical_buck(double inputVoltage, double outputVoltage, d
 
     MAS::Waveform currentWaveform, voltageWaveform;
     if (minimumCurrent >= 0) {  // CCM
-        currentWaveform = create_waveform(Lbl::TRIANGULAR, primaryCurrentPeakToPeak, switchingFrequency,
+        currentWaveform = WP::create_waveform(Lbl::TRIANGULAR, primaryCurrentPeakToPeak, switchingFrequency,
                                           dutyCycle, outputCurrent);
-        voltageWaveform = create_waveform(Lbl::RECTANGULAR, primaryVoltagePeakToPeak, switchingFrequency,
+        voltageWaveform = WP::create_waveform(Lbl::RECTANGULAR, primaryVoltagePeakToPeak, switchingFrequency,
                                           dutyCycle, 0.0);
     } else {  // DCM — recompute the conduction interval (the CCM duty would overrun the period)
         tOn = std::sqrt(2 * outputCurrent * inductance * (outputVoltage + diodeVoltageDrop) /
@@ -40,7 +44,7 @@ MAS::OperatingPoint analytical_buck(double inputVoltage, double outputVoltage, d
         primaryCurrentPeakToPeak = (inputVoltage - outputVoltage) * tOn / inductance;
         const double iAvg = primaryCurrentPeakToPeak / 2.0;       // area balance: avg = ΔIL/2
         const double dcmDutyCycle = tOn * switchingFrequency;
-        currentWaveform = create_waveform(Lbl::TRIANGULAR_WITH_DEADTIME, primaryCurrentPeakToPeak,
+        currentWaveform = WP::create_waveform(Lbl::TRIANGULAR_WITH_DEADTIME, primaryCurrentPeakToPeak,
                                           switchingFrequency, dcmDutyCycle, iAvg, deadTime);
         // The DCM voltage needs explicit levels/times (a single duty can't express tOn + the level split).
         voltageWaveform.set_data(std::vector<double>{primaryVoltageMaximum, primaryVoltageMaximum,
@@ -51,7 +55,7 @@ MAS::OperatingPoint analytical_buck(double inputVoltage, double outputVoltage, d
 
     MAS::OperatingPoint operatingPoint;
     operatingPoint.get_mutable_excitations_per_winding().push_back(
-        complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Primary"));
+        WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Primary"));
     return operatingPoint;
 }
 
