@@ -56,3 +56,28 @@ TEST_CASE("analytical_buck enters DCM at light load", "[analytical][solver][buck
 TEST_CASE("analytical_buck rejects Vout >= Vin (duty >= 1)", "[analytical][solver][buck]") {
     CHECK_THROWS(analytical_buck(12, 12, 2, 100000, 10e-6));
 }
+
+TEST_CASE("analytical_boost CCM inductor excitation matches closed form", "[analytical][solver][boost]") {
+    using Kirchhoff::analytical::analytical_boost;
+    // 12 V -> 24 V, 1 A out, 100 kHz, L = 20 uH (ideal). D = 1 - Vin/Vout = 0.5.
+    const double vin = 12, vout = 24, iout = 1, fsw = 100000, L = 20e-6;
+    MAS::OperatingPoint op = analytical_boost(vin, vout, iout, fsw, L);
+    REQUIRE(op.get_excitations_per_winding().size() == 1);
+    const auto& cur = *op.get_excitations_per_winding()[0].get_current()->get_processed();
+
+    const double D = 1 - vin / vout;                            // 0.5
+    const double ripple = vin * (D / fsw) / L;                  // 3 A
+    const double iAvg = iout * vout / vin;                      // input current 2 A
+    const double peak = iAvg + ripple / 2.0;                    // 3.5 A
+    const double rms = std::sqrt(iAvg * iAvg + ripple * ripple / 12.0);  // ~2.18 A
+
+    CHECK(*cur.get_average() == Catch::Approx(iAvg).margin(0.03));   // INPUT current, not load
+    CHECK(*cur.get_peak() == Catch::Approx(peak).margin(0.05));
+    CHECK(*cur.get_rms() == Catch::Approx(rms).margin(0.03));
+    CHECK(*cur.get_peak_to_peak() == Catch::Approx(ripple).margin(0.05));
+}
+
+TEST_CASE("analytical_boost rejects Vin >= Vout (duty <= 0)", "[analytical][solver][boost]") {
+    using Kirchhoff::analytical::analytical_boost;
+    CHECK_THROWS(analytical_boost(24, 12, 1, 100000, 20e-6));
+}

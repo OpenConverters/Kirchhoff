@@ -21,5 +21,13 @@ MAS::OperatingPoint analytical_buck(double inputVoltage, double outputVoltage, d
                                     double switchingFrequency, double inductance,
                                     double diodeVoltageDrop = 0.0, double efficiency = 1.0);
 
+// Boost (CCM + DCM). One winding excitation (the input inductor): TRIANGULAR current whose AVERAGE is the
+// input current Iout·(Vout+Vd)/Vin (not the load current), ripple from the inductance; RECTANGULAR
+// voltage (Vin during on, Vin-Vout-Vd during off). Ported from MKF Boost::process_operating_points_for_
+// input_voltage. Throws if the duty (1 - Vin·η/(Vout+Vd)) is <= 0 (Vin above Vout) or >= 1.
+MAS::OperatingPoint analytical_boost(double inputVoltage, double outputVoltage, double outputCurrent,
+                                     double switchingFrequency, double inductance,
+                                     double diodeVoltageDrop = 0.0, double efficiency = 1.0);
+
 } // namespace analytical
 } // namespace Kirchhoff
