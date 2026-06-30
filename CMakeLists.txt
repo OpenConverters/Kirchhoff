@@ -37,7 +37,14 @@ if (NGSPICE_LIB AND NGSPICE_INCLUDE_DIR AND NOT DEFINED CACHE{ENABLE_NGSPICE_SET
     set(ENABLE_NGSPICE_SET ON CACHE INTERNAL "")
 endif()
 
-add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/Dab.cpp src/IsolatedBuck.cpp src/IsolatedBuckBoost.cpp src/Weinberg.cpp src/Llc.cpp src/Src.cpp src/Cllc.cpp src/Clllc.cpp src/Pfc.cpp src/Vienna.cpp src/TasAssembler.cpp src/NgspiceRunner.cpp src/Analytical.cpp src/AnalyticalDsp.cpp src/ConverterAnalytical.cpp)
+# The converter-waveform DSP (FFT, create_waveform, sampled/processed/harmonics, complete_excitation)
+# is NOT re-implemented in Kirchhoff — it lives once in MKF's self-contained WaveformProcessor (extracted
+# out of Inputs.cpp; depends only on the MAS types + std, no magnetics/Settings). Kirchhoff compiles that
+# single file directly (no dependency on the rest of MKF). MKF_DIR points at the MKF checkout.
+set(MKF_DIR "/home/alf/OpenMagnetics/MKF" CACHE PATH "Path to the MKF checkout (for the shared WaveformProcessor)")
+set(MKF_WAVEFORM_PROCESSOR "${MKF_DIR}/src/processors/WaveformProcessor.cpp")
+
+add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/Dab.cpp src/IsolatedBuck.cpp src/IsolatedBuckBoost.cpp src/Weinberg.cpp src/Llc.cpp src/Src.cpp src/Cllc.cpp src/Clllc.cpp src/Pfc.cpp src/Vienna.cpp src/TasAssembler.cpp src/NgspiceRunner.cpp src/Analytical.cpp src/ConverterAnalytical.cpp "${MKF_WAVEFORM_PROCESSOR}")
 target_include_directories(kirchhoff PUBLIC
     src
     "${PSMA_ROOT}/PEAS/src"
@@ -48,6 +55,11 @@ target_include_directories(kirchhoff PUBLIC
     # MAS_kirchhoff but does `#include "json.hpp"`, so consumers also need the nlohmann single-header
     # dir on the path (MAS_kirchhoff keeps that PRIVATE).
     "${nlohmann_json_SOURCE_DIR}/include/nlohmann")
+# MKF's src/ — only for the shared WaveformProcessor's own includes ("processors/WaveformProcessor.h",
+# "support/Exceptions.h"), both self-contained (MAS types + std). PRIVATE so it's on the path for
+# kirchhoff's own TUs (ConverterAnalytical.cpp + WaveformProcessor.cpp) but does NOT propagate to test
+# binaries (no risk of an MKF header shadowing a Kirchhoff one).
+target_include_directories(kirchhoff PRIVATE "${MKF_DIR}/src")
 target_link_libraries(kirchhoff PUBLIC RAS CAS SAS AAS CTAS MAS_kirchhoff CIAS nlohmann_json::nlohmann_json)
 if (ENABLE_NGSPICE AND NGSPICE_LIB AND NGSPICE_INCLUDE_DIR)
     target_compile_definitions(kirchhoff PUBLIC ENABLE_NGSPICE)
@@ -148,9 +160,6 @@ target_link_libraries(test_analytical PRIVATE kirchhoff Catch2::Catch2WithMain)
 
 add_executable(test_ptp tests/test_ptp.cpp)
 target_link_libraries(test_ptp PRIVATE kirchhoff Catch2::Catch2WithMain)
-
-add_executable(test_analytical_dsp tests/test_analytical_dsp.cpp)
-target_link_libraries(test_analytical_dsp PRIVATE kirchhoff Catch2::Catch2WithMain)
 
 add_executable(test_converter_analytical tests/test_converter_analytical.cpp)
 target_link_libraries(test_converter_analytical PRIVATE kirchhoff Catch2::Catch2WithMain)
