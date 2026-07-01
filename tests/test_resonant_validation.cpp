@@ -141,3 +141,62 @@ TEST_CASE("resonant validation grid: LLC (FHA baseline)", "[resval][llc]") {
     // here (loose bound so the harness itself is green while we build the fix).
     CHECK(worst < 1.0);
 }
+
+// Shared body for the two-sided (CLLC/CLLLC) FB solvers across the freq x load grid.
+namespace {
+template <class DesignT, class BuildT, class AnaT>
+void run_two_sided(const char* name, DesignT d, BuildT buildTas, AnaT analyticalFn, const std::string& tankVec, bool trap) {
+    PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
+    const double fr = d.resonantFrequency, baseRload = d.outputVoltage / (d.outputPower / d.outputVoltage);
+    std::vector<double> tankAtFr;
+    auto grid = sweep(name, fr, {0.85, 0.95, 1.0, 1.10}, {1.0, 0.5}, [&](double fdrive, double lf,
+                       double& nrmse, double& aPk, double& sPk, double& vout, double& iout, double& trms) {
+        auto dd = d; dd.switchingFrequency = fdrive;
+        std::string deck = Kirchhoff::tas_to_ngspice(buildTas(dd), ideal);
+        if (trap) deck = std::regex_replace(deck, std::regex("method=gear"), "method=trap");
+        deck = std::regex_replace(deck, std::regex(R"(Rload Vout 0 \S+)"), "Rload Vout 0 " + std::to_string(baseRload / lf));
+        auto r = Kirchhoff::run_ngspice_in_process(deck);
+        if (!r.success || r.time.size() < 1000) return false;
+        double T = 1.0 / fdrive;
+        vout = r.average("v(vout)", r.time.back() - T, r.time.back()).value_or(0);
+        if (vout < 0.3) return false;
+        iout = vout / (baseRload / lf);
+        auto op = analyticalFn(dd, vout, iout, fdrive);
+        trms = analytical_tank_rms(op);
+        const auto& wf = op.get_excitations_per_winding()[0].get_current()->get_waveform();
+        std::vector<double> aVal = wf->get_data(); int N = 256;
+        std::vector<double> aTime(aVal.size()); for (size_t i = 0; i < aVal.size(); ++i) aTime[i] = T * i / (aVal.size() - 1);
+        std::vector<double> aRes(N); { size_t j = 0; for (int k = 0; k < N; ++k) { double tt = T * k / N; while (j + 1 < aTime.size() && aTime[j + 1] < tt) ++j; double f = (aTime[j + 1] - aTime[j] > 0) ? (tt - aTime[j]) / (aTime[j + 1] - aTime[j]) : 0; aRes[k] = aVal[j] + f * (aVal[j + 1] - aVal[j]); } }
+        if (!r.vectors.count(tankVec)) return false;
+        auto sRes = settled(r.time, r.vectors.at(tankVec), T, N);
+        nrmse = phase_inv_nrmse(aRes, sRes);
+        aPk = *std::max_element(aRes.begin(), aRes.end()); sPk = *std::max_element(sRes.begin(), sRes.end());
+        return true;
+    }, tankAtFr);
+    REQUIRE(!grid.empty());
+    if (tankAtFr.size() >= 2) CHECK(tankAtFr.front() > 1.2 * tankAtFr.back());
+    double worst = 0; for (auto& p : grid) worst = std::max(worst, p.nrmse);
+    std::cerr << "  " << name << " worst-case NRMSE across grid = " << worst << "\n";
+    CHECK(worst < 6.0);   // loose baseline (FHA off-resonance is poor); TDA target is < 0.10
+}
+}  // namespace
+
+TEST_CASE("resonant validation grid: CLLC (FHA baseline)", "[resval][cllc]") {
+    if (!Kirchhoff::ngspice_in_process_available()) { WARN("no libngspice"); return; }
+    auto d = Kirchhoff::design_cllc(spec_for(400, 48, 480, 100000));
+    run_two_sided("CLLC", d,
+        [](const Kirchhoff::CllcDesign& x){ return Kirchhoff::build_cllc_tas(x); },
+        [](const Kirchhoff::CllcDesign& x, double vo, double io, double f){
+            return Kirchhoff::analytical::analytical_cllc(x.inputVoltage,{vo},{io},{x.turnsRatio},f,x.magnetizingInductance,x.primaryResonantInductance,x.primaryResonantCapacitance,x.secondaryResonantInductance,x.secondaryResonantCapacitance,1.0); },
+        "l.xcllccell.llr1_pri#branch", false);
+}
+
+TEST_CASE("resonant validation grid: CLLLC (FHA baseline)", "[resval][clllc]") {
+    if (!Kirchhoff::ngspice_in_process_available()) { WARN("no libngspice"); return; }
+    auto d = Kirchhoff::design_clllc(spec_for(400, 48, 480, 100000));
+    run_two_sided("CLLLC", d,
+        [](const Kirchhoff::ClllcDesign& x){ return Kirchhoff::build_clllc_tas(x); },
+        [](const Kirchhoff::ClllcDesign& x, double vo, double io, double f){
+            return Kirchhoff::analytical::analytical_clllc(x.inputVoltage,{vo},{io},{x.turnsRatio},f,x.magnetizingInductance,x.primaryResonantInductance,x.primaryResonantCapacitance,x.secondaryResonantInductance,x.secondaryResonantCapacitance,1.0); },
+        "l.xclllcpower.llr1_pri#branch", true);
+}
