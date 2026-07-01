@@ -1594,7 +1594,10 @@ MAS::OperatingPoint analytical_src(double inputVoltage,
 
     const double fr = 1.0 / (2.0 * M_PI * std::sqrt(Lr * Cr));
     const double Lambda = fsw / fr;
-    if (Lambda < 1.0)
+    // At-resonance (Λ = 1, X = 0, φ = 0) is the canonical SRC operating point; allow a small tolerance
+    // so fsw == fr (with fr recomputed from Lr·Cr rounding) is not misread as below-resonance. Genuine
+    // below-resonance (capacitive / hard-switching) still throws.
+    if (Lambda < 1.0 - 1e-6)
         throw std::invalid_argument("analytical_src: below-resonance operation (Lambda = " +
                                     std::to_string(Lambda) + " < 1) not supported (capacitive / hard-switching)");
 

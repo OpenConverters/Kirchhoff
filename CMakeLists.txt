@@ -164,6 +164,9 @@ target_link_libraries(test_ptp PRIVATE kirchhoff Catch2::Catch2WithMain)
 add_executable(test_converter_analytical tests/test_converter_analytical.cpp)
 target_link_libraries(test_converter_analytical PRIVATE kirchhoff Catch2::Catch2WithMain)
 
+add_executable(test_nrmse_gate tests/test_nrmse_gate.cpp)
+target_link_libraries(test_nrmse_gate PRIVATE kirchhoff Catch2::Catch2WithMain)
+
 add_executable(test_settings tests/test_settings.cpp)
 target_link_libraries(test_settings PRIVATE kirchhoff Catch2::Catch2WithMain)
 # Lets the test locate the independent Python averaged-model oracle (tests/averaged_model.py).
