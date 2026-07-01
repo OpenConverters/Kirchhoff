@@ -798,13 +798,25 @@ MAS::OperatingPoint analytical_zeta(double inputVoltage, double outputVoltage,
 // process_operating_point_for_excitation; compute_buck_duty:56 / compute_boost_duty:76).
 MAS::OperatingPoint analytical_fsbb(double inputVoltage, double outputVoltage,
                                     double outputCurrent, double switchingFrequency,
-                                    double inductance, double efficiency) {
+                                    double inductance, double efficiency, FsbbMode mode) {
     using Lbl = MAS::WaveformLabel;
     const double period = 1.0 / switchingFrequency;
     const double maximumDutyCycle = 0.95;
+    if (inputVoltage <= 0) throw std::invalid_argument("analytical_fsbb: input voltage must be > 0");
+    if (outputVoltage <= 0) throw std::invalid_argument("analytical_fsbb: output voltage must be > 0");
+    if (inductance <= 0) throw std::invalid_argument("analytical_fsbb: inductance must be > 0");
 
     double dutyForWaveform, dIL, iL_avg, primaryVoltagePtp;
-    if (outputVoltage < inputVoltage) {  // BUCK
+    if (mode == FsbbMode::SIMULTANEOUS) {
+        // 4-switch simultaneous buck-boost (the Kirchhoff deck's mode): all four switches commute
+        // each cycle. Charge phase (Q1+Q4) applies +Vin across L for D·T; discharge phase (Q2+Q3)
+        // applies −Vo for (1−D)·T. Gain M = D/(1−D) = Vo/Vin ⇒ D = Vo/(Vin+Vo). Regular at Vo==Vin.
+        const double D = outputVoltage / (inputVoltage + outputVoltage);
+        iL_avg = outputCurrent / (1.0 - D);            // buck-boost inductor average current
+        dIL = inputVoltage * (D * period) / inductance;  // charge phase: Vin across L for D·T
+        primaryVoltagePtp = inputVoltage + outputVoltage;  // +Vin (D) / −Vo (1−D), volt-second balanced
+        dutyForWaveform = D;
+    } else if (outputVoltage < inputVoltage) {  // BUCK
         double D_buck = outputVoltage / (inputVoltage * efficiency);
         if (D_buck >= 1.0) throw std::invalid_argument("analytical_fsbb: buck D >= 1");
         if (D_buck >= maximumDutyCycle - 0.01) throw std::invalid_argument("analytical_fsbb: buck D exceeds maximumDutyCycle");

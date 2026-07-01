@@ -2,6 +2,7 @@
 #include "DimensionJson.hpp"
 #include "KirchhoffConfig.hpp"
 #include "ComponentRequirements.hpp"
+#include "ConverterAnalytical.hpp"
 #include <cmath>
 #include <algorithm>
 #include <vector>
@@ -85,25 +86,22 @@ json build_fsbb_tas(const FsbbDesign& d) {
         j["inputs"]["designRequirements"] = reqs.is_null()
             ? req::body_diode(d.inputVoltage, d.outputPower / d.inputVoltage) : reqs; return j; };
 
-    // Single inductor L (single-winding magnetic) -> complete sourceable requirement with excitation.
-    // 4-switch buck-boost SIMULTANEOUS mode: charge phase applies Vin across L for D·T; the inductor
-    // delivers to the output only during (1-D), so I_L,avg = Io/(1-D). Currents at Vin_min (max duty /
-    // max inductor current); voltages at Vin_max (max flux swing). (mirrors Boost's worst-case corner.)
-    const double fsw = d.switchingFrequency, T = 1.0 / fsw, L_H = d.inductance;
+    // Single inductor L (single-winding magnetic) sourced from the SINGLE FHA source — analytical_fsbb in
+    // SIMULTANEOUS mode: the 4-switch buck-boost mode this deck runs for EVERY Vin/Vo (charge phase +Vin
+    // across L for D·T, discharge −Vo for (1-D)·T, D = Vo/(Vin+Vo)), regular at Vo==Vin. Ratings pull from
+    // the Vin_min corner (max duty / max inductor current, mirrors Boost); the embedded excitation is the
+    // nominal-Vin operating point (same convention as the boost/pfc/vienna single-inductor conversions).
+    const double fsw = d.switchingFrequency, L_H = d.inductance;
     const double Vo = d.outputVoltage, Io = d.outputPower / Vo;
-    const double Di = Vo / (d.inputVoltageMin + Vo);          // duty at Vin_min (current corner)
-    const double ILavg = Io / (1.0 - Di);                     // buck-boost inductor average current
-    const double dIL   = d.inputVoltageMin * Di * T / L_H;    // pk-pk ripple (charge phase)
-    const double IpkL  = ILavg + dIL / 2.0;
-    const double IrmsL = std::sqrt(ILavg * ILavg + dIL * dIL / 12.0);
-    const double Dv = Vo / (d.inputVoltageMax + Vo);          // duty at Vin_max (voltage corner)
-    const double vIndPk = std::max(d.inputVoltageMax, Vo), vIndPkPk = d.inputVoltageMax + Vo;
-    const double vIndRms = std::sqrt(Dv * d.inputVoltageMax * d.inputVoltageMax + (1.0 - Dv) * Vo * Vo);
+    namespace AN = Kirchhoff::analytical;
+    const AN::FsbbMode kMode = AN::FsbbMode::SIMULTANEOUS;
+    const MAS::OperatingPoint aopWorst = AN::analytical_fsbb(d.inputVoltageMin, Vo, Io, fsw, L_H, d.efficiency, kMode);
+    const MAS::OperatingPoint aopNom   = AN::analytical_fsbb(d.inputVoltage,    Vo, Io, fsw, L_H, d.efficiency, kMode);
+    const double IpkL  = AN::winding_current(aopWorst, 0, "peak");
+    const double IrmsL = AN::winding_current(aopWorst, 0, "rms");
     json lind; lind["magnetic"] = json::object();
     lind["inputs"] = req::magnetic_inputs(d.inductance, 0.2, /*single winding*/ {}, {"primary"},
-        std::nullopt, 25.0, {
-            req::winding_excitation("triangular", fsw, IpkL, IrmsL, ILavg, dIL, d.dutyCycle,
-                                    vIndPk, vIndRms, 0.0, vIndPkPk)});
+        std::nullopt, 25.0, AN::excitations_processed(aopNom));
 
     // --- semiconductor stresses: all four H-bridge switches share one rating ---
     // Buck leg Q1/Q2 nodes swing 0..Vin_max; boost leg Q3/Q4 nodes swing 0..Vout. Worst-case block

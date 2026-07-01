@@ -139,15 +139,23 @@ MAS::OperatingPoint analytical_zeta(double inputVoltage, double outputVoltage,
                                     double inductanceL1, double diodeVoltageDrop = 0.0,
                                     double efficiency = 1.0);
 
-// Four-switch buck-boost (single-phase, non-bidirectional). One "Inductor" excitation. BUCK
-// region (Vo < Vin): D = Vo/(Vin·η), iL_avg = Iout, pp_voltage = Vin. BOOST region (Vo > Vin):
-// D = 1 − Vin·η/Vo, iL_avg = Iout/(1−D), pp_voltage = Vo. Ported from MKF FourSwitchBuckBoost.cpp
-// (process_operating_point_for_excitation, BUCK/BOOST branches). The mixed BUCK_BOOST transition
-// region is NOT ported (needs transition_mode + min on/off-time params). Throws if Vo == Vin
-// (transition region) or the region duty is out of range.
+// Four-switch buck-boost mode selector. BUCK_BOOST_AUTO reproduces MKF's separate BUCK/BOOST
+// region models (throws in the Vo==Vin transition). SIMULTANEOUS is the 4-switch simultaneous
+// (buck-boost) mode Kirchhoff's deck actually runs for EVERY Vin/Vo: all four switches commute
+// each cycle, D = Vo/(Vin+Vo), so it is regular at Vo==Vin (no transition singularity).
+enum class FsbbMode { BUCK_BOOST_AUTO, SIMULTANEOUS };
+
+// Four-switch buck-boost (single-phase, non-bidirectional). One "Inductor" excitation.
+// BUCK_BOOST_AUTO (default): BUCK region (Vo < Vin) D = Vo/(Vin·η), iL_avg = Iout, pp_voltage = Vin;
+// BOOST region (Vo > Vin) D = 1 − Vin·η/Vo, iL_avg = Iout/(1−D), pp_voltage = Vo (ported from MKF
+// FourSwitchBuckBoost.cpp BUCK/BOOST branches); throws at Vo == Vin.
+// SIMULTANEOUS: the mode the Kirchhoff deck runs — charge phase applies +Vin across L for D·T,
+// discharge phase −Vo for (1−D)·T, D = Vo/(Vin+Vo), iL_avg = Iout/(1−D), ΔiL = Vin·D·T/L,
+// pp_voltage = Vin+Vo (volt-second balanced). Valid for all Vin/Vo including Vo == Vin.
 MAS::OperatingPoint analytical_fsbb(double inputVoltage, double outputVoltage,
                                     double outputCurrent, double switchingFrequency,
-                                    double inductance, double efficiency = 1.0);
+                                    double inductance, double efficiency = 1.0,
+                                    FsbbMode mode = FsbbMode::BUCK_BOOST_AUTO);
 
 // Isolated buck (fly-buck). Two outputs: the primary buck rail (Vpri, Ipri) and one isolated
 // secondary (Vsec, Isec). `inductance` is the primary/magnetizing inductance, `turnsRatio` the

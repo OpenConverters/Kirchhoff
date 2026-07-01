@@ -256,6 +256,24 @@ TEST_CASE("analytical_fsbb boost region: inductor avg = Iout/(1-D)", "[analytica
     CHECK(*processed_current(op, 0).get_average() == Catch::Approx(2.0).margin(0.05));   // Iout/(1-D)=2
 }
 
+TEST_CASE("analytical_fsbb SIMULTANEOUS: regular at Vo==Vin (buck-boost mode)", "[analytical][solver][fsbb]") {
+    using Kirchhoff::analytical::analytical_fsbb;
+    using Kirchhoff::analytical::FsbbMode;
+    // 24 V -> 24 V, 5 A, 100 kHz, L=20 uH — the transition point that BUCK_BOOST_AUTO throws on.
+    // Simultaneous mode: D = Vo/(Vin+Vo) = 0.5, iL_avg = Iout/(1-D) = 10 A, ΔiL = Vin*D*T/L.
+    MAS::OperatingPoint op = analytical_fsbb(24, 24, 5, 100000, 20e-6, 1.0, FsbbMode::SIMULTANEOUS);
+    REQUIRE(op.get_excitations_per_winding().size() == 1);
+    const double D = 0.5, dIL = 24.0 * (D / 100000) / 20e-6;   // = 6.0 A pk-pk
+    CHECK(*processed_current(op, 0).get_average() == Catch::Approx(10.0).margin(0.1));   // Iout/(1-D)
+    CHECK(*processed_current(op, 0).get_peak() == Catch::Approx(10.0 + dIL / 2).margin(0.2));
+    CHECK(voltage_average(op, 0) == Catch::Approx(0.0).margin(0.3));                     // volt-second balance
+    // Voltage swings +Vin (charge) / -Vo (discharge): peak-to-peak = Vin+Vo = 48.
+    CHECK(*processed_voltage(op, 0).get_peak_to_peak() == Catch::Approx(48.0).margin(1.0));
+    // And it must NOT throw at the transition the AUTO mode rejects.
+    CHECK_NOTHROW(analytical_fsbb(24, 24, 5, 100000, 20e-6, 1.0, FsbbMode::SIMULTANEOUS));
+    CHECK_THROWS(analytical_fsbb(24, 24, 5, 100000, 20e-6));   // AUTO still throws at Vo==Vin
+}
+
 TEST_CASE("analytical_isolated_buck: primary avg=Ipri, secondary avg=Isec", "[analytical][solver][isolatedbuck]") {
     using Kirchhoff::analytical::analytical_isolated_buck;
     // 12 V; primary rail 3.3 V @ 1 A; isolated secondary 5 V @ 0.5 A; n=0.5, L=22 uH.
