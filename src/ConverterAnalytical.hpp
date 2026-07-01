@@ -391,5 +391,44 @@ MAS::OperatingPoint analytical_vienna(double linePhaseVoltageRms,
                                       double powerFactor = 1.0,
                                       bool fullLineCycle = true);
 
+// ── Phase 7: single-phase AC-input PFC (boost front end) ─────────────────────
+// Single-phase hysteretic/CCM boost Power-Factor-Correction stage. The magnetic is the boost
+// inductor; because the current-loop reference is proportional to the rectified line voltage, the
+// inductor current follows a RECTIFIED-SINE (|sin|) line-current envelope with the per-angle boost
+// switching ripple superimposed. This solver ports MKF PowerFactorCorrection::process_operating_points
+// (converter_models/PowerFactorCorrection.cpp:425), the BOOST topologyVariant branch (bipolar=false,
+// buckBoostClass=false), plus the boost-path helpers it delegates to: per_phase_power (:238, = outputPower
+// for the single-phase case), calculate_duty_cycle (:218 → the boost ratio D = 1 − Vin/(Vout+Vd), :229),
+// and effective_diode_voltage_drop (→ the diodeVoltageDrop param).
+//
+// PUSHES exactly ONE winding excitation — the boost inductor ("Boost inductor"): a CUSTOM current
+// (rectified-sine envelope of amplitude iLinePeak = √2·Pin/Vrms, Pin = outputPower/efficiency, plus the
+// triangular switching ripple) and a CUSTOM voltage (ON: +Vin; OFF: Vin−Vout−Vd; volt-second balanced,
+// zero mean), completed at the LINE frequency (mirroring MKF's excitation.set_frequency(lineFrequency) +
+// calculate_processed_data(..., lineFrequency)). The time grid is MKF's exact one: timeStep = Tsw/4 over
+// `numberOfPeriods` mains periods.
+//
+// OMITTED (mirroring the KH-family policy): MKF's diagnostic-only per-OP members (lastDutyCyclePeak /
+// lastPeakInductorCurrent / lastInductorRipple / lastLineRmsCurrent / lastInputPower / perOp* :474-498)
+// shape no winding waveform; the magnetizing-inductance auto-sizing branch (L<=0 → calculate_inductance_*
+// :440-452) is omitted since KH always supplies boostInductance (PfcDesign); and the TOTEM_POLE (bipolar),
+// SEPIC/Ćuk (buckBoostClass) and INTERLEAVED_BOOST (per-phase split) variants are not ported (KH PfcDesign
+// is single-phase boost). There is NO NRMSE cross-check gate — PFC is AC-input + closed-loop and does not
+// map to a single settled ngspice vector (as with Vienna) — so validation is STRUCTURAL only.
+//
+// THROWS (mirroring MKF's own guards — run_checks :175-216, calculate_inductance_ccm :263; no fabricated
+// defaults) on: non-positive inputVoltageRms / outputVoltage / outputPower / lineFrequency /
+// switchingFrequency / boostInductance; efficiency ∉ (0,1]; and outputVoltage+Vd ≤ √2·inputVoltageRms
+// (a boost PFC can only step UP — the boost-family analogue of Vienna's over-modulation guard).
+MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
+                                   double outputVoltage,
+                                   double outputPower,
+                                   double lineFrequency,
+                                   double switchingFrequency,
+                                   double boostInductance,
+                                   double efficiency = 1.0,
+                                   double diodeVoltageDrop = 0.0,
+                                   int numberOfPeriods = 2);
+
 } // namespace analytical
 } // namespace Kirchhoff

@@ -3382,5 +3382,129 @@ MAS::OperatingPoint analytical_vienna(double linePhaseVoltageRms,
     return operatingPoint;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 7: single-phase AC-input PFC — boost front end.
+// Ported from MKF converter_models/PowerFactorCorrection.cpp:425
+// (PowerFactorCorrection::process_operating_points), the BOOST topologyVariant branch
+// (bipolar=false, buckBoostClass=false). The boost-path helpers it delegates to are inlined:
+//   per_phase_power (:238)          → outputPower (single phase, no interleaving split)
+//   calculate_duty_cycle (:218-229) → boost ratio D = 1 − Vin/(Vout+Vd)
+//   effective_diode_voltage_drop    → diodeVoltageDrop param
+// See ConverterAnalytical.hpp for the full omitted/throws contract.
+// ─────────────────────────────────────────────────────────────────────────────
+MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
+                                   double outputVoltage,
+                                   double outputPower,
+                                   double lineFrequency,
+                                   double switchingFrequency,
+                                   double boostInductance,
+                                   double efficiency,
+                                   double diodeVoltageDrop,
+                                   int numberOfPeriods) {
+    using Lbl = MAS::WaveformLabel;
+
+    // Guards — mirror MKF's own (PowerFactorCorrection::run_checks :175-216,
+    // calculate_inductance_ccm :263); no fabricated defaults.
+    if (inputVoltageRms <= 0)
+        throw std::invalid_argument("analytical_pfc: inputVoltageRms must be > 0");
+    if (outputVoltage <= 0)
+        throw std::invalid_argument("analytical_pfc: outputVoltage must be > 0");
+    if (outputPower <= 0)
+        throw std::invalid_argument("analytical_pfc: outputPower must be > 0");
+    if (lineFrequency <= 0)
+        throw std::invalid_argument("analytical_pfc: lineFrequency must be > 0");
+    if (switchingFrequency <= 0)
+        throw std::invalid_argument("analytical_pfc: switchingFrequency must be > 0");
+    if (boostInductance <= 0)
+        throw std::invalid_argument("analytical_pfc: boostInductance must be > 0");
+    if (efficiency <= 0 || efficiency > 1.0)   // MKF run_checks :207
+        throw std::invalid_argument("analytical_pfc: efficiency must be in (0, 1]");
+    // Boost can only step UP: Vout must exceed the peak line voltage (MKF run_checks :194-204).
+    const double vinPeakForCheck = inputVoltageRms * std::sqrt(2.0);
+    if (outputVoltage + diodeVoltageDrop <= vinPeakForCheck)
+        throw std::invalid_argument(
+            "analytical_pfc: outputVoltage must exceed peak input voltage sqrt(2)*inputVoltageRms "
+            "(a boost PFC can only step up)");
+
+    // MKF :454-468 — worst-case at the (single) supplied RMS line voltage.
+    const double vinRmsMin  = inputVoltageRms;
+    const double vinPeakMin = vinRmsMin * std::sqrt(2.0);
+    const double L          = boostInductance;
+    const double pinAvg     = outputPower / efficiency;
+    const double iinRmsAvg  = pinAvg / vinRmsMin;
+    const double iLinePeak  = iinRmsAvg * std::sqrt(2.0);
+
+    // MKF :500-513 — time grid: Tsw/4 step over `numberOfPeriods` mains periods.
+    const double mainsPeriod     = 1.0 / lineFrequency;
+    const double switchingPeriod = 1.0 / switchingFrequency;
+    const int    actualPeriods   = (numberOfPeriods > 0) ? numberOfPeriods : 2;
+    const double totalTime       = mainsPeriod * actualPeriods;
+    const double timeStep        = switchingPeriod / 4.0;
+    const size_t numPoints       = static_cast<size_t>(totalTime / timeStep) + 1;
+
+    std::vector<double> currentData, voltageData, timeData;
+    currentData.reserve(numPoints);
+    voltageData.reserve(numPoints);
+    timeData.reserve(numPoints);
+
+    // MKF :515-586 — the boost branch (bipolar=false, buckBoostClass=false).
+    for (size_t i = 0; i < numPoints; ++i) {
+        const double t = i * timeStep;
+        timeData.push_back(t);
+
+        const double theta = 2.0 * M_PI * t / mainsPeriod;
+        // Bridged boost → rectified |sin| (unipolar inductor current/voltage).  MKF :523-526
+        const double vinShape   = std::abs(std::sin(theta));
+        const double vinInst     = vinPeakMin * vinShape;
+        const double vinAbsInst  = vinInst;   // vinShape is already non-negative for the boost bridge
+
+        // Boost duty D = 1 − Vin/(Vout+Vd), clipped to the physical [0, 1].  MKF :543-547
+        double D = 1.0 - vinAbsInst / (outputVoltage + diodeVoltageDrop);
+        if (D < 0.0) D = 0.0;
+        if (D > 1.0) D = 1.0;
+
+        const double iAvgInst = iLinePeak * vinShape;                       // MKF :549
+        const double deltaI   = vinAbsInst * D / (L * switchingFrequency);  // MKF :550
+
+        // Integer switching-cycle phase (4 samples/period since timeStep = Tsw/4).  MKF :557-559
+        constexpr size_t samplesPerSwCycle = 4;
+        const double switchPhase = static_cast<double>(i % samplesPerSwCycle)
+                                   / static_cast<double>(samplesPerSwCycle);
+
+        double ripple;   // MKF :561-566
+        if (switchPhase < D) {
+            ripple = -deltaI / 2 + deltaI * (switchPhase / D);
+        } else {
+            ripple = deltaI / 2 - deltaI * ((switchPhase - D) / (1 - D));
+        }
+        currentData.push_back(iAvgInst + ripple);                           // MKF :568
+
+        if (switchPhase < D) {
+            voltageData.push_back(vinInst);                                 // ON: L sees +Vin.  MKF :570-572
+        } else {
+            // Boost-family OFF-time: inductor sees Vin − Vout − Vd.  MKF :579-585 (voutSigned = Vout).
+            voltageData.push_back(vinInst - outputVoltage - diodeVoltageDrop);
+        }
+    }
+
+    // MKF :588-624 — one CUSTOM current + voltage waveform (the single boost-inductor winding),
+    // completed at the LINE frequency. WP::complete_excitation supplies the DSP MKF runs inline
+    // (calculate_sampled_waveform / _harmonics_data / _processed_data).
+    MAS::Waveform currentWaveform;
+    currentWaveform.set_ancillary_label(Lbl::CUSTOM);
+    currentWaveform.set_data(currentData);
+    currentWaveform.set_time(timeData);
+
+    MAS::Waveform voltageWaveform;
+    voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
+    voltageWaveform.set_data(voltageData);
+    voltageWaveform.set_time(timeData);
+
+    MAS::OperatingPoint operatingPoint;
+    operatingPoint.get_mutable_excitations_per_winding().push_back(
+        WP::complete_excitation(currentWaveform, voltageWaveform, lineFrequency, "Boost inductor"));
+    return operatingPoint;
+}
+
 } // namespace analytical
 } // namespace Kirchhoff
