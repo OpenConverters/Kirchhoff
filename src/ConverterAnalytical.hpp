@@ -264,5 +264,31 @@ MAS::OperatingPoint analytical_src(double inputVoltage,
                                    double bridgeVoltageFactor = 1.0,
                                    SrcRectifier rectifier = SrcRectifier::FULL_BRIDGE);
 
+// LLC resonant converter via the Runo Nielsen TIME-DOMAIN analysis (TDA), NOT FHA. A half-bridge drives a
+// series Lr-Cr tank in series with the transformer magnetizing inductance Lm; the tank state
+// x = [I_Ls, I_Lm, V_Cr] evolves through three linear sub-states (A_POS / A_NEG secondary-conducting,
+// B_FW freewheeling) whose event-driven closed-form segments compose one half cycle. Steady state is the
+// half-wave antisymmetry x(Thalf) = −x(0), enforced by a multi-start damped-Newton solve (with LIP
+// singularity perturbation + physical-bound sanity fallback) on the 3-vector residual. Pushes Primary
+// (tank current I_Ls + topology-dependent voltage: VLm for a separate Lr, or Vi−VCr for an integrated Lr)
+// + per output either two center-tapped "Secondary i Half {1,2}" half-windings or one full-bridge
+// "Secondary i". Secondary current = (I_Ls − I_Lm)·share·n (the transferred diode current). Ported from
+// MKF converter_models/Llc.cpp (LlcStateVector/propagate_substate/find_next_event/propagate_half_cycle/
+// solve_steady_state/sample_segments :315-783, process_operating_point_for_input_voltage :786). MKF's
+// ZVS/LIP diagnostics and the VOLTAGE_DOUBLER/CURRENT_DOUBLER rectifiers (no SrcRectifier equivalent) are
+// omitted; the tank solver is transcribed exactly. `bridgeVoltageFactor` k_bridge = 0.5 (half bridge,
+// the LLC convention) or 1.0 (full bridge). Throws on non-positive fsw / Lm / Ls / Cr / turns ratio.
+MAS::OperatingPoint analytical_llc(double inputVoltage,
+                                   const std::vector<double>& outputVoltages,
+                                   const std::vector<double>& outputCurrents,
+                                   const std::vector<double>& turnsRatios,
+                                   double switchingFrequency,
+                                   double magnetizingInductance,
+                                   double seriesResonantInductance,
+                                   double resonantCapacitance,
+                                   double bridgeVoltageFactor = 0.5,
+                                   SrcRectifier rectifier = SrcRectifier::CENTER_TAPPED,
+                                   bool integratedResonantInductor = false);
+
 } // namespace analytical
 } // namespace Kirchhoff

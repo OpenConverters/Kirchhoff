@@ -401,3 +401,55 @@ TEST_CASE("analytical_src rejects below-resonance and bad tank", "[analytical][s
     CHECK_THROWS(analytical_src(400, {48}, {5}, {8}, 120000, 0, 63.3e-9));      // Lr=0
     CHECK_THROWS(analytical_src(400, {48}, {5}, {8}, 120000, 40e-6, 0));        // Cr=0
 }
+
+// ─── Phase 5: LLC resonant converter (Runo Nielsen TDA) ─────────────────────
+// Structural invariants of the time-domain tank solver: the symmetric half-bridge yields an
+// antisymmetric primary tank current (zero-mean); the winding set is Primary + the rectifier's
+// secondaries; and the throw guards fire on non-positive fsw / Lm / Ls / Cr. Driven BELOW resonance
+// (fsw < fr) where the multi-start Newton converges cleanly (see the [nrmse][llc] gate for the
+// at-resonance singularity characterization). Follows the SRC/DAB structural-test style.
+
+TEST_CASE("analytical_llc center-tapped: antisymmetric tank current, 3 windings",
+          "[analytical][solver][llc]") {
+    using Kirchhoff::analytical::analytical_llc;
+    using Kirchhoff::analytical::SrcRectifier;
+    // 400 V -> 12 V, 10 A, half-bridge (k=0.5), n=16, Lm=589 uH, Ls=118 uH, Cr=13.4 nF.
+    // fsw=100 kHz is below fr=1/(2*pi*sqrt(Ls*Cr))~=126 kHz, so the TDA solver converges.
+    MAS::OperatingPoint op = analytical_llc(400, {12}, {10}, {16}, 100000, 589e-6, 118e-6, 13.4e-9,
+                                            0.5, SrcRectifier::CENTER_TAPPED);
+    REQUIRE(op.get_excitations_per_winding().size() == 3);   // Primary + Secondary 0 Half 1/2
+    // Symmetric bridge -> half-wave-antisymmetric tank current -> zero mean (small vs the RMS).
+    const auto& cur = *processed_current(op, 0).get_average();
+    const double rms = *processed_current(op, 0).get_rms();
+    CHECK(rms > 0.0);
+    CHECK(std::abs(cur) < 0.15 * rms + 0.05);
+    // Each center-tapped half-winding conducts only one polarity -> non-negative current.
+    CHECK(*processed_current(op, 1).get_negative_peak() >= -0.05);
+    CHECK(*processed_current(op, 2).get_negative_peak() >= -0.05);
+}
+
+TEST_CASE("analytical_llc full-bridge rectifier: 2 windings, bipolar secondary",
+          "[analytical][solver][llc]") {
+    using Kirchhoff::analytical::analytical_llc;
+    using Kirchhoff::analytical::SrcRectifier;
+    MAS::OperatingPoint op = analytical_llc(400, {12}, {10}, {16}, 100000, 589e-6, 118e-6, 13.4e-9,
+                                            0.5, SrcRectifier::FULL_BRIDGE);
+    REQUIRE(op.get_excitations_per_winding().size() == 2);   // Primary + Secondary 0
+    CHECK(std::abs(*processed_current(op, 0).get_average()) <
+          0.15 * (*processed_current(op, 0).get_rms()) + 0.05);
+    // Full-bridge secondary carries the bipolar reflected diode current (swings both signs).
+    CHECK(*processed_current(op, 1).get_peak() > 0.0);
+    CHECK(*processed_current(op, 1).get_negative_peak() < 0.0);
+}
+
+TEST_CASE("analytical_llc rejects non-positive fsw / Lm / Ls / Cr / turns ratio",
+          "[analytical][solver][llc]") {
+    using Kirchhoff::analytical::analytical_llc;
+    CHECK_THROWS(analytical_llc(400, {12}, {10}, {16}, 0,      589e-6, 118e-6, 13.4e-9));  // fsw=0
+    CHECK_THROWS(analytical_llc(400, {12}, {10}, {16}, 100000, 0,      118e-6, 13.4e-9));  // Lm=0
+    CHECK_THROWS(analytical_llc(400, {12}, {10}, {16}, 100000, 589e-6, 0,      13.4e-9));  // Ls=0
+    CHECK_THROWS(analytical_llc(400, {12}, {10}, {16}, 100000, 589e-6, 118e-6, 0));        // Cr=0
+    CHECK_THROWS(analytical_llc(400, {12}, {10}, {0},  100000, 589e-6, 118e-6, 13.4e-9));  // n=0
+    // Vector length mismatch.
+    CHECK_THROWS(analytical_llc(400, {12}, {10, 1}, {16}, 100000, 589e-6, 118e-6, 13.4e-9));
+}
