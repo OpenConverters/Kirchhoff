@@ -1,6 +1,7 @@
 #include "Zeta.hpp"
 #include "DimensionJson.hpp"
 #include "ComponentRequirements.hpp"
+#include "ConverterAnalytical.hpp"   // single FHA source: analytical_zeta + excitations_processed/winding_current
 #include "KirchhoffConfig.hpp"
 #include <cmath>
 #include <vector>
@@ -76,11 +77,21 @@ json build_zeta_tas(const ZetaDesign& d) {
     auto diode  = [&]() { json j; j["semiconductor"]["diode"] = json::object();
         j["inputs"]["designRequirements"] = req::body_diode(d.inputVoltage, d.outputPower / d.inputVoltage); return j; };
 
+    // --- L1 (the MAIN coupled inductor) sourced from the SINGLE FHA solver (SPICE-validated analytical) ---
+    // Worst-case corner (Vin_min) drives the switch rating; the declared nominal OP is what the TAS embeds
+    // for L1. analytical_zeta returns ONE winding ("Primary" = L1); L2 (the secondary coupled inductor, whose
+    // excitation is NOT one of the solver's windings) keeps its inline computation.
+    namespace AN = Kirchhoff::analytical;
     const double fsw = d.switchingFrequency, iout = d.outputPower / d.outputVoltage;
-    const double dIL1 = cfg::get(d.config, "l1RippleRatio", kRippleRatioL1) * (iout * d.dutyCycle / (1.0 - d.dutyCycle));
     const double dIL2 = cfg::get(d.config, "l2RippleRatio", kL2RipplePct) * iout;
     const double vSwing = d.inputVoltage + d.outputVoltage;   // Cc holds ~Vo; switch/diode block Vin+Vo
+    const MAS::OperatingPoint aopWorst = AN::analytical_zeta(d.inputVoltageMin, d.outputVoltage, iout, fsw,
+                                                            d.inductanceL1, d.diodeDrop, d.efficiency);
+    const MAS::OperatingPoint aopNom   = AN::analytical_zeta(d.inputVoltage,    d.outputVoltage, iout, fsw,
+                                                            d.inductanceL1, d.diodeDrop, d.efficiency);
+    const double IL1avg = AN::winding_current(aopWorst, 0, "offset");   // L1 average (input current) at the worst corner
 
+    // L2 (secondary coupled inductor) — inline single-winding excitation (not one of the solver's windings).
     auto inductor = [&](double L, double iAvg, double iPkPk) {
         json m; m["magnetic"] = json::object();
         const double iPk = iAvg + iPkPk / 2.0, iRms = std::sqrt(iAvg * iAvg + iPkPk * iPkPk / 12.0);
@@ -89,7 +100,9 @@ json build_zeta_tas(const ZetaDesign& d) {
                                      vSwing, vSwing / std::sqrt(3.0), 0.0, vSwing)});
         return m;
     };
-    json L1 = inductor(d.inductanceL1, iout * d.dutyCycle / (1.0 - d.dutyCycle), dIL1);
+    json L1; L1["magnetic"] = json::object();
+    L1["inputs"] = req::magnetic_inputs(d.inductanceL1, 0.2, {}, {"primary"}, std::nullopt, 25.0,
+        AN::excitations_processed(aopNom));
     json L2 = inductor(d.inductanceL2, iout, dIL2);
     json cc; cc["capacitor"] = json::object();
     cc["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.couplingCapacitance;
@@ -99,7 +112,7 @@ json build_zeta_tas(const ZetaDesign& d) {
     capd["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage / cfg::v_derate_capacitor(d.config);
     json mq = mosfet();
     mq["inputs"]["designRequirements"] = req::mosfet("mainSwitch", vSwing / cfg::v_derate_mosfet(d.config),
-                                                     iout + iout * d.dutyCycle / (1.0 - d.dutyCycle),
+                                                     iout + IL1avg,
                                                      0.01 * d.outputPower, 125.0);
     json md = diode();
     md["inputs"]["designRequirements"] = req::diode(vSwing / cfg::v_derate_diode(d.config), iout / 0.7,

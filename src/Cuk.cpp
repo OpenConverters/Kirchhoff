@@ -2,6 +2,7 @@
 #include "DimensionJson.hpp"
 #include "KirchhoffConfig.hpp"
 #include "ComponentRequirements.hpp"
+#include "ConverterAnalytical.hpp"   // single FHA source: analytical_cuk + excitations_processed/winding_current
 #include <cmath>
 #include <vector>
 
@@ -79,11 +80,21 @@ json build_cuk_tas(const CukDesign& d) {
     auto diode  = [&]() { json j; j["semiconductor"]["diode"] = json::object();
         j["inputs"]["designRequirements"] = req::body_diode(d.inputVoltage, d.outputPower / d.inputVoltage); return j; };
 
+    // --- L1 (the MAIN coupled inductor) sourced from the SINGLE FHA solver (SPICE-validated analytical) ---
+    // Worst-case corner (Vin_min) drives the switch rating; the declared nominal OP is what the TAS embeds
+    // for L1. analytical_cuk returns ONE winding ("Primary" = L1); L2 (the secondary coupled inductor, whose
+    // excitation is NOT one of the solver's windings) keeps its inline computation.
+    namespace AN = Kirchhoff::analytical;
     const double fsw = d.switchingFrequency, iout = d.outputPower / d.outputVoltageMag;
-    const double dIL1 = cfg::get(d.config, "l1RippleRatio", kRippleRatioL1) * (iout * d.dutyCycle / (1.0 - d.dutyCycle));
     const double dIL2 = cfg::get(d.config, "l2RippleRatio", kL2RipplePct) * iout;
     const double vSwing = d.inputVoltage + d.outputVoltageMag;   // C1 holds ~Vin+|Vo|; switch/diode block it
+    const MAS::OperatingPoint aopWorst = AN::analytical_cuk(d.inputVoltageMin, d.outputVoltageMag, iout, fsw,
+                                                           d.inductanceL1, d.diodeDrop, d.efficiency);
+    const MAS::OperatingPoint aopNom   = AN::analytical_cuk(d.inputVoltage,    d.outputVoltageMag, iout, fsw,
+                                                           d.inductanceL1, d.diodeDrop, d.efficiency);
+    const double IL1avg = AN::winding_current(aopWorst, 0, "offset");   // L1 average (input current) at the worst corner
 
+    // L2 (secondary coupled inductor) — inline single-winding excitation (not one of the solver's windings).
     auto inductor = [&](double L, double iAvg, double iPkPk) {
         json m; m["magnetic"] = json::object();
         const double iPk = iAvg + iPkPk / 2.0, iRms = std::sqrt(iAvg * iAvg + iPkPk * iPkPk / 12.0);
@@ -92,7 +103,9 @@ json build_cuk_tas(const CukDesign& d) {
                                      vSwing, vSwing / std::sqrt(3.0), 0.0, vSwing)});
         return m;
     };
-    json L1 = inductor(d.inductanceL1, iout * d.dutyCycle / (1.0 - d.dutyCycle), dIL1);
+    json L1; L1["magnetic"] = json::object();
+    L1["inputs"] = req::magnetic_inputs(d.inductanceL1, 0.2, {}, {"primary"}, std::nullopt, 25.0,
+        AN::excitations_processed(aopNom));
     json L2 = inductor(d.inductanceL2, iout, dIL2);
     json c1; c1["capacitor"] = json::object();
     c1["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.couplingCapacitance;
@@ -102,7 +115,7 @@ json build_cuk_tas(const CukDesign& d) {
     capd["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltageMag / cfg::v_derate_capacitor(d.config);
     json mq = mosfet();
     mq["inputs"]["designRequirements"] = req::mosfet("mainSwitch", vSwing / cfg::v_derate_mosfet(d.config),
-                                                     iout + iout * d.dutyCycle / (1.0 - d.dutyCycle),
+                                                     iout + IL1avg,
                                                      0.01 * d.outputPower, 125.0);
     json md = diode();
     md["inputs"]["designRequirements"] = req::diode(vSwing / cfg::v_derate_diode(d.config), iout / 0.7,

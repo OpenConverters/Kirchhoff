@@ -1,6 +1,7 @@
 #include "TwoSwitchForward.hpp"
 #include "DimensionJson.hpp"
 #include "ComponentRequirements.hpp"
+#include "ConverterAnalytical.hpp"   // single FHA source: analytical_two_switch_forward + excitations_processed/winding_current
 #include "KirchhoffConfig.hpp"
 #include <cmath>
 #include <vector>
@@ -69,30 +70,32 @@ json build_two_switch_forward_tas(const TwoSwitchForwardDesign& d) {
     auto diode  = [&]() { json j; j["semiconductor"]["diode"] = json::object();
         j["inputs"]["designRequirements"] = req::body_diode(d.inputVoltage, d.outputPower / d.inputVoltage); return j; };
 
+    namespace AN = Kirchhoff::analytical;
     const double n = d.turnsRatio, Lm = d.magnetizingInductance, fsw = d.switchingFrequency;
     const double T = 1.0 / fsw, Dn = d.dutyCycle, Vin = d.inputVoltage, Vout = d.outputVoltage;
     const double iout = d.outputPower / d.outputVoltage;
+    const double ripple = cfg::get(d.config, "inductorRippleRatio", kRippleRatio);
 
-    // --- per-winding electrical stresses (two-switch forward; the two clamp diodes reset to ±Vin) ---
-    // Magnetizing current ramp during ON, peak = Vin*D*T/Lm; resets through the clamp diodes (the
-    // primary itself carries the reset current back to the rails, no separate demag winding).
-    const double ImagPk  = Vin * Dn * T / Lm;
-    const double ImagRms = ImagPk * std::sqrt(Dn / 3.0);
+    // --- MAIN magnetic (the 2-winding transformer T1) sourced from the SINGLE FHA solver ---
+    // analytical_two_switch_forward returns EXACTLY the two transformer windings — "First primary" +
+    // "Secondary 0" — matching T1's turnsRatios = [n]. The output-filter inductor Lout is a SECOND magnetic
+    // (NOT one of the solver's windings) and keeps its inline excitation. The magnetizing reset peak
+    // (clamp-diode rating) stays inline — a clean Vin*D*T/Lm (the solver folds the magnetizing current into
+    // the combined primary winding, so there is no separate reset winding to read).
+    //
+    // CORNER: n is sized for D_max = 0.5 at Vin_min (the transformer-reset limit), so evaluating the solver
+    // at Vin_min sits exactly on its t1 <= T/2 guard (it throws for some operating points). The declared
+    // NOMINAL operating point (D_nom < 0.5) is used — also the corner the existing current ratings used.
+    const MAS::OperatingPoint aopNom = AN::analytical_two_switch_forward(Vin, {Vout}, {iout}, {n}, fsw, Lm,
+                                                             d.outputInductance, ripple, d.diodeDrop);
+    const double IpkPri  = AN::winding_current(aopNom, 0, "peak");   // primary peak (switch rating)
+    const double IrmsPri = AN::winding_current(aopNom, 0, "rms");    // primary rms (switch RdsOn conduction)
+    const double ImagPk  = Vin * Dn * T / Lm;                        // magnetizing reset peak (clamp-diode rating)
+
+    // Output filter inductor Lout (single winding) — inline excitation (not one of the solver's windings).
     const double dILout  = (Vin / n - d.diodeDrop - Vout) * (Dn * T) / d.outputInductance;
     const double IpkLout = iout + dILout / 2.0;
     const double IrmsLout = std::sqrt(iout * iout + dILout * dILout / 12.0);
-    // Secondary carries the inductor current during ON (conducts D).
-    const double IcSec   = iout, IpkSec = IpkLout;
-    const double IrmsSec = std::sqrt(Dn) * std::sqrt(iout * iout + dILout * dILout / 12.0);
-    // Primary = reflected secondary current (Iout/n) + magnetizing ramp, during ON.
-    const double IcPri   = iout / n;
-    const double IpkPri  = IpkSec / n + ImagPk;
-    const double IrmsPri = std::sqrt(Dn) * IcPri + ImagRms;
-    // Winding voltages: primary +Vin during ON, -Vin during reset (clamped by D1/D2); peak Vin, swing 2*Vin.
-    const double vPriPk = Vin, vPriPkPk = 2.0 * Vin;
-    const double vPriRms = Vin;                                  // square ±Vin
-    const double vSecPk = Vin / n, vSecPkPk = Vin / n;
-    const double vSecRms = std::sqrt(Dn) * (Vin / n);
     const double vLonF = Vin / n - d.diodeDrop - Vout, vLoff = Vout;
     const double vLoutPk = std::max(std::abs(vLonF), vLoff), vLoutPkPk = std::abs(vLonF) + vLoff;
     const double vLoutRms = std::sqrt(Dn * vLonF * vLonF + (1.0 - Dn) * vLoff * vLoff);
@@ -118,14 +121,11 @@ json build_two_switch_forward_tas(const TwoSwitchForwardDesign& d) {
     auto rectDiode = [&]() { json j = diode();
         j["inputs"]["designRequirements"] = req::diode(ratedVrSec, iout / 0.7, maxVfSec, maxTrr); return j; };
 
-    // 2-winding transformer (primary + secondary, no demag): turnsRatios = [n] -> 2 excitations.
+    // 2-winding transformer (primary + secondary, no demag): turnsRatios = [n] -> 2 excitations (from the solver).
     std::vector<std::string> xfmrIso{"primary", "secondary"};
     json xfmr; xfmr["magnetic"] = json::object();
-    xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, {n}, xfmrIso, std::nullopt, 25.0, {
-        req::winding_excitation("forwardPrimary",   fsw, IpkPri, IrmsPri, 0.0, IpkPri, Dn,
-                                vPriPk, vPriRms, 0.0, vPriPkPk),
-        req::winding_excitation("forwardSecondary", fsw, IpkSec, IrmsSec, IcSec, dILout, Dn,
-                                vSecPk, vSecRms, 0.0, vSecPkPk)});
+    xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, {n}, xfmrIso, std::nullopt, 25.0,
+        AN::excitations_processed(aopNom));
     // Output filter inductor: single winding (turnsRatios = []) -> 1 excitation, DC-biased at Iout.
     json lout; lout["magnetic"] = json::object();
     lout["inputs"] = req::magnetic_inputs(d.outputInductance, 0.2, {}, {"primary"}, std::nullopt, 25.0, {
