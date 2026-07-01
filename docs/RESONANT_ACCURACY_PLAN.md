@@ -103,6 +103,41 @@ but is **not yet correct** — two concrete problems to solve first:
 The lesson holds: get ONE operating point matching SPICE by direct waveform overlay first, then the grid —
 do not tune thresholds to hide a 4× error.
 
+### Update — deeper findings (the naive TDA is a dead end; the correct architecture found; a fidelity floor)
+
+Iterated the LLC model further with SPICE waveform overlay at 0.85·fr:
+
+1. **The antisymmetric ±Vo-clamp TDA (MKF's family) is fundamentally broken and cannot be tweaked into
+   correctness.** With an ideal ±Vo voltage clamp the tank has NO load damping: the reactive current
+   builds unbounded (iLr ≈ 6 A vs SPICE 1.25 A; "delivered" 584 W vs 120 W load). An outer charge-balance
+   loop on Vout *diverges* — the delivered current *increases* with Vout (wrong feedback sign). The clamp
+   model is a dead end.
+2. **The correct architecture is TIME-MARCHING the full 4-state circuit** [iLr, iLm, vCr, vCout] to steady
+   state: the rectifier clamps the primary to ±n·vCout when a diode conducts, the rectified secondary
+   |iD|·n charges the output cap Cout, and the load draws vCout/Rload. Marching ~80–400 cycles from rest,
+   it CONVERGES STABLY (no singularity, no divergence) and gives the RIGHT amplitude/gain: with a
+   reflected rectifier drop Vd≈1.4 V and tank Q≈8–12, Vout ≈ 12.2 V (SPICE 12.0) and iLr peak ≈ 1.33 A
+   (SPICE 1.25). This fixes BOTH MKF failures — the resonance blow-up and the load-blindness.
+3. **BUT off-resonance SHAPE fidelity plateaus at ~0.30 NRMSE — the same as FHA — and is NOT improvable by
+   Q, Vd, or freewheel/mode logic.** At 0.85·fr the SPICE iLr carries harmonics from the real transformer
+   leakage (K=0.999), the split resonant caps, and the actual diode conduction, which neither a pure-
+   sinusoid model (FHA, 0.29) nor an idealized-clamp time-march (0.30) reproduces. This is a **reduced-
+   order-model fidelity floor**, not a bug: reaching < 0.10 off-resonance requires modeling that circuit
+   detail — i.e. converging toward the full SPICE netlist, which defeats the point of a fast analytical
+   solver.
+
+**Revised conclusion.** A fast reduced-order resonant model — whether FHA or a simplified time-domain sim —
+has a ~0.15–0.30 shape floor OFF resonance vs the full SPICE circuit. FHA is *exact at/near resonance*
+(the design point: LLC 0.027, CLLLC 0.024) and the time-march offers stability + correct amplitude but no
+off-resonance shape gain over FHA. So the practical options are: (a) keep FHA (accurate where these
+converters actually operate; off-resonance documented) — CURRENT STATE; (b) ship the time-march 4-state
+model where amplitude/gain across the range matters more than exact shape (stable, load-correct, but
+~2–3× slower and no better on shape); (c) for lab-grade off-resonance waveforms, use the ngspice path the
+harness already runs. Getting a *fast* model under 0.10 everywhere is a genuine research problem
+(state-plane / generalized-mode analysis with explicit harmonic + rectifier-DCM modeling), not a tuning
+exercise. The validation harness (< 0.10 target, grid-wide) remains the correct acceptance test for any
+future attempt.
+
 ## Recommendation
 - If only CLLC-at-its-point matters → Option A.
 - If KH's resonant models must be trustworthy across their **full operating range** (the right bar for an

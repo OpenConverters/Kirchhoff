@@ -190,3 +190,4 @@ target_link_libraries(test_ltspice_backend PRIVATE kirchhoff Catch2::Catch2WithM
 add_executable(test_requirements tests/test_requirements.cpp)
 target_link_libraries(test_requirements PRIVATE kirchhoff Catch2::Catch2WithMain)
 target_compile_definitions(test_requirements PRIVATE KIRCHHOFF_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests")
+
