@@ -10,9 +10,12 @@
 //   4. The gate is TIGHT everywhere (a wrong model must fail, not hide behind a loose "characterization").
 // Decks are converged with method=trap (the CLLLC/resonant netlists stall on the default method=gear).
 //
-// Run against the current FHA solvers it establishes the accuracy BASELINE (and exposes the latent
-// off-resonance error). It is the acceptance test for the corrected time-domain model (Option B): the
-// target is NRMSE < 0.10 across the whole grid for every topology.
+// FHA is the SHIPPED resonant model (decision, docs/RESONANT_ACCURACY_PLAN.md): it is exact at
+// resonance / unity gain — where these converters actually operate — and has a reduced-order fidelity
+// floor OFF resonance that a fast analytical solver cannot beat (an idealized time-domain model hits the
+// same ~0.30 floor; < 0.10 everywhere needs full-circuit detail = ngspice, or a research-level state-plane
+// model). So each grid asserts a REGRESSION GUARD at the documented FHA worst-case per topology (not the
+// abandoned < 0.10 target). The harness remains the acceptance test should a corrected model ever be built.
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
@@ -137,15 +140,17 @@ TEST_CASE("resonant validation grid: LLC (FHA baseline)", "[resval][llc]") {
     // BASELINE (not yet the tight gate): report worst NRMSE across the grid.
     double worst = 0; for (auto& p : grid) worst = std::max(worst, p.nrmse);
     std::cerr << "  LLC worst-case NRMSE across grid = " << worst << "\n";
-    // The corrected time-domain model (Option B) must bring this under 0.10; the FHA baseline is recorded
-    // here (loose bound so the harness itself is green while we build the fix).
-    CHECK(worst < 1.0);
+    // Regression guard at the documented FHA baseline (worst ~0.29 below resonance). FHA is the shipped
+    // resonant model — exact at resonance (0.027), with a reduced-order floor off-resonance that a fast
+    // analytical solver cannot beat (see docs/RESONANT_ACCURACY_PLAN.md). Catches a regression, not the
+    // abandoned < 0.10 TDA target.
+    CHECK(worst < 0.40);
 }
 
 // Shared body for the two-sided (CLLC/CLLLC) FB solvers across the freq x load grid.
 namespace {
 template <class DesignT, class BuildT, class AnaT>
-void run_two_sided(const char* name, DesignT d, BuildT buildTas, AnaT analyticalFn, const std::string& tankVec, bool trap) {
+void run_two_sided(const char* name, DesignT d, BuildT buildTas, AnaT analyticalFn, const std::string& tankVec, bool trap, double worstBound) {
     PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
     const double fr = d.resonantFrequency, baseRload = d.outputVoltage / (d.outputPower / d.outputVoltage);
     std::vector<double> tankAtFr;
@@ -177,7 +182,11 @@ void run_two_sided(const char* name, DesignT d, BuildT buildTas, AnaT analytical
     if (tankAtFr.size() >= 2) CHECK(tankAtFr.front() > 1.2 * tankAtFr.back());
     double worst = 0; for (auto& p : grid) worst = std::max(worst, p.nrmse);
     std::cerr << "  " << name << " worst-case NRMSE across grid = " << worst << "\n";
-    CHECK(worst < 6.0);   // loose baseline (FHA off-resonance is poor); TDA target is < 0.10
+    // Regression guard at the DOCUMENTED FHA baseline (FHA is the shipped resonant model; it is exact at
+    // resonance/unity gain — the design point — and degrades off-resonance, a reduced-order-model floor that
+    // a fast analytical solver cannot beat; see docs/RESONANT_ACCURACY_PLAN.md). This bound catches a
+    // regression, it is NOT the (abandoned) < 0.10 corrected-TDA target.
+    CHECK(worst < worstBound);
 }
 }  // namespace
 
@@ -188,7 +197,7 @@ TEST_CASE("resonant validation grid: CLLC (FHA baseline)", "[resval][cllc]") {
         [](const Kirchhoff::CllcDesign& x){ return Kirchhoff::build_cllc_tas(x); },
         [](const Kirchhoff::CllcDesign& x, double vo, double io, double f){
             return Kirchhoff::analytical::analytical_cllc(x.inputVoltage,{vo},{io},{x.turnsRatio},f,x.magnetizingInductance,x.primaryResonantInductance,x.primaryResonantCapacitance,x.secondaryResonantInductance,x.secondaryResonantCapacitance,1.0); },
-        "l.xcllccell.llr1_pri#branch", false);
+        "l.xcllccell.llr1_pri#branch", false, /*worstBound=*/1.60);   // FHA off-unity worst ~1.37
 }
 
 TEST_CASE("resonant validation grid: CLLLC (FHA baseline)", "[resval][clllc]") {
@@ -198,5 +207,5 @@ TEST_CASE("resonant validation grid: CLLLC (FHA baseline)", "[resval][clllc]") {
         [](const Kirchhoff::ClllcDesign& x){ return Kirchhoff::build_clllc_tas(x); },
         [](const Kirchhoff::ClllcDesign& x, double vo, double io, double f){
             return Kirchhoff::analytical::analytical_clllc(x.inputVoltage,{vo},{io},{x.turnsRatio},f,x.magnetizingInductance,x.primaryResonantInductance,x.primaryResonantCapacitance,x.secondaryResonantInductance,x.secondaryResonantCapacitance,1.0); },
-        "l.xclllcpower.llr1_pri#branch", true);
+        "l.xclllcpower.llr1_pri#branch", true, /*worstBound=*/0.75);   // FHA off-resonance worst ~0.57
 }
