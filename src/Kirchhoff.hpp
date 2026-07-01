@@ -199,6 +199,7 @@
 #include "Settings.hpp"     // Kirchhoff::Settings (project-wide config) + RunEngine
 #include "Analytical.hpp"   // analytical_operating_point — the simulator-free run engine
 #include "NgspiceRunner.hpp" // run_ngspice_in_process — the in-process libngspice runner
+#include "ConverterExtract.hpp" // extract_operating_point / topology_waveforms — the MKF-extract-trio replacement
 
 #include "Flyback.hpp"
 #include "Boost.hpp"
