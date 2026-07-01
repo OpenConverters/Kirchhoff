@@ -2,6 +2,7 @@
 #include "DimensionJson.hpp"
 #include "KirchhoffConfig.hpp"
 #include "ComponentRequirements.hpp"
+#include "ConverterAnalytical.hpp"
 #include <cmath>
 #include <algorithm>
 #include <vector>
@@ -189,15 +190,17 @@ json build_src_tas(const SrcDesign& d) {
     // ONE (turnsRatios=[n]). K=0.999 (MKF). windings = primary + wpo secondaries.
     std::vector<std::string> isoSides{"primary"};
     std::vector<double> turnsRatios;
-    std::vector<json> windings{
-        req::winding_excitation("sinusoidal", fr, ItankPk, ItankRms, 0.0, ItankPkPk, std::nullopt,
-                                vPriPk, vPriRms, 0.0, vPriPkPk)};
-    for (int w = 0; w < wpo; ++w) {
-        isoSides.push_back("secondary");
-        turnsRatios.push_back(n);
-        windings.push_back(req::winding_excitation("sinusoidal", fr, IsecPk, IsecRms, 0.0, IsecPkPk,
-                            std::nullopt, vSecPk, vSecRms, 0.0, vSecPkPk));
-    }
+    for (int w = 0; w < wpo; ++w) { isoSides.push_back("secondary"); turnsRatios.push_back(n); }
+    // Transformer (T1) EMBEDDED excitations from the SINGLE FHA source (the SPICE-validated analytical SRC
+    // solver). SRC is a HALF-bridge (bridgeVoltageFactor=0.5, not analytical_src's full-bridge 1.0 default);
+    // turnsRatios is PER OUTPUT (the CENTER_TAPPED rectifier splits it into primary + 2 secondary windings).
+    // The resonant inductor Lr and the switch/diode ratings keep the inline tank FHA.
+    namespace AN = Kirchhoff::analytical;
+    const AN::SrcRectifier rect = (d.rectifierType == RectifierType::CenterTapped)
+                                  ? AN::SrcRectifier::CENTER_TAPPED : AN::SrcRectifier::FULL_BRIDGE;
+    const MAS::OperatingPoint aopT1 = AN::analytical_src(d.inputVoltage, {d.outputVoltage}, {Iout}, {n}, fr,
+                                                         d.resonantInductance, d.resonantCapacitance, 0.5, rect);
+    const std::vector<json> windings = AN::excitations_processed(aopT1);
     json t1; t1["magnetic"] = json::object();
     t1["inputs"] = req::magnetic_inputs(d.magnetizingInductance, 0.1, turnsRatios, isoSides,
         std::nullopt, 25.0, windings);

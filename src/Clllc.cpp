@@ -2,6 +2,7 @@
 #include "DimensionJson.hpp"
 #include "KirchhoffConfig.hpp"
 #include "ComponentRequirements.hpp"
+#include "ConverterAnalytical.hpp"
 #include <cmath>
 #include <algorithm>
 #include <vector>
@@ -168,14 +169,19 @@ json build_clllc_tas(const ClllcDesign& d) {
 
     // Transformer: primary Lpri = Lm, single secondary, turnsRatios=[n].
     // 2 physical windings = turnsRatios.size()+1: primary (tank current) + secondary (reflected ×n).
+    // Transformer (T1) EMBEDDED excitations from the SINGLE FHA source (the SPICE-validated analytical CLLLC
+    // solver): full-bridge drive (bridgeVoltageFactor=1.0) -> primary + single secondary (2 windings),
+    // matching. Lr1/Lr2 (primary/secondary resonant inductors) and the switch/diode ratings keep the inline
+    // tank FHA (they are not transformer windings). (CLLLC FHA is exact at unity gain — 0.024 NRMSE.)
+    namespace AN = Kirchhoff::analytical;
+    const double IoutT = d.outputPower / d.outputVoltage;
+    const MAS::OperatingPoint aopT1 = AN::analytical_clllc(d.inputVoltage, {d.outputVoltage}, {IoutT}, {n}, fr,
+        d.magnetizingInductance, d.primaryResonantInductance, d.primaryResonantCapacitance,
+        d.secondaryResonantInductance, d.secondaryResonantCapacitance, 1.0, AN::SrcRectifier::FULL_BRIDGE);
     std::vector<std::string> isoSides{"primary", "secondary"};
     json t1; t1["magnetic"] = json::object();
     t1["inputs"] = req::magnetic_inputs(d.magnetizingInductance, 0.1, {n}, isoSides,
-        std::nullopt, 25.0, {
-            req::winding_excitation("sinusoidal", fr, ItankPk, ItankRms, 0.0, ItankPkPk, std::nullopt,
-                                    vPriPk, vPriRms, 0.0, vPriPkPk),
-            req::winding_excitation("sinusoidal", fr, IsecPk, IsecRms, 0.0, IsecPkPk, std::nullopt,
-                                    vSecPk, vSecRms, 0.0, vSecPkPk)});
+        std::nullopt, 25.0, AN::excitations_processed(aopT1));
 
     // ───────────────────────── POWER stage ─────────────────────────
     // A small in-line sense resistor in the secondary tank exposes the tank-current sign (senseP/senseM)

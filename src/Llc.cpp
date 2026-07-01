@@ -2,6 +2,7 @@
 #include "DimensionJson.hpp"
 #include "KirchhoffConfig.hpp"
 #include "ComponentRequirements.hpp"
+#include "ConverterAnalytical.hpp"
 #include <cmath>
 #include <algorithm>
 #include <vector>
@@ -212,15 +213,22 @@ json build_llc_tas(const LlcDesign& d) {
     // + wpo secondaries; physical winding count = turnsRatios.size()+1.
     std::vector<std::string> isoSides{"primary"};
     std::vector<double> turnsRatios;
-    std::vector<json> windings{
-        req::winding_excitation("sinusoidal", fr, ItankPk, ItankRms, 0.0, ItankPkPk, std::nullopt,
-                                vPriPk, vPriRms, 0.0, vPriPkPk)};
-    for (int w = 0; w < wpo; ++w) {
-        isoSides.push_back("secondary");
-        turnsRatios.push_back(n);
-        windings.push_back(req::winding_excitation("sinusoidal", fr, IsecPk, IsecRms, 0.0, IsecPkPk,
-                            std::nullopt, vSecPk, vSecRms, 0.0, vSecPkPk));
-    }
+    for (int w = 0; w < wpo; ++w) { isoSides.push_back("secondary"); turnsRatios.push_back(n); }
+    // Transformer (T1) EMBEDDED excitations from the SINGLE FHA source (the SPICE-validated analytical LLC
+    // solver): its default rectifier is CENTER_TAPPED, matching the LLC default, so the winding structure
+    // (primary + wpo secondaries) lines up. Half-bridge drive -> bridgeVoltageFactor=0.5, evaluated at fr.
+    // The resonant inductor Lr and the switch/diode ratings keep the inline tank FHA (Lr's voltage = i*Zr is
+    // not a transformer winding, so it is not one of the analytical windings).
+    namespace AN = Kirchhoff::analytical;
+    const AN::SrcRectifier rect = (d.rectifierType == RectifierType::CenterTapped)
+                                  ? AN::SrcRectifier::CENTER_TAPPED : AN::SrcRectifier::FULL_BRIDGE;
+    // analytical_llc's turnsRatios is PER OUTPUT (one here); the CENTER_TAPPED rectifier splits it into the
+    // 3 physical windings (primary + two secondary half-windings) internally.
+    const std::vector<double> trs{n};
+    const MAS::OperatingPoint aopT1 = AN::analytical_llc(d.inputVoltage, {d.outputVoltage}, {Iout}, trs, fr,
+                                                         d.magnetizingInductance, d.resonantInductance,
+                                                         d.resonantCapacitance, 0.5, rect);
+    const std::vector<json> windings = AN::excitations_processed(aopT1);
     json t1; t1["magnetic"] = json::object();
     t1["inputs"] = req::magnetic_inputs(d.magnetizingInductance, 0.1, turnsRatios, isoSides,
         std::nullopt, 25.0, windings);
