@@ -18,6 +18,47 @@ namespace analytical {
 // waveform construction, harmonics, and processed stresses come from OpenMagnetics::WaveformProcessor.
 using WP = OpenMagnetics::WaveformProcessor;
 
+// --- build_<topo>_tas bridge helpers (see header) ------------------------------------------------------
+std::vector<nlohmann::json> excitations_json(const MAS::OperatingPoint& op) {
+    std::vector<nlohmann::json> out;
+    for (const auto& e : op.get_excitations_per_winding()) out.push_back(nlohmann::json(e));
+    return out;
+}
+
+namespace {
+double processed_of(const MAS::SignalDescriptor* sig, const std::string& field, const char* side,
+                    std::size_t w) {
+    if (!sig) throw std::runtime_error("winding stress: winding " + std::to_string(w) + " has no " + side);
+    auto proc = sig->get_processed();
+    if (!proc) throw std::runtime_error("winding stress: winding " + std::to_string(w) + " " + side
+                                        + " has no processed data");
+    std::optional<double> v;
+    if (field == "peak") v = proc->get_peak();
+    else if (field == "rms") v = proc->get_rms();
+    else if (field == "offset") v = proc->get_offset();
+    else if (field == "peakToPeak") v = proc->get_peak_to_peak();
+    else if (field == "dutyCycle") v = proc->get_duty_cycle();
+    else throw std::runtime_error("winding stress: unknown field '" + field + "'");
+    if (!v) throw std::runtime_error("winding stress: winding " + std::to_string(w) + " " + side + " has no "
+                                     + field);
+    return *v;
+}
+}  // namespace
+
+double winding_current(const MAS::OperatingPoint& op, std::size_t w, const std::string& field) {
+    const auto& excs = op.get_excitations_per_winding();
+    if (w >= excs.size()) throw std::runtime_error("winding_current: winding index out of range");
+    auto cur = excs[w].get_current();
+    return processed_of(cur ? &*cur : nullptr, field, "current", w);
+}
+
+double winding_voltage(const MAS::OperatingPoint& op, std::size_t w, const std::string& field) {
+    const auto& excs = op.get_excitations_per_winding();
+    if (w >= excs.size()) throw std::runtime_error("winding_voltage: winding index out of range");
+    auto vol = excs[w].get_voltage();
+    return processed_of(vol ? &*vol : nullptr, field, "voltage", w);
+}
+
 // Ported from MKF converter_models/Buck.cpp (calculate_duty_cycle + process_operating_points_for_input_voltage).
 MAS::OperatingPoint analytical_buck(double inputVoltage, double outputVoltage, double outputCurrent,
                                     double switchingFrequency, double inductance,

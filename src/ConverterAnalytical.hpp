@@ -10,11 +10,28 @@
 
 #include "MAS.hpp"
 
+#include <nlohmann/json.hpp>
 #include <limits>
+#include <string>
 #include <vector>
 
 namespace Kirchhoff {
 namespace analytical {
+
+// --- build_<topo>_tas bridge: embed an analytical operating point's excitations, and read its stresses ---
+// These let build_<topo>_tas source its per-winding magnetic excitations AND its component-rating stresses
+// from the SPICE-validated analytical solvers instead of a second, inline FHA — so the FHA physics lives
+// in exactly ONE place (ConverterAnalytical). See docs/MKF_INTEGRATION.md ("FHA unification").
+
+// Serialize an operating point's per-winding excitations to the vector<json> that req::magnetic_inputs
+// consumes. The analytical excitation is a strict superset of the old hand-built one (current + voltage,
+// each with waveform + harmonics + processed), so the embedded TAS excitation gets richer, not poorer.
+std::vector<nlohmann::json> excitations_json(const MAS::OperatingPoint& op);
+
+// Read a processed current/voltage stress of winding `w` from an operating point (for component ratings).
+// `field` ∈ {peak,rms,offset,peakToPeak,dutyCycle}. Throws if the field is absent (no silent 0).
+double winding_current(const MAS::OperatingPoint& op, std::size_t w, const std::string& field);
+double winding_voltage(const MAS::OperatingPoint& op, std::size_t w, const std::string& field);
 
 // Buck (synchronous/diode, CCM + DCM). Returns an OperatingPoint with one winding excitation (the output
 // inductor): TRIANGULAR current (average = outputCurrent, ripple from the inductance) and RECTANGULAR

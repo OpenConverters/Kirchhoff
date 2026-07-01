@@ -1,6 +1,7 @@
 #include "Buck.hpp"
 #include "DimensionJson.hpp"
 #include "ComponentRequirements.hpp"
+#include "ConverterAnalytical.hpp"   // single FHA source: analytical_buck + excitations_json/winding_current
 #include "KirchhoffConfig.hpp"
 #include <cmath>
 #include <string>
@@ -78,29 +79,32 @@ json build_buck_tas(const BuckDesign& d) {
     auto isc = [](const char* name, const char* kind, const char* dir, std::vector<json> eps) {
         json c; c["name"] = name; c["kind"] = kind; if (dir[0]) c["direction"] = dir; c["endpoints"] = eps; return c; };
 
-    // --- per-component stresses (worst-case corner) ---
+    // --- per-component stresses from the SINGLE FHA source (the SPICE-validated analytical solver) ---
+    // Two operating points: the WORST-CASE corner (Vin_min) drives the component RATINGS; the DECLARED
+    // nominal operating point is what the TAS embeds for the magnetic. No inline FHA — the inductor
+    // current/voltage waveforms come from ConverterAnalytical, so the physics lives in exactly one place.
+    namespace AN = Kirchhoff::analytical;
     const double fsw = d.switchingFrequency, T = 1.0 / fsw, L = d.inductance;
     const double iout = d.outputPower / d.outputVoltage;
-    const double Dmax = (d.outputVoltage) / (d.inputVoltageMin * d.efficiency);   // duty at Vin_min
-    const double dIL = (d.inputVoltageMin - d.outputVoltage) * Dmax / (L * fsw);   // pk-pk inductor ripple
-    const double IpkL = iout + dIL / 2.0;
-    const double IrmsL = std::sqrt(iout * iout + dIL * dIL / 12.0);
+    const MAS::OperatingPoint aopWorst = AN::analytical_buck(d.inputVoltageMin, d.outputVoltage, iout, fsw, L,
+                                                             d.diodeDrop, d.efficiency);
+    const MAS::OperatingPoint aopNom   = AN::analytical_buck(d.inputVoltage,    d.outputVoltage, iout, fsw, L,
+                                                             d.diodeDrop, d.efficiency);
+    const double Dmax   = AN::winding_current(aopWorst, 0, "dutyCycle");
+    const double dIL    = AN::winding_current(aopWorst, 0, "peakToPeak");
+    const double IpkL   = AN::winding_current(aopWorst, 0, "peak");
+    const double IrmsL  = AN::winding_current(aopWorst, 0, "rms");
     const double IswRms = std::sqrt(Dmax) * IrmsL;
     const double IdiodeAvg = iout * (1.0 - Dmax);
-    const double IcoutRms = dIL / (2.0 * std::sqrt(3.0));               // triangular ripple into Cout
-    const double ratedVds = d.inputVoltageMax / cfg::v_derate_mosfet(d.config);          // switch + diode both block Vin
-    const double maxRdsOn = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IswRms * IswRms);
-    const double maxVf = (ratedVds < 100.0) ? 0.6 : 1.2;
-
-    // Inductor voltage: +(Vin-Vout) ON / -Vout OFF (volt-second balanced).
-    const double vOn = d.inputVoltage - d.outputVoltage, vIndPk = std::max(vOn, d.outputVoltage);
-    const double vIndRms = std::sqrt(d.dutyCycle * vOn * vOn + (1.0 - d.dutyCycle) * d.outputVoltage * d.outputVoltage);
+    const double IcoutRms  = dIL / (2.0 * std::sqrt(3.0));              // triangular ripple into Cout
+    const double ratedVds  = d.inputVoltageMax / cfg::v_derate_mosfet(d.config);   // switch + diode both block Vin
+    const double maxRdsOn  = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IswRms * IswRms);
+    const double maxVf     = (ratedVds < 100.0) ? 0.6 : 1.2;
 
     // --- component PEAS docs (seed + detailed requirements) ---
     json ind; ind["magnetic"] = json::object();
-    ind["inputs"] = req::magnetic_inputs(L, 0.2, /*single winding*/ {}, {"primary"}, std::nullopt, 25.0, {
-        req::winding_excitation("triangular", fsw, IpkL, IrmsL, iout, dIL, d.dutyCycle,
-                                vIndPk, vIndRms, 0.0, d.inputVoltage)});
+    ind["inputs"] = req::magnetic_inputs(L, 0.2, /*single winding*/ {}, {"primary"}, std::nullopt, 25.0,
+                                         AN::excitations_json(aopNom));
     json mosfet; mosfet["semiconductor"]["mosfet"] = json::object();
     mosfet["inputs"]["designRequirements"] = req::mosfet("mainSwitch", ratedVds, IpkL, maxRdsOn, 125.0);
     json diode; diode["semiconductor"]["diode"] = json::object();

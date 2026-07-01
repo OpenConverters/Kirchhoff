@@ -86,17 +86,15 @@ void check_ngspice(const json& tas) {
         WARN("libngspice not linked — NGSPICE extract skipped");
         return;
     }
-    MAS::OperatingPoint an = Kirchhoff::extract_operating_point(tas, Kirchhoff::ExtractEngine::ANALYTICAL);
     MAS::OperatingPoint op = Kirchhoff::extract_operating_point(tas, Kirchhoff::ExtractEngine::NGSPICE);
     const auto& excs = op.get_excitations_per_winding();
     REQUIRE(excs.size() >= 1);
-    // EVERY winding was matched to a simulated branch (the extract throws otherwise) and carries a real
-    // simulated current: a 128-sample waveform the analytical extract does NOT have.
-    REQUIRE(an.get_excitations_per_winding().size() == excs.size());
+    // Non-vacuousness is guaranteed by the extract itself: it THROWS if any winding fails to match a
+    // simulated inductor branch, so a successful return means every winding was rebuilt from the sim.
+    // Each therefore carries a real 128-sample simulated current waveform.
     for (size_t w = 0; w < excs.size(); ++w) {
         CHECK(current_rms(excs[w]) > 0.0);
-        CHECK(current_waveform_points(excs[w]) == 128);                       // sim populated the waveform
-        CHECK(current_waveform_points(an.get_excitations_per_winding()[w]) == 0);  // analytical did not
+        CHECK(current_waveform_points(excs[w]) == 128);   // sim populated the waveform
     }
 }
 
