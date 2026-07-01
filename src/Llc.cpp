@@ -101,6 +101,12 @@ LlcDesign design_llc(const json& tasInputs) {
         d.resonantInductance = *pinnedLm / Ln;
         d.resonantCapacitance = 1.0 / (wr * wr * d.resonantInductance);
     }
+    // Advanced flow: an EXPLICIT resonant Lr/Cr pin (desiredResonantInductance/Capacitance) overrides the
+    // sizing above — the caller has already chosen the tank (e.g. from a realized MKF magnetic + a catalog
+    // cap), so KH honors it verbatim instead of re-deriving from Q·Rac. Lm stays whatever was pinned/derived
+    // above; Ln = Lm/Lr then simply reflects the pinned tank (mirrors AdvancedLlc's independent pins).
+    if (auto pinnedLr = req::provided_resonant_inductance(dr)) d.resonantInductance = *pinnedLr;
+    if (auto pinnedCr = req::provided_resonant_capacitance(dr)) d.resonantCapacitance = *pinnedCr;
 
     d.switchDuty = cfg::get(d.config, "switchDutyFraction", kSwitchDuty);
     d.loadResistance = Rload;

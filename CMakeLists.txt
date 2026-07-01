@@ -173,6 +173,9 @@ target_link_libraries(test_resonant_validation PRIVATE kirchhoff Catch2::Catch2W
 add_executable(test_extract tests/test_extract.cpp)
 target_link_libraries(test_extract PRIVATE kirchhoff Catch2::Catch2WithMain)
 
+add_executable(test_advanced tests/test_advanced.cpp)
+target_link_libraries(test_advanced PRIVATE kirchhoff Catch2::Catch2WithMain)
+
 add_executable(test_settings tests/test_settings.cpp)
 target_link_libraries(test_settings PRIVATE kirchhoff Catch2::Catch2WithMain)
 # Lets the test locate the independent Python averaged-model oracle (tests/averaged_model.py).

@@ -66,6 +66,27 @@ inline std::optional<double> provided_turns_ratio(const json& designRequirements
     return std::nullopt;
 }
 
+// "Design around a pinned resonant tank" (the resonant-topology Advanced flow, mirroring MKF's
+// AdvancedLlc/AdvancedCllc which take desiredResonantInductance / desiredResonantCapacitance as
+// INDEPENDENT pins alongside the magnetizing inductance). Reads designRequirements.desiredResonantInductance
+// / resonantInductance (and the capacitance analog), number or {nominal/…}. Returns nullopt if unpinned
+// (the topology sizes the tank from Q·Rac as before). Kept separate from provided_inductance because for a
+// resonant converter the RESONANT L and the MAGNETIZING L are distinct constraints.
+inline std::optional<double> provided_resonant_inductance(const json& designRequirements) {
+    if (designRequirements.is_object())
+        for (const char* k : {"desiredResonantInductance", "resonantInductance"})
+            if (designRequirements.contains(k))
+                return PEAS::resolve_dimensional_values(designRequirements.at(k));
+    return std::nullopt;
+}
+inline std::optional<double> provided_resonant_capacitance(const json& designRequirements) {
+    if (designRequirements.is_object())
+        for (const char* k : {"desiredResonantCapacitance", "resonantCapacitance"})
+            if (designRequirements.contains(k))
+                return PEAS::resolve_dimensional_values(designRequirements.at(k));
+    return std::nullopt;
+}
+
 // --- semiconductor: MOSFET main switch ---
 inline json mosfet(const std::string& role, double ratedVds, double ratedId,
                    double maxRdsOn, double maxTjC) {
