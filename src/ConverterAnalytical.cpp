@@ -3506,5 +3506,317 @@ MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
     return operatingPoint;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 8: magnetic-COMPONENT operating-point models (CT / DMC / CMC). Each ports
+// one MKF converter_models process_operating_points faithfully; the component's
+// per-winding excitation is computed from explicit electrical params (no Magnetic /
+// core geometry), and all DSP comes from WaveformProcessor.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Element-wise data ops used by the CT reflection chain (MKF Inputs::multiply_waveform /
+// sum_waveform, Inputs.cpp:106/114 — trivial scalar transforms of the data vector, not DSP; the
+// time grid is preserved so the result is still samplable).
+static MAS::Waveform ca_scale_waveform(MAS::Waveform waveform, double scalar) {
+    for (auto& datum : waveform.get_mutable_data()) datum *= scalar;
+    return waveform;
+}
+static MAS::Waveform ca_offset_waveform(MAS::Waveform waveform, double scalar) {
+    for (auto& datum : waveform.get_mutable_data()) datum += scalar;
+    return waveform;
+}
+
+// Ported from MKF converter_models/CurrentTransformer.cpp:42 (process_operating_points(turnsRatio,
+// secondaryDcResistance)).
+MAS::OperatingPoint analytical_current_transformer(MAS::WaveformLabel primaryCurrentWaveformLabel,
+                                                   double maximumPrimaryCurrentPeak,
+                                                   double frequency,
+                                                   double turnsRatio,
+                                                   double burdenResistor,
+                                                   double secondaryDcResistance,
+                                                   double dutyCycle,
+                                                   double diodeVoltageDrop) {
+    using Lbl = MAS::WaveformLabel;
+
+    // Guards: reject non-positive required inputs (no fabricated defaults). complete_excitation itself
+    // also rejects frequency <= 0.
+    if (maximumPrimaryCurrentPeak <= 0)
+        throw std::invalid_argument("analytical_current_transformer: maximumPrimaryCurrentPeak must be > 0");
+    if (frequency <= 0)
+        throw std::invalid_argument("analytical_current_transformer: frequency must be > 0");
+    if (turnsRatio <= 0)
+        throw std::invalid_argument("analytical_current_transformer: turnsRatio must be > 0");
+
+    // MKF CurrentTransformer.cpp:45-56 — primary-current peak-to-peak per waveform shape (and the
+    // unsupported-label guard MKF throws).
+    double peakToPeak;
+    switch (primaryCurrentWaveformLabel) {
+        case Lbl::SINUSOIDAL:
+            peakToPeak = maximumPrimaryCurrentPeak * 2;
+            break;
+        case Lbl::UNIPOLAR_RECTANGULAR:
+        case Lbl::UNIPOLAR_TRIANGULAR:
+            peakToPeak = maximumPrimaryCurrentPeak;
+            break;
+        default:
+            throw std::invalid_argument(
+                "analytical_current_transformer: only SINUSOIDAL, UNIPOLAR_RECTANGULAR, "
+                "UNIPOLAR_TRIANGULAR are allowed for current transformers");
+    }
+
+    // MKF :59 — the primary (sensed line) current waveform.
+    MAS::Waveform primaryCurrentWaveform =
+        WP::create_waveform(primaryCurrentWaveformLabel, peakToPeak, frequency, dutyCycle);
+
+    // MKF :66-68 — secondary current = primary × turnsRatio (Ip·Np = Is·Ns); secondary voltage =
+    // Is·burden + (Vdiode + Rsec_dc). MKF derives the secondary current via reflect_waveform (2-arg,
+    // Inputs.cpp:1222) which likewise multiplies the data by the ratio.
+    MAS::Waveform secondaryCurrentWaveform = ca_scale_waveform(primaryCurrentWaveform, turnsRatio);
+    MAS::Waveform secondaryVoltageWaveform =
+        ca_offset_waveform(ca_scale_waveform(secondaryCurrentWaveform, burdenResistor),
+                           diodeVoltageDrop + secondaryDcResistance);
+
+    // MKF :73 — the primary winding voltage is the secondary voltage reflected back: V_pri = V_sec × turnsRatio.
+    MAS::Waveform primaryVoltageWaveform = ca_scale_waveform(secondaryVoltageWaveform, turnsRatio);
+
+    // MKF :79-90 — two winding excitations (Primary + Secondary). complete_excitation runs the same DSP
+    // (sampled waveform + harmonics + processed) MKF applies to each SignalDescriptor inline (:60-78).
+    MAS::OperatingPoint operatingPoint;
+    operatingPoint.get_mutable_excitations_per_winding().push_back(
+        WP::complete_excitation(primaryCurrentWaveform, primaryVoltageWaveform, frequency, "Primary"));
+    operatingPoint.get_mutable_excitations_per_winding().push_back(
+        WP::complete_excitation(secondaryCurrentWaveform, secondaryVoltageWaveform, frequency, "Secondary"));
+    return operatingPoint;
+}
+
+// Winding/phase count for a DMC configuration. MKF DifferentialModeChoke.h:96 (get_number_of_windings).
+static int dmc_number_of_windings(DmcConfiguration configuration) {
+    switch (configuration) {
+        case DmcConfiguration::SINGLE_PHASE:             return 1;
+        case DmcConfiguration::SINGLE_PHASE_BALANCED:    return 2;
+        case DmcConfiguration::THREE_PHASE:              return 3;
+        case DmcConfiguration::THREE_PHASE_WITH_NEUTRAL: return 4;
+    }
+    return 1;
+}
+
+// Ported from MKF converter_models/DifferentialModeChoke.cpp:145 (process_operating_points) +
+// resolve_peak_current (:128).
+MAS::OperatingPoint analytical_differential_mode_choke(double operatingCurrent,
+                                                       double inputVoltage,
+                                                       double lineFrequency,
+                                                       double switchingFrequency,
+                                                       DmcConfiguration configuration,
+                                                       double peakCurrent,
+                                                       double ambientTemperature) {
+    using Lbl = MAS::WaveformLabel;
+
+    // MKF :150-151 — operating (loss) frequency is the line frequency; ripple is at the switching frequency
+    // (MKF require_input throws if it is missing/non-positive).
+    if (switchingFrequency <= 0)
+        throw std::invalid_argument("analytical_differential_mode_choke: switchingFrequency must be > 0");
+    if (lineFrequency <= 0)
+        throw std::invalid_argument("analytical_differential_mode_choke: lineFrequency must be > 0");
+    const double operatingFrequency = lineFrequency;
+    const double rippleFrequency    = switchingFrequency;
+
+    // MKF resolve_peak_current(0.20) (:128-143): an explicit peak wins; otherwise derive it from a positive
+    // operating current with a 20% ripple assumption; otherwise there is genuinely no current info → throw.
+    constexpr double kOperatingRippleFraction = 0.20;
+    double resolvedPeakCurrent;
+    if (std::isfinite(peakCurrent)) {
+        resolvedPeakCurrent = peakCurrent;
+    } else {
+        if (!(operatingCurrent > 0))
+            throw std::invalid_argument(
+                "analytical_differential_mode_choke: neither peakCurrent nor a positive operatingCurrent "
+                "was provided — cannot size the choke");
+        resolvedPeakCurrent = operatingCurrent * (1.0 + kOperatingRippleFraction);
+    }
+
+    // MKF :162-165 — ripple current = peak − operating (fallback 20% if the difference is negative).
+    double currentRipple = resolvedPeakCurrent - operatingCurrent;
+    if (currentRipple < 0)
+        currentRipple = operatingCurrent * 0.2;
+
+    const int numWindings = dmc_number_of_windings(configuration);
+    const double operatingVoltage = inputVoltage;
+
+    // MKF :185-194 — per-winding phase angles (0 / ±120° for 3-phase; the neutral shares 0°).
+    std::vector<double> phaseAngles;
+    if (configuration == DmcConfiguration::SINGLE_PHASE) {
+        phaseAngles = {0.0};
+    } else if (configuration == DmcConfiguration::SINGLE_PHASE_BALANCED) {
+        phaseAngles = {0.0, 0.0};
+    } else if (configuration == DmcConfiguration::THREE_PHASE) {
+        phaseAngles = {0.0, 2.0 * M_PI / 3.0, 4.0 * M_PI / 3.0};
+    } else {  // THREE_PHASE_WITH_NEUTRAL
+        phaseAngles = {0.0, 2.0 * M_PI / 3.0, 4.0 * M_PI / 3.0, 0.0};
+    }
+
+    // Keep the RAW per-winding current waveforms so the magnetizing current (Σ I_k) is summed on the same
+    // 10000-point line-period grid MKF uses (complete_excitation stores the resampled waveform, not the raw).
+    std::vector<MAS::Waveform> rawCurrentWaveforms;
+    std::vector<MAS::OperatingPointExcitation> excitations;
+
+    for (int windingIdx = 0; windingIdx < numWindings; windingIdx++) {
+        const double phaseAngle = phaseAngles[windingIdx];
+        const bool isNeutral =
+            (configuration == DmcConfiguration::THREE_PHASE_WITH_NEUTRAL && windingIdx == 3);
+
+        // MKF :207-231 — line-frequency sinusoid of amplitude √2·operatingCurrent (RMS→peak) + a triangular
+        // switching-frequency ripple of amplitude currentRipple, over one line period (10000 points). The
+        // neutral winding carries 10% of the phase amplitude.
+        double currentAmplitude = operatingCurrent * std::sqrt(2.0);
+        if (isNeutral) currentAmplitude *= 0.1;
+
+        const int numPoints = 10000;
+        const double period = 1.0 / operatingFrequency;
+        std::vector<double> timeData(numPoints), currentData(numPoints);
+        for (int i = 0; i < numPoints; i++) {
+            const double t = i * period / numPoints;
+            timeData[i] = t;
+            currentData[i] = currentAmplitude * std::sin(2.0 * M_PI * operatingFrequency * t + phaseAngle);
+            const double ripplePhase = std::fmod(t * rippleFrequency, 1.0);
+            const double ripple = (ripplePhase < 0.5) ? (4.0 * ripplePhase - 1.0) : (3.0 - 4.0 * ripplePhase);
+            currentData[i] += currentRipple * ripple;
+        }
+
+        MAS::Waveform currentWaveform;
+        currentWaveform.set_ancillary_label(Lbl::CUSTOM);
+        currentWaveform.set_data(currentData);
+        currentWaveform.set_time(timeData);
+        rawCurrentWaveforms.push_back(currentWaveform);
+
+        // MKF :248-258 — small line-frequency voltage across the inductor (~5% of input; neutral 10% of that).
+        double voltageAmplitude = operatingVoltage * 0.05;
+        if (isNeutral) voltageAmplitude *= 0.1;
+        MAS::Waveform voltageWaveform =
+            WP::create_waveform(Lbl::SINUSOIDAL, voltageAmplitude, operatingFrequency, 0.5);
+
+        // MKF :237-274 builds the current + voltage SignalDescriptors (processed + sampled + harmonics) then
+        // the excitation; complete_excitation runs exactly that DSP at the line frequency.
+        excitations.push_back(
+            WP::complete_excitation(currentWaveform, voltageWaveform, operatingFrequency,
+                                    "Winding " + std::to_string(windingIdx + 1)));
+    }
+
+    MAS::OperatingPoint operatingPoint;
+    operatingPoint.set_excitations_per_winding(excitations);
+    operatingPoint.get_mutable_conditions().set_ambient_temperature(ambientTemperature);
+
+    // MKF :281-315 — magnetizing current = point-by-point sum of all winding currents (in a DMC every winding
+    // drives the flux the same way, so MMF ∝ Σ I_k). Set on the first winding's excitation.
+    {
+        std::vector<double> sumData = rawCurrentWaveforms[0].get_data();
+        const auto timeData = rawCurrentWaveforms[0].get_time().value();
+        for (size_t w = 1; w < rawCurrentWaveforms.size(); ++w) {
+            const auto& wData = rawCurrentWaveforms[w].get_data();
+            for (size_t j = 0; j < sumData.size() && j < wData.size(); ++j)
+                sumData[j] += wData[j];
+        }
+
+        MAS::Waveform magnetizingWaveform;
+        magnetizingWaveform.set_ancillary_label(Lbl::CUSTOM);
+        magnetizingWaveform.set_data(sumData);
+        magnetizingWaveform.set_time(timeData);
+
+        MAS::SignalDescriptor magnetizingCurrent;
+        auto sampledWaveform = WP::calculate_sampled_waveform(magnetizingWaveform, operatingFrequency);
+        magnetizingCurrent.set_waveform(sampledWaveform);
+        magnetizingCurrent.set_harmonics(WP::calculate_harmonics_data(sampledWaveform, operatingFrequency));
+        magnetizingCurrent.set_processed(WP::calculate_processed_data(magnetizingCurrent, sampledWaveform, true));
+
+        operatingPoint.get_mutable_excitations_per_winding()[0].set_magnetizing_current(magnetizingCurrent);
+    }
+
+    return operatingPoint;
+}
+
+// CMC winding names by count. Ported from MKF CommonModeChoke::windingNames (CommonModeChoke.cpp:35).
+static std::vector<std::string> cmc_winding_names(int numWindings) {
+    switch (numWindings) {
+        case 2:  return {"Line", "Neutral"};
+        case 3:  return {"Phase A", "Phase B", "Phase C"};
+        case 4:  return {"Phase A", "Phase B", "Phase C", "Neutral"};
+        default: {
+            std::vector<std::string> names;
+            for (int i = 0; i < numWindings; ++i)
+                names.push_back("Winding " + std::to_string(i + 1));
+            return names;
+        }
+    }
+}
+
+// MKF CommonModeChoke.cpp:89-93 — V_mains → CM excitation scaling, calibrated so 230 V is a no-op
+// (dV/dt ∝ V_bus ≈ √2·V_mains → I_cm scales linearly with the mains voltage; vanishes at 0 V).
+static constexpr double CMC_VREF_VMAINS = 230.0;
+static double cmc_excitation_scaling(double operatingVoltage) {
+    if (operatingVoltage <= 0.0) return 0.0;
+    return operatingVoltage / CMC_VREF_VMAINS;
+}
+
+// Ported from MKF converter_models/CommonModeChoke.cpp:327 (the scalar-arg
+// process_operating_points(turnsRatios, magnetizingInductance)); the all-1:1 turnsRatios arg shapes no
+// excitation and is dropped.
+MAS::OperatingPoint analytical_common_mode_choke(double magnetizingInductance,
+                                                 double operatingCurrent,
+                                                 double operatingVoltage,
+                                                 double excitationFrequency,
+                                                 int numberOfWindings,
+                                                 double parasiticCapacitancePf,
+                                                 double dvdtVPerNs,
+                                                 double ambientTemperature) {
+    using Lbl = MAS::WaveformLabel;
+
+    // Guards mirror MKF run_checks (CommonModeChoke.cpp:228-262): numberOfWindings 2-4, positive operating
+    // current, positive excitation (line/dominant) frequency; plus the magnetizing inductance MKF derives
+    // from the Magnetic and the operating voltage the CM scaling needs — all required, no fabricated defaults.
+    if (numberOfWindings < 2 || numberOfWindings > 4)
+        throw std::invalid_argument("analytical_common_mode_choke: numberOfWindings must be 2, 3, or 4");
+    if (magnetizingInductance <= 0)
+        throw std::invalid_argument("analytical_common_mode_choke: magnetizingInductance must be > 0");
+    if (operatingCurrent <= 0)
+        throw std::invalid_argument("analytical_common_mode_choke: operatingCurrent must be > 0");
+    if (operatingVoltage <= 0)
+        throw std::invalid_argument("analytical_common_mode_choke: operatingVoltage must be > 0");
+    if (excitationFrequency <= 0)
+        throw std::invalid_argument("analytical_common_mode_choke: excitationFrequency must be > 0");
+
+    const double excFreq = excitationFrequency;
+
+    // MKF :347-357 — CM current amplitude: I_cm = C·dV/dt when both are supplied, else a representative
+    // 0.1 A, then scaled by the mains voltage (see cmc_excitation_scaling).
+    double iCmPeak;
+    if (parasiticCapacitancePf > 0.0 && dvdtVPerNs > 0.0)
+        iCmPeak = parasiticCapacitancePf * dvdtVPerNs * 1e-3;
+    else
+        iCmPeak = 0.1;
+    iCmPeak *= cmc_excitation_scaling(operatingVoltage);
+
+    // MKF :359-361 — CM voltage across the CM inductance: V = L·ω·I_cm_peak.
+    const double omega   = 2.0 * M_PI * excFreq;
+    const double vCmPeak = magnetizingInductance * omega * iCmPeak;
+
+    const auto names = cmc_winding_names(numberOfWindings);
+
+    MAS::OperatingPoint operatingPoint;
+    for (int w = 0; w < numberOfWindings; ++w) {
+        // MKF :378-406 — every winding gets the SAME CM ripple current (peak-to-peak 2·I_cm) riding on the
+        // line-current DC bias, and a CM voltage leading the current by 90° (ideal inductor V = L·dI/dt).
+        MAS::Waveform currentWaveform = WP::create_waveform(
+            Lbl::SINUSOIDAL, iCmPeak * 2.0, excFreq, 0.5, operatingCurrent, 0, 0, 0);
+        MAS::Waveform voltageWaveform = WP::create_waveform(
+            Lbl::SINUSOIDAL, vCmPeak * 2.0, excFreq, 0.5, 0.0, 0, 0, M_PI / 2.0);
+
+        operatingPoint.get_mutable_excitations_per_winding().push_back(
+            WP::complete_excitation(currentWaveform, voltageWaveform, excFreq, names[w]));
+    }
+
+    // MKF :414-418 — conditions + name.
+    operatingPoint.get_mutable_conditions().set_ambient_temperature(ambientTemperature);
+    operatingPoint.set_name("Nominal");
+    return operatingPoint;
+}
+
 } // namespace analytical
 } // namespace Kirchhoff

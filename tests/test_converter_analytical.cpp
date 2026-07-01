@@ -20,6 +20,12 @@ static MAS::ProcessedWaveform processed_current(const MAS::OperatingPoint& op, s
 static double voltage_average(const MAS::OperatingPoint& op, size_t winding) {
     return *op.get_excitations_per_winding().at(winding).get_voltage()->get_processed()->get_average();
 }
+static MAS::ProcessedWaveform processed_voltage(const MAS::OperatingPoint& op, size_t winding) {
+    return *op.get_excitations_per_winding().at(winding).get_voltage()->get_processed();
+}
+static MAS::ProcessedWaveform processed_magnetizing(const MAS::OperatingPoint& op, size_t winding) {
+    return *op.get_excitations_per_winding().at(winding).get_magnetizing_current()->get_processed();
+}
 
 TEST_CASE("analytical_buck CCM inductor excitation matches closed form", "[analytical][solver][buck]") {
     // 12 V -> 5 V, 2 A, 100 kHz, L = 10 uH (ideal: Vd=0, eta=1).
@@ -740,4 +746,141 @@ TEST_CASE("analytical_pfc rejects non-positive line/bus/power/fsw/L and infeasib
     // efficiency out of (0,1].
     CHECK_THROWS(analytical_pfc(kPfcVrms, kPfcVout, kPfcPo, kPfcFline, kPfcFsw, kPfcL, 1.5));
     CHECK_THROWS(analytical_pfc(kPfcVrms, kPfcVout, kPfcPo, kPfcFline, kPfcFsw, kPfcL, 0.0));
+}
+
+// ─── Phase 8: magnetic-COMPONENT operating-point models (CT / DMC / CMC) ────────
+// STRUCTURAL tests only — these are magnetic COMPONENTS (a current-sense transformer, a differential-
+// mode choke, a common-mode choke), NOT gated switching converters, so there is NO NRMSE gate. We assert
+// the winding count, the per-winding current/voltage shape + magnitude against the closed form, and the
+// throw guards (mirroring each MKF model's own guards).
+
+// Current-sense transformer. Ported from MKF converter_models/CurrentTransformer.cpp:42.
+TEST_CASE("analytical_current_transformer: 2 windings, secondary = primary*turnsRatio, burden voltage",
+          "[analytical][component][ct]") {
+    using Kirchhoff::analytical::analytical_current_transformer;
+    // 100 A sensed line current, 100 kHz, turnsRatio Np/Ns = 0.01 (1:100 step-up turns → 1:100 step-down
+    // current), burden = 10 Ω, secondary DC resistance 0.5 Ω, diode drop 0.7 V.
+    const double ipk = 100, freq = 100000, n = 0.01, burden = 10, rdc = 0.5, vd = 0.7;
+    MAS::OperatingPoint op = analytical_current_transformer(
+        MAS::WaveformLabel::SINUSOIDAL, ipk, freq, n, burden, rdc, 0.5, vd);
+
+    REQUIRE(op.get_excitations_per_winding().size() == 2);   // Primary + Secondary
+    // Primary winding carries the sensed line current (zero-mean sine of peak I_pk).
+    CHECK(*processed_current(op, 0).get_peak() == Catch::Approx(ipk).margin(0.5));
+    CHECK(*processed_current(op, 0).get_average() == Catch::Approx(0.0).margin(0.05));
+    // Secondary current = primary × turnsRatio (Ip·Np = Is·Ns).
+    CHECK(*processed_current(op, 1).get_peak() == Catch::Approx(ipk * n).margin(0.05));   // 1.0 A
+    CHECK(*processed_current(op, 1).get_average() == Catch::Approx(0.0).margin(0.05));
+    // Secondary voltage = Is·burden + (Vdiode + Rsec_dc): sine of peak Is_pk·burden riding on the DC term.
+    CHECK(voltage_average(op, 1) == Catch::Approx(vd + rdc).margin(0.05));                 // 1.2 V DC
+    CHECK(*processed_voltage(op, 1).get_peak() == Catch::Approx(ipk * n * burden + vd + rdc).margin(0.1)); // 11.2
+    // Primary winding voltage is the secondary voltage reflected back: V_pri = V_sec × turnsRatio.
+    CHECK(*processed_voltage(op, 0).get_peak() ==
+          Catch::Approx((ipk * n * burden + vd + rdc) * n).margin(0.02));                  // 0.112 V
+}
+
+TEST_CASE("analytical_current_transformer rejects bad waveform label and non-positive inputs",
+          "[analytical][component][ct]") {
+    using Kirchhoff::analytical::analytical_current_transformer;
+    // Only SINUSOIDAL / UNIPOLAR_RECTANGULAR / UNIPOLAR_TRIANGULAR are allowed (MKF CT guard).
+    CHECK_THROWS(analytical_current_transformer(MAS::WaveformLabel::BIPOLAR_TRIANGULAR, 100, 100000, 0.01, 10));
+    CHECK_THROWS(analytical_current_transformer(MAS::WaveformLabel::TRIANGULAR, 100, 100000, 0.01, 10));
+    // Non-positive required inputs.
+    CHECK_THROWS(analytical_current_transformer(MAS::WaveformLabel::SINUSOIDAL, 0.0, 100000, 0.01, 10)); // peak
+    CHECK_THROWS(analytical_current_transformer(MAS::WaveformLabel::SINUSOIDAL, 100, 0.0,    0.01, 10)); // freq
+    CHECK_THROWS(analytical_current_transformer(MAS::WaveformLabel::SINUSOIDAL, 100, 100000, 0.0,  10)); // n
+    // A valid unipolar label works (no throw).
+    CHECK_NOTHROW(analytical_current_transformer(MAS::WaveformLabel::UNIPOLAR_TRIANGULAR, 100, 100000, 0.01, 10));
+}
+
+// Differential-mode choke. Ported from MKF converter_models/DifferentialModeChoke.cpp:145.
+TEST_CASE("analytical_differential_mode_choke single-phase: 1 winding, current RMS = line current",
+          "[analytical][component][dmc]") {
+    using Kirchhoff::analytical::analytical_differential_mode_choke;
+    // 10 A line current, 230 V, 50 Hz line, 100 kHz switching ripple, single phase (default peak → 20% ripple).
+    const double iop = 10, vin = 230, fline = 50, fsw = 100000;
+    MAS::OperatingPoint op = analytical_differential_mode_choke(iop, vin, fline, fsw);
+
+    REQUIRE(op.get_excitations_per_winding().size() == 1);   // single winding
+    // Line-frequency sinusoid of amplitude √2·Iop (RMS→peak) + a switching ripple of amplitude
+    // (peak−operating)=0.2·Iop → RMS ≈ Iop, zero mean, peak ≈ √2·Iop + 0.2·Iop.
+    const double ripple = 0.2 * iop;   // default peakCurrent = 1.2·Iop
+    CHECK(*processed_current(op, 0).get_average() == Catch::Approx(0.0).margin(0.3));
+    CHECK(*processed_current(op, 0).get_rms() == Catch::Approx(iop).margin(0.3));
+    CHECK(*processed_current(op, 0).get_peak() == Catch::Approx(iop * std::sqrt(2.0) + ripple).margin(0.5));
+    // The magnetizing current (Σ of all winding currents) is set on the first winding's excitation.
+    REQUIRE(op.get_excitations_per_winding()[0].get_magnetizing_current().has_value());
+    CHECK(*processed_magnetizing(op, 0).get_rms() > 0.0);
+}
+
+TEST_CASE("analytical_differential_mode_choke three-phase: 3 windings, identical, DM currents cancel in core",
+          "[analytical][component][dmc]") {
+    using Kirchhoff::analytical::analytical_differential_mode_choke;
+    using Kirchhoff::analytical::DmcConfiguration;
+    const double iop = 10;
+    MAS::OperatingPoint op = analytical_differential_mode_choke(
+        iop, 230, 50, 100000, DmcConfiguration::THREE_PHASE);
+
+    REQUIRE(op.get_excitations_per_winding().size() == 3);   // Phase A / B / C
+    // The three windings carry the same-magnitude line current (120° apart) → identical RMS ≈ Iop.
+    CHECK(*processed_current(op, 0).get_rms() == Catch::Approx(iop).margin(0.3));
+    CHECK(*processed_current(op, 1).get_rms() == Catch::Approx(*processed_current(op, 0).get_rms()).margin(0.05));
+    CHECK(*processed_current(op, 2).get_rms() == Catch::Approx(*processed_current(op, 0).get_rms()).margin(0.05));
+    // Magnetizing current = point-by-point sum: the balanced sines cancel, leaving only the common ripple,
+    // so its peak is far below a single winding's peak (the DM current does NOT saturate the core).
+    REQUIRE(op.get_excitations_per_winding()[0].get_magnetizing_current().has_value());
+    CHECK(*processed_magnetizing(op, 0).get_peak() < *processed_current(op, 0).get_peak());
+}
+
+TEST_CASE("analytical_differential_mode_choke rejects non-positive frequencies / missing current",
+          "[analytical][component][dmc]") {
+    using Kirchhoff::analytical::analytical_differential_mode_choke;
+    CHECK_THROWS(analytical_differential_mode_choke(10, 230, 50, 0.0));     // switchingFrequency = 0
+    CHECK_THROWS(analytical_differential_mode_choke(10, 230, 0.0, 100000)); // lineFrequency = 0
+    // Neither peakCurrent (NaN default) nor a positive operatingCurrent → cannot size the choke.
+    CHECK_THROWS(analytical_differential_mode_choke(0.0, 230, 50, 100000));
+}
+
+// Common-mode choke. Ported from MKF converter_models/CommonModeChoke.cpp:327 (scalar-arg overload).
+TEST_CASE("analytical_common_mode_choke: N windings, DC bias = line current, small CM ripple, identical",
+          "[analytical][component][cmc]") {
+    using Kirchhoff::analytical::analytical_common_mode_choke;
+    // Lm = 1 mH, 5 A line current, 230 V mains (scaling no-op), 150 kHz dominant impedance frequency, 2 windings.
+    const double Lm = 1e-3, iop = 5, vop = 230, fexc = 150000;
+    MAS::OperatingPoint op = analytical_common_mode_choke(Lm, iop, vop, fexc);
+
+    REQUIRE(op.get_excitations_per_winding().size() == 2);   // Line + Neutral
+    // Default (no parasitics): I_cm = 0.1 A × (230/230). Every winding = CM ripple (pp = 2·I_cm) on the
+    // line-current DC bias → average = line current, small ripple.
+    const double iCmPeak = 0.1;
+    CHECK(*processed_current(op, 0).get_average() == Catch::Approx(iop).margin(0.05));           // DC = line I
+    CHECK(*processed_current(op, 0).get_peak_to_peak() == Catch::Approx(2.0 * iCmPeak).margin(0.05));
+    // Both windings carry the identical CM waveform (precondition for the CM-choke magnetizing-current path).
+    CHECK(*processed_current(op, 1).get_average() == Catch::Approx(*processed_current(op, 0).get_average()).margin(0.01));
+    CHECK(*processed_current(op, 1).get_rms() == Catch::Approx(*processed_current(op, 0).get_rms()).margin(0.01));
+    // CM voltage present, peak = L·ω·I_cm.
+    REQUIRE(op.get_excitations_per_winding()[0].get_voltage().has_value());
+    const double vCmPeak = Lm * 2.0 * M_PI * fexc * iCmPeak;                                      // ≈ 94.25 V
+    CHECK(*processed_voltage(op, 0).get_peak() == Catch::Approx(vCmPeak).margin(1.0));
+}
+
+TEST_CASE("analytical_common_mode_choke honors winding count and C·dV/dt CM current",
+          "[analytical][component][cmc]") {
+    using Kirchhoff::analytical::analytical_common_mode_choke;
+    // 4 windings; explicit parasitics 100 pF × 10 V/ns → I_cm = 100·10·1e-3 = 1.0 A (× 230/230 = 1.0).
+    MAS::OperatingPoint op = analytical_common_mode_choke(1e-3, 5, 230, 150000, 4, 100.0, 10.0);
+    REQUIRE(op.get_excitations_per_winding().size() == 4);   // Phase A/B/C + Neutral
+    CHECK(*processed_current(op, 0).get_peak_to_peak() == Catch::Approx(2.0).margin(0.05));   // 2·I_cm = 2.0
+    CHECK(*processed_current(op, 3).get_average() == Catch::Approx(5.0).margin(0.05));        // DC = line I
+}
+
+TEST_CASE("analytical_common_mode_choke rejects bad winding count / non-positive inputs",
+          "[analytical][component][cmc]") {
+    using Kirchhoff::analytical::analytical_common_mode_choke;
+    CHECK_THROWS(analytical_common_mode_choke(1e-3, 5, 230, 150000, 1));   // numberOfWindings < 2
+    CHECK_THROWS(analytical_common_mode_choke(1e-3, 5, 230, 150000, 5));   // numberOfWindings > 4
+    CHECK_THROWS(analytical_common_mode_choke(0.0,  5, 230, 150000));      // Lm = 0
+    CHECK_THROWS(analytical_common_mode_choke(1e-3, 0, 230, 150000));      // operatingCurrent = 0
+    CHECK_THROWS(analytical_common_mode_choke(1e-3, 5, 0.0, 150000));      // operatingVoltage = 0
+    CHECK_THROWS(analytical_common_mode_choke(1e-3, 5, 230, 0.0));         // excitationFrequency = 0
 }

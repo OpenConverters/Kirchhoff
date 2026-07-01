@@ -430,5 +430,82 @@ MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
                                    double diodeVoltageDrop = 0.0,
                                    int numberOfPeriods = 2);
 
+// ── Phase 8: magnetic-COMPONENT operating-point models ───────────────────────
+// The final three MKF converter_models that have no KH analytical counterpart. Unlike the switching
+// converters above, these three are magnetic COMPONENTS — a current-sense transformer, a differential-
+// mode filter choke, and a common-mode filter choke. Their `process_operating_points` compute the per-
+// winding excitation(s) of the component from its ELECTRICAL inputs (applied current(s)/voltage(s),
+// frequency, turns ratio, DC resistance, inductance, winding/phase count). Every value MKF reads from a
+// `Magnetic` or member is here an explicit scalar param; the only Magnetic-derived value any of them uses
+// for the excitation — the CMC magnetizing inductance — is passed as `magnetizingInductance`. Nothing
+// core-geometry-only (core-loss, B-field, leakage) is ported: those shape no winding excitation. All DSP
+// (sampling / harmonics / processed stresses) comes from WaveformProcessor, exactly as the rest of the file.
+
+// Current-sense transformer. Pushes TWO winding excitations: Primary + Secondary. The primary current is
+// the sensed line current (shape `primaryCurrentWaveformLabel` ∈ {SINUSOIDAL, UNIPOLAR_RECTANGULAR,
+// UNIPOLAR_TRIANGULAR}, peak `maximumPrimaryCurrentPeak`). Ampere-turn balance Ip·Np = Is·Ns with
+// `turnsRatio` = Np/Ns gives the secondary current = primary × turnsRatio (for a step-up-turns CT, Np<Ns
+// ⇒ turnsRatio<1 ⇒ the secondary is a scaled-DOWN replica of the line current). The secondary develops
+// V_sec = Is·burdenResistor + (diodeVoltageDrop + secondaryDcResistance) across the burden + rectifier +
+// winding DC resistance; the primary winding voltage is that reflected back V_pri = V_sec × turnsRatio.
+// Ported from MKF converter_models/CurrentTransformer.cpp:42 (process_operating_points(turnsRatio,
+// secondaryDcResistance)); MKF's multiply_waveform/sum_waveform/reflect_waveform data ops are inlined and
+// the two SignalDescriptors are completed via WP::complete_excitation (same DSP MKF runs inline). Throws
+// on an unsupported waveform label (MKF's own guard) and on non-positive peak / frequency / turnsRatio.
+MAS::OperatingPoint analytical_current_transformer(MAS::WaveformLabel primaryCurrentWaveformLabel,
+                                                   double maximumPrimaryCurrentPeak,
+                                                   double frequency,
+                                                   double turnsRatio,
+                                                   double burdenResistor,
+                                                   double secondaryDcResistance = 0.0,
+                                                   double dutyCycle = 0.5,
+                                                   double diodeVoltageDrop = 0.0);
+
+// DMC/CMC winding configuration → winding (phase) count. Mirrors MKF DifferentialModeChoke's
+// get_number_of_windings() (DifferentialModeChoke.h:96) and the phase-angle table.
+enum class DmcConfiguration { SINGLE_PHASE, SINGLE_PHASE_BALANCED, THREE_PHASE, THREE_PHASE_WITH_NEUTRAL };
+
+// Differential-mode filter choke. Pushes ONE excitation per winding/line (SINGLE_PHASE ⇒ 1, SINGLE_PHASE_
+// BALANCED ⇒ 2, THREE_PHASE ⇒ 3, THREE_PHASE_WITH_NEUTRAL ⇒ 4 — the neutral winding carries 10% amplitude).
+// Each winding current is the line-frequency sinusoid of amplitude √2·operatingCurrent (RMS→peak), phase-
+// shifted per phase (0 / ±120° for 3-phase), with a triangular switching-frequency ripple of amplitude
+// `currentRipple = peakCurrent − operatingCurrent` superimposed (CUSTOM waveform, one line period). The
+// winding voltage is a small line-frequency sinusoid (5% of `inputVoltage`). The first winding's excitation
+// additionally carries the magnetizing current = point-by-point sum of all winding currents (in a DMC every
+// winding drives the flux the same way, so MMF ∝ Σ I_k). `peakCurrent` defaults to NaN → derived as
+// operatingCurrent·(1+0.20) exactly as MKF's resolve_peak_current(0.20). Ported from MKF converter_models/
+// DifferentialModeChoke.cpp:145 (process_operating_points) + resolve_peak_current (:128). MKF's ngspice/
+// attenuation/propose_design paths and the DesignRequirements are NOT part of the excitation and are omitted.
+// Throws on non-positive switchingFrequency / lineFrequency, and (per MKF) when neither peakCurrent nor a
+// positive operatingCurrent is available to size the choke.
+MAS::OperatingPoint analytical_differential_mode_choke(double operatingCurrent,
+                                                       double inputVoltage,
+                                                       double lineFrequency,
+                                                       double switchingFrequency,
+                                                       DmcConfiguration configuration = DmcConfiguration::SINGLE_PHASE,
+                                                       double peakCurrent = std::numeric_limits<double>::quiet_NaN(),
+                                                       double ambientTemperature = 25.0);
+
+// Common-mode filter choke. Pushes ONE excitation per winding (numberOfWindings ∈ [2,4]; names
+// Line/Neutral, Phase A/B/C, +Neutral). The core sees only the COMMON-MODE excitation: every winding gets
+// the SAME sinusoidal CM ripple current at `excitationFrequency` (the dominant impedance-spec frequency)
+// riding on a DC bias equal to the line `operatingCurrent`, and a CM voltage V = L·ω·I_cm leading the
+// current by 90° (ideal inductor). The CM ripple amplitude is I_cm = parasiticCapacitancePf·dvdtVPerNs·1e-3
+// (the C·dV/dt switch-node injection) when both are supplied, else a representative 0.1 A, then scaled by
+// operatingVoltage/230 V (dV/dt ∝ V_bus). `magnetizingInductance` is the CM inductance (the one Magnetic-
+// derived value, taken as a scalar). Ported from MKF converter_models/CommonModeChoke.cpp:327 (the scalar-
+// arg process_operating_points(turnsRatios, magnetizingInductance)) + windingNames (:35) + cmExcitationScaling
+// (:90). The `Magnetic` overload (:428), ngspice paths and DesignRequirements are omitted (not excitation).
+// Throws on numberOfWindings ∉ [2,4], and non-positive magnetizingInductance / operatingCurrent /
+// operatingVoltage / excitationFrequency (mirroring MKF run_checks — no fabricated defaults).
+MAS::OperatingPoint analytical_common_mode_choke(double magnetizingInductance,
+                                                 double operatingCurrent,
+                                                 double operatingVoltage,
+                                                 double excitationFrequency,
+                                                 int numberOfWindings = 2,
+                                                 double parasiticCapacitancePf = 0.0,
+                                                 double dvdtVPerNs = 0.0,
+                                                 double ambientTemperature = 25.0);
+
 } // namespace analytical
 } // namespace Kirchhoff
