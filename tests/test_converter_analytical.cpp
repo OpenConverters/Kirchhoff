@@ -453,3 +453,69 @@ TEST_CASE("analytical_llc rejects non-positive fsw / Lm / Ls / Cr / turns ratio"
     // Vector length mismatch.
     CHECK_THROWS(analytical_llc(400, {12}, {10, 1}, {16}, 100000, 589e-6, 118e-6, 13.4e-9));
 }
+
+// ─── Phase 5: CLLC bidirectional resonant converter (4-state Sun et al. TDA) ──
+// Structural invariants of the 4-state time-domain tank solver: the symmetric full bridge yields an
+// antisymmetric primary tank current (zero-mean); the winding set is Primary + the rectifier's
+// secondaries; the throw guards fire on non-positive fsw / Lm / tank values / turns ratio and on an
+// infeasible conversion gain. Driven BELOW resonance (fsw < fr) where the damped-Picard steady-state
+// solve converges cleanly (residual < 0.5 A) — see the [nrmse][cllc] gate for the at-resonance
+// singularity characterization. Tank params below are a design_cllc 400 V→48 V/480 W design (n≈7.72,
+// Lm=492 µH, Lr1=110.6 µH, Cr1=22.9 nF, Lr2=1.86 µH, Cr2=1.364 µF; fr≈100 kHz). Follows the LLC style.
+namespace {
+constexpr double kCllcVin = 400, kCllcVout = 48, kCllcIout = 10, kCllcN = 7.71605;
+constexpr double kCllcLm = 492.179e-6, kCllcLr1 = 110.602e-6, kCllcCr1 = 22.9022e-9;
+constexpr double kCllcLr2 = 1.85769e-6, kCllcCr2 = 1.36354e-6;
+constexpr double kCllcFsub = 85000;   // below fr → the Picard solve converges cleanly
+}
+
+TEST_CASE("analytical_cllc full-bridge: antisymmetric tank current, 2 windings",
+          "[analytical][solver][cllc]") {
+    using Kirchhoff::analytical::analytical_cllc;
+    MAS::OperatingPoint op = analytical_cllc(kCllcVin, {kCllcVout}, {kCllcIout}, {kCllcN}, kCllcFsub,
+                                             kCllcLm, kCllcLr1, kCllcCr1, kCllcLr2, kCllcCr2);
+    REQUIRE(op.get_excitations_per_winding().size() == 2);   // Primary + Secondary 0 (full-wave)
+    // Symmetric full bridge → half-wave-antisymmetric tank current → zero mean (small vs the RMS).
+    const double mean = *processed_current(op, 0).get_average();
+    const double rms  = *processed_current(op, 0).get_rms();
+    CHECK(rms > 0.0);
+    CHECK(std::abs(mean) < 0.15 * rms + 0.05);
+    // Full-wave secondary carries the bipolar transferred rectifier current n·(iLs−iLm): swings both signs.
+    CHECK(*processed_current(op, 1).get_peak() > 0.0);
+    CHECK(*processed_current(op, 1).get_negative_peak() < 0.0);
+    // Primary voltage (magnetizing VLm, clamped to ±n·Vout during power delivery) is zero-mean.
+    CHECK(voltage_average(op, 0) == Catch::Approx(0.0).margin(2.0));
+}
+
+TEST_CASE("analytical_cllc center-tapped rectifier: 3 windings", "[analytical][solver][cllc]") {
+    using Kirchhoff::analytical::analytical_cllc;
+    using Kirchhoff::analytical::SrcRectifier;
+    MAS::OperatingPoint op = analytical_cllc(kCllcVin, {kCllcVout}, {kCllcIout}, {kCllcN}, kCllcFsub,
+                                             kCllcLm, kCllcLr1, kCllcCr1, kCllcLr2, kCllcCr2,
+                                             1.0, SrcRectifier::CENTER_TAPPED);
+    REQUIRE(op.get_excitations_per_winding().size() == 3);   // Primary + Secondary 0 Half 1/2
+    // Each center-tapped half-winding conducts only one polarity → non-negative current.
+    CHECK(*processed_current(op, 1).get_negative_peak() >= -0.05);
+    CHECK(*processed_current(op, 2).get_negative_peak() >= -0.05);
+}
+
+TEST_CASE("analytical_cllc rejects bad inputs and infeasible gain", "[analytical][solver][cllc]") {
+    using Kirchhoff::analytical::analytical_cllc;
+    // fsw / Lm / turns ratio / tank values non-positive.
+    CHECK_THROWS(analytical_cllc(kCllcVin, {kCllcVout}, {kCllcIout}, {kCllcN}, 0,
+                                 kCllcLm, kCllcLr1, kCllcCr1, kCllcLr2, kCllcCr2));               // fsw=0
+    CHECK_THROWS(analytical_cllc(kCllcVin, {kCllcVout}, {kCllcIout}, {kCllcN}, kCllcFsub,
+                                 0, kCllcLr1, kCllcCr1, kCllcLr2, kCllcCr2));                     // Lm=0
+    CHECK_THROWS(analytical_cllc(kCllcVin, {kCllcVout}, {kCllcIout}, {0.0}, kCllcFsub,
+                                 kCllcLm, kCllcLr1, kCllcCr1, kCllcLr2, kCllcCr2));               // n=0
+    CHECK_THROWS(analytical_cllc(kCllcVin, {kCllcVout}, {kCllcIout}, {kCllcN}, kCllcFsub,
+                                 kCllcLm, 0, kCllcCr1, kCllcLr2, kCllcCr2));                      // Lr1=0
+    CHECK_THROWS(analytical_cllc(kCllcVin, {kCllcVout}, {kCllcIout}, {kCllcN}, kCllcFsub,
+                                 kCllcLm, kCllcLr1, kCllcCr1, kCllcLr2, 0));                      // Cr2=0
+    // Vector length mismatch.
+    CHECK_THROWS(analytical_cllc(kCllcVin, {kCllcVout}, {kCllcIout, 1}, {kCllcN}, kCllcFsub,
+                                 kCllcLm, kCllcLr1, kCllcCr1, kCllcLr2, kCllcCr2));
+    // Infeasible conversion gain: n=1 for a 400→48 step-down gives M_req = 48/400 = 0.12 < 0.5.
+    CHECK_THROWS(analytical_cllc(kCllcVin, {kCllcVout}, {kCllcIout}, {1.0}, kCllcFsub,
+                                 kCllcLm, kCllcLr1, kCllcCr1, kCllcLr2, kCllcCr2));
+}

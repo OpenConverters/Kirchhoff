@@ -290,5 +290,37 @@ MAS::OperatingPoint analytical_llc(double inputVoltage,
                                    SrcRectifier rectifier = SrcRectifier::CENTER_TAPPED,
                                    bool integratedResonantInductor = false);
 
+// CLLC bidirectional resonant converter via the 4-state TIME-DOMAIN analysis (Sun et al. 2020 IEEE TPEL
+// 35(4):3491–3505). Unlike the LLC (single Cr resonance) the CLLC resonates on BOTH sides: a primary
+// series tank (Cr1+Lr1) and a secondary series tank (Lr2+Cr2) flank the magnetizing Lm, so the steady
+// state needs a 4-vector x = [i_Lr1, i_Lm, v_Cr1, v_Cr2_pri] (both cap voltages are independent), not the
+// LLC's 3-vector. The secondary tank is referred to the primary (Lr2_pri = Lr2·n², Cr2_pri = Cr2/n²); the
+// ODE is a block-antidiagonal 4×4 linear system propagated in closed form via a 2×2 eigendecomposition,
+// with the same event-driven P_POS/P_NEG/F sub-states as the LLC. Steady state is the half-wave
+// antisymmetry x(Thalf) = −x(0), solved by a multi-start damped-Picard iteration (physically-motivated
+// cap-voltage seeds, per-seed sanity bounds, best-residual kept). Pushes Primary (tank current i_Lr1 +
+// magnetizing voltage VLm) + one full-bridge "Secondary 0" (I_sec = n·(i_Lr1 − i_Lm), V_sec = VLm/n) —
+// exactly MKF's winding set. `rectifier` = CENTER_TAPPED instead splits the secondary into two polarity
+// half-windings (family-consistent with analytical_llc/_src; MKF CLLC itself is single-winding full-wave).
+// `bridgeVoltageFactor` k_bridge = 1.0 (full bridge, the CLLC default) or 0.5 (half bridge). Ported from
+// MKF converter_models/Cllc.cpp: the cllc4_* machinery (:735-1081) + process_operating_point_for_input_
+// voltage (:1087, forward branch). MKF's ZVS / mode-classification diagnostics, the extra-component (Cr/Lr)
+// waveforms, the dead 3-state collapsed path (is_asymmetric is always true), and REVERSE power flow are
+// omitted (KH has no power-flow-direction input; design_cllc is forward-only). Throws on non-positive fsw /
+// Lm / turns ratio / any tank value, and on an infeasible conversion gain n·Vout/(k·Vin) ∉ [0.5, 3.0]
+// (MKF's M_req guard) or a non-converging solve (mirroring MKF's own guards — no fabricated defaults).
+MAS::OperatingPoint analytical_cllc(double inputVoltage,
+                                    const std::vector<double>& outputVoltages,
+                                    const std::vector<double>& outputCurrents,
+                                    const std::vector<double>& turnsRatios,
+                                    double switchingFrequency,
+                                    double magnetizingInductance,
+                                    double primaryResonantInductance,
+                                    double primaryResonantCapacitance,
+                                    double secondaryResonantInductance,
+                                    double secondaryResonantCapacitance,
+                                    double bridgeVoltageFactor = 1.0,
+                                    SrcRectifier rectifier = SrcRectifier::FULL_BRIDGE);
+
 } // namespace analytical
 } // namespace Kirchhoff
