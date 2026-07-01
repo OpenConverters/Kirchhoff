@@ -1,6 +1,7 @@
 #include "IsolatedBuckBoost.hpp"
 #include "DimensionJson.hpp"
 #include "ComponentRequirements.hpp"
+#include "ConverterAnalytical.hpp"   // single FHA source: analytical_isolated_buck_boost + excitations_processed/winding_current
 #include "KirchhoffConfig.hpp"
 #include <cmath>
 #include <algorithm>
@@ -78,31 +79,22 @@ json build_isolated_buck_boost_tas(const IsolatedBuckBoostDesign& d) {
         if (!reqs.is_null()) j["inputs"]["designRequirements"] = reqs; return j; };
 
     const double N = d.turnsRatio, Lm = d.magnetizingInductance;
-    const double fsw = d.switchingFrequency, T = 1.0 / fsw, D = d.dutyCycle;
+    const double fsw = d.switchingFrequency, T = 1.0 / fsw;
 
-    // --- coupled-inductor (flyback) winding stresses (REUSE the design's voltages/powers) ---
-    // Magnetizing current center referred to primary = the reflected total load current
-    // Imax = I_pri + ΣI_sec/N (same quantity design_isolated_buck_boost used to size ΔI). Primary winding
-    // conducts during ON (D); ripple ΔI = Vin·D·T/Lmag. Secondary conducts during OFF (1−D).
+    // --- coupled-inductor (2-winding flyback) stresses from the SINGLE FHA source (the SPICE-validated
+    // analytical solver). analytical_isolated_buck_boost returns the transformer's Primary + Secondary 0
+    // excitations. The WORST-CASE corner (Vin_min → higher duty D=Vpri/(Vin+Vpri)·η → higher primary
+    // current) drives the component RATINGS; the DECLARED nominal operating point is what the TAS embeds.
+    namespace AN = Kirchhoff::analytical;
     const double IpriLoad = d.primaryPower / d.primaryVoltage;
     const double IsecLoad = d.secondaryPower / d.secondaryVoltage;
-    const double IcMag = IpriLoad + IsecLoad / N;                 // magnetizing center, primary-referred
-    const double dIpri = d.inputVoltage * D * T / Lm;             // primary pk-pk ripple
-    const double IpkPri = IcMag + dIpri / 2.0;
-    const double IrmsPri = std::sqrt(D) * std::sqrt(IcMag * IcMag + dIpri * dIpri / 12.0);
-    // Secondary winding: peak = primary peak reflected by N; conducts during OFF; DC offset = the
-    // secondary load current it delivers per full period.
-    const double IcSec = IsecLoad, dIsec = dIpri * N;
-    const double IpkSec = IpkPri * N;
-    const double IrmsSec = std::sqrt(1.0 - D) * std::sqrt((IcMag * N) * (IcMag * N) + dIsec * dIsec / 12.0);
-
-    // Winding voltages (volt-second balanced, flyback): primary sees +Vin during ON / −V_pri during OFF;
-    // secondary mirrors the primary scaled by 1/N. Evaluated at the nominal operating point.
-    const double VpriOn = d.inputVoltage, VpriOff = d.primaryVoltage;
-    const double vPriPk = std::max(VpriOn, VpriOff), vPriPkPk = VpriOn + VpriOff;
-    const double vPriRms = std::sqrt(D * VpriOn * VpriOn + (1.0 - D) * VpriOff * VpriOff);
-    const double vSecPk = vPriPk / N, vSecPkPk = vPriPkPk / N;
-    const double vSecRms = vPriRms / N;
+    const MAS::OperatingPoint aopWorst = AN::analytical_isolated_buck_boost(d.inputVoltageMin, d.primaryVoltage,
+                                            IpriLoad, d.secondaryVoltage, IsecLoad, fsw, Lm, N, 0.0, d.efficiency);
+    const MAS::OperatingPoint aopNom   = AN::analytical_isolated_buck_boost(d.inputVoltage,    d.primaryVoltage,
+                                            IpriLoad, d.secondaryVoltage, IsecLoad, fsw, Lm, N, 0.0, d.efficiency);
+    // Primary winding stresses from the worst-case corner (winding 0).
+    const double IpkPri  = AN::winding_current(aopWorst, 0, "peak");
+    const double IrmsPri = AN::winding_current(aopWorst, 0, "rms");
 
     // --- semiconductor stresses (flyback-class, max-stress corner Vin_max) ---
     // QS1 blocks Vin_max + the reflected primary-rail voltage during OFF (clamp-limited).
@@ -123,11 +115,8 @@ json build_isolated_buck_boost_tas(const IsolatedBuckBoostDesign& d) {
     // (Non-galvanic isolationVoltage not carried on the spec -> std::nullopt.)
     std::vector<std::string> isoSides{"primary", "secondary"};
     json xfmr; xfmr["magnetic"] = json::object();
-    xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, {N}, isoSides, std::nullopt, 25.0, {
-        req::winding_excitation("flybackPrimary",   fsw, IpkPri, IrmsPri, IcMag, dIpri, D,
-                                vPriPk, vPriRms, 0.0, vPriPkPk),
-        req::winding_excitation("flybackSecondary", fsw, IpkSec, IrmsSec, IcSec, dIsec, 1.0 - D,
-                                vSecPk, vSecRms, 0.0, vSecPkPk)});
+    xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, {N}, isoSides, std::nullopt, 25.0,
+        AN::excitations_processed(aopNom));
 
     json cpri; cpri["capacitor"] = json::object();
     cpri["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;

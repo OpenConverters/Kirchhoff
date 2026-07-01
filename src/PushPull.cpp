@@ -2,6 +2,7 @@
 #include "DimensionJson.hpp"
 #include "KirchhoffConfig.hpp"
 #include "ComponentRequirements.hpp"
+#include "ConverterAnalytical.hpp"   // single FHA source: analytical_push_pull + excitations_processed/winding_current
 #include <cmath>
 #include <vector>
 
@@ -86,29 +87,28 @@ json build_push_pull_tas(const PushPullDesign& d) {
     const double fsw = d.switchingFrequency;
     const double Vin = d.inputVoltage, Vout = d.outputVoltage, Dn = d.dutyCycle;
 
-    // --- per-winding electrical stresses (volt-second balanced, nominal operating point) ---
-    // CURRENTS. Buck-derived: the output inductor carries a DC-biased triangle (avg=Iout). Each
-    // secondary half conducts only during its switch's ON-time (duty Dn per half-cycle) carrying
-    // the inductor current; each primary half reflects that, scaled by 1/N, plus magnetizing.
+    // --- per-winding stresses from the SINGLE FHA source (the SPICE-validated analytical solver) ---
+    // Two operating points: the WORST-CASE corner (Vin_min → higher per-switch duty → higher primary
+    // conduction) drives the transformer/switch RATINGS; the DECLARED nominal operating point is what the
+    // TAS embeds for the transformer. The output inductor Lout is a SEPARATE magnetic (not one of
+    // analytical_push_pull's four transformer windings), so it keeps its inline buck-derived stresses.
+    namespace AN = Kirchhoff::analytical;
+    const double rippleRatio = cfg::get(d.config, "inductorRippleRatio", kRippleRatio);
     const double Iout  = d.outputPower / Vout;
-    const double dILout = cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Iout;
+    const MAS::OperatingPoint aopWorst = AN::analytical_push_pull(d.inputVoltageMin, Vout, Iout, fsw,
+                                            N, Lm, d.outputInductance, rippleRatio, d.diodeDrop);
+    const MAS::OperatingPoint aopNom   = AN::analytical_push_pull(d.inputVoltage,    Vout, Iout, fsw,
+                                            N, Lm, d.outputInductance, rippleRatio, d.diodeDrop);
+    // Output inductor (SEPARATE magnetic): DC-biased triangle, avg=Iout, ripple from the inductor sizing.
+    const double dILout = rippleRatio * Iout;
     const double IpkLout = Iout + dILout / 2.0;
     const double IrmsLout = std::sqrt(Iout * Iout + dILout * dILout / 12.0);
-    // Secondary half: square pulse of height ≈ Iout for duty Dn (one half-cycle); offset 0 (AC).
-    const double IpkSec  = IpkLout;
-    const double IrmsSec = std::sqrt(Dn) * Iout;
-    const double dISec   = dILout;
-    // Primary half: reflected secondary current /N, conducting duty Dn on alternate half-cycles.
-    const double IpkPri  = IpkLout / N;
-    const double IrmsPri = std::sqrt(Dn) * Iout / N;
-    const double dIPri   = dILout / N;
-    // VOLTAGES. Each primary half is a square ±Vin (center tap at Vin; the off half is reflected to
-    // -Vin). Each secondary half sees ±N·Vin. The output inductor sees +(Vin/N - Vout) when either
-    // diode conducts (combined duty 2·Dn) and -Vout otherwise. All winding-voltage offsets are 0
-    // (the DC bias lives in the inductor CURRENT, not its volt-seconds).
+    // Primary-half switch conduction (winding 0 = "Primary Half 1") from the worst-case corner.
+    const double IpkPri  = AN::winding_current(aopWorst, 0, "peak");
+    const double IrmsPri = AN::winding_current(aopWorst, 0, "rms");
+    // VOLTAGES (output inductor only; the transformer volt-seconds come from the analytical excitation).
+    // The output inductor sees +(Vin/N - Vout) when either diode conducts (combined duty 2·Dn), -Vout otherwise.
     const double D2 = std::min(1.0, 2.0 * Dn);
-    const double vPriPk = Vin, vPriPkPk = 2.0 * Vin, vPriRms = Vin;
-    const double vSecPk = N * Vin, vSecPkPk = 2.0 * N * Vin, vSecRms = N * Vin;
     const double vLoutOn = Vin / N - Vout;
     const double vLoutPk = std::max(std::fabs(vLoutOn), Vout), vLoutPkPk = Vin / N;
     const double vLoutRms = std::sqrt(D2 * vLoutOn * vLoutOn + (1.0 - D2) * Vout * Vout);
@@ -138,17 +138,12 @@ json build_push_pull_tas(const PushPullDesign& d) {
     // Dot/terminal order mirrors MKF: Lpri_top pri_top->center_tap; Lpri_bot center_tap->pri_bot;
     // Lsec_top sec_top->gnd; Lsec_bot gnd->sec_bot. Isolated -> isolationSides per winding
     // {primary, primary, secondary, secondary}. PushPullDesign carries no isolationVoltage -> nullopt.
+    // Transformer (MAIN magnetic): four center-tapped windings [Primary Half 1/2, Secondary 0 Half 1/2]
+    // sourced from analytical_push_pull at the nominal operating point — the FHA physics lives in ONE place.
     json xfmr; xfmr["magnetic"] = json::object();
     xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, {1.0, N, N},
-        {"primary", "primary", "secondary", "secondary"}, std::nullopt, 25.0, {
-            req::winding_excitation("pushPullPrimary",   fsw, IpkPri, IrmsPri, 0.0, dIPri, Dn,
-                                    vPriPk, vPriRms, 0.0, vPriPkPk),
-            req::winding_excitation("pushPullPrimary",   fsw, IpkPri, IrmsPri, 0.0, dIPri, Dn,
-                                    vPriPk, vPriRms, 0.0, vPriPkPk),
-            req::winding_excitation("pushPullSecondary", fsw, IpkSec, IrmsSec, 0.0, dISec, Dn,
-                                    vSecPk, vSecRms, 0.0, vSecPkPk),
-            req::winding_excitation("pushPullSecondary", fsw, IpkSec, IrmsSec, 0.0, dISec, Dn,
-                                    vSecPk, vSecRms, 0.0, vSecPkPk)},
+        {"primary", "primary", "secondary", "secondary"}, std::nullopt, 25.0,
+        AN::excitations_processed(aopNom),
         // N (computed at maxDutyCycle, line ~42) is the duty CEILING -> emit the two secondary ratios as
         // {maximum}; the 1.0 second-primary half is a structural 1:1 and stays {nominal}.
         /*turnsRatioIsCeiling=*/{false, true, true});
