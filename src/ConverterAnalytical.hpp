@@ -24,9 +24,12 @@ namespace analytical {
 // in exactly ONE place (ConverterAnalytical). See docs/MKF_INTEGRATION.md ("FHA unification").
 
 // Serialize an operating point's per-winding excitations to the vector<json> that req::magnetic_inputs
-// consumes. The analytical excitation is a strict superset of the old hand-built one (current + voltage,
-// each with waveform + harmonics + processed), so the embedded TAS excitation gets richer, not poorer.
-std::vector<nlohmann::json> excitations_json(const MAS::OperatingPoint& op);
+// consumes — the MINIMAL, schema-valid processed form (label + peak/rms/offset/peakToPeak/dutyCycle for
+// current & voltage), sourcing the FHA scalars from the ONE solver. Deliberately NOT the full waveform +
+// harmonics: those (a) bloat the TAS and (b) carry WaveformProcessor fields (deadTime=null, negativePeak
+// as the raw min) the operatingPoint schema rejects. The adviser re-derives waveforms via inputs.process()
+// anyway; the browser gets waveforms from extract_operating_point instead.
+std::vector<nlohmann::json> excitations_processed(const MAS::OperatingPoint& op);
 
 // Read a processed current/voltage stress of winding `w` from an operating point (for component ratings).
 // `field` ∈ {peak,rms,offset,peakToPeak,dutyCycle}. Throws if the field is absent (no silent 0).

@@ -7,6 +7,7 @@
 #include "CiasConverter.hpp"
 #include "CiasCircuitConverter.hpp"
 #include "ComponentRequirements.hpp"
+#include "ConverterAnalytical.hpp"   // single FHA source: analytical_flyback + excitations_processed/winding_current
 #include "KirchhoffConfig.hpp"
 
 #include <sstream>
@@ -199,28 +200,27 @@ json build_flyback_tas(const FlybackDesign& d) {
         json c; c["name"] = name; c["endpoints"] = eps; return c; };
     auto comp = [](const char* name, json data) { json c; c["name"] = name; c["data"] = data; return c; };
 
-    // --- per-component electrical stresses (worst-case corner) -> detailed, sourceable requirements ---
+    // --- per-component stresses from the SINGLE FHA source (the SPICE-validated analytical solver) ---
+    // Worst-case corner (Vin_min) drives the ratings; the declared nominal OP is what the TAS embeds
+    // (which also fixes a latent inconsistency: the old code mixed worst-case currents with nominal
+    // voltages in the embedded excitation). analytical_flyback carries the DCM secondary correction.
+    namespace AN = Kirchhoff::analytical;
     const double n = d.turnsRatio, fsw = d.switchingFrequency, T = 1.0 / fsw, Lm = d.magnetizingInductance;
     const double Pin = d.outputPower / d.efficiency;
     const double Iout = d.outputPower / d.outputVoltage;
-
-    // CURRENTS at Vin_min (max duty / max current corner) — CCM trapezoids.
-    const double Vor = n * d.outputVoltage;
-    const double Dmin = Vor / (d.inputVoltageMin + Vor);
     const double IinMin = Pin / d.inputVoltageMin;
-    const double IcPri  = IinMin / Dmin;                       // primary current center during ON
-    const double dIpri  = d.inputVoltageMin * Dmin * T / Lm;   // primary pk-pk ripple
-    const double IpkPri = IcPri + dIpri / 2.0;
-    const double IrmsPri = std::sqrt(Dmin) * std::sqrt(IcPri * IcPri + dIpri * dIpri / 12.0);
-    const double IcSec = IcPri * n, dIsec = dIpri * n;
-    const double IpkSec = IpkPri * n;
-    const double IrmsSec = std::sqrt(1.0 - Dmin) * std::sqrt(IcSec * IcSec + dIsec * dIsec / 12.0);
+    const MAS::OperatingPoint aopWorst = AN::analytical_flyback(d.inputVoltageMin, {d.outputVoltage}, {Iout},
+                                                               {n}, fsw, Lm, 0.0, d.efficiency);
+    const MAS::OperatingPoint aopNom   = AN::analytical_flyback(d.inputVoltage,    {d.outputVoltage}, {Iout},
+                                                               {n}, fsw, Lm, 0.0, d.efficiency);
+    const double IpkPri  = AN::winding_current(aopWorst, 0, "peak");
+    const double IrmsPri = AN::winding_current(aopWorst, 0, "rms");
+    const double IpkSec  = AN::winding_current(aopWorst, 1, "peak");
+    const double IrmsSec = AN::winding_current(aopWorst, 1, "rms");
 
-    // VOLTAGES at Vin_max (max stress corner). Leakage-spike margin is covered by derating + a
-    // future clamp/snubber (auxiliary network is out of scope for now).
+    // VOLTAGES at Vin_max (max stress corner) for the semiconductor ratings.
     const double VdsStress = d.inputVoltageMax + n * d.outputVoltage;
     const double VrStress  = d.outputVoltage + d.inputVoltageMax / n;
-
     const double ratedVds = VdsStress / cfg::v_derate_mosfet(d.config);
     const double ratedVr  = VrStress  / cfg::v_derate_diode(d.config);
     const double maxRdsOn = 0.01 * d.outputPower / (IrmsPri * IrmsPri);   // <=1% of Pout conduction
@@ -238,20 +238,9 @@ json build_flyback_tas(const FlybackDesign& d) {
 
     std::vector<std::string> isoSides{"primary", "secondary"};
     std::optional<double> isoV = d.isolationVoltage > 0 ? std::optional<double>(d.isolationVoltage) : std::nullopt;
-    // Winding voltages (volt-second balanced): primary sees +Vin (ON) / -n*Vout (OFF); secondary
-    // sees -Vin/n (ON) / +Vout (OFF). Evaluated at the nominal operating point.
-    const double Vp = d.inputVoltage, Vs = d.outputVoltage, Dn = d.dutyCycle;
-    const double vPriPk = std::max(Vp, n * Vs), vPriPkPk = Vp + n * Vs;
-    const double vPriRms = std::sqrt(Dn * Vp * Vp + (1.0 - Dn) * n * n * Vs * Vs);
-    const double vSecPk = std::max(Vp / n, Vs), vSecPkPk = Vp / n + Vs;
-    const double vSecRms = std::sqrt(Dn * (Vp / n) * (Vp / n) + (1.0 - Dn) * Vs * Vs);
 
     json mag; mag["magnetic"] = json::object();
-    mag["inputs"] = req::magnetic_inputs(Lm, 0.1, {n}, isoSides, isoV, 25.0, {
-        req::winding_excitation("flybackPrimary",   fsw, IpkPri, IrmsPri, IcPri, dIpri, Dmin,
-                                vPriPk, vPriRms, 0.0, vPriPkPk),
-        req::winding_excitation("flybackSecondary", fsw, IpkSec, IrmsSec, IcSec, dIsec, 1.0 - Dmin,
-                                vSecPk, vSecRms, 0.0, vSecPkPk)});
+    mag["inputs"] = req::magnetic_inputs(Lm, 0.1, {n}, isoSides, isoV, 25.0, AN::excitations_processed(aopNom));
 
     json capCin; capCin["capacitor"] = json::object();
     capCin["inputs"]["designRequirements"] = req::capacitor(

@@ -1,7 +1,7 @@
 #include "Buck.hpp"
 #include "DimensionJson.hpp"
 #include "ComponentRequirements.hpp"
-#include "ConverterAnalytical.hpp"   // single FHA source: analytical_buck + excitations_json/winding_current
+#include "ConverterAnalytical.hpp"   // single FHA source: analytical_buck + excitations_processed/winding_current
 #include "KirchhoffConfig.hpp"
 #include <cmath>
 #include <string>
@@ -104,7 +104,7 @@ json build_buck_tas(const BuckDesign& d) {
     // --- component PEAS docs (seed + detailed requirements) ---
     json ind; ind["magnetic"] = json::object();
     ind["inputs"] = req::magnetic_inputs(L, 0.2, /*single winding*/ {}, {"primary"}, std::nullopt, 25.0,
-                                         AN::excitations_json(aopNom));
+                                         AN::excitations_processed(aopNom));
     json mosfet; mosfet["semiconductor"]["mosfet"] = json::object();
     mosfet["inputs"]["designRequirements"] = req::mosfet("mainSwitch", ratedVds, IpkL, maxRdsOn, 125.0);
     json diode; diode["semiconductor"]["diode"] = json::object();

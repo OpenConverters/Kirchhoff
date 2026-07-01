@@ -1,6 +1,7 @@
 #include "Boost.hpp"
 #include "DimensionJson.hpp"
 #include "ComponentRequirements.hpp"
+#include "ConverterAnalytical.hpp"   // single FHA source: analytical_boost + excitations_processed/winding_current
 #include "KirchhoffConfig.hpp"
 #include <vector>
 #include <stdexcept>
@@ -83,16 +84,20 @@ json build_boost_tas(const BoostDesign& d) {
     auto isc = [](const char* name, const char* kind, const char* dir, std::vector<json> eps) {
         json c; c["name"] = name; c["kind"] = kind; if (dir[0]) c["direction"] = dir; c["endpoints"] = eps; return c; };
 
-    // --- per-component electrical stresses (worst-case corner) -> detailed, sourceable requirements ---
+    // --- per-component stresses from the SINGLE FHA source (the SPICE-validated analytical solver) ---
+    // Worst-case corner (Vin_min) drives the ratings; the declared nominal OP is what the TAS embeds.
+    namespace AN = Kirchhoff::analytical;
     const double fsw = d.switchingFrequency, T = 1.0 / fsw, L_H = d.inductance;
-    const double Pin = d.outputPower / d.efficiency;
     const double Iout = d.outputPower / d.outputVoltage;
-    // CURRENTS at Vin_min (max duty / max inductor current corner).
-    const double Dmax = 1.0 - d.inputVoltageMin * d.efficiency / d.outputVoltage;
-    const double ILavg = Pin / d.inputVoltageMin;
-    const double dIL   = d.inputVoltageMin * Dmax * T / L_H;     // inductor pk-pk ripple
-    const double IpkL  = ILavg + dIL / 2.0;
-    const double IrmsL = std::sqrt(ILavg * ILavg + dIL * dIL / 12.0);
+    const MAS::OperatingPoint aopWorst = AN::analytical_boost(d.inputVoltageMin, d.outputVoltage, Iout, fsw,
+                                                              L_H, 0.0, d.efficiency);
+    const MAS::OperatingPoint aopNom   = AN::analytical_boost(d.inputVoltage,    d.outputVoltage, Iout, fsw,
+                                                              L_H, 0.0, d.efficiency);
+    const double Dmax  = AN::winding_current(aopWorst, 0, "dutyCycle");
+    const double dIL   = AN::winding_current(aopWorst, 0, "peakToPeak");
+    const double ILavg = AN::winding_current(aopWorst, 0, "offset");
+    const double IpkL  = AN::winding_current(aopWorst, 0, "peak");
+    const double IrmsL = AN::winding_current(aopWorst, 0, "rms");
     const double IswRms   = std::sqrt(Dmax) * IrmsL;                       // switch conducts during D
     const double IdiodeRms = std::sqrt(1.0 - Dmax) * IrmsL;               // diode conducts during 1-D
     const double IcoutRms = std::sqrt(std::max(0.0, IdiodeRms * IdiodeRms - Iout * Iout));
@@ -102,16 +107,9 @@ json build_boost_tas(const BoostDesign& d) {
     const double maxRdsOn = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IswRms * IswRms);
     const double maxVf    = (ratedVr < 100.0) ? 0.6 : 1.2;
 
-    // component PEAS docs: discriminator + detailed inputs.designRequirements
-    // Inductor voltage: +Vin (ON) / -(Vout-Vin) (OFF), volt-second balanced; evaluated at Vin_min.
-    const double Vin = d.inputVoltageMin, Voff = d.outputVoltage - Vin;
-    const double vIndPk = std::max(Vin, Voff), vIndPkPk = d.outputVoltage;
-    const double vIndRms = std::sqrt(Dmax * Vin * Vin + (1.0 - Dmax) * Voff * Voff);
     json ind; ind["magnetic"] = json::object();
     ind["inputs"] = req::magnetic_inputs(d.inductance, 0.2, /*single winding*/ {}, {"primary"},
-        std::nullopt, 25.0, {
-            req::winding_excitation("triangular", fsw, IpkL, IrmsL, ILavg, dIL, Dmax,
-                                    vIndPk, vIndRms, 0.0, vIndPkPk)});
+        std::nullopt, 25.0, AN::excitations_processed(aopNom));
     json mosfet; mosfet["semiconductor"]["mosfet"] = json::object();
     mosfet["inputs"]["designRequirements"] = req::mosfet("mainSwitch", ratedVds, IpkL, maxRdsOn, 125.0);
     json diode;  diode["semiconductor"]["diode"] = json::object();

@@ -19,9 +19,33 @@ namespace analytical {
 using WP = OpenMagnetics::WaveformProcessor;
 
 // --- build_<topo>_tas bridge helpers (see header) ------------------------------------------------------
-std::vector<nlohmann::json> excitations_json(const MAS::OperatingPoint& op) {
+namespace {
+// Emit the minimal, schema-valid processed side (current/voltage) into `dst[side]` from a SignalDescriptor.
+void emit_processed(nlohmann::json& dst, const char* side, const std::optional<MAS::SignalDescriptor>& sig) {
+    if (!sig) return;
+    auto proc = sig->get_processed();
+    if (!proc) return;
+    nlohmann::json p;
+    p["label"]  = nlohmann::json(proc->get_label());   // WaveformLabel enum (required)
+    p["offset"] = proc->get_offset();                  // double (required)
+    if (proc->get_peak())         p["peak"]       = *proc->get_peak();
+    if (proc->get_rms())          p["rms"]        = *proc->get_rms();
+    if (proc->get_peak_to_peak()) p["peakToPeak"] = *proc->get_peak_to_peak();
+    if (proc->get_duty_cycle())   p["dutyCycle"]  = *proc->get_duty_cycle();
+    dst[side]["processed"] = std::move(p);
+}
+}  // namespace
+
+std::vector<nlohmann::json> excitations_processed(const MAS::OperatingPoint& op) {
     std::vector<nlohmann::json> out;
-    for (const auto& e : op.get_excitations_per_winding()) out.push_back(nlohmann::json(e));
+    for (const auto& e : op.get_excitations_per_winding()) {
+        nlohmann::json j;
+        j["frequency"] = e.get_frequency();
+        if (e.get_name()) j["name"] = *e.get_name();
+        emit_processed(j, "current", e.get_current());
+        emit_processed(j, "voltage", e.get_voltage());
+        out.push_back(std::move(j));
+    }
     return out;
 }
 
