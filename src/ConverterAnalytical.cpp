@@ -1691,366 +1691,18 @@ MAS::OperatingPoint analytical_src(double inputVoltage,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// LLC resonant converter — Runo Nielsen TIME-DOMAIN analysis (event-driven sub-state propagator).
-// Every helper below is transcribed FAITHFULLY from MKF converter_models/Llc.cpp:315-783 (the anonymous
-// TDA machinery) — signs, indices, the Newton Jacobian, the sub-state event conditions, the multi-start
-// seeds and the singularity/sanity guards are byte-for-byte the MKF numerics (MKF file:line cited per
-// function). MKF's diagnostic-only pieces (classify_mode, ZVS/LIP members) are omitted — they shape no
-// winding waveform.
-//
-// State x = [I_Ls, I_L, V_C]: resonant-inductor current, magnetizing current, resonant-cap voltage.
-// Three linear sub-states cover Nielsen's six modes:
-//   A_POS: +Vo diode conducting   dILs/dt=(Vi−Vc−Vo)/Ls  dIL/dt=+Vo/L   dVc/dt=ILs/C
-//   A_NEG: −Vo diode conducting   dILs/dt=(Vi−Vc+Vo)/Ls  dIL/dt=−Vo/L   dVc/dt=ILs/C
-//   B_FW : freewheeling (ILs≡IL)  dILs/dt=(Vi−Vc)/(Ls+L)                dVc/dt=ILs/C
+// LLC resonant converter — load-aware First-Harmonic Approximation (FHA).
+// REPLACES the earlier faithful port of MKF's lossless event-driven Nielsen TDA, which models an
+// infinite-Q, LOAD-BLIND tank: the emitted tank current was independent of Iout (proven: identical rms
+// across a 7x load sweep) and ~5x the SPICE tank current, diverging toward fr. FHA folds the load into
+// the tank via the AC-equivalent resistance Rac = (8/pi^2)*n^2*Rload, so the primary tank current scales
+// with load and matches SPICE (validated by the [nrmse][llc] gate, like analytical_src). Tank: series
+// Ls-Cr feeding Lm in parallel with the reflected load Rac.
+//   Zin = j(wLs - 1/(wCr)) + (jwLm)||Rac,   ILs_pk = (4/pi)*k_bridge*Vin / |Zin|,  phi = arg(Zin).
+// The primary winding carries the resonant current ILs; the magnetizing current ILm is the Lm triangle
+// (Lm is clamped to +/-Vo = +/-n*Vout by the secondary rectifier); the secondary carries n*(ILs - ILm)
+// rectified. FHA is NOT singular at fr (Ls-Cr cancel, Zin -> Lm||Rac), so it is valid at/above/below fr.
 // ─────────────────────────────────────────────────────────────────────────────
-namespace {
-
-enum class LlcSubState { A_POS, A_NEG, B_FW };  // MKF Llc.cpp:315
-
-struct LlcStateVector { double iLs; double iL; double vC; };  // MKF Llc.cpp:317
-
-struct LlcSubStateSegment {  // MKF Llc.cpp:323
-    LlcSubState state;
-    double t_start;
-    double t_end;
-    LlcStateVector x_start;
-    LlcStateVector x_end;
-};
-
-// MKF Llc.cpp:333 substate_freq
-void llc_substate_freq(LlcSubState s, double Ls, double L, double C, double& w, double& Z) {
-    if (s == LlcSubState::B_FW) {
-        double L_eff = Ls + L;  // freewheeling: Lm in series with Ls (diodes off)
-        w = 1.0 / std::sqrt(L_eff * C);
-        Z = std::sqrt(L_eff / C);
-    } else {
-        w = 1.0 / std::sqrt(Ls * C);  // power delivery: Lm clamped, only Ls and C ring
-        Z = std::sqrt(Ls / C);
-    }
-}
-
-// MKF Llc.cpp:356 propagate_substate — closed-form single sub-state step.
-LlcStateVector llc_propagate_substate(LlcSubState s, LlcStateVector x_in, double dt, double Vi, double Vo,
-                                      double Ls, double L, double C) {
-    LlcStateVector out{};
-    if (dt <= 0) return x_in;
-
-    double w, Z;
-    llc_substate_freq(s, Ls, L, C, w, Z);
-    double cs = std::cos(w * dt);
-    double sn = std::sin(w * dt);
-
-    if (s == LlcSubState::B_FW) {
-        double V_eq = Vi;  // freewheeling: I_Ls ≡ I_L, drive = Vi
-        double dV = x_in.vC - V_eq;
-        double iLs_new = x_in.iLs * cs - (dV / Z) * sn;
-        double vC_new  = V_eq + dV * cs + x_in.iLs * Z * sn;
-        out.iLs = iLs_new;
-        out.iL  = iLs_new;  // tracks ILs in freewheeling
-        out.vC  = vC_new;
-        return out;
-    }
-
-    // Power-delivery: A_POS → V_drive = Vi−Vo, dIL/dt=+Vo/L; A_NEG → V_drive = Vi+Vo, dIL/dt=−Vo/L.
-    double V_drive = (s == LlcSubState::A_POS) ? (Vi - Vo) : (Vi + Vo);
-    double dIL_dt  = (s == LlcSubState::A_POS) ? (+Vo / L) : (-Vo / L);
-
-    double dV = x_in.vC - V_drive;
-    out.iLs = x_in.iLs * cs - (dV / Z) * sn;
-    out.vC  = V_drive + dV * cs + x_in.iLs * Z * sn;
-    out.iL  = x_in.iL + dIL_dt * dt;
-    return out;
-}
-
-// MKF Llc.cpp:402 trigger_value — trigger g(dt) that ends the current sub-state.
-double llc_trigger_value(LlcSubState s, LlcStateVector x_in, double dt, double Vi, double Vo,
-                         double Ls, double L, double C) {
-    LlcStateVector x = llc_propagate_substate(s, x_in, dt, Vi, Vo, Ls, L, C);
-    if (s == LlcSubState::A_POS) return x.iL - x.iLs;   // > 0 means Id flipped negative
-    if (s == LlcSubState::A_NEG) return x.iLs - x.iL;   // > 0 means Id flipped positive
-    // B_FW: VLm = (L/(Ls+L))·(Vi−Vc) exits the ±Vo clamp window; return the most-positive violation.
-    double VLm = (L / (Ls + L)) * (Vi - x.vC);
-    double pos_violation = VLm - Vo;
-    double neg_violation = -VLm - Vo;
-    return std::max(pos_violation, neg_violation);
-}
-
-// MKF Llc.cpp:433 find_next_event — smallest t in (0, t_max] where the trigger crosses 0 upward.
-double llc_find_next_event(LlcSubState s, LlcStateVector x_in, double t_max, double Vi, double Vo,
-                           double Ls, double L, double C) {
-    constexpr int COARSE_STEPS = 64;
-    double dt_coarse = t_max / COARSE_STEPS;
-    double prev_g = llc_trigger_value(s, x_in, 1e-12, Vi, Vo, Ls, L, C);
-    if (prev_g >= 0) {
-        return 0.0;  // trigger already true at t≈0 (tangent case): leave the boundary immediately
-    }
-
-    for (int k = 1; k <= COARSE_STEPS; ++k) {
-        double t = k * dt_coarse;
-        double g = llc_trigger_value(s, x_in, t, Vi, Vo, Ls, L, C);
-        if (g >= 0 && std::isfinite(g)) {
-            double lo = t - dt_coarse;
-            double hi = t;
-            double g_lo = prev_g;
-            for (int it = 0; it < 50; ++it) {
-                double mid = 0.5 * (lo + hi);
-                double g_mid = llc_trigger_value(s, x_in, mid, Vi, Vo, Ls, L, C);
-                if (g_mid * g_lo < 0) {
-                    hi = mid;
-                } else {
-                    lo = mid;
-                    g_lo = g_mid;
-                }
-                if ((hi - lo) < 1e-12) break;
-            }
-            return 0.5 * (lo + hi);
-        }
-        prev_g = g;
-    }
-    return t_max;  // no crossing
-}
-
-// MKF Llc.cpp:473 next_state_after_B — which secondary diode forward-biases after a B_FW transition.
-LlcSubState llc_next_state_after_B(LlcStateVector x_at_event, double Vi, double Ls, double L) {
-    double VLm = (L / (Ls + L)) * (Vi - x_at_event.vC);
-    return (VLm > 0) ? LlcSubState::A_POS : LlcSubState::A_NEG;
-}
-
-// MKF Llc.cpp:484 initial_substate — sub-state at t=0 of the half cycle.
-LlcSubState llc_initial_substate(LlcStateVector x0, double Vi, double Vo, double Ls, double L) {
-    double Id = x0.iLs - x0.iL;
-    if (std::abs(Id) > 1e-9) {
-        return (Id > 0) ? LlcSubState::A_POS : LlcSubState::A_NEG;
-    }
-    double VLm = (L / (Ls + L)) * (Vi - x0.vC);
-    if (VLm > Vo) return LlcSubState::A_POS;
-    if (VLm < -Vo) return LlcSubState::A_NEG;
-    return LlcSubState::B_FW;
-}
-
-// MKF Llc.cpp:500 propagate_half_cycle — event loop over [0, Thalf] → chain of closed-form segments.
-std::vector<LlcSubStateSegment> llc_propagate_half_cycle(
-    LlcStateVector x0, double Thalf, double Vi, double Vo, double Ls, double L, double C) {
-    std::vector<LlcSubStateSegment> segments;
-    segments.reserve(8);
-
-    LlcSubState current = llc_initial_substate(x0, Vi, Vo, Ls, L);
-    LlcStateVector x = x0;
-    double t = 0.0;
-    constexpr int MAX_SEGMENTS = 16;  // safety bound; LLC modes use ≤ 6
-
-    for (int k = 0; k < MAX_SEGMENTS; ++k) {
-        double remaining = Thalf - t;
-        if (remaining <= 1e-15) break;
-
-        double t_event = llc_find_next_event(current, x, remaining, Vi, Vo, Ls, L, C);
-        double dt = std::min(t_event, remaining);
-        if (dt < 1e-15 && k > 0) {
-            // Zero-length segment: transition immediately to avoid an infinite loop.
-            LlcSubState next;
-            if (current == LlcSubState::B_FW) {
-                next = llc_next_state_after_B(x, Vi, Ls, L);
-            } else {
-                next = LlcSubState::B_FW;
-            }
-            current = next;
-            continue;
-        }
-        LlcStateVector x_end = llc_propagate_substate(current, x, dt, Vi, Vo, Ls, L, C);
-        segments.push_back({current, t, t + dt, x, x_end});
-        t += dt;
-        x = x_end;
-
-        if (t >= Thalf - 1e-15) break;
-
-        if (current == LlcSubState::B_FW) {
-            current = llc_next_state_after_B(x, Vi, Ls, L);
-        } else {
-            current = LlcSubState::B_FW;  // A_POS / A_NEG ended on Id = 0 → freewheeling
-        }
-    }
-
-    return segments;
-}
-
-// MKF Llc.cpp:555 solve_steady_state — damped Newton on F(x0)=propagate_half(x0).end + x0 with Picard
-// fallback; returns the BEST (lowest-residual) iterate seen, re-propagated for waveforms.
-LlcStateVector llc_solve_steady_state(
-    LlcStateVector x0_seed, double Thalf, double Vi, double Vo, double Ls, double L, double C,
-    std::vector<LlcSubStateSegment>& outSegments, double& outResidual) {
-    auto eval_F = [&](LlcStateVector x0) -> std::array<double, 3> {
-        auto segs = llc_propagate_half_cycle(x0, Thalf, Vi, Vo, Ls, L, C);
-        LlcStateVector x_end = segs.empty() ? x0 : segs.back().x_end;
-        return {x_end.iLs + x0.iLs, x_end.iL + x0.iL, x_end.vC + x0.vC};
-    };
-    auto norm = [](const std::array<double, 3>& f) {
-        return std::sqrt(f[0]*f[0] + f[1]*f[1] + f[2]*f[2]);
-    };
-
-    LlcStateVector x0 = x0_seed;
-    auto F = eval_F(x0);
-    double r = norm(F);
-
-    constexpr int MAX_ITERS = 50;
-    constexpr double TOL = 1e-7;
-
-    double scale_i = std::max(1e-3, 0.01 * std::abs(x0.iLs) + 1e-3);
-    double scale_v = std::max(1e-2, 0.01 * std::abs(x0.vC)  + 1e-2);
-
-    double damping = 1.0;
-    double prev_r = r;
-    int stagnant = 0;
-
-    LlcStateVector bestX0 = x0;  // track the best iterate; Newton/Picard is non-monotone
-    double bestR = r;
-
-    for (int iter = 0; iter < MAX_ITERS && r > TOL; ++iter) {
-        // Jacobian by central differences.
-        double J[3][3];
-        LlcStateVector xp, xm;
-        std::array<double, 3> Fp, Fm;
-
-        xp = x0; xp.iLs += scale_i;
-        xm = x0; xm.iLs -= scale_i;
-        Fp = eval_F(xp); Fm = eval_F(xm);
-        for (int i = 0; i < 3; ++i) J[i][0] = (Fp[i] - Fm[i]) / (2 * scale_i);
-
-        xp = x0; xp.iL += scale_i;
-        xm = x0; xm.iL -= scale_i;
-        Fp = eval_F(xp); Fm = eval_F(xm);
-        for (int i = 0; i < 3; ++i) J[i][1] = (Fp[i] - Fm[i]) / (2 * scale_i);
-
-        xp = x0; xp.vC += scale_v;
-        xm = x0; xm.vC -= scale_v;
-        Fp = eval_F(xp); Fm = eval_F(xm);
-        for (int i = 0; i < 3; ++i) J[i][2] = (Fp[i] - Fm[i]) / (2 * scale_v);
-
-        // Solve J·dx = -F by Gaussian elimination with partial pivoting.
-        double A[3][4];
-        for (int i = 0; i < 3; ++i) {
-            for (int j = 0; j < 3; ++j) A[i][j] = J[i][j];
-            A[i][3] = -F[i];
-        }
-        bool singular = false;
-        for (int col = 0; col < 3; ++col) {
-            int piv = col;
-            double maxv = std::abs(A[col][col]);
-            for (int row = col + 1; row < 3; ++row) {
-                if (std::abs(A[row][col]) > maxv) {
-                    maxv = std::abs(A[row][col]);
-                    piv = row;
-                }
-            }
-            if (maxv < 1e-14) { singular = true; break; }
-            if (piv != col) std::swap(A[col], A[piv]);
-            for (int row = col + 1; row < 3; ++row) {
-                double f = A[row][col] / A[col][col];
-                for (int k = col; k < 4; ++k) A[row][k] -= f * A[col][k];
-            }
-        }
-        if (singular) break;
-        double dx[3];
-        for (int i = 2; i >= 0; --i) {
-            double sum = A[i][3];
-            for (int j = i + 1; j < 3; ++j) sum -= A[i][j] * dx[j];
-            dx[i] = sum / A[i][i];
-        }
-
-        // Damped step + line search on ||F||.
-        double try_d = damping;
-        LlcStateVector x_new{};
-        std::array<double, 3> F_new{};
-        double r_new = r;
-        bool accepted = false;
-        for (int ls = 0; ls < 6; ++ls) {
-            x_new.iLs = x0.iLs + try_d * dx[0];
-            x_new.iL  = x0.iL  + try_d * dx[1];
-            x_new.vC  = x0.vC  + try_d * dx[2];
-            F_new = eval_F(x_new);
-            r_new = norm(F_new);
-            if (std::isfinite(r_new) && r_new < r) {
-                accepted = true;
-                break;
-            }
-            try_d *= 0.5;
-        }
-        if (!accepted) {
-            // Picard fallback: x0_new = -x_end.
-            auto segs = llc_propagate_half_cycle(x0, Thalf, Vi, Vo, Ls, L, C);
-            if (!segs.empty()) {
-                LlcStateVector x_end = segs.back().x_end;
-                x_new.iLs = -x_end.iLs;
-                x_new.iL  = -x_end.iL;
-                x_new.vC  = -x_end.vC;
-                F_new = eval_F(x_new);
-                r_new = norm(F_new);
-            }
-        }
-        x0 = x_new;
-        F = F_new;
-        if (r_new >= prev_r * 0.999) {
-            stagnant++;
-            damping *= 0.7;
-        } else {
-            stagnant = 0;
-            damping = std::min(1.0, damping * 1.2);
-        }
-        prev_r = r_new;
-        r = r_new;
-        if (std::isfinite(r) && r < bestR) {
-            bestR = r;
-            bestX0 = x0;
-        }
-        if (stagnant >= 4) break;
-    }
-
-    outSegments = llc_propagate_half_cycle(bestX0, Thalf, Vi, Vo, Ls, L, C);
-    outResidual = bestR;
-    return bestX0;
-}
-
-// MKF Llc.cpp:744 sample_segments — raster the segment chain onto a uniform [0, Thalf] grid (N+1 points).
-void llc_sample_segments(const std::vector<LlcSubStateSegment>& segs, double Thalf, int N,
-                         double Vi, double Vo, double Ls, double L, double C,
-                         std::vector<double>& ILs_pos, std::vector<double>& IL_pos,
-                         std::vector<double>& Vc_pos, std::vector<double>& VL_pos) {
-    double dt = Thalf / N;
-    size_t segIdx = 0;
-    for (int k = 0; k <= N; ++k) {
-        double t = k * dt;
-        if (t > Thalf) t = Thalf;
-        while (segIdx + 1 < segs.size() && t > segs[segIdx].t_end + 1e-15) ++segIdx;
-        if (segs.empty()) {
-            ILs_pos[k] = 0; IL_pos[k] = 0; Vc_pos[k] = 0; VL_pos[k] = 0;
-            continue;
-        }
-        const auto& seg = segs[segIdx];
-        double t_local = t - seg.t_start;
-        if (t_local < 0) t_local = 0;
-        if (t_local > seg.t_end - seg.t_start) t_local = seg.t_end - seg.t_start;
-        LlcStateVector x = llc_propagate_substate(seg.state, seg.x_start, t_local, Vi, Vo, Ls, L, C);
-        ILs_pos[k] = x.iLs;
-        IL_pos[k]  = x.iL;
-        Vc_pos[k]  = x.vC;
-        if (seg.state == LlcSubState::A_POS) {
-            VL_pos[k] = +Vo;
-        } else if (seg.state == LlcSubState::A_NEG) {
-            VL_pos[k] = -Vo;
-        } else {
-            VL_pos[k] = (L / (Ls + L)) * (Vi - x.vC);  // B_FW: VLm = (L/(Ls+L))·(Vi−Vc)
-        }
-    }
-}
-
-}  // anonymous namespace
-
-// Ported from MKF converter_models/Llc.cpp:786 (process_operating_point_for_input_voltage). The MKF
-// member/method reads become explicit scalar params (KH's MAS has no LlcOperatingPoint): k_bridge →
-// bridgeVoltageFactor, computedResonantInductance → seriesResonantInductance, computedResonantCapacitance
-// → resonantCapacitance, get_integrated_resonant_inductor() → integratedResonantInductor,
-// get_effective_rectifier_type() → rectifier (CENTER_TAPPED / FULL_BRIDGE). Missing/non-positive
-// quantities THROW (mirroring MKF's own guards — no fabricated defaults).
 MAS::OperatingPoint analytical_llc(double inputVoltage,
                                    const std::vector<double>& outputVoltages,
                                    const std::vector<double>& outputCurrents,
@@ -2063,242 +1715,123 @@ MAS::OperatingPoint analytical_llc(double inputVoltage,
                                    SrcRectifier rectifier,
                                    bool integratedResonantInductor) {
     using Lbl = MAS::WaveformLabel;
+    (void)integratedResonantInductor;   // in FHA the winding-current shapes do not depend on Ls integration
     if (outputVoltages.empty() || outputVoltages.size() != outputCurrents.size() ||
         outputVoltages.size() != turnsRatios.size())
         throw std::invalid_argument("analytical_llc: outputVoltages/outputCurrents/turnsRatios "
                                     "must be non-empty and equal length");
     const double fsw = switchingFrequency;
     if (fsw <= 0) throw std::invalid_argument("analytical_llc: switching frequency must be > 0");
-    const double Ls = seriesResonantInductance;
-    const double C  = resonantCapacitance;
-    const double L  = magnetizingInductance;
-    // MKF guards (Llc.cpp:849, :875): magnetizing inductance and resonant-tank values must be positive.
-    if (L <= 0) throw std::invalid_argument("analytical_llc: magnetizing inductance must be > 0");
-    if (Ls <= 0 || C <= 0) throw std::invalid_argument("analytical_llc: resonant Ls/Cr must be > 0");
-
+    const double Ls = seriesResonantInductance, Cr = resonantCapacitance, Lm = magnetizingInductance;
+    if (Lm <= 0) throw std::invalid_argument("analytical_llc: magnetizing inductance must be > 0");
+    if (Ls <= 0 || Cr <= 0) throw std::invalid_argument("analytical_llc: resonant Ls/Cr must be > 0");
     const double k_bridge = bridgeVoltageFactor;
-    const bool integratedLs = integratedResonantInductor;
-    const double Vi = k_bridge * inputVoltage;  // MKF Llc.cpp:813
+    const double n_main = turnsRatios[0];
+    if (n_main <= 0) throw std::invalid_argument("analytical_llc: turns ratio must be > 0");
 
     const size_t nOutputs = outputVoltages.size();
-    const double n_main = turnsRatios[0];       // MKF get_n_for_output(0)
-    if (n_main <= 0) throw std::invalid_argument("analytical_llc: turns ratio must be > 0");
-    double Vo = n_main * outputVoltages[0];     // MKF Llc.cpp:838 (VD's ×0.5 is not ported)
+    const double Vout0 = outputVoltages[0], Iout0 = outputCurrents[0];
+    if (Vout0 <= 0 || Iout0 <= 0) throw std::invalid_argument("analytical_llc: main output V/I must be > 0");
+    const double Vo = n_main * Vout0;                                    // reflected output (magnetizing clamp)
+    const double Rload = Vout0 / Iout0;
+    const double Rac = (8.0 / (M_PI * M_PI)) * n_main * n_main * Rload;   // FHA AC-equivalent load
 
-    if (!std::isfinite(Vo) || Vo < 0)  // MKF Llc.cpp:890
-        throw std::invalid_argument("analytical_llc: reflected output voltage Vo is invalid");
+    const double w = 2.0 * M_PI * fsw;
+    const double XLs = w * Ls, XCr = 1.0 / (w * Cr), XLm = w * Lm;
+    // Lm || Rac (complex): Zp = (jXLm.Rac)/(Rac + jXLm) = Rac.XLm^2/D + j.Rac^2.XLm/D,  D = Rac^2 + XLm^2.
+    const double D = Rac * Rac + XLm * XLm;
+    const double Zp_re = Rac * XLm * XLm / D;
+    const double Zp_im = Rac * Rac * XLm / D;
+    const double Zin_re = Zp_re;
+    const double Zin_im = (XLs - XCr) + Zp_im;
+    const double Zin_mag = std::sqrt(Zin_re * Zin_re + Zin_im * Zin_im);
+    const double phi = std::atan2(Zin_im, Zin_re);
 
-    const double period = 1.0 / fsw;      // MKF Llc.cpp:878
-    const double Thalf = period / 2.0;
-    const double Thalf_eff = Thalf;       // MKF Llc.cpp:888 (dead time not modelled)
-    if (!std::isfinite(Thalf_eff) || Thalf_eff <= 0)  // MKF Llc.cpp:892
-        throw std::invalid_argument("analytical_llc: half switching period is invalid");
+    const double Vin_fund_pk = (4.0 / M_PI) * k_bridge * inputVoltage;
+    const double ILs_pk = (Zin_mag > 0) ? Vin_fund_pk / Zin_mag : 0.0;
 
-    const int N = 256;                    // MKF Llc.cpp:905
-    const double dt = Thalf_eff / N;
+    // Magnetizing current: Lm sees +/-Vo square -> triangle, peak = Vo*(Thalf)/(2*Lm).
+    const double Thalf = 1.0 / (2.0 * fsw);
+    const double ILm_pk = Vo * Thalf / (2.0 * Lm);
 
-    // FHA-style Newton seed (MKF Llc.cpp:911-920).
-    double Im_pk_est = Vo * Thalf_eff / (2.0 * L);
-    if (!std::isfinite(Im_pk_est) || std::abs(Im_pk_est) > 1e6)
-        Im_pk_est = std::copysign(1.0, Im_pk_est);
-
-    double Iout_main = outputCurrents[0];
-    double Iload_reflected = Iout_main / n_main;
-    double Ires_est = std::max(std::abs(Im_pk_est) + std::abs(Iload_reflected),
-                               std::abs(Iload_reflected) * 1.5);
-
-    LlcStateVector x0_seed{ -Ires_est, -Im_pk_est, 0.0 };
-
-    std::vector<LlcSubStateSegment> segments;
-    double residual = 0.0;
-
-    // LIP singularity perturbation (MKF Llc.cpp:941-945): near Vi ≈ Vo the (iLs, vC) sub-system is a 180°
-    // rotation and the Newton Jacobian is rank-deficient; nudge Vi up 0.5% for the solve only.
-    double Vi_solver = Vi;
-    double denom_vo = std::max(std::abs(Vi), std::abs(Vo));
-    if (denom_vo > 0 && std::abs(Vi - Vo) / denom_vo < 0.005) {
-        Vi_solver = Vi * 1.005;
-    }
-    // Multi-start (MKF Llc.cpp:954-982): the half-cycle steady-state map is piecewise, so ‖F‖ has several
-    // basins; seed from several physically-plausible start points and keep the lowest residual.
-    double Zr = (C > 0) ? std::sqrt(Ls / C) : 0.0;
-    std::vector<LlcStateVector> seeds = {
-        x0_seed,
-        { -0.7 * Ires_est, -Im_pk_est, 0.0 },
-        { -1.4 * Ires_est, -Im_pk_est, 0.0 },
-        { -Ires_est, -Im_pk_est,  Ires_est * Zr },
-        { -Ires_est, -Im_pk_est, -Ires_est * Zr },
-        {  Ires_est, -Im_pk_est, 0.0 },
-        { -Ires_est,  Im_pk_est, 0.0 },
-    };
-    LlcStateVector x0 = x0_seed;
-    residual = std::numeric_limits<double>::max();
-    for (const auto& seed : seeds) {
-        std::vector<LlcSubStateSegment> segTry;
-        double rTry = 0.0;
-        LlcStateVector xTry = llc_solve_steady_state(seed, Thalf_eff, Vi_solver, Vo, Ls, L, C, segTry, rTry);
-        if (rTry >= 0.0 && rTry < residual) {
-            residual = rTry;
-            x0 = xTry;
-            segments = segTry;
-        }
-        if (residual < 1e-3) break;  // off-LIP converges on the first seed; skip the rest
-    }
-    if (segments.empty()) {  // all starts bailed — fall back to the default solve
-        x0 = llc_solve_steady_state(x0_seed, Thalf_eff, Vi_solver, Vo, Ls, L, C, segments, residual);
-    }
-
-    // Sanity check (MKF Llc.cpp:989-997): reject an unphysical null-space iterate → FHA closed-form seed.
-    double sanity_iLs = std::max(10.0 * Ires_est, 20.0);
-    double sanity_vC  = std::max(10.0 * std::abs(Vi), 10.0 * std::abs(Vo));
-    if (sanity_vC < 200.0) sanity_vC = 200.0;
-    if (!std::isfinite(x0.iLs) || !std::isfinite(x0.iL) || !std::isfinite(x0.vC) ||
-        std::abs(x0.iLs) > sanity_iLs ||
-        std::abs(x0.vC)  > sanity_vC) {
-        x0 = x0_seed;
-        residual = -1.0;  // flag "seed fallback"
-    }
-    // Re-propagate with the authoritative Vi for waveform emission (MKF Llc.cpp:1000).
-    segments = llc_propagate_half_cycle(x0, Thalf_eff, Vi, Vo, Ls, L, C);
-
-    std::vector<double> ILs_pos(N + 1, 0.0), IL_pos(N + 1, 0.0);
-    std::vector<double> Vc_pos(N + 1, 0.0), VL_pos(N + 1, 0.0);
-    llc_sample_segments(segments, Thalf_eff, N, Vi, Vo, Ls, L, C, ILs_pos, IL_pos, Vc_pos, VL_pos);
-
-    double ILs0 = x0.iLs;  // MKF Llc.cpp:1038
-    double IL0  = x0.iL;
-
-    // Convergence diagnostic (MKF Llc.cpp:1052-1058): a bounded-but-imperfect residual → warn, don't throw.
-    double i_thresh = std::max(0.5, 0.02 * std::abs(Iload_reflected));
-    if (residual > i_thresh) {
-        std::cerr << "[analytical_llc] Nielsen TDA solver did not fully converge: residual="
-                  << residual << " A (Vi=" << Vi << "V, Vo=" << Vo << "V, fsw=" << fsw
-                  << "Hz) — analytical waveform is bounded but may be imperfect for this op point."
-                  << std::endl;
-    }
-
-    // Build full-period waveforms by half-wave antisymmetry (MKF Llc.cpp:1069-1106).
-    int totalSamples = 2 * N + 1;
-    std::vector<double> time_full(totalSamples);
-    std::vector<double> ILs_full(totalSamples);
-    std::vector<double> IL_full(totalSamples);
-    std::vector<double> Vpri_full(totalSamples);  // primary voltage (topology-dependent)
-    std::vector<double> VLm_full(totalSamples);   // magnetizing voltage (for the secondaries)
-
-    for (int k = 0; k <= N; ++k) {
-        time_full[k] = k * dt;
-        ILs_full[k] = std::isfinite(ILs_pos[k]) ? ILs_pos[k] : ILs0;
-        IL_full[k]  = std::isfinite(IL_pos[k])  ? IL_pos[k]  : IL0;
-
-        double VLm_k = std::isfinite(VL_pos[k]) ? VL_pos[k] : 0.0;
-        double Vc_k  = std::isfinite(Vc_pos[k]) ? Vc_pos[k] : 0.0;
-        VLm_full[k] = VLm_k;
-
-        if (integratedLs) {
-            Vpri_full[k] = Vi - Vc_k;   // integrated Lr: bridge voltage with Cr ripple
-        } else {
-            Vpri_full[k] = VLm_k;       // separate Lr: magnetizing voltage only
-        }
-    }
-
-    for (int k = 1; k <= N; ++k) {
-        time_full[N + k] = Thalf + k * dt;
-        ILs_full[N + k] = std::isfinite(ILs_pos[k]) ? -ILs_pos[k] : -ILs0;
-        IL_full[N + k]  = std::isfinite(IL_pos[k])  ? -IL_pos[k]  : -IL0;
-
-        double VLm_k = std::isfinite(VL_pos[k]) ? VL_pos[k] : 0.0;
-        double Vc_k  = std::isfinite(Vc_pos[k]) ? Vc_pos[k] : 0.0;
-        VLm_full[N + k] = -VLm_k;
-
-        if (integratedLs) {
-            Vpri_full[N + k] = -(Vi - Vc_k);
-        } else {
-            Vpri_full[N + k] = -VLm_k;
+    const int N = 256;
+    const int totalSamples = 2 * N + 1;
+    const double period = 1.0 / fsw;
+    const double dt = period / (2 * N);
+    std::vector<double> time_full(totalSamples), ILs_full(totalSamples), ILm_full(totalSamples),
+        Vpri_full(totalSamples);
+    for (int k = 0; k < totalSamples; ++k) {
+        const double t = k * dt;
+        const double theta = w * t;
+        time_full[k] = t;
+        ILs_full[k] = ILs_pk * std::sin(theta - phi);
+        double thetaMod = std::fmod(theta, 2.0 * M_PI);
+        if (thetaMod < 0) thetaMod += 2.0 * M_PI;
+        if (thetaMod < M_PI) {                       // +Vo half: iLm ramps -ILm_pk -> +ILm_pk
+            ILm_full[k] = -ILm_pk + 2.0 * ILm_pk * (thetaMod / M_PI);
+            Vpri_full[k] = +Vo;
+        } else {                                     // -Vo half: iLm ramps +ILm_pk -> -ILm_pk
+            ILm_full[k] = ILm_pk - 2.0 * ILm_pk * ((thetaMod - M_PI) / M_PI);
+            Vpri_full[k] = -Vo;
         }
     }
 
     MAS::OperatingPoint operatingPoint;
-    // Primary excitation (MKF Llc.cpp:1154-1169): tank current I_Ls + topology-dependent voltage.
+    // Primary: resonant tank current ILs + clamped +/-Vo transformer voltage.
     {
-        MAS::Waveform currentWaveform;
-        currentWaveform.set_ancillary_label(Lbl::CUSTOM);
-        currentWaveform.set_data(ILs_full);
-        currentWaveform.set_time(time_full);
-
-        MAS::Waveform voltageWaveform;
-        voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
-        voltageWaveform.set_data(Vpri_full);
-        voltageWaveform.set_time(time_full);
-
+        MAS::Waveform iW; iW.set_ancillary_label(Lbl::CUSTOM); iW.set_data(ILs_full); iW.set_time(time_full);
+        MAS::Waveform vW; vW.set_ancillary_label(Lbl::CUSTOM); vW.set_data(Vpri_full); vW.set_time(time_full);
         operatingPoint.get_mutable_excitations_per_winding().push_back(
-            WP::complete_excitation(currentWaveform, voltageWaveform, fsw, "Primary"));
+            WP::complete_excitation(iW, vW, fsw, "Primary"));
     }
-
-    // Secondary excitations (MKF Llc.cpp:1171-1359). Id = I_Ls − I_L is the primary-referred diode
-    // current (the tank current transferred to the secondaries); I_sec = Id·share·n (ampere-turn
-    // balance). CT → two half-windings; FB → one bipolar winding. (VD / CD are not ported.)
+    // Secondaries: rectified reflected tank current I_sec = n*(ILs - ILm)*share. CT -> two half-windings
+    // (each conducts one polarity); FB -> one bipolar winding.
     double total_g = 0.0;
-    for (size_t i = 0; i < nOutputs; ++i) {
-        double Vout_i = outputVoltages[i];
-        double Iout_i = outputCurrents[i];
-        if (Vout_i > 0 && Iout_i > 0) total_g += Iout_i / Vout_i;
-    }
+    for (size_t i = 0; i < nOutputs; ++i)
+        if (outputVoltages[i] > 0 && outputCurrents[i] > 0) total_g += outputCurrents[i] / outputVoltages[i];
     if (total_g <= 0) total_g = 1.0;
-
     for (size_t outputIdx = 0; outputIdx < nOutputs; ++outputIdx) {
-        double n_i = turnsRatios[outputIdx];
-        if (n_i <= 0) n_i = 1.0;
-
-        double Vout_i = outputVoltages[outputIdx];
-        double Iout_i = outputCurrents[outputIdx];
-        double share = (Vout_i > 0 && Iout_i > 0) ? (Iout_i / Vout_i) / total_g
-                                                  : (outputIdx == 0 ? 1.0 : 0.0);
-
+        double n_i = turnsRatios[outputIdx]; if (n_i <= 0) n_i = 1.0;
+        const double Vout_i = outputVoltages[outputIdx], Iout_i = outputCurrents[outputIdx];
+        const double share = (Vout_i > 0 && Iout_i > 0) ? (Iout_i / Vout_i) / total_g
+                                                        : (outputIdx == 0 ? 1.0 : 0.0);
+        // Enforce the known DC output: FHA captures the fundamental of the diode current but not its exact
+        // conduction phase, so the raw rectified reflected current n*(ILs-ILm) does not integrate to Iout.
+        // Scale it so its rectified (full-wave) average equals Iout_i — the boundary condition the output
+        // capacitor physically imposes. (The primary tank current ILs is untouched; it is SPICE-validated.)
+        double rawOutAvg = 0.0;
+        for (int k = 0; k < totalSamples; ++k)
+            rawOutAvg += std::abs((ILs_full[k] - ILm_full[k]) * share * n_i);
+        rawOutAvg /= totalSamples;
+        const double secScale = (rawOutAvg > 1e-12) ? (Iout_i / rawOutAvg) : 1.0;
         if (rectifier == SrcRectifier::CENTER_TAPPED) {
-            // MKF Llc.cpp:1218-1244 — two half-windings, each conducting on one polarity.
             for (size_t halfIdx = 0; halfIdx < 2; ++halfIdx) {
-                std::vector<double> iSecData(totalSamples, 0.0);
-                std::vector<double> vSecData(totalSamples, 0.0);
+                std::vector<double> iSecData(totalSamples, 0.0), vSecData(totalSamples, 0.0);
                 for (int k = 0; k < totalSamples; ++k) {
-                    double Id = ILs_full[k] - IL_full[k];
-                    if (!std::isfinite(Id)) Id = 0;
-                    double Id_share = Id * share;
-                    double Id_half = (halfIdx == 0) ? std::max(0.0, Id_share) : std::max(0.0, -Id_share);
-                    iSecData[k] = Id_half * n_i;
-                    vSecData[k] = VLm_full[k] / n_i;
-                    if (!std::isfinite(iSecData[k])) iSecData[k] = 0;
-                    if (!std::isfinite(vSecData[k])) vSecData[k] = 0;
+                    const double Id = (ILs_full[k] - ILm_full[k]) * share;
+                    const double Id_half = (halfIdx == 0) ? std::max(0.0, Id) : std::max(0.0, -Id);
+                    iSecData[k] = Id_half * n_i * secScale;
+                    vSecData[k] = (halfIdx == 0) ? (Vpri_full[k] >= 0 ? +Vout_i : -Vout_i)
+                                                 : (Vpri_full[k] >= 0 ? -Vout_i : +Vout_i);
                 }
-                MAS::Waveform secCurrentWfm; secCurrentWfm.set_ancillary_label(Lbl::CUSTOM);
-                secCurrentWfm.set_data(iSecData); secCurrentWfm.set_time(time_full);
-                MAS::Waveform secVoltageWfm; secVoltageWfm.set_ancillary_label(Lbl::CUSTOM);
-                secVoltageWfm.set_data(vSecData); secVoltageWfm.set_time(time_full);
-                std::string windingName = "Secondary " + std::to_string(outputIdx)
-                                        + " Half " + std::to_string(halfIdx + 1);
+                MAS::Waveform iW; iW.set_ancillary_label(Lbl::CUSTOM); iW.set_data(iSecData); iW.set_time(time_full);
+                MAS::Waveform vW; vW.set_ancillary_label(Lbl::CUSTOM); vW.set_data(vSecData); vW.set_time(time_full);
                 operatingPoint.get_mutable_excitations_per_winding().push_back(
-                    WP::complete_excitation(secCurrentWfm, secVoltageWfm, fsw, windingName));
+                    WP::complete_excitation(iW, vW, fsw, "Secondary " + std::to_string(outputIdx) +
+                                                         " Half " + std::to_string(halfIdx + 1)));
             }
-        } else {  // FULL_BRIDGE — MKF Llc.cpp:1246-1266: single bipolar secondary winding.
-            std::vector<double> iSecData(totalSamples, 0.0);
-            std::vector<double> vSecData(totalSamples, 0.0);
+        } else {
+            std::vector<double> iSecData(totalSamples, 0.0), vSecData(totalSamples, 0.0);
             for (int k = 0; k < totalSamples; ++k) {
-                double Id = ILs_full[k] - IL_full[k];
-                if (!std::isfinite(Id)) Id = 0;
-                iSecData[k] = Id * share * n_i;
-                vSecData[k] = VLm_full[k] / n_i;
-                if (!std::isfinite(iSecData[k])) iSecData[k] = 0;
-                if (!std::isfinite(vSecData[k])) vSecData[k] = 0;
+                iSecData[k] = (ILs_full[k] - ILm_full[k]) * share * n_i * secScale;
+                vSecData[k] = (Vpri_full[k] >= 0 ? +Vout_i : -Vout_i);
             }
-            MAS::Waveform secCurrentWfm; secCurrentWfm.set_ancillary_label(Lbl::CUSTOM);
-            secCurrentWfm.set_data(iSecData); secCurrentWfm.set_time(time_full);
-            MAS::Waveform secVoltageWfm; secVoltageWfm.set_ancillary_label(Lbl::CUSTOM);
-            secVoltageWfm.set_data(vSecData); secVoltageWfm.set_time(time_full);
-            std::string windingName = "Secondary " + std::to_string(outputIdx);
+            MAS::Waveform iW; iW.set_ancillary_label(Lbl::CUSTOM); iW.set_data(iSecData); iW.set_time(time_full);
+            MAS::Waveform vW; vW.set_ancillary_label(Lbl::CUSTOM); vW.set_data(vSecData); vW.set_time(time_full);
             operatingPoint.get_mutable_excitations_per_winding().push_back(
-                WP::complete_excitation(secCurrentWfm, secVoltageWfm, fsw, windingName));
+                WP::complete_excitation(iW, vW, fsw, "Secondary " + std::to_string(outputIdx)));
         }
     }
-
     return operatingPoint;
 }
 

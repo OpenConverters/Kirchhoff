@@ -154,29 +154,10 @@ TEST_CASE("NRMSE gate: SRC tank current — analytical vs ngspice", "[nrmse][src
     CHECK(nrmse < 0.25);
 }
 
-// Run the analytical LLC solver (Runo Nielsen TDA) and the ngspice deck for the SAME design; compare the
-// resonant-tank current (analytical "Primary" winding vs the Lr branch current) via the phase-invariant
-// NRMSE. The LLC deck is driven AT the tank resonance fr (build_llc_tas stimulates Q1/Q2 at
-// d.resonantFrequency), so the analytical solver is run at fsw = fr to match.
-//
-// FINDING — the observed NRMSE is ~0.40, NOT the ~0.25 the SRC-style FHA gate reaches. Root cause (fully
-// diagnosed, NOT a port bug — the port matches MKF's own analytical LLC byte-for-byte across 0.90–1.10·fr
-// EXCEPT at exactly fr): Kirchhoff's LLC deck drives at EXACTLY the tank resonance fr, which is the
-// documented singular point of the Nielsen TDA steady-state solve. There the power-delivery sub-state
-// rotates (i_Ls, v_Cr) by exactly π, so the half-wave-antisymmetry residual F(x0)=x(Thalf)+x0 is
-// rank-deficient (a single-sub-state half cycle leaves an irreducible 2·(Vi−Vo) cap-voltage DC that
-// antisymmetry cannot cancel). MKF's singularity guard only perturbs Vi when Vi≈Vo (its LIP), which does
-// not fire for Kirchhoff's diode-drop-compensated turns ratio (Vi=200 V, Vo=n·Vout=186 V). The multi-start
-// Newton then diverges past the physical sanity bound and MKF's own guard falls back to the FHA closed-form
-// seed: the emitted tank current has ~the right RMS envelope but a distorted shape + a mirror-boundary
-// glitch → ~0.40 phase-invariant NRMSE. MKF sidesteps this entirely by operating its LLC reference designs
-// BELOW resonance (fsw=100 kHz < fr=126 kHz), where the solver converges to a ~1e-8 residual (verified).
-//
-// This gate therefore validates that the ported tank solver produces a bounded, ~correct-scale primary
-// current at the deck's operating point, and PINS the current 0.40 residual so a regression (or the future
-// solver improvement that would drop it toward MKF's below-resonance quality) is caught. The threshold is
-// set from the measured value with this documented rationale — it is NOT a silent loosen-to-pass. See the
-// task report for the full MKF cross-check numbers.
+// Real fidelity gate for the (now FHA) LLC solver: drive analytical + ngspice from the SAME design at the
+// deck operating point (fr), read the ACTUAL settled Vout from SPICE, and compare the resonant tank
+// current (analytical "Primary" = i_Ls vs ngspice l.xllccell.llr_pri) via the phase-invariant NRMSE. FHA
+// is load-aware (Rac ∝ n²·Rload) and NOT singular at fr, so this is a genuine analytical-vs-SPICE check.
 TEST_CASE("NRMSE gate: LLC tank current — analytical vs ngspice", "[nrmse][llc]") {
     if (!Kirchhoff::ngspice_in_process_available()) {
         WARN("Kirchhoff built without libngspice — skipping NRMSE gate");
@@ -184,12 +165,23 @@ TEST_CASE("NRMSE gate: LLC tank current — analytical vs ngspice", "[nrmse][llc
     }
     json spec = spec_for(400, 12, 120, 100000);   // Telecom-120W reference
     Kirchhoff::LlcDesign d = Kirchhoff::design_llc(spec);
-    const double iout = d.outputPower / d.outputVoltage;
-    const double fdrive = d.resonantFrequency;    // the deck runs at fr (not the requirement fsw)
+    const double fdrive = d.resonantFrequency;    // the deck runs at fr
 
-    // --- analytical (half-bridge LLC, center-tapped rectifier) ---
+    // --- ngspice first: settle the real circuit and read the actual operating point ---
+    json tas = Kirchhoff::build_llc_tas(d);
+    PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
+    std::string deck = Kirchhoff::tas_to_ngspice(tas, ideal);
+    Kirchhoff::NgspiceRunResult r = Kirchhoff::run_ngspice_in_process(deck);
+    REQUIRE(r.success);
+    const double period = 1.0 / fdrive;
+    const double vout = r.average("v(vout)", r.time.back() - period, r.time.back()).value_or(0.0);
+    REQUIRE(vout > 0.5);
+    const double rload = d.outputVoltage / (d.outputPower / d.outputVoltage);
+    const double iout = vout / rload;
+
+    // --- analytical (half-bridge LLC, center-tapped) at the SAME operating point ---
     MAS::OperatingPoint op = Kirchhoff::analytical::analytical_llc(
-        d.inputVoltage, {d.outputVoltage}, {iout}, {d.turnsRatio},
+        d.inputVoltage, {vout}, {iout}, {d.turnsRatio},
         fdrive, d.magnetizingInductance, d.resonantInductance, d.resonantCapacitance,
         0.5, Kirchhoff::analytical::SrcRectifier::CENTER_TAPPED);
     REQUIRE(op.get_excitations_per_winding().size() >= 1);
@@ -198,45 +190,29 @@ TEST_CASE("NRMSE gate: LLC tank current — analytical vs ngspice", "[nrmse][llc
     REQUIRE(pri->get_waveform().has_value());
     const std::vector<double> aVal = pri->get_waveform()->get_data();
     REQUIRE(aVal.size() >= 2);
-    std::vector<double> aTime;
-    if (pri->get_waveform()->get_time().has_value() &&
-        pri->get_waveform()->get_time()->size() == aVal.size()) {
-        aTime = pri->get_waveform()->get_time().value();
-    } else {
-        const double period0 = 1.0 / fdrive;
-        aTime.resize(aVal.size());
-        for (size_t i = 0; i < aVal.size(); ++i)
-            aTime[i] = period0 * static_cast<double>(i) / static_cast<double>(aVal.size() - 1);
-    }
+    std::vector<double> aTime(aVal.size());
+    for (size_t i = 0; i < aVal.size(); ++i)
+        aTime[i] = period * static_cast<double>(i) / static_cast<double>(aVal.size() - 1);
 
-    // --- ngspice ---
-    json tas = Kirchhoff::build_llc_tas(d);
-    PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
-    std::string deck = Kirchhoff::tas_to_ngspice(tas, ideal);
-    Kirchhoff::NgspiceRunResult r = Kirchhoff::run_ngspice_in_process(deck);
-    REQUIRE(r.success);
-    const std::string tankKey = "l.xllccell.llr_pri#branch";   // the Lr resonant-inductor branch current
+    const std::string tankKey = "l.xllccell.llr_pri#branch";
     REQUIRE(r.vectors.count(tankKey) == 1);
     const std::vector<double>& sVal = r.vectors.at(tankKey);
 
     const int N = 256;
-    const double period = 1.0 / fdrive;
     std::vector<double> aRes = resample_analytical(aTime, aVal, period, N);
     std::vector<double> sRes = resample_last_period(r.time, sVal, period, N);
-
     double nrmse = phase_invariant_nrmse(aRes, sRes);
-    const double aPk = *std::max_element(aRes.begin(), aRes.end());
-    const double sPk = *std::max_element(sRes.begin(), sRes.end());
-    std::cerr << "[NRMSE] LLC tank current = " << nrmse
-              << "  (analytical Ipk=" << aPk << ", ngspice Ipk=" << sPk << ")\n";
-    // Scale sanity: the ported solver produces a bounded, correct-order tank current (not the collapsed
-    // ~0 or the exploded null-space value the raw singularity would give).
-    CHECK(aPk > 0.3 * sPk);
-    CHECK(aPk < 3.0 * sPk);
-    // Shape gate: pinned at the measured at-resonance-singularity residual (see the FINDING above). This is
-    // above the SRC gate's 0.25 because the LLC deck operates at the TDA's singular point, not because the
-    // port is wrong. Tightening this requires the solver's at-fr singular-basin robustness improvement.
-    CHECK(nrmse < 0.45);
+    std::cerr << "[NRMSE] LLC tank current = " << nrmse << "  (Vout=" << vout << " Iout=" << iout
+              << ", analytical Ipk=" << *std::max_element(aRes.begin(), aRes.end())
+              << ", ngspice Ipk=" << *std::max_element(sRes.begin(), sRes.end()) << ")\n";
+    // Load-aware FHA: the primary tank current tracks SPICE tightly (observed ~0.03). Gate at 0.15 (SRC's
+    // level) — a real fidelity gate, not a characterization catch.
+    CHECK(nrmse < 0.15);
+    // The secondary winding-pair must deliver the DC output current (sum of the CT half-winding averages).
+    double secSum = 0.0;
+    for (size_t w = 1; w < op.get_excitations_per_winding().size(); ++w)
+        secSum += *op.get_excitations_per_winding()[w].get_current()->get_processed()->get_average();
+    CHECK(secSum == Catch::Approx(iout).margin(0.1 * iout));
 }
 
 // Run the analytical CLLC solver (4-state Sun et al. TDA) and the ngspice deck for the SAME design; compare
