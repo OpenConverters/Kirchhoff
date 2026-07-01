@@ -105,33 +105,19 @@ json build_weinberg_tas(const WeinbergDesign& d) {
     const double n = d.turnsRatio, fsw = d.switchingFrequency;
     const double Vin = d.inputVoltage, Vout = d.outputVoltage, D = d.switchDuty;
 
-    // --- per-winding electrical stresses (boost regime D>0.5, nominal operating point) ---
-    // CURRENTS. The current-fed front end draws Iin = Pin/Vin; the two L1 windings split it (Iin/2
-    // each, DC-biased). Each primary half carries the full input current during its conduction
-    // (duty D, the halves overlap for D>0.5); each secondary half supplies the output current Iout
-    // through its rectifier on alternate half-cycles.
+    // --- semiconductor-only electrical stresses (nominal operating corner) ---
+    // The transformer/inductor WINDING excitations come from the analytical solver below (the single FHA
+    // source); only the values the switch/diode ratings need are computed inline here. The current-fed
+    // front end draws Iin = Pin/Vin; each push-pull primary half carries the full input current during its
+    // ON-fraction D. Primary halves reflect ±Vout/n, secondaries ±Vout.
     const double Iin  = d.outputPower / (d.efficiency * Vin);
     const double Iout = d.outputPower / Vout;
     const double IL1avg = Iin / 2.0;
     const double dIL1 = cfg::get(d.config, "l1RippleRatio", kRippleRatio) * IL1avg;
-    const double IpkL1  = IL1avg + dIL1 / 2.0;
-    const double IrmsL1 = std::sqrt(IL1avg * IL1avg + dIL1 * dIL1 / 12.0);
-    // Primary half: input current during its ON-fraction D; offset 0 (AC winding).
     const double IpkPri  = Iin + dIL1 / 2.0;
     const double IrmsPri = std::sqrt(D) * Iin;
-    // Secondary half: supplies Iout, conducting ~half the period (CT full-wave); offset 0.
-    const double IpkSec  = Iout;
-    const double IrmsSec = Iout / std::sqrt(2.0);
-    // VOLTAGES. The output rectifier clamps each secondary half to ±Vout; the primary halves reflect
-    // that to ±Vout/n. Winding-voltage offsets are 0 (DC bias is in the L1 current). The input
-    // inductor L1 charges at +Vin for an effective fraction dEff and resets at -Vin·dEff/(1−dEff)
-    // (volt-second balance).
-    const double dEff = std::max(2.0 * D - 1.0, D);
-    const double vL1Reset = (dEff < 1.0) ? Vin * dEff / (1.0 - dEff) : Vin;
-    const double vL1Pk = std::max(Vin, vL1Reset), vL1PkPk = Vin + vL1Reset;
-    const double vL1Rms = std::sqrt(dEff * Vin * Vin + (1.0 - dEff) * vL1Reset * vL1Reset);
-    const double vPriPk = Vout / n, vPriPkPk = 2.0 * Vout / n, vPriRms = Vout / n;
-    const double vSecPk = Vout, vSecPkPk = 2.0 * Vout, vSecRms = Vout;
+    const double vPriPkPk = 2.0 * Vout / n;   // S1/S2 reflected blocking voltage
+    const double vSecPkPk = 2.0 * Vout;       // Dpos/Dneg blocking voltage
 
     // ── semiconductor requirements (boost regime, nominal operating corner) ──
     // Push-pull primary switches S1/S2: in a current-fed push-pull each off-switch drain is clamped by

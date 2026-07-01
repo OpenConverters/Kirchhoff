@@ -29,3 +29,7 @@ tests/reference/*
 *.swp
 __pycache__/
 *.pyc
+
+# out-of-source build dirs (wasm/ngspice/topology variants) + MCP browser artifacts
+build-*/
+.playwright-mcp/
