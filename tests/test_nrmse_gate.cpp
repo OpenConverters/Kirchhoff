@@ -339,3 +339,56 @@ TEST_CASE("NRMSE gate: CLLLC tank current — analytical vs ngspice", "[nrmse][c
     rectAvg /= secData.size();
     CHECK(rectAvg == Catch::Approx(iout).margin(0.12 * iout));
 }
+
+// Resonant SECONDARY-winding fidelity vs SPICE, measured on the SETTLED last period (an earlier audit
+// wrongly used rms over the whole transient, which reads artificially low). LLC/CLLLC secondaries match
+// SPICE tightly; CLLC is looser because its design runs off-unity-gain (n*Vout=370 != Vin=400), the
+// regime where the single-sinusoid FHA is weakest (CLLLC, identical formula but n*Vout=Vin, is exact).
+TEST_CASE("NRMSE gate: resonant secondary winding rms vs ngspice", "[nrmse][secondary]") {
+    if (!Kirchhoff::ngspice_in_process_available()) { WARN("no libngspice"); return; }
+    PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
+    auto settledRms = [](const std::vector<double>& t, const std::vector<double>& v, double T) {
+        const int M = 512; double te = t.back(), tb = te - T; size_t j = 0; double q = 0;
+        for (int k = 0; k < M; ++k) { double tt = tb + T*k/M; while (j+1<t.size() && t[j+1]<tt) ++j;
+            double f = (t[j+1]-t[j]>0)?(tt-t[j])/(t[j+1]-t[j]):0; double x = v[j]+f*(v[j+1]-v[j]); q += x*x; }
+        return std::sqrt(q/M);
+    };
+    auto anaRms = [](const MAS::OperatingPoint& op, size_t w) {
+        return *op.get_excitations_per_winding()[w].get_current()->get_processed()->get_rms();
+    };
+    // LLC (center-tapped: analytical "Secondary 0 Half 1" vs spice lt1_sec1)
+    {
+        auto d = Kirchhoff::design_llc(spec_for(400,12,120,100000)); double f = d.resonantFrequency, T = 1.0/f;
+        auto r = Kirchhoff::run_ngspice_in_process(Kirchhoff::tas_to_ngspice(Kirchhoff::build_llc_tas(d), ideal));
+        REQUIRE(r.success);
+        double vo = r.average("v(vout)", r.time.back()-T, r.time.back()).value_or(0);
+        double io = vo/(d.outputVoltage/(d.outputPower/d.outputVoltage));
+        auto op = Kirchhoff::analytical::analytical_llc(d.inputVoltage,{vo},{io},{d.turnsRatio},f,d.magnetizingInductance,d.resonantInductance,d.resonantCapacitance,0.5,Kirchhoff::analytical::SrcRectifier::CENTER_TAPPED);
+        double ratio = anaRms(op,1) / settledRms(r.time, r.vectors.at("l.xllccell.lt1_sec1#branch"), T);
+        std::cerr << "[SEC] LLC secondary rms ratio = " << ratio << "\n";
+        CHECK(ratio == Catch::Approx(1.0).margin(0.12));
+    }
+    // CLLLC (full-bridge: analytical "Secondary 0" vs spice lt1_sec1; trap deck)
+    {
+        auto d = Kirchhoff::design_clllc(spec_for(400,48,480,100000)); double f = d.resonantFrequency, T = 1.0/f;
+        auto deck = std::regex_replace(Kirchhoff::tas_to_ngspice(Kirchhoff::build_clllc_tas(d), ideal), std::regex("method=gear"), "method=trap");
+        auto r = Kirchhoff::run_ngspice_in_process(deck); REQUIRE(r.success);
+        double vo = r.average("v(vout)", r.time.back()-T, r.time.back()).value_or(0);
+        double io = vo/(d.outputVoltage/(d.outputPower/d.outputVoltage));
+        auto op = Kirchhoff::analytical::analytical_clllc(d.inputVoltage,{vo},{io},{d.turnsRatio},f,d.magnetizingInductance,d.primaryResonantInductance,d.primaryResonantCapacitance,d.secondaryResonantInductance,d.secondaryResonantCapacitance,1.0);
+        double ratio = anaRms(op,1) / settledRms(r.time, r.vectors.at("l.xclllcpower.lt1_sec1#branch"), T);
+        std::cerr << "[SEC] CLLLC secondary rms ratio = " << ratio << "\n";
+        CHECK(ratio == Catch::Approx(1.0).margin(0.12));
+    }
+    // CLLC (off-unity design → looser; bounded, not tight)
+    {
+        auto d = Kirchhoff::design_cllc(spec_for(400,48,480,100000)); double f = d.resonantFrequency, T = 1.0/f;
+        auto r = Kirchhoff::run_ngspice_in_process(Kirchhoff::tas_to_ngspice(Kirchhoff::build_cllc_tas(d), ideal)); REQUIRE(r.success);
+        double vo = r.average("v(vout)", r.time.back()-T, r.time.back()).value_or(0);
+        double io = vo/(d.outputVoltage/(d.outputPower/d.outputVoltage));
+        auto op = Kirchhoff::analytical::analytical_cllc(d.inputVoltage,{vo},{io},{d.turnsRatio},f,d.magnetizingInductance,d.primaryResonantInductance,d.primaryResonantCapacitance,d.secondaryResonantInductance,d.secondaryResonantCapacitance,1.0);
+        double ratio = anaRms(op,1) / settledRms(r.time, r.vectors.at("l.xcllccell.lt1_sec1#branch"), T);
+        std::cerr << "[SEC] CLLC secondary rms ratio = " << ratio << "  (off-unity FHA limit)\n";
+        CHECK(ratio == Catch::Approx(1.0).margin(0.25));
+    }
+}
