@@ -2,6 +2,7 @@
 #include "DimensionJson.hpp"
 #include "KirchhoffConfig.hpp"
 #include "ComponentRequirements.hpp"
+#include "ConverterAnalytical.hpp"
 #include <cmath>
 #include <algorithm>
 #include <vector>
@@ -170,14 +171,30 @@ json build_ahb_tas(const AhbDesign& d) {
     const int wpo = rectifier_windings_per_output(d.rectifierType);
     std::vector<std::string> isoSides{"primary"};
     std::vector<double> turnsRatios;
-    std::vector<json> xwindings{
-        req::winding_excitation("ahbPrimary", fsw, IpriPk, IpriRms, 0.0, dILm, Dn,
-                                vPriPk, vPriRms, 0.0, vPriPkPk)};
-    for (int w = 0; w < wpo; ++w) {
-        isoSides.push_back("secondary");
-        turnsRatios.push_back(N);
-        xwindings.push_back(req::winding_excitation("ahbSecondary", fsw, IsecPk, IsecRms, 0.0, dIsecRefl, Dn,
-                                vSecPk, vSecRms, 0.0, vSecPkPk));
+    for (int w = 0; w < wpo; ++w) { isoSides.push_back("secondary"); turnsRatios.push_back(N); }
+
+    // Transformer excitations from the SINGLE FHA source — the SPICE-validated analytical AHB solver.
+    // FULL_BRIDGE (default) emits Primary + ONE secondary; CENTER_TAPPED emits Primary + two half-windings;
+    // both line up with the wpo winding structure. CURRENT_DOUBLER is not modelled by the solver, so it
+    // keeps the inline model. currentRippleRatio is chosen so the solver's internal Lo matches the deck's
+    // actual output inductor (ripple = dILo/Io). This CORRECTS the inline secondary model, which used a
+    // zero DC offset (real deck: Io*(2D-1) bias, carried by the gapped energy-transfer transformer) and a
+    // sqrt(Dn) RMS factor (AHB conducts BOTH intervals — no freewheel — so RMS ~ Io); verified vs ngspice.
+    namespace AN = Kirchhoff::analytical;
+    std::vector<json> xwindings;
+    if (d.rectifierType == RectifierType::FullBridge || d.rectifierType == RectifierType::CenterTapped) {
+        const AN::SrcRectifier rect = (d.rectifierType == RectifierType::CenterTapped)
+                                      ? AN::SrcRectifier::CENTER_TAPPED : AN::SrcRectifier::FULL_BRIDGE;
+        const double rippleRatio = dILo / Io;   // makes the solver's compute_lo_min Lo == d.outputInductance
+        const MAS::OperatingPoint aopT1 = AN::analytical_asymmetric_half_bridge(
+            d.inputVoltage, {Vo}, {Io}, {N}, fsw, Lm, Dn, rippleRatio, 0.0, rect);
+        xwindings = AN::excitations_processed(aopT1);
+    } else {
+        xwindings.push_back(req::winding_excitation("ahbPrimary", fsw, IpriPk, IpriRms, 0.0, dILm, Dn,
+                                vPriPk, vPriRms, 0.0, vPriPkPk));
+        for (int w = 0; w < wpo; ++w)
+            xwindings.push_back(req::winding_excitation("ahbSecondary", fsw, IsecPk, IsecRms, 0.0, dIsecRefl, Dn,
+                                    vSecPk, vSecRms, 0.0, vSecPkPk));
     }
     json xfmr; xfmr["magnetic"] = json::object();
     xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, turnsRatios, isoSides, std::nullopt, 25.0, xwindings,

@@ -383,15 +383,21 @@ TEST_CASE("analytical_asymmetric_half_bridge: zero-mean primary (Cb blocks DC), 
     CHECK(voltage_average(op, 0) == Catch::Approx(0.0).margin(0.5));
 }
 
-TEST_CASE("analytical_asymmetric_half_bridge rejects FULL_BRIDGE (asymmetric-duty DC bias)",
+TEST_CASE("analytical_asymmetric_half_bridge FULL_BRIDGE: one DC-biased secondary, 2 windings",
           "[analytical][solver][ahb]") {
     using Kirchhoff::analytical::analytical_asymmetric_half_bridge;
     using Kirchhoff::analytical::SrcRectifier;
-    // AHB's complementary duty (D != 0.5) makes a single full-bridge secondary winding carry a net DC
-    // component Io*(2D-1) that a real bridge rectifier cannot sustain — not ported, must throw (no
-    // silently-DC-biased winding). The center-tapped path (two half-windings) is the validated one.
-    CHECK_THROWS(analytical_asymmetric_half_bridge(48, {12}, {5}, {2}, 100000, 200e-6, 0.4, 0.3, 0.0,
-                                                   SrcRectifier::FULL_BRIDGE));
+    // Full-bridge rectifier: ONE secondary winding, i_sec = sign(v_pri)*i_Lo. AHB has no freewheel
+    // (complementary duty) so the winding conducts the whole period => RMS ~ Io (5 A). The asymmetric
+    // duty D=0.4 gives a REAL DC bias Io*(2D-1) = 5*(-0.2) = -1.0 A (the gapped AHB transformer carries
+    // it) — confirmed against the ngspice deck. Primary stays zero-mean (series Cb blocks primary DC).
+    MAS::OperatingPoint op = analytical_asymmetric_half_bridge(48, {12}, {5}, {2}, 100000, 200e-6, 0.4, 0.3, 0.0,
+                                                              SrcRectifier::FULL_BRIDGE);
+    REQUIRE(op.get_excitations_per_winding().size() == 2);            // Primary + one Secondary
+    CHECK(*processed_current(op, 0).get_average() == Catch::Approx(0.0).margin(0.3));   // primary zero-mean
+    CHECK(*processed_current(op, 1).get_average() == Catch::Approx(-1.0).margin(0.4));  // Io*(2D-1) DC bias
+    CHECK(*processed_current(op, 1).get_rms() > 4.0);                 // full-period conduction ~ Io
+    CHECK(*processed_current(op, 1).get_rms() < 6.0);
 }
 
 TEST_CASE("analytical_asymmetric_half_bridge rejects duty outside (0,1)", "[analytical][solver][ahb]") {

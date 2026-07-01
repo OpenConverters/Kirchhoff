@@ -1358,14 +1358,6 @@ MAS::OperatingPoint analytical_asymmetric_half_bridge(double inputVoltage,
     if (!(fsw > 0.0))
         throw std::invalid_argument("analytical_asymmetric_half_bridge: switchingFrequency must be > 0");
     (void)diodeVoltageDrop;  // not used in AHB waveform generation (only in the design-side turns-ratio)
-    // AHB's complementary (asymmetric) duty makes a SINGLE full-bridge secondary winding carry a net DC
-    // component Io*(2D-1) — which a real bridge rectifier (no DC winding path) cannot sustain. A faithful
-    // full-bridge AHB secondary needs the two half-cycle current LEVELS to differ (ampere-second balance),
-    // not the naive fold of the center-tapped halves. Not ported: throw rather than return a DC-biased
-    // winding. Use CENTER_TAPPED (the validated path), or the build's inline model for full-bridge.
-    if (rectifier == SrcRectifier::FULL_BRIDGE)
-        throw std::invalid_argument("analytical_asymmetric_half_bridge: FULL_BRIDGE secondary not ported "
-                                    "(asymmetric duty -> net DC winding current); use CENTER_TAPPED");
 
     const double Vin = inputVoltage;
     // Multi-output: primary sees the total reflected power (project to output #0).
@@ -1470,8 +1462,20 @@ MAS::OperatingPoint analytical_asymmetric_half_bridge(double inputVoltage,
                 WP::complete_excitation(wfm(iSec_k, time), wfm(vSec_k, time), fsw,
                                         "Secondary " + std::to_string(k)));
         }
+    } else if (rectifier == SrcRectifier::FULL_BRIDGE) {
+        // Full-bridge rectifier: ONE secondary winding. The bridge routes the full output-inductor
+        // current through the winding at all times (2 diodes conduct), with the winding current sign
+        // following the primary polarity: i_sec = sign(v_pri)·i_Lo = iSec_a − iSec_b, at the full ±Vsec
+        // square (= vSec_a). AHB has NO freewheel interval (complementary duty), so the winding conducts
+        // the whole period ⇒ RMS ≈ Io, and the ASYMMETRIC duty gives a real DC bias Io·(2D−1) that the
+        // gapped AHB (energy-transfer) transformer carries — confirmed against the ngspice deck
+        // (secondary avg = Io·(2D−1), rms ≈ Io). The zero-offset inline model understated this bias.
+        std::vector<double> iSecFB(iSec_a.size()), vSecFB(vSec_a.size());
+        for (size_t k = 0; k < iSec_a.size(); ++k) { iSecFB[k] = iSec_a[k] - iSec_b[k]; vSecFB[k] = vSec_a[k]; }
+        operatingPoint.get_mutable_excitations_per_winding().push_back(
+            WP::complete_excitation(wfm(iSecFB, time), wfm(vSecFB, time), fsw, "Secondary 0"));
     } else {
-        // Center-tapped rectifier: two polarity-split half-windings. (FULL_BRIDGE threw above.)
+        // Center-tapped rectifier: two polarity-split half-windings.
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(wfm(iSec_a, time), wfm(vSec_a, time), fsw, "Secondary 0a"));
         operatingPoint.get_mutable_excitations_per_winding().push_back(
