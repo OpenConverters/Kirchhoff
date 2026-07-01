@@ -588,3 +588,80 @@ TEST_CASE("analytical_clllc rejects non-positive fsw / Lm / tank / turns ratio /
     CHECK_THROWS(analytical_clllc(kClllcVhv, {kClllcVlv}, {kClllcIout, 1}, {kClllcN}, kClllcFsub,
                                   kClllcLm, kClllcLr1, kClllcCr1, kClllcLr2, kClllcCr2));
 }
+
+// ─── Phase 6: three-phase AC-input PFC — Vienna rectifier (structural) ──────────
+// STRUCTURAL tests only. Vienna is a 3-phase AC-input PFC; the PtP/ngspice cross-check suite EXCLUDES
+// it (no clean single-vector boost-inductor mapping — the SPICE side is a single-phase peak-of-line
+// boost emulation), so there is NO NRMSE gate. We assert the winding count (3 per-phase boost inductors),
+// the current-envelope shape/magnitude (fullLineCycle: bipolar full-sine of amplitude ≈ the per-phase
+// line-current peak I_pk, zero mean over the line cycle; peakOfLine: triangular about I_pk), and the
+// throw guards. Design point: 230 V L-N (=400 V L-L) → 800 V split bus, 10 kW, 50 Hz line, 70 kHz sw,
+// L = 500 µH, η = pf = 1.
+namespace {
+constexpr double kVienVph = 230.0, kVienVdc = 800.0, kVienPo = 10000.0;
+constexpr double kVienFline = 50.0, kVienFsw = 70000.0, kVienL = 500e-6;
+// Closed form (MKF Vienna::compute_*): V_phase_peak = √2·Vph; M = Vpk/(Vdc/2); I_pk = √2·P/(3·Vph);
+// ΔI_pp(peak) = V_phase_peak·(1−M)·Tsw/L.
+const double kVienVpk   = std::sqrt(2.0) * kVienVph;                 // 325.27 V
+const double kVienM     = kVienVpk / (kVienVdc / 2.0);              // 0.8132
+const double kVienIpk   = std::sqrt(2.0) * kVienPo / (3.0 * kVienVph);   // 20.50 A
+const double kVienDIpp  = kVienVpk * (1.0 - kVienM) / kVienFsw / kVienL; // 1.736 A
+}
+
+TEST_CASE("analytical_vienna fullLineCycle: 3 windings, bipolar sine envelope peak = I_pk",
+          "[analytical][solver][vienna]") {
+    using Kirchhoff::analytical::analytical_vienna;
+    MAS::OperatingPoint op = analytical_vienna(kVienVph, kVienVdc, kVienPo, kVienFline, kVienFsw, kVienL);
+
+    REQUIRE(op.get_excitations_per_winding().size() == 3);   // Phase A / B / C boost inductors
+    const auto& cur = *processed_current(op, 0).get_average();  // (forces the optional; unused directly)
+    (void)cur;
+
+    // The line-cycle envelope is a bipolar full sine of amplitude I_pk + the local switching ripple:
+    // positive peak ≈ +I_pk, negative peak ≈ −I_pk (MKF builds it bipolar), zero mean over the cycle.
+    CHECK(*processed_current(op, 0).get_peak() == Catch::Approx(kVienIpk).margin(kVienDIpp));
+    REQUIRE(processed_current(op, 0).get_negative_peak().has_value());
+    CHECK(*processed_current(op, 0).get_negative_peak() == Catch::Approx(-kVienIpk).margin(kVienDIpp));
+    CHECK(*processed_current(op, 0).get_negative_peak() < 0.0);                 // bipolar, as MKF builds it
+    CHECK(*processed_current(op, 0).get_average() == Catch::Approx(0.0).margin(0.5));   // full sine → zero mean
+
+    // The three phases are the same envelope shifted ±120° → identical magnitude statistics.
+    CHECK(*processed_current(op, 1).get_peak() == Catch::Approx(*processed_current(op, 0).get_peak()).margin(0.3));
+    CHECK(*processed_current(op, 2).get_peak() == Catch::Approx(*processed_current(op, 0).get_peak()).margin(0.3));
+
+    // Voltage excitation present on every winding.
+    REQUIRE(op.get_excitations_per_winding()[0].get_voltage().has_value());
+    REQUIRE(op.get_excitations_per_winding()[0].get_voltage()->get_processed().has_value());
+}
+
+TEST_CASE("analytical_vienna peakOfLine: 3 windings, triangular about I_pk, zero-mean voltage",
+          "[analytical][solver][vienna]") {
+    using Kirchhoff::analytical::analytical_vienna;
+    // fullLineCycle=false → the peak-of-line switching-period snapshot.
+    MAS::OperatingPoint op = analytical_vienna(kVienVph, kVienVdc, kVienPo, kVienFline, kVienFsw, kVienL,
+                                               1.0, 1.0, /*fullLineCycle=*/false);
+    REQUIRE(op.get_excitations_per_winding().size() == 3);
+    // Triangular inductor current about the per-phase line-current peak I_pk, ripple = ΔI_pp.
+    CHECK(*processed_current(op, 0).get_average() == Catch::Approx(kVienIpk).margin(0.2));
+    CHECK(*processed_current(op, 0).get_peak() == Catch::Approx(kVienIpk + kVienDIpp / 2.0).margin(0.2));
+    CHECK(*processed_current(op, 0).get_peak_to_peak() == Catch::Approx(kVienDIpp).margin(0.2));
+    CHECK(*processed_current(op, 0).get_negative_peak() > 0.0);   // I_pk − ΔI_pp/2 > 0 (non-negative snapshot)
+    // Inductor voltage is volt-second balanced (V_on = V_phase_peak during D, V_off = V_phase_peak − Vdc/2).
+    CHECK(voltage_average(op, 0) == Catch::Approx(0.0).margin(0.5));
+}
+
+TEST_CASE("analytical_vienna rejects non-positive line/bus/fsw/L and over-modulation",
+          "[analytical][solver][vienna]") {
+    using Kirchhoff::analytical::analytical_vienna;
+    CHECK_THROWS(analytical_vienna(0.0,      kVienVdc, kVienPo, kVienFline, kVienFsw, kVienL));  // Vph=0
+    CHECK_THROWS(analytical_vienna(kVienVph, 0.0,      kVienPo, kVienFline, kVienFsw, kVienL));  // Vdc=0
+    CHECK_THROWS(analytical_vienna(kVienVph, kVienVdc, 0.0,     kVienFline, kVienFsw, kVienL));  // Po=0
+    CHECK_THROWS(analytical_vienna(kVienVph, kVienVdc, kVienPo, kVienFline, 0.0,      kVienL));  // fsw=0
+    CHECK_THROWS(analytical_vienna(kVienVph, kVienVdc, kVienPo, kVienFline, kVienFsw, 0.0));     // L=0
+    CHECK_THROWS(analytical_vienna(kVienVph, kVienVdc, kVienPo, 0.0,        kVienFsw, kVienL));  // fLine=0
+    // Over-modulation: Vdc = 400 V gives M = 325.27/200 = 1.63 > 1.
+    CHECK_THROWS(analytical_vienna(kVienVph, 400.0,    kVienPo, kVienFline, kVienFsw, kVienL));
+    // efficiency / power factor out of (0,1].
+    CHECK_THROWS(analytical_vienna(kVienVph, kVienVdc, kVienPo, kVienFline, kVienFsw, kVienL, 1.5, 1.0));
+    CHECK_THROWS(analytical_vienna(kVienVph, kVienVdc, kVienPo, kVienFline, kVienFsw, kVienL, 1.0, 0.0));
+}

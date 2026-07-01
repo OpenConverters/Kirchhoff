@@ -353,5 +353,43 @@ MAS::OperatingPoint analytical_clllc(double inputVoltage,
                                      double bridgeVoltageFactor = 1.0,
                                      SrcRectifier rectifier = SrcRectifier::FULL_BRIDGE);
 
+// ── Phase 6: three-phase AC-input PFC (Vienna rectifier) ─────────────────────
+// Vienna rectifier — a 3-phase, 3-level unidirectional boost PFC. The magnetic is the PER-PHASE boost
+// inductor; each of the three legs boosts its phase (line-to-neutral) voltage onto the split ±Vdc/2 DC
+// bus. This solver ports MKF Vienna::process_operating_point_for_input_voltage (converter_models/
+// Vienna.cpp:556) plus the helpers it calls: compute_phase_peak_voltage (:105), compute_modulation_index
+// (:111), compute_line_peak_current (:117), and build_line_cycle_waveform (:282). MKF's diagnostic-only
+// members (last*/computed* switch/diode RMS/avg stresses via compute_switch_rms etc.) are OMITTED — they
+// shape no winding excitation. MKF's phaseCount>1 interleaving and the peakOfLinePlusSectors strategy
+// (a different helper, emit_switching_period_op_at_line_angle) are OMITTED to match KH's single-channel-
+// per-phase ViennaDesign; N_ch is fixed at 1 → exactly THREE windings ("Phase A/B/C").
+//
+// Parameterization mirrors KH's ViennaDesign (src/Vienna.hpp): `linePhaseVoltageRms` is the per-phase
+// line-to-NEUTRAL RMS (KH `inputVoltageRms`), so V_phase_peak = √2·linePhaseVoltageRms — identical to
+// MKF's compute_phase_peak_voltage(V_LL) = √2·V_LL/√3 once V_LL = √3·linePhaseVoltageRms. `outputDcVoltage`
+// is the FULL bus Vdc (split ±Vdc/2); `outputPower` is the total 3-phase output power (MKF's P = Vout·Iout).
+//
+// Two shaping modes, both faithful to MKF's branches:
+//   fullLineCycle = true  (DEFAULT): each winding carries the full 50/60 Hz line cycle (MKF
+//     build_line_cycle_waveform) — a bipolar full-sine current envelope of amplitude I_pk, shifted ±120°
+//     per phase, with the per-angle switching-ripple triangle superimposed. complete_excitation runs at
+//     the LINE frequency. This is the "rectified-sine envelope with HF ripple" KH's build_vienna_tas uses.
+//   fullLineCycle = false (MKF peakOfLineOnly default): the switching-period snapshot at peak-of-line —
+//     TRIANGULAR current about I_pk (ΔI_pp = V_phase_peak·(1−M)·Tsw/L) + RECTANGULAR ±(V_phase_peak /
+//     V_phase_peak−Vdc/2) voltage, at the SWITCHING frequency.
+//
+// THROWS (mirroring MKF's guards; no fabricated defaults) on: non-positive linePhaseVoltageRms /
+// outputDcVoltage / outputPower / switchingFrequency / boostInductance / lineFrequency; efficiency ∉ (0,1];
+// powerFactor ∉ (0,1]; over-modulation M = V_phase_peak/(Vdc/2) > 1; and (fullLineCycle only) Fsw ≤ F_line.
+MAS::OperatingPoint analytical_vienna(double linePhaseVoltageRms,
+                                      double outputDcVoltage,
+                                      double outputPower,
+                                      double lineFrequency,
+                                      double switchingFrequency,
+                                      double boostInductance,
+                                      double efficiency = 1.0,
+                                      double powerFactor = 1.0,
+                                      bool fullLineCycle = true);
+
 } // namespace analytical
 } // namespace Kirchhoff

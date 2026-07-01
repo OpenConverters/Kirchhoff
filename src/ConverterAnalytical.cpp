@@ -3211,5 +3211,176 @@ MAS::OperatingPoint analytical_clllc(double inputVoltage,
     return operatingPoint;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 6: three-phase AC-input PFC — Vienna rectifier.
+// Ported from MKF converter_models/Vienna.cpp:556 (process_operating_point_for_input_voltage)
+// plus the helpers it calls (compute_phase_peak_voltage :105, compute_modulation_index :111,
+// compute_line_peak_current :117, build_line_cycle_waveform :282). Diagnostics-only members and
+// the phaseCount>1 / peakOfLinePlusSectors paths are omitted (see header). N_ch = 1 → 3 windings.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// MKF Vienna::compute_phase_peak_voltage (Vienna.cpp:105). Expressed with the per-phase
+// line-to-NEUTRAL RMS: V_phase_peak = √2·V_phase_rms. Equals MKF's √2·V_LL/√3 since V_LL = √3·V_phase_rms.
+static double vienna_phase_peak_voltage(double linePhaseVoltageRms) {
+    if (linePhaseVoltageRms <= 0)
+        throw std::invalid_argument("analytical_vienna: linePhaseVoltageRms must be > 0");
+    return std::sqrt(2.0) * linePhaseVoltageRms;
+}
+
+// MKF Vienna::compute_modulation_index (Vienna.cpp:111): M = V_phase_peak / (Vdc/2).
+static double vienna_modulation_index(double vPhasePeak, double vdc) {
+    if (vdc <= 0)
+        throw std::invalid_argument("analytical_vienna: outputDcVoltage must be > 0");
+    return vPhasePeak / (vdc / 2.0);
+}
+
+// MKF Vienna::compute_line_peak_current (Vienna.cpp:117): I_pk = √2·P / (3·V_phase_rms·η·pf).
+static double vienna_line_peak_current(double power, double vPhaseRms, double eff, double pf) {
+    if (power <= 0)
+        throw std::invalid_argument("analytical_vienna: outputPower must be > 0");
+    if (vPhaseRms <= 0)
+        throw std::invalid_argument("analytical_vienna: phase RMS voltage must be > 0");
+    if (eff <= 0 || eff > 1.0)
+        throw std::invalid_argument("analytical_vienna: efficiency must be in (0, 1]");
+    if (pf <= 0 || pf > 1.0)
+        throw std::invalid_argument("analytical_vienna: powerFactor must be in (0, 1]");
+    return std::sqrt(2.0) * power / (3.0 * vPhaseRms * eff * pf);
+}
+
+// MKF Vienna::LineCycleKind (Vienna.h) — selects the current vs. inductor-voltage envelope build.
+enum class ViennaLineCycleKind { CURRENT, VOLTAGE };
+
+// MKF Vienna::build_line_cycle_waveform (Vienna.cpp:282), transcribed exactly. Builds the full 50/60 Hz
+// line-cycle envelope for ONE phase (shifted by phaseOffsetRad), with the per-angle switching-ripple
+// triangle superimposed. numSamples default 4096 matches MKF's header default (Vienna.h:242).
+static MAS::Waveform vienna_build_line_cycle_waveform(
+    ViennaLineCycleKind kind,
+    double iPk, double vPhasePeak, double vdc,
+    double L, double fsw, double fLine,
+    double phaseOffsetRad,
+    size_t numSamples = 4096) {
+    if (numSamples < 2)
+        throw std::invalid_argument("analytical_vienna: numSamples must be >= 2");
+    if (fLine <= 0)
+        throw std::invalid_argument("analytical_vienna: lineFrequency must be > 0");
+    if (fsw <= fLine)
+        throw std::invalid_argument("analytical_vienna: switchingFrequency must be > lineFrequency");
+    if (L <= 0)
+        throw std::invalid_argument("analytical_vienna: boostInductance must be > 0");
+
+    const double T_line = 1.0 / fLine;
+    const double T_sw   = 1.0 / fsw;
+    const double omega  = 2.0 * M_PI * fLine;
+    const double Vhalf  = vdc / 2.0;
+
+    std::vector<double> time(numSamples), data(numSamples);
+    for (size_t i = 0; i < numSamples; ++i) {
+        double t = static_cast<double>(i) / static_cast<double>(numSamples - 1) * T_line;
+        time[i]  = t;
+
+        double theta    = omega * t + phaseOffsetRad;
+        double sinTheta = std::sin(theta);
+        double Vphase_t = vPhasePeak * sinTheta;
+        double Iavg_t   = iPk * sinTheta;
+
+        double dutyAbs = 1.0 - std::abs(Vphase_t) / Vhalf;   // per-angle boost duty (1 − |Vphase|/Vhalf)
+        if (dutyAbs < 0.0) dutyAbs = 0.0;
+        if (dutyAbs > 1.0) dutyAbs = 1.0;
+
+        double dI_pp = std::abs(Vphase_t) * dutyAbs * T_sw / L;   // local switching-period ripple pk-pk
+
+        double tri = 0.0;   // sub-sampled triangular ripple tri(2π·Fsw·t) ∈ [−1,+1]
+        {
+            double swPhase = std::fmod(fsw * t, 1.0);
+            tri = (swPhase < 0.5) ? (4.0 * swPhase - 1.0) : (3.0 - 4.0 * swPhase);
+        }
+
+        if (kind == ViennaLineCycleKind::CURRENT) {
+            data[i] = Iavg_t + 0.5 * dI_pp * tri;
+        } else {
+            double V_on  = Vphase_t;
+            double V_off = Vphase_t - ((Vphase_t >= 0) ? Vhalf : -Vhalf);
+            data[i] = (tri >= 0) ? V_on : V_off;
+        }
+    }
+
+    MAS::Waveform wf;
+    wf.set_data(data);
+    wf.set_time(time);
+    return wf;
+}
+
+// Ported from MKF converter_models/Vienna.cpp:556 (process_operating_point_for_input_voltage).
+MAS::OperatingPoint analytical_vienna(double linePhaseVoltageRms,
+                                      double outputDcVoltage,
+                                      double outputPower,
+                                      double lineFrequency,
+                                      double switchingFrequency,
+                                      double boostInductance,
+                                      double efficiency,
+                                      double powerFactor,
+                                      bool fullLineCycle) {
+    using Lbl = MAS::WaveformLabel;
+
+    const double Fsw = switchingFrequency;
+    if (Fsw <= 0)
+        throw std::invalid_argument("analytical_vienna: switchingFrequency must be > 0");   // MKF Vienna.cpp:566
+    const double Vdc = outputDcVoltage;
+
+    // MKF Vienna.cpp:573-579: phase peak, modulation index, over-modulation gate.
+    const double V_phase_peak = vienna_phase_peak_voltage(linePhaseVoltageRms);
+    const double V_phase_rms  = V_phase_peak / std::sqrt(2.0);
+    const double M            = vienna_modulation_index(V_phase_peak, Vdc);
+    if (M > 1.0)
+        throw std::invalid_argument(
+            "analytical_vienna: modulation index M=" + std::to_string(M) +
+            " > 1 (over-modulation); outputDcVoltage must exceed 2·V_phase_peak");
+
+    // MKF Vienna.cpp:584-593: P = Vout·Iout (here supplied directly as outputPower), I_pk, L.
+    const double P    = outputPower;
+    const double I_pk = vienna_line_peak_current(P, V_phase_rms, efficiency, powerFactor);
+    const double L    = boostInductance;
+    if (L <= 0)
+        throw std::invalid_argument("analytical_vienna: boostInductance must be > 0");
+
+    // MKF Vienna.cpp:595-600: peak-of-line duty, inductor-voltage levels, switching-ripple pk-pk.
+    const double duty_at_peak = 1.0 - M;
+    const double V_L_on  = V_phase_peak;             // switch closed: full phase voltage across L
+    const double V_L_off = V_phase_peak - Vdc / 2.0; // switch open: rectifier conducts to bus (negative)
+    const double V_L_pp  = V_L_on - V_L_off;         // = Vdc/2
+    const double Tsw     = 1.0 / Fsw;
+    const double DeltaI_pp = V_L_on * duty_at_peak * Tsw / L;
+
+    // MKF Vienna.cpp:655-665: three phase-inductor windings, shifted ±120°. N_ch fixed at 1 (KH).
+    static const char*  phaseNames[3]   = {"Phase A", "Phase B", "Phase C"};
+    static const double phaseOffsets[3] = {0.0, -2.0 * M_PI / 3.0, +2.0 * M_PI / 3.0};
+
+    MAS::OperatingPoint operatingPoint;
+    for (int ph = 0; ph < 3; ++ph) {
+        MAS::Waveform currentWaveform, voltageWaveform;
+        double opFreq = Fsw;
+
+        if (fullLineCycle) {
+            // MKF Vienna.cpp:677-685: full line-cycle envelope, complete_excitation at the LINE frequency.
+            currentWaveform = vienna_build_line_cycle_waveform(
+                ViennaLineCycleKind::CURRENT, I_pk, V_phase_peak, Vdc, L, Fsw, lineFrequency, phaseOffsets[ph]);
+            voltageWaveform = vienna_build_line_cycle_waveform(
+                ViennaLineCycleKind::VOLTAGE, I_pk, V_phase_peak, Vdc, L, Fsw, lineFrequency, phaseOffsets[ph]);
+            opFreq = lineFrequency;
+        } else {
+            // MKF Vienna.cpp:687-703: peak-of-line switching-period snapshot. RECTANGULAR voltage with
+            // offset=0 yields V_on = pp·(1−D) = V_phase_peak and V_off = −pp·D = V_phase_peak − Vdc/2
+            // (volt-second balanced, zero mean) — see the MKF comment at Vienna.cpp:690.
+            currentWaveform = WP::create_waveform(Lbl::TRIANGULAR, DeltaI_pp, Fsw, duty_at_peak, I_pk, 0);
+            voltageWaveform = WP::create_waveform(Lbl::RECTANGULAR, V_L_pp, Fsw, duty_at_peak, 0.0, 0);
+        }
+
+        operatingPoint.get_mutable_excitations_per_winding().push_back(
+            WP::complete_excitation(currentWaveform, voltageWaveform, opFreq, phaseNames[ph]));
+    }
+
+    return operatingPoint;
+}
+
 } // namespace analytical
 } // namespace Kirchhoff
