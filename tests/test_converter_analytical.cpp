@@ -312,6 +312,21 @@ TEST_CASE("analytical_psfb: antisymmetric primary, 3 windings", "[analytical][so
     CHECK(voltage_average(op, 0) == Catch::Approx(0.0).margin(5.0));                    // volt-second balance
 }
 
+TEST_CASE("analytical_psfb FULL_BRIDGE: one bipolar secondary, 2 windings", "[analytical][solver][psfb]") {
+    using Kirchhoff::analytical::analytical_psfb;
+    using Kirchhoff::analytical::SrcRectifier;
+    MAS::OperatingPoint op = analytical_psfb(400, {12}, {20}, {27}, 100000, 1e-3, 5e-6, 5e-6, 144, 0.0,
+                                             SrcRectifier::FULL_BRIDGE);
+    REQUIRE(op.get_excitations_per_winding().size() == 2);             // Primary + one Secondary
+    CHECK(*processed_current(op, 0).get_average() == Catch::Approx(0.0).margin(0.5));   // antisymmetric primary
+    // Full-bridge secondary is a single bipolar winding: full-wave (zero-mean current), carrying the
+    // reflected output-inductor current only during the active fraction Deff (~0 during freewheel), so
+    // RMS = sqrt(Deff)*Io_rms < Io (= 20 A) — the exact form the validated inline build uses.
+    CHECK(*processed_current(op, 1).get_average() == Catch::Approx(0.0).margin(1.0));
+    CHECK(*processed_current(op, 1).get_rms() > 12.0);
+    CHECK(*processed_current(op, 1).get_rms() < 20.5);
+}
+
 TEST_CASE("analytical_psfb rejects zero phase shift / bad inputs", "[analytical][solver][psfb]") {
     using Kirchhoff::analytical::analytical_psfb;
     CHECK_THROWS(analytical_psfb(400, {12}, {20}, {27}, 100000, 1e-3, 5e-6, 5e-6, 0));    // D_cmd=0
@@ -326,6 +341,18 @@ TEST_CASE("analytical_pshb: antisymmetric primary (+/-Vin/2), 3 windings", "[ana
     CHECK(voltage_average(op, 0) == Catch::Approx(0.0).margin(5.0));
 }
 
+TEST_CASE("analytical_pshb FULL_BRIDGE: one bipolar secondary, 2 windings", "[analytical][solver][pshb]") {
+    using Kirchhoff::analytical::analytical_pshb;
+    using Kirchhoff::analytical::SrcRectifier;
+    MAS::OperatingPoint op = analytical_pshb(400, {12}, {20}, {14}, 100000, 1e-3, 5e-6, 5e-6, 144, 0.0,
+                                             SrcRectifier::FULL_BRIDGE);
+    REQUIRE(op.get_excitations_per_winding().size() == 2);
+    CHECK(*processed_current(op, 0).get_average() == Catch::Approx(0.0).margin(0.5));
+    CHECK(*processed_current(op, 1).get_average() == Catch::Approx(0.0).margin(1.0));
+    CHECK(*processed_current(op, 1).get_rms() > 12.0);   // sqrt(Deff)*Io, full-wave with freewheel gaps
+    CHECK(*processed_current(op, 1).get_rms() < 20.5);
+}
+
 TEST_CASE("analytical_asymmetric_half_bridge: zero-mean primary (Cb blocks DC), 3 windings",
           "[analytical][solver][ahb]") {
     using Kirchhoff::analytical::analytical_asymmetric_half_bridge;
@@ -336,6 +363,17 @@ TEST_CASE("analytical_asymmetric_half_bridge: zero-mean primary (Cb blocks DC), 
     // ((1-D)*Vin during D*T, -D*Vin during (1-D)*T).
     CHECK(*processed_current(op, 0).get_average() == Catch::Approx(0.0).margin(0.3));
     CHECK(voltage_average(op, 0) == Catch::Approx(0.0).margin(0.5));
+}
+
+TEST_CASE("analytical_asymmetric_half_bridge rejects FULL_BRIDGE (asymmetric-duty DC bias)",
+          "[analytical][solver][ahb]") {
+    using Kirchhoff::analytical::analytical_asymmetric_half_bridge;
+    using Kirchhoff::analytical::SrcRectifier;
+    // AHB's complementary duty (D != 0.5) makes a single full-bridge secondary winding carry a net DC
+    // component Io*(2D-1) that a real bridge rectifier cannot sustain — not ported, must throw (no
+    // silently-DC-biased winding). The center-tapped path (two half-windings) is the validated one.
+    CHECK_THROWS(analytical_asymmetric_half_bridge(48, {12}, {5}, {2}, 100000, 200e-6, 0.4, 0.3, 0.0,
+                                                   SrcRectifier::FULL_BRIDGE));
 }
 
 TEST_CASE("analytical_asymmetric_half_bridge rejects duty outside (0,1)", "[analytical][solver][ahb]") {

@@ -186,6 +186,11 @@ MAS::OperatingPoint analytical_active_clamp_forward(double inputVoltage,
                                                     double mainOutputInductance, double currentRippleRatio,
                                                     double dutyCycle = 0.45, double diodeVoltageDrop = 0.0);
 
+// Secondary rectifier topology shared by the phase-shifted bridge family and the
+// resonant converters: FULL_BRIDGE emits ONE secondary winding per output (bipolar,
+// full-wave); CENTER_TAPPED emits two polarity-split half-windings per output.
+enum class SrcRectifier { FULL_BRIDGE, CENTER_TAPPED };
+
 // ── Phase 4: the phase-shifted bridge family ────────────────────────────────
 // Each function reuses the shared header-only kernel OpenMagnetics::PwmBridgeSolver
 // (duty-cycle loss + three-segment sub-interval breakdown) exactly as the MKF bridge
@@ -195,21 +200,23 @@ MAS::OperatingPoint analytical_active_clamp_forward(double inputVoltage,
 // is kept. The effective duty cycle is derived from `phaseShiftDegrees` (D_cmd =
 // |phi|/180); a non-positive phase shift throws (no default duty is substituted).
 
-// Phase-shifted full bridge (CCM, center-tapped). The primary swings ±Vin; pushes
-// Primary + a center-tapped pair "Secondary i a"/"Secondary i b" per output (each
-// half-winding carries the reflected output-inductor current on alternate half-cycles
-// and reverse-blocks on the other). `seriesInductance` is the resonant/leakage Lr
-// (must be > 0 — feeds the Sabate duty-cycle loss and the freewheel decay);
-// `outputInductance` Lo sets the output-inductor ripple ΔILo = Vo·(1−Deff)/(Fs·Lo)
-// (Lo ≤ 0 ⇒ zero ripple). Ported from MKF PhaseShiftedFullBridge.cpp:359. Throws on
-// non-positive Vin / turns ratio / Fs / Lm / Lr / phase shift.
+// Phase-shifted full bridge (CCM). The primary swings ±Vin. `rectifier` selects the
+// secondary winding set: CENTER_TAPPED (default) pushes Primary + a pair "Secondary i a"/
+// "Secondary i b" per output (each half-winding carries the reflected output-inductor
+// current on alternate half-cycles and reverse-blocks on the other); FULL_BRIDGE pushes
+// Primary + ONE "Secondary i" per output (a single bipolar winding carrying ±ILo at
+// ±Vsec, full-wave). `seriesInductance` is the resonant/leakage Lr (must be > 0 — feeds
+// the Sabate duty-cycle loss and the freewheel decay); `outputInductance` Lo sets the
+// output-inductor ripple ΔILo = Vo·(1−Deff)/(Fs·Lo) (Lo ≤ 0 ⇒ zero ripple). Ported from
+// MKF PhaseShiftedFullBridge.cpp:359. Throws on non-positive Vin / turns ratio / Fs / Lm / Lr / phase shift.
 MAS::OperatingPoint analytical_psfb(double inputVoltage,
                                     const std::vector<double>& outputVoltages,
                                     const std::vector<double>& outputCurrents,
                                     const std::vector<double>& turnsRatios,
                                     double switchingFrequency, double magnetizingInductance,
                                     double seriesInductance, double outputInductance,
-                                    double phaseShiftDegrees, double diodeVoltageDrop = 0.0);
+                                    double phaseShiftDegrees, double diodeVoltageDrop = 0.0,
+                                    SrcRectifier rectifier = SrcRectifier::CENTER_TAPPED);
 
 // Phase-shifted half bridge (3-level NPC, CCM, center-tapped). Identical sub-interval
 // model to the PSFB but the primary swings ±Vin/2 (BRIDGE_VOLTAGE_FACTOR = 0.5) and the
@@ -222,7 +229,8 @@ MAS::OperatingPoint analytical_pshb(double inputVoltage,
                                     const std::vector<double>& turnsRatios,
                                     double switchingFrequency, double magnetizingInductance,
                                     double seriesInductance, double outputInductance,
-                                    double phaseShiftDegrees, double diodeVoltageDrop = 0.0);
+                                    double phaseShiftDegrees, double diodeVoltageDrop = 0.0,
+                                    SrcRectifier rectifier = SrcRectifier::CENTER_TAPPED);
 
 // Asymmetric half bridge (CCM, center-tapped). Complementary-duty half bridge with a
 // series DC-blocking cap Cb. Pushes Primary + center-tapped "Secondary 0a"/"Secondary 0b"
@@ -240,7 +248,8 @@ MAS::OperatingPoint analytical_asymmetric_half_bridge(double inputVoltage,
                                                       const std::vector<double>& turnsRatios,
                                                       double switchingFrequency, double magnetizingInductance,
                                                       double dutyCycle, double currentRippleRatio,
-                                                      double diodeVoltageDrop = 0.0);
+                                                      double diodeVoltageDrop = 0.0,
+                                                      SrcRectifier rectifier = SrcRectifier::CENTER_TAPPED);
 
 // Dual Active Bridge (DAB) — triple-phase-shift (SPS/EPS/DPS/TPS). Both sides are full bridges
 // driving a series-inductor (Lr) tank through the transformer; bidirectional isolated power flow.
@@ -263,9 +272,6 @@ MAS::OperatingPoint analytical_dab(double inputVoltage,
                                    double outerPhaseShiftD3Degrees = 0.0);
 
 // ── Phase 5: resonant converter family (FHA) ────────────────────────────────
-
-// Secondary rectifier topology for the resonant converters.
-enum class SrcRectifier { FULL_BRIDGE, CENTER_TAPPED };
 
 // Series Resonant Converter (SRC) via First-Harmonic Approximation (FHA), ABOVE-RESONANCE only
 // (Λ = fsw/fr ≥ 1; the capacitive/hard-switching region throws, matching MKF Phase 2). The series

@@ -1067,7 +1067,8 @@ MAS::OperatingPoint analytical_active_clamp_forward(double inputVoltage,
 static MAS::OperatingPoint pwm_bridge_phase_shifted_core(
     double Vbus, double Vo, double Io, double Fs,
     double Lm, double Lr, double Lo, double D_cmd, double freewheelTau,
-    const std::vector<double>& turnsRatios, const char* who) {
+    const std::vector<double>& turnsRatios, const char* who,
+    SrcRectifier rectifier = SrcRectifier::CENTER_TAPPED) {
     using Lbl = MAS::WaveformLabel;
     namespace PBS = OpenMagnetics::PwmBridgeSolver;
 
@@ -1195,13 +1196,30 @@ static MAS::OperatingPoint pwm_bridge_phase_shifted_core(
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(currentWaveform, voltageWaveform, Fs, "Primary"));
     }
-    // ---- Secondary center-tapped half-windings (one pair per output) ----
-    // Each half-winding conducts the (reflected) output-inductor current on alternate
-    // half-cycles; the opposite half-cycle reverse-blocks (zero current, −Vsec_pk).
+    // ---- Secondary winding(s), one set per output, per the rectifier topology ----
+    // FULL_BRIDGE: ONE winding conducting on BOTH half-cycles — the diode bridge full-wave
+    //   rectifies, so the winding carries the (reflected) output-inductor current with its
+    //   direction reversing each half-cycle (bipolar ±ILo) at the full bipolar ±Vsec square.
+    // CENTER_TAPPED: two half-windings, each conducting ILo on alternate half-cycles and
+    //   reverse-blocking (zero current, −Vsec) on the other.
     for (size_t secIdx = 0; secIdx < turnsRatios.size(); ++secIdx) {
         double ni = turnsRatios[secIdx];
         if (ni <= 0) continue;
         double VsecPk = Vbus / ni;
+        if (rectifier == SrcRectifier::FULL_BRIDGE) {
+            std::vector<double> v(totalSamples), i(totalSamples);
+            for (int k = 0; k < totalSamples; ++k) {
+                double vpri = Vpri_full[k];
+                double iLo_k = ILo_full[k];
+                v[k] = (vpri > 0) ? VsecPk : (vpri < 0 ? -VsecPk : 0.0);
+                i[k] = (vpri > 0) ? iLo_k  : (vpri < 0 ? -iLo_k  : 0.0);
+            }
+            MAS::Waveform iWfm; iWfm.set_ancillary_label(Lbl::CUSTOM); iWfm.set_data(i); iWfm.set_time(time_full);
+            MAS::Waveform vWfm; vWfm.set_ancillary_label(Lbl::CUSTOM); vWfm.set_data(v); vWfm.set_time(time_full);
+            operatingPoint.get_mutable_excitations_per_winding().push_back(
+                WP::complete_excitation(iWfm, vWfm, Fs, "Secondary " + std::to_string(secIdx)));
+            continue;
+        }
         std::vector<double> v1(totalSamples), i1(totalSamples), v2(totalSamples), i2(totalSamples);
         for (int k = 0; k < totalSamples; ++k) {
             bool positive_half = (k <= N_samples);
@@ -1237,7 +1255,8 @@ MAS::OperatingPoint analytical_psfb(double inputVoltage,
                                     const std::vector<double>& turnsRatios,
                                     double switchingFrequency, double magnetizingInductance,
                                     double seriesInductance, double outputInductance,
-                                    double phaseShiftDegrees, double diodeVoltageDrop) {
+                                    double phaseShiftDegrees, double diodeVoltageDrop,
+                                    SrcRectifier rectifier) {
     if (outputVoltages.empty() || outputVoltages.size() != outputCurrents.size() ||
         outputVoltages.size() != turnsRatios.size())
         throw std::invalid_argument("analytical_psfb: outputVoltages/outputCurrents/turnsRatios "
@@ -1254,7 +1273,8 @@ MAS::OperatingPoint analytical_psfb(double inputVoltage,
     double freewheelTau = (seriesInductance > 0 && R_eff > 0) ? seriesInductance / R_eff : 1.0;
     return pwm_bridge_phase_shifted_core(inputVoltage, outputVoltages[0], outputCurrents[0],
                                          switchingFrequency, magnetizingInductance, seriesInductance,
-                                         outputInductance, D_cmd, freewheelTau, turnsRatios, "analytical_psfb");
+                                         outputInductance, D_cmd, freewheelTau, turnsRatios, "analytical_psfb",
+                                         rectifier);
 }
 
 // Ported from MKF converter_models/PhaseShiftedHalfBridge.cpp:318
@@ -1266,7 +1286,8 @@ MAS::OperatingPoint analytical_pshb(double inputVoltage,
                                     const std::vector<double>& turnsRatios,
                                     double switchingFrequency, double magnetizingInductance,
                                     double seriesInductance, double outputInductance,
-                                    double phaseShiftDegrees, double diodeVoltageDrop) {
+                                    double phaseShiftDegrees, double diodeVoltageDrop,
+                                    SrcRectifier rectifier) {
     if (outputVoltages.empty() || outputVoltages.size() != outputCurrents.size() ||
         outputVoltages.size() != turnsRatios.size())
         throw std::invalid_argument("analytical_pshb: outputVoltages/outputCurrents/turnsRatios "
@@ -1284,7 +1305,8 @@ MAS::OperatingPoint analytical_pshb(double inputVoltage,
     double freewheelTau = (seriesInductance > 0) ? seriesInductance / (2.0 * RON_PER_SWITCH) : 1.0;
     return pwm_bridge_phase_shifted_core(Vhb, outputVoltages[0], outputCurrents[0],
                                          switchingFrequency, magnetizingInductance, seriesInductance,
-                                         outputInductance, D_cmd, freewheelTau, turnsRatios, "analytical_pshb");
+                                         outputInductance, D_cmd, freewheelTau, turnsRatios, "analytical_pshb",
+                                         rectifier);
 }
 
 // Ported from MKF converter_models/AsymmetricHalfBridge.cpp:460
@@ -1301,7 +1323,7 @@ MAS::OperatingPoint analytical_asymmetric_half_bridge(double inputVoltage,
                                                       const std::vector<double>& turnsRatios,
                                                       double switchingFrequency, double magnetizingInductance,
                                                       double dutyCycle, double currentRippleRatio,
-                                                      double diodeVoltageDrop) {
+                                                      double diodeVoltageDrop, SrcRectifier rectifier) {
     using Lbl = MAS::WaveformLabel;
     // ---- Input validation (no defaults, no fallbacks: throw loud, mirroring MKF) ----
     if (!(inputVoltage > 0.0) || !std::isfinite(inputVoltage))
@@ -1324,6 +1346,14 @@ MAS::OperatingPoint analytical_asymmetric_half_bridge(double inputVoltage,
     if (!(fsw > 0.0))
         throw std::invalid_argument("analytical_asymmetric_half_bridge: switchingFrequency must be > 0");
     (void)diodeVoltageDrop;  // not used in AHB waveform generation (only in the design-side turns-ratio)
+    // AHB's complementary (asymmetric) duty makes a SINGLE full-bridge secondary winding carry a net DC
+    // component Io*(2D-1) — which a real bridge rectifier (no DC winding path) cannot sustain. A faithful
+    // full-bridge AHB secondary needs the two half-cycle current LEVELS to differ (ampere-second balance),
+    // not the naive fold of the center-tapped halves. Not ported: throw rather than return a DC-biased
+    // winding. Use CENTER_TAPPED (the validated path), or the build's inline model for full-bridge.
+    if (rectifier == SrcRectifier::FULL_BRIDGE)
+        throw std::invalid_argument("analytical_asymmetric_half_bridge: FULL_BRIDGE secondary not ported "
+                                    "(asymmetric duty -> net DC winding current); use CENTER_TAPPED");
 
     const double Vin = inputVoltage;
     // Multi-output: primary sees the total reflected power (project to output #0).
@@ -1409,16 +1439,10 @@ MAS::OperatingPoint analytical_asymmetric_half_bridge(double inputVoltage,
     MAS::OperatingPoint operatingPoint;
     operatingPoint.get_mutable_excitations_per_winding().push_back(
         WP::complete_excitation(wfm(iPri, time), wfm(vPri, time), fsw, "Primary"));
-    operatingPoint.get_mutable_excitations_per_winding().push_back(
-        WP::complete_excitation(wfm(iSec_a, time), wfm(vSec_a, time), fsw, "Secondary 0a"));
-    operatingPoint.get_mutable_excitations_per_winding().push_back(
-        WP::complete_excitation(wfm(iSec_b, time), wfm(vSec_b, time), fsw, "Secondary 0b"));
 
-    // V6 multi-output: replace the center-tapped pair with per-output load-share
-    // secondaries (share_k = Vo_k·Io_k/ΣVo·Io; i_sec_k = share_k·n_k·iPri).
     if (numOutputs > 1 && totalPower > 0.0) {
-        auto& exc = operatingPoint.get_mutable_excitations_per_winding();
-        exc.pop_back(); exc.pop_back();  // drop "Secondary 0a"/"0b"
+        // V6 multi-output: per-output load-share secondaries (share_k = Vo_k·Io_k/ΣVo·Io;
+        // i_sec_k = share_k·n_k·iPri) — ONE winding per output regardless of rectifier.
         for (size_t k = 0; k < numOutputs; ++k) {
             const double Vo_k = outputVoltages[k];
             const double Io_k = outputCurrents[k];
@@ -1430,9 +1454,16 @@ MAS::OperatingPoint analytical_asymmetric_half_bridge(double inputVoltage,
                 iSec_k[i] = share * n_k * iPri[i];
                 vSec_k[i] = (vPri[i] > 0.0) ? +Vo_k : -Vo_k;
             }
-            exc.push_back(WP::complete_excitation(wfm(iSec_k, time), wfm(vSec_k, time), fsw,
-                                                  "Secondary " + std::to_string(k)));
+            operatingPoint.get_mutable_excitations_per_winding().push_back(
+                WP::complete_excitation(wfm(iSec_k, time), wfm(vSec_k, time), fsw,
+                                        "Secondary " + std::to_string(k)));
         }
+    } else {
+        // Center-tapped rectifier: two polarity-split half-windings. (FULL_BRIDGE threw above.)
+        operatingPoint.get_mutable_excitations_per_winding().push_back(
+            WP::complete_excitation(wfm(iSec_a, time), wfm(vSec_a, time), fsw, "Secondary 0a"));
+        operatingPoint.get_mutable_excitations_per_winding().push_back(
+            WP::complete_excitation(wfm(iSec_b, time), wfm(vSec_b, time), fsw, "Secondary 0b"));
     }
     return operatingPoint;
 }

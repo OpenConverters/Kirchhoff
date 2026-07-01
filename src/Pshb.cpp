@@ -2,6 +2,7 @@
 #include "DimensionJson.hpp"
 #include "KirchhoffConfig.hpp"
 #include "ComponentRequirements.hpp"
+#include "ConverterAnalytical.hpp"
 #include <cmath>
 #include <algorithm>
 #include <vector>
@@ -168,14 +169,28 @@ json build_pshb_tas(const PshbDesign& d) {
     const int wpo = rectifier_windings_per_output(d.rectifierType);
     std::vector<std::string> isoSides{"primary"};
     std::vector<double> turnsRatios;
-    std::vector<json> xwindings{
-        req::winding_excitation("pshbPrimary", fsw, IpriPk, IpriRms, 0.0, dILm, Deff,
-                                vPriPk, vPriRms, 0.0, vPriPkPk)};
-    for (int w = 0; w < wpo; ++w) {
-        isoSides.push_back("secondary");
-        turnsRatios.push_back(N);
-        xwindings.push_back(req::winding_excitation("pshbSecondary", fsw, IsecPk, IsecRms, 0.0, dILo, Deff,
-                                vSecPk, vSecRms, 0.0, vSecPkPk));
+    for (int w = 0; w < wpo; ++w) { isoSides.push_back("secondary"); turnsRatios.push_back(N); }
+
+    // Transformer excitations from the SINGLE FHA source — the SPICE-validated analytical PSHB solver
+    // (it takes the FULL Vin and halves it internally to the split-cap bus). FULL_BRIDGE (default) emits
+    // Primary + ONE bipolar secondary; CENTER_TAPPED emits Primary + two half-windings; both line up with
+    // the wpo winding structure. CURRENT_DOUBLER is not modelled by the solver, so it keeps the inline
+    // model. Lr + the switch/diode ratings stay inline (Lr is not a transformer winding).
+    namespace AN = Kirchhoff::analytical;
+    std::vector<json> xwindings;
+    if (d.rectifierType == RectifierType::FullBridge || d.rectifierType == RectifierType::CenterTapped) {
+        const AN::SrcRectifier rect = (d.rectifierType == RectifierType::CenterTapped)
+                                      ? AN::SrcRectifier::CENTER_TAPPED : AN::SrcRectifier::FULL_BRIDGE;
+        const MAS::OperatingPoint aopT1 = AN::analytical_pshb(d.inputVoltage, {Vo}, {Io}, {N}, fsw, Lm,
+                                                              d.seriesInductance, d.outputInductance,
+                                                              d.phaseDeg, 0.0, rect);
+        xwindings = AN::excitations_processed(aopT1);
+    } else {
+        xwindings.push_back(req::winding_excitation("pshbPrimary", fsw, IpriPk, IpriRms, 0.0, dILm, Deff,
+                                vPriPk, vPriRms, 0.0, vPriPkPk));
+        for (int w = 0; w < wpo; ++w)
+            xwindings.push_back(req::winding_excitation("pshbSecondary", fsw, IsecPk, IsecRms, 0.0, dILo, Deff,
+                                    vSecPk, vSecRms, 0.0, vSecPkPk));
     }
     json xfmr; xfmr["magnetic"]=json::object();
     xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, turnsRatios, isoSides, std::nullopt, 25.0, xwindings);
