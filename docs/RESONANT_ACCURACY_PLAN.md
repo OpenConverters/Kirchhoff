@@ -79,6 +79,30 @@ the settled tank current. **Extend it to test EACH resonant topology at MULTIPLE
 LLC/CLLLC and is the acceptance test for the fix (target < 0.10 everywhere). The load-scaling regression
 guard (`[analytical][scaling]`) is already in place.
 
+## Option B — implementation progress + debugging findings (next-session starting points)
+
+A first LLC time-domain propagator was prototyped (state [iLr, iLm, vCr], ESR = Zr/40 on Lr, RK4 with a
+diode-mode machine: PWR_POS/PWR_NEG clamp the primary to ±Vo, FREEWHEEL locks iLr=iLm below resonance;
+half-wave-antisymmetric steady state x(Thalf) = −x(0) via Newton with a numeric 3×3 Jacobian). It runs
+but is **not yet correct** — two concrete problems to solve first:
+
+1. **Singular steady-state solve AT fr.** With ESR = Zr/40 (Q≈40) the Newton still diverges at exactly fr
+   (residual ~29, hits the iteration cap, iLr → −88 A). The resonance singularity is only *partly* tamed
+   by that ESR. Fixes to try: (a) larger/again physically-motivated ESR (Q≈8–15 from real tank+switch
+   loss), (b) a homotopy/continuation seed (solve just off fr, walk in), (c) solve in a basis that
+   removes the antisymmetric null direction, (d) Levenberg–Marquardt damping instead of raw Newton.
+2. **~4× over-prediction of the tank amplitude OFF resonance** (where the Newton DOES converge cleanly,
+   resid ~1e-11): at 0.85·fr the model gives iLr ≈ 5.4 A vs SPICE 1.25 A, with vCr swinging ±556 V — the
+   tank rings too high. This is a physical-model error, not a solver error: the ±Vo clamp is not
+   extracting/damping enough energy (the delivered power / load coupling is under-represented), so the
+   reactive amplitude builds up. Re-derive the powering-interval energy balance and confirm the drive
+   (Vbus = k_bridge·Vin = 200 for the half-bridge — matches the working FHA) and the Vo clamp sign/timing
+   against a single SPICE waveform overlay BEFORE trusting the grid. Overlay iLr, iLm, vCr and vprimary
+   from SPICE vs the model at one operating point to localize the discrepancy.
+
+The lesson holds: get ONE operating point matching SPICE by direct waveform overlay first, then the grid —
+do not tune thresholds to hide a 4× error.
+
 ## Recommendation
 - If only CLLC-at-its-point matters → Option A.
 - If KH's resonant models must be trustworthy across their **full operating range** (the right bar for an
