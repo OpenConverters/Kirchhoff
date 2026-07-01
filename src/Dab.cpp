@@ -1,6 +1,7 @@
 #include "Dab.hpp"
 #include "DimensionJson.hpp"
 #include "ComponentRequirements.hpp"
+#include "ConverterAnalytical.hpp"
 #include "KirchhoffConfig.hpp"
 #include <cmath>
 #include <algorithm>
@@ -129,9 +130,7 @@ json build_dab_tas(const DabDesign& d) {
     // Primary winding carries the tank current (Lr is in series with it); secondary current is the tank
     // current reflected by N (ampere-turns balance). Bridge windings see ±square voltages: primary ±Vin,
     // secondary ±Vout. No DC bias (AC-driven). Galvanic-only isolation (no isolationVoltage on spec).
-    const double IpkSec = IpkTank * N, IrmsSec = IrmsTank * N, dITankSec = dITank * N;
-    const double vPriPk = d.inputVoltage,  vPriPkPk = 2.0 * d.inputVoltage,  vPriRms = d.inputVoltage;   // ±Vin square
-    const double vSecPk = d.outputVoltage, vSecPkPk = 2.0 * d.outputVoltage, vSecRms = d.outputVoltage;  // ±Vout square
+    const double IpkSec = IpkTank * N, IrmsSec = IrmsTank * N;  // secondary bridge stresses (reflected tank current)
 
     // --- semiconductor stresses: primary bridge blocks Vin, secondary bridge blocks Vout ---
     // QA..QD (primary full bridge) block the DC-link Vin_max and carry the tank current (IrmsTank).
@@ -142,16 +141,23 @@ json build_dab_tas(const DabDesign& d) {
     const double ratedVdsSec = d.outputVoltage  / cfg::v_derate_mosfet(d.config);
     const double maxRdsOnPri = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IrmsTank * IrmsTank);
     const double maxRdsOnSec = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IrmsSec  * IrmsSec);
+    // Transformer (T1) EMBEDDED excitations from the SINGLE FHA source — the SPICE-validated analytical
+    // DAB solver (SPS modulation: inner shifts D1=D2=0, outer D3=phaseShiftDeg). It emits exactly 2
+    // windings (primary + one secondary), matching this 2-winding bridge transformer; the series inductor
+    // Lr and the switch ratings keep the inline tank stresses above (Lr is not a transformer winding).
+    // The analytical primary current = tank iL + magnetizing Im (more complete than the tank-only inline
+    // value). Evaluated at nominal Vin — the corner the inline tank ratings already used.
+    namespace AN = Kirchhoff::analytical;
+    const double IoutDab = d.outputPower / d.outputVoltage;
+    const MAS::OperatingPoint aopT1 = AN::analytical_dab(d.inputVoltage, {d.outputVoltage}, {IoutDab}, {N},
+                                                         fsw, Lm, Lr_H, 0.0, 0.0, d.phaseShiftDeg);
+    const std::vector<json> windings = AN::excitations_processed(aopT1);
     std::vector<std::string> isoSides{"primary", "secondary"};
     json xfmr; xfmr["magnetic"] = json::object();
-    xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, {N}, isoSides, std::nullopt, 25.0, {
-        req::winding_excitation("dabPrimary",   fsw, IpkTank, IrmsTank, 0.0, dITank,    std::nullopt,
-                                vPriPk, vPriRms, 0.0, vPriPkPk),
-        req::winding_excitation("dabSecondary", fsw, IpkSec,  IrmsSec,  0.0, dITankSec, std::nullopt,
-                                vSecPk, vSecRms, 0.0, vSecPkPk)});
-        // NB: DAB keeps its DESIGNED (nominal) Lm — unlike the other transformers it ties Lm to the
-        // series inductor (Lm = max(.., 10*Lr)) for the magnetizing-ripple/ZVS, so maximising Lm
-        // (lmIsMinimum) detunes its operating point and it stops regulating (verified). abt #56.
+    // NB: DAB keeps its DESIGNED (nominal) Lm — unlike the other transformers it ties Lm to the series
+    // inductor (Lm = max(.., 10*Lr)) for the magnetizing-ripple/ZVS, so maximising Lm (lmIsMinimum)
+    // detunes its operating point and it stops regulating (verified). abt #56.
+    xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, {N}, isoSides, std::nullopt, 25.0, windings);
 
     json capd; capd["capacitor"] = json::object();
     capd["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;
