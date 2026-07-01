@@ -2,6 +2,7 @@
 #include "DimensionJson.hpp"
 #include "KirchhoffConfig.hpp"
 #include "ComponentRequirements.hpp"
+#include "ConverterAnalytical.hpp"
 #include <cmath>
 #include <vector>
 #include <stdexcept>
@@ -120,20 +121,19 @@ json build_pfc_tas(const PfcDesign& d) {
     // with HF switching ripple riding on it. Saturation is set by the line-peak instantaneous peak; heating
     // by the line-rms input current (plus the HF ripple); flux swing (core loss) by the HF voltage at the
     // boost rate. (No DC bias — the envelope returns to ~0 each line zero-crossing; offset = line average.)
-    const double pinW  = d.outputPower / std::max(d.efficiency, 1e-6);
     const double vpeak = d.inputVoltageRms * std::sqrt(2.0);
-    const double iLineRms = pinW / d.inputVoltageRms;       // input/inductor LF rms (boost emulates a resistor)
-    const double iPeakEnv = std::sqrt(2.0) * iLineRms;       // line-peak of the current envelope
-    const double dILpk = vpeak * (d.outputVoltage - vpeak)
-                         / (d.boostInductance * d.switchingFrequency * d.outputVoltage);  // HF ripple at line peak
-    const double IpkL  = iPeakEnv + dILpk / 2.0;
-    const double IrmsL = std::sqrt(iLineRms * iLineRms + dILpk * dILpk / 12.0);
-    const double IavgL = (2.0 / kPi) * iPeakEnv;             // mean of |line| over a half-cycle
-    const double Dpk   = (d.outputVoltage - vpeak) / d.outputVoltage;  // boost duty at the line peak
-    const double vIndPk   = std::max(vpeak, d.outputVoltage - vpeak), vIndPkPk = d.outputVoltage;
-    const double vIndRms  = std::sqrt(Dpk * vpeak * vpeak + (1.0 - Dpk) * (d.outputVoltage - vpeak) * (d.outputVoltage - vpeak));
-    const json indExc = req::winding_excitation("triangular", d.switchingFrequency,
-        IpkL, IrmsL, IavgL, dILpk, Dpk, vIndPk, vIndRms, 0.0, vIndPkPk);
+    // Boost-inductor excitation from the SINGLE FHA source (the SPICE-validated analytical PFC line-cycle
+    // solver): the rectified-sine current envelope + HF ripple, as processed peak/rms/offset. PFC has ONE
+    // AC operating point (fixed line rms), so the same op feeds both the embedded excitation and the ratings.
+    namespace AN = Kirchhoff::analytical;
+    const MAS::OperatingPoint aopPfc = AN::analytical_pfc(d.inputVoltageRms, d.outputVoltage, d.outputPower,
+                                                          d.lineFrequency, d.switchingFrequency,
+                                                          d.boostInductance, d.efficiency);
+    const double IpkL  = AN::winding_current(aopPfc, 0, "peak");
+    const double IrmsL = AN::winding_current(aopPfc, 0, "rms");
+    const double IavgL = AN::winding_current(aopPfc, 0, "offset");
+    const double Dpk   = (d.outputVoltage - vpeak) / d.outputVoltage;  // boost duty at the line peak (ratings)
+    const json indExc = AN::excitations_processed(aopPfc).at(0);
 
     // ── semiconductor requirements (worst-case corner) ──
     // The boost MOSFET SW and the boost diode D5 both block the DC bus Vout. The four bridge

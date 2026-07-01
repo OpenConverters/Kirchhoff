@@ -2,6 +2,7 @@
 #include "DimensionJson.hpp"
 #include "KirchhoffConfig.hpp"
 #include "ComponentRequirements.hpp"
+#include "ConverterAnalytical.hpp"
 #include <cmath>
 #include <vector>
 #include <string>
@@ -114,20 +115,21 @@ json build_vienna_tas(const ViennaDesign& d) {
     // Per-phase boost-inductor excitation. Each Vienna leg boosts its phase to the HALF-bus (Vout/2, the
     // 3-level step). Current is a rectified-sine envelope (per-phase peak) with HF ripple; voltages are the
     // half-bus boost levels. (Mirrors the single-phase PFC inductor; per-phase current = total/3.)
-    const double pinV   = d.outputPower / std::max(d.efficiency, 1e-6);
     const double vpeakV = d.inputVoltageRms * std::sqrt(2.0);
     const double Vhalf  = 0.5 * d.outputVoltage;
-    const double iLineRmsV = pinV / (3.0 * d.inputVoltageRms);          // per-phase LF rms
-    const double iPeakEnvV = std::sqrt(2.0) * iLineRmsV;                // per-phase line-current peak
-    const double dILpkV = Vhalf / (4.0 * d.switchingFrequency * d.boostInductance);  // inverts the L sizing
-    const double IpkLV  = iPeakEnvV + dILpkV / 2.0;
-    const double IrmsLV = std::sqrt(iLineRmsV * iLineRmsV + dILpkV * dILpkV / 12.0);
-    const double IavgLV = (2.0 / kPi) * iPeakEnvV;
-    const double DpkV   = std::max(0.0, (Vhalf - vpeakV) / Vhalf);      // boost duty at line peak (to half-bus)
-    const double vIndPkV   = std::max(vpeakV, Vhalf - vpeakV), vIndPkPkV = Vhalf;
-    const double vIndRmsV  = std::sqrt(DpkV * vpeakV * vpeakV + (1.0 - DpkV) * (Vhalf - vpeakV) * (Vhalf - vpeakV));
-    const json indExcV = req::winding_excitation("triangular", d.switchingFrequency,
-        IpkLV, IrmsLV, IavgLV, dILpkV, DpkV, vIndPkV, vIndRmsV, 0.0, vIndPkPkV);
+    // Per-phase boost-inductor excitation from the SINGLE FHA source (the SPICE-validated 3-phase Vienna
+    // line-cycle solver): the per-phase rectified-sine current envelope + HF ripple, as processed
+    // peak/rms/offset. One AC operating point, so the same op feeds both the embedded excitation and ratings.
+    namespace AN = Kirchhoff::analytical;
+    const MAS::OperatingPoint aopVienna = AN::analytical_vienna(d.inputVoltageRms, d.outputVoltage,
+                                                               d.outputPower, d.lineFrequency,
+                                                               d.switchingFrequency, d.boostInductance,
+                                                               d.efficiency);
+    const double IpkLV  = AN::winding_current(aopVienna, 0, "peak");
+    const double IrmsLV = AN::winding_current(aopVienna, 0, "rms");
+    const double IavgLV = AN::winding_current(aopVienna, 0, "offset");
+    const double DpkV   = std::max(0.0, (Vhalf - vpeakV) / Vhalf);      // boost duty at line peak (ratings)
+    const json indExcV = AN::excitations_processed(aopVienna).at(0);
     auto resBrick = [&](double r) { json j; j["resistor"] = json::object();
         auto& dr = j["inputs"]["designRequirements"];
         dr["deviceType"] = "resistor";
