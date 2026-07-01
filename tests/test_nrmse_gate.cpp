@@ -277,3 +277,65 @@ TEST_CASE("NRMSE gate: CLLC tank current — analytical vs ngspice", "[nrmse][cl
     rectAvg /= secData.size();
     CHECK(rectAvg == Catch::Approx(iout).margin(0.12 * iout));
 }
+
+// Real fidelity gate for the (now FHA) CLLLC solver. build_clllc_tas emits a deck with method=gear that
+// stalls after ~40 points on the CLLLC netlist (a deck-integration issue, NOT the solver); method=trap
+// converges the full 400 periods, so we swap it here. Drive analytical + ngspice from the same design at
+// fr, read the settled Vout, compare the primary tank current (analytical "Primary" = i_Lr1 vs ngspice
+// l.xclllcpower.llr1_pri) via the phase-invariant NRMSE. FHA is load-aware and not singular at fr.
+TEST_CASE("NRMSE gate: CLLLC tank current — analytical vs ngspice", "[nrmse][clllc]") {
+    if (!Kirchhoff::ngspice_in_process_available()) {
+        WARN("Kirchhoff built without libngspice — skipping NRMSE gate");
+        return;
+    }
+    json spec = spec_for(400, 48, 480, 100000);
+    Kirchhoff::ClllcDesign d = Kirchhoff::design_clllc(spec);
+    const double fdrive = d.resonantFrequency;
+
+    json tas = Kirchhoff::build_clllc_tas(d);
+    PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
+    std::string deck = Kirchhoff::tas_to_ngspice(tas, ideal);
+    deck = std::regex_replace(deck, std::regex("method=gear"), "method=trap");   // converge the CLLLC netlist
+    Kirchhoff::NgspiceRunResult r = Kirchhoff::run_ngspice_in_process(deck);
+    REQUIRE(r.success);
+    REQUIRE(r.time.size() > 1000);   // guard against the gear-method 40-point stall
+    const double period = 1.0 / fdrive;
+    const double vout = r.average("v(vout)", r.time.back() - period, r.time.back()).value_or(0.0);
+    REQUIRE(vout > 0.5);
+    const double rload = d.outputVoltage / (d.outputPower / d.outputVoltage);
+    const double iout = vout / rload;
+
+    MAS::OperatingPoint op = Kirchhoff::analytical::analytical_clllc(
+        d.inputVoltage, {vout}, {iout}, {d.turnsRatio},
+        fdrive, d.magnetizingInductance, d.primaryResonantInductance, d.primaryResonantCapacitance,
+        d.secondaryResonantInductance, d.secondaryResonantCapacitance, 1.0);
+    REQUIRE(op.get_excitations_per_winding().size() == 2);
+    auto pri = op.get_excitations_per_winding()[0].get_current();
+    REQUIRE(pri.has_value());
+    REQUIRE(pri->get_waveform().has_value());
+    const std::vector<double> aVal = pri->get_waveform()->get_data();
+    REQUIRE(aVal.size() >= 2);
+    std::vector<double> aTime(aVal.size());
+    for (size_t i = 0; i < aVal.size(); ++i)
+        aTime[i] = period * static_cast<double>(i) / static_cast<double>(aVal.size() - 1);
+
+    const std::string tankKey = "l.xclllcpower.llr1_pri#branch";
+    REQUIRE(r.vectors.count(tankKey) == 1);
+    const std::vector<double>& sVal = r.vectors.at(tankKey);
+
+    const int N = 256;
+    std::vector<double> aRes = resample_analytical(aTime, aVal, period, N);
+    std::vector<double> sRes = resample_last_period(r.time, sVal, period, N);
+    double nrmse = phase_invariant_nrmse(aRes, sRes);
+    std::cerr << "[NRMSE] CLLLC tank current = " << nrmse << "  (Vout=" << vout << " Iout=" << iout
+              << ", analytical Ipk=" << *std::max_element(aRes.begin(), aRes.end())
+              << ", ngspice Ipk=" << *std::max_element(sRes.begin(), sRes.end()) << ")\n";
+    // Observed ~0.025 — the load-aware FHA tracks the symmetric CLLLC tank tightly. Gate at 0.15.
+    CHECK(nrmse < 0.15);
+    // Full-bridge secondary is bipolar; its rectified average delivers the DC output.
+    const std::vector<double> secData = op.get_excitations_per_winding().back().get_current()->get_waveform()->get_data();
+    double rectAvg = 0.0;
+    for (double x : secData) rectAvg += std::abs(x);
+    rectAvg /= secData.size();
+    CHECK(rectAvg == Catch::Approx(iout).margin(0.12 * iout));
+}
