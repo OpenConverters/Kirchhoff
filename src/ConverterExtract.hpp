@@ -54,4 +54,18 @@ std::vector<MagneticExtract> topology_waveforms(const nlohmann::json& tas);
 MAS::OperatingPoint extract_operating_point(const nlohmann::json& tas, ExtractEngine engine,
                                             const std::string& magneticName = "");
 
+// Per-topology design diagnostics, derived from the assembled TAS. Replaces MKF's per-model
+// "<name>Diagnostics" objects (Flyback::get_last_*, Llc::get_computed_*, …) with the topology-AGNOSTIC
+// subset that is recoverable from the TAS: the computed component values (magnetizing/resonant inductance,
+// turns ratios, resonant/output capacitances) and the per-operating-point per-winding stresses (peak/rms
+// current & voltage, duty cycle) plus an inferred CCM/DCM flag. Structure mirrors MKF's WebLibMKF
+// serialization — a flat block (first operating point) + an `operatingPoints[]` array (one row per OP).
+//
+// NOTE (documented gap, not a silent omission): the solver-INTERNAL resonant diagnostics MKF exposed
+// (Nielsen `lastMode`/`lastSubStateSequence`/`lastSteadyStateResidual`) are intentionally ABSENT — KH's
+// resonant solvers are FHA, not the Nielsen/4-state TDA, so those fields would be meaningless here. ZVS
+// margins and flux-excursion feasibility need per-topology physics + device Coss that the TAS does not
+// carry; they are out of scope for this TAS-derived view (see the migration notes).
+nlohmann::json diagnostics(const nlohmann::json& tas);
+
 }  // namespace Kirchhoff
