@@ -53,7 +53,7 @@ endif()
 set(MKF_DIR "/home/alf/OpenMagnetics/MKF" CACHE PATH "Path to the MKF checkout (for the shared WaveformProcessor)")
 set(MKF_WAVEFORM_PROCESSOR "${MKF_DIR}/src/processors/WaveformProcessor.cpp")
 
-add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/Dab.cpp src/IsolatedBuck.cpp src/IsolatedBuckBoost.cpp src/Weinberg.cpp src/Llc.cpp src/Src.cpp src/Cllc.cpp src/Clllc.cpp src/Pfc.cpp src/Vienna.cpp src/TasAssembler.cpp src/NgspiceRunner.cpp src/Analytical.cpp src/ConverterAnalytical.cpp src/ConverterExtract.cpp "${MKF_WAVEFORM_PROCESSOR}")
+add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/Dab.cpp src/IsolatedBuck.cpp src/IsolatedBuckBoost.cpp src/Weinberg.cpp src/Llc.cpp src/Src.cpp src/Cllc.cpp src/Clllc.cpp src/Pfc.cpp src/Vienna.cpp src/TasAssembler.cpp src/NgspiceRunner.cpp src/Analytical.cpp src/ConverterAnalytical.cpp src/ConverterExtract.cpp src/KirchhoffApi.cpp "${MKF_WAVEFORM_PROCESSOR}")
 target_include_directories(kirchhoff PUBLIC
     src
     "${PSMA_ROOT}/PEAS/src"
