@@ -322,5 +322,36 @@ MAS::OperatingPoint analytical_cllc(double inputVoltage,
                                     double bridgeVoltageFactor = 1.0,
                                     SrcRectifier rectifier = SrcRectifier::FULL_BRIDGE);
 
+// CLLLC bidirectional resonant converter via the 4-state RK4 AFFINE-PROPAGATOR TDA (a symmetric CLLC-with-
+// two-caps: both the primary Cr1-Lr1 tank AND the secondary Lr2-Cr2 tank flank the magnetizing Lm). The
+// steady state is the 4-vector x = [i_Lr1, i_Lr2, v_Cr1, v_Cr2] (i_Lm derived as i_Lr1 − i_Lr2/n by
+// ampere-turn balance; Lr2/Cr2 kept as ACTUAL secondary-side values with n entering the coupled-inductance
+// matrix explicitly). Unlike the LLC/CLLC event-driven closed-form solvers, MKF's CLLLC integrates the
+// linear tank ODE with RK4: because the half-period propagator P is affine (P(x0) = M·x0 + g), it measures
+// g and the four columns of M in five RK4 passes then solves the half-wave-antisymmetry (M+I)·x0 = −g by
+// 4×4 Gaussian elimination — an exact (modulo RK4 truncation) steady state in six passes, no Newton/Picard.
+// A 1 mΩ ESR on Lr1/Lr2 keeps (M+I) non-singular even for a lossless tank at exact resonance. Pushes
+// Primary (tank current i_Lr1 + magnetizing voltage v_pri = Lm·di_Lm/dt) + one full-bridge "Secondary 0"
+// (current = i_Lr2, voltage = v_pri/n) — exactly MKF's winding set. `rectifier` = CENTER_TAPPED instead
+// splits the secondary current into two polarity half-windings (family-consistent with analytical_llc/
+// _cllc/_src). `bridgeVoltageFactor` sets BOTH bridges (1.0 full bridge, the CLLLC default; 0.5 half
+// bridge). Ported from MKF converter_models/Clllc.cpp: the Clllc* RK4 machinery (:356-494) +
+// process_operating_point_for_input_voltage (:606, forward branch). MKF's ZVS / mode / current-sharing
+// diagnostics, the extra-component (Cr/Lr) waveforms, and REVERSE power flow (KH has no power-flow-direction
+// input; design_clllc is forward-only) are omitted. Throws on non-positive fsw / Lm / turns ratio / any tank
+// value / HV or LV bus voltage (mirroring MKF's guards — no fabricated defaults).
+MAS::OperatingPoint analytical_clllc(double inputVoltage,
+                                     const std::vector<double>& outputVoltages,
+                                     const std::vector<double>& outputCurrents,
+                                     const std::vector<double>& turnsRatios,
+                                     double switchingFrequency,
+                                     double magnetizingInductance,
+                                     double primaryResonantInductance,
+                                     double primaryResonantCapacitance,
+                                     double secondaryResonantInductance,
+                                     double secondaryResonantCapacitance,
+                                     double bridgeVoltageFactor = 1.0,
+                                     SrcRectifier rectifier = SrcRectifier::FULL_BRIDGE);
+
 } // namespace analytical
 } // namespace Kirchhoff

@@ -2891,5 +2891,325 @@ MAS::OperatingPoint analytical_cllc(double inputVoltage,
     return operatingPoint;
 }
 
+// ─── Phase 5: CLLLC bidirectional resonant converter (4-state RK4 affine-propagator TDA) ──────────────
+// Ported from MKF converter_models/Clllc.cpp. Unlike the LLC/CLLC event-driven closed-form solvers, MKF's
+// CLLLC integrates the 4-state linear tank ODE x = [i_Lr1, i_Lr2, v_Cr1, v_Cr2] with RK4 over the half
+// period, exploiting that the half-period propagator P is AFFINE (P(x0) = M·x0 + g): it MEASURES g (= P(0))
+// and the four columns of M with five RK4 passes then solves the half-wave-antisymmetric steady state
+// (M+I)·x0 = −g by 4×4 Gaussian elimination — an exact (modulo RK4 truncation) steady state in six RK4
+// passes, no Newton / no Picard (MKF Clllc.cpp:41-54). A 1 mΩ parasitic ESR on Lr1/Lr2 keeps M's spectral
+// radius < 1 so (M+I) is non-singular even for a lossless tank at exact resonance. i_Lm is DERIVED
+// algebraically as i_Lr1 − i_Lr2/n (transformer ampere-turn balance), not carried as a state; Lr2/Cr2 are
+// ACTUAL secondary-side values (n enters the coupled-inductance matrix explicitly, not by primary-referral).
+// This machinery is NOT byte-identical to the CLLC/LLC event-driven helpers already in this file, so
+// CLLLC's own RK4 helpers are ported here.
+namespace {
+
+// MKF Clllc.cpp:356 — 4-state vector [i_Lr1, i_Lr2, v_Cr1, v_Cr2].
+struct ClllcState {
+    double iLr1 = 0;
+    double iLr2 = 0;
+    double vCr1 = 0;
+    double vCr2 = 0;
+};
+
+// MKF Clllc.cpp:363 — tank + bridge parameters. Lr2/Cr2 are secondary-side; n enters the ODE explicitly.
+struct ClllcParams {
+    double Lr1 = 0;
+    double Lr2 = 0;
+    double Lm  = 0;
+    double Cr1 = 0;
+    double Cr2 = 0;
+    double n   = 1;
+    double rLr1 = 1e-3;
+    double rLr2 = 1e-3;
+    double k_pri = 1.0;
+    double k_sec = 1.0;
+};
+
+// MKF Clllc.cpp:378 — dx/dt at state x with raw bridge voltages (scaled by k_pri / k_sec). Per the KVL
+// derivation (MKF Clllc.cpp:340-351), eliminating v_pri gives the 2×2 coupled-inductance system
+// M_L = [[Lr1+Lm, −Lm/n], [−Lm/n, Lr2+Lm/n²]] which is inverted in closed form here (det = |M_L|).
+ClllcState clllc_dxdt(const ClllcState& x, double uHV_raw, double uLV_raw, const ClllcParams& p) {
+    double uHV = p.k_pri * uHV_raw;
+    double uLV = p.k_sec * uLV_raw;
+    double Lm_n  = p.Lm / p.n;
+    double Lm_n2 = p.Lm / (p.n * p.n);
+    double det = (p.Lr1 + p.Lm) * (p.Lr2 + Lm_n2) - Lm_n * Lm_n;
+    if (det <= 0)
+        throw std::runtime_error("analytical_clllc: coupled-L matrix singular");
+
+    double rhs1 = uHV - x.vCr1 - p.rLr1 * x.iLr1;
+    double rhs2 = -x.vCr2 - uLV - p.rLr2 * x.iLr2;
+
+    ClllcState d;
+    d.iLr1 = ((p.Lr2 + Lm_n2) * rhs1 + Lm_n * rhs2) / det;
+    d.iLr2 = (Lm_n * rhs1 + (p.Lr1 + p.Lm) * rhs2) / det;
+    d.vCr1 = x.iLr1 / p.Cr1;
+    d.vCr2 = x.iLr2 / p.Cr2;
+    return d;
+}
+
+// MKF Clllc.cpp:399 — a + s·b.
+inline ClllcState clllc_state_axpy(const ClllcState& a, const ClllcState& b, double s) {
+    return ClllcState{a.iLr1 + s*b.iLr1, a.iLr2 + s*b.iLr2,
+                      a.vCr1 + s*b.vCr1, a.vCr2 + s*b.vCr2};
+}
+
+// MKF Clllc.cpp:405 — single RK4 step of size dt with constant bridge inputs.
+ClllcState clllc_rk4_step(const ClllcState& x, double dt, double uHV, double uLV, const ClllcParams& p) {
+    ClllcState k1 = clllc_dxdt(x, uHV, uLV, p);
+    ClllcState k2 = clllc_dxdt(clllc_state_axpy(x, k1, dt * 0.5), uHV, uLV, p);
+    ClllcState k3 = clllc_dxdt(clllc_state_axpy(x, k2, dt * 0.5), uHV, uLV, p);
+    ClllcState k4 = clllc_dxdt(clllc_state_axpy(x, k3, dt), uHV, uLV, p);
+    return ClllcState{
+        x.iLr1 + dt / 6.0 * (k1.iLr1 + 2*k2.iLr1 + 2*k3.iLr1 + k4.iLr1),
+        x.iLr2 + dt / 6.0 * (k1.iLr2 + 2*k2.iLr2 + 2*k3.iLr2 + k4.iLr2),
+        x.vCr1 + dt / 6.0 * (k1.vCr1 + 2*k2.vCr1 + 2*k3.vCr1 + k4.vCr1),
+        x.vCr2 + dt / 6.0 * (k1.vCr2 + 2*k2.vCr2 + 2*k3.vCr2 + k4.vCr2),
+    };
+}
+
+// MKF Clllc.cpp:422 — propagate a half period with both bridges in the +polarity. Caller produces the
+// negative half by mirror symmetry (half-wave antisymmetry of the steady state).
+ClllcState clllc_propagate_half(ClllcState x0, double Thalf, double VHV, double VLV,
+                                const ClllcParams& p, int N) {
+    double dt = Thalf / N;
+    ClllcState x = x0;
+    for (int k = 0; k < N; ++k) {
+        x = clllc_rk4_step(x, dt, +VHV, +VLV, p);
+    }
+    return x;
+}
+
+// MKF Clllc.cpp:434 — 4×4 linear solve via Gaussian elimination with partial pivoting. Throws on singular.
+void clllc_solve4x4(double A[4][4], double b[4], double out[4]) {
+    double M[4][5];
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) M[i][j] = A[i][j];
+        M[i][4] = b[i];
+    }
+    for (int col = 0; col < 4; ++col) {
+        int piv = col;
+        double mx = std::abs(M[col][col]);
+        for (int r = col + 1; r < 4; ++r) {
+            if (std::abs(M[r][col]) > mx) { mx = std::abs(M[r][col]); piv = r; }
+        }
+        if (mx < 1e-30)
+            throw std::runtime_error("analytical_clllc: steady-state (M+I) singular (lossless tank?)");
+        if (piv != col) for (int k = 0; k < 5; ++k) std::swap(M[col][k], M[piv][k]);
+        for (int r = col + 1; r < 4; ++r) {
+            double f = M[r][col] / M[col][col];
+            for (int k = col; k < 5; ++k) M[r][k] -= f * M[col][k];
+        }
+    }
+    for (int i = 3; i >= 0; --i) {
+        double s = M[i][4];
+        for (int j = i + 1; j < 4; ++j) s -= M[i][j] * out[j];
+        out[i] = s / M[i][i];
+    }
+}
+
+// MKF Clllc.cpp:465 — one-shot steady state x0 such that P(x0) = −x0 (half-wave antisymmetry). P is affine:
+// P(x0) = M·x0 + g. Measure g (= P(0)) and the four columns of M (= P(e_i) − g) by five RK4 passes, then
+// solve (M + I)·x0 = −g.
+ClllcState clllc_solve_steady_state(double Thalf, double VHV, double VLV, const ClllcParams& p, int N) {
+    ClllcState zero;
+    ClllcState ge = clllc_propagate_half(zero, Thalf, VHV, VLV, p, N);
+    double g[4] = {ge.iLr1, ge.iLr2, ge.vCr1, ge.vCr2};
+
+    double M[4][4];
+    for (int i = 0; i < 4; ++i) {
+        ClllcState ei;
+        if (i == 0) ei.iLr1 = 1.0;
+        else if (i == 1) ei.iLr2 = 1.0;
+        else if (i == 2) ei.vCr1 = 1.0;
+        else ei.vCr2 = 1.0;
+        ClllcState end = clllc_propagate_half(ei, Thalf, VHV, VLV, p, N);
+        M[0][i] = end.iLr1 - g[0];
+        M[1][i] = end.iLr2 - g[1];
+        M[2][i] = end.vCr1 - g[2];
+        M[3][i] = end.vCr2 - g[3];
+    }
+
+    double A[4][4];
+    double rhs[4];
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) A[i][j] = M[i][j] + (i == j ? 1.0 : 0.0);
+        rhs[i] = -g[i];
+    }
+    double x0[4];
+    clllc_solve4x4(A, rhs, x0);
+    return ClllcState{x0[0], x0[1], x0[2], x0[3]};
+}
+
+}  // anonymous namespace
+
+// Ported from MKF converter_models/Clllc.cpp:606 (process_operating_point_for_input_voltage — the FORWARD
+// power-flow branch). MKF member/accessor reads become explicit scalar params (KH's MAS has no
+// ClllcOperatingPoint): op.get_switching_frequency() → switchingFrequency, computedPrimarySeriesInductance
+// → primaryResonantInductance, computedSecondarySeriesInductance → secondaryResonantInductance,
+// computedMagnetizingInductance → magnetizingInductance, turnsRatios[0] → n. `bridgeVoltageFactor` sets BOTH
+// k_pri and k_sec (KH exposes a single factor — the symmetric-CLLLC assumption that primary and secondary
+// bridges are the same type; MKF derives them independently from bridge_type_primary/secondary). MKF's
+// ZVS / mode-classification / current-sharing DIAGNOSTIC members, the extra-component (Cr/Lr) waveforms,
+// the half-wave-antisymmetry residual bookkeeping, and the REVERSE power-flow branch (KH has no
+// power-flow-direction input; design_clllc is forward-only) are omitted. Missing / non-positive required
+// inputs THROW (mirroring MKF's own guards — no fabricated defaults).
+MAS::OperatingPoint analytical_clllc(double inputVoltage,
+                                     const std::vector<double>& outputVoltages,
+                                     const std::vector<double>& outputCurrents,
+                                     const std::vector<double>& turnsRatios,
+                                     double switchingFrequency,
+                                     double magnetizingInductance,
+                                     double primaryResonantInductance,
+                                     double primaryResonantCapacitance,
+                                     double secondaryResonantInductance,
+                                     double secondaryResonantCapacitance,
+                                     double bridgeVoltageFactor,
+                                     SrcRectifier rectifier) {
+    using Lbl = MAS::WaveformLabel;
+    // MKF Clllc.cpp:613 (missing voltages/currents). KH additionally requires matched vector lengths.
+    if (outputVoltages.empty() || outputVoltages.size() != outputCurrents.size() ||
+        outputVoltages.size() != turnsRatios.size())
+        throw std::invalid_argument("analytical_clllc: outputVoltages/outputCurrents/turnsRatios "
+                                    "must be non-empty and equal length");
+
+    const double fsw = switchingFrequency;
+    if (!std::isfinite(fsw) || fsw <= 0)   // MKF Clllc.cpp:618
+        throw std::invalid_argument("analytical_clllc: switching frequency must be > 0");
+
+    const double n = turnsRatios[0];       // MKF Clllc.cpp:627
+    if (!std::isfinite(n) || n <= 0)       // MKF Clllc.cpp:628
+        throw std::invalid_argument("analytical_clllc: turns ratio must be > 0");
+
+    // FORWARD power flow only (MKF Clllc.cpp:638-644 reverse branch omitted): the HV bridge is active and
+    // the LV bridge synchronous-rectifies. outputVoltages[0] is the LV bus; inputVoltage the HV bus.
+    const double Vlv = outputVoltages[0];  // MKF Clllc.cpp:638
+    const double Vhv = inputVoltage;       // MKF Clllc.cpp:639
+    if (Vlv <= 0 || Vhv <= 0)              // MKF Clllc.cpp:645
+        throw std::invalid_argument("analytical_clllc: HV/LV bus voltages must be positive");
+
+    // Tank parameters (MKF Clllc.cpp:648-657 forward branch). Lr2/Cr2 are the ACTUAL secondary-side values.
+    ClllcParams p;
+    p.Lr1 = primaryResonantInductance;
+    p.Lr2 = secondaryResonantInductance;
+    p.Cr1 = primaryResonantCapacitance;
+    p.Cr2 = secondaryResonantCapacitance;
+    // MKF Clllc.cpp:622 (computed tank must be positive) — here the tank arrives as explicit params.
+    if (p.Lr1 <= 0 || p.Cr1 <= 0 || p.Lr2 <= 0 || p.Cr2 <= 0)
+        throw std::invalid_argument("analytical_clllc: resonant tank values invalid (Lr1/Cr1/Lr2/Cr2 > 0)");
+    p.n     = n;
+    p.k_pri = bridgeVoltageFactor;   // MKF Clllc.cpp:656-657 (k_pri, k_sec; KH uses one factor for both)
+    p.k_sec = bridgeVoltageFactor;
+    p.Lm    = magnetizingInductance; // MKF Clllc.cpp:669
+    if (!std::isfinite(p.Lm) || p.Lm <= 0)   // MKF Clllc.cpp:671
+        throw std::invalid_argument("analytical_clllc: magnetizing inductance must be > 0");
+    p.rLr1 = 1e-3;   // MKF Clllc.cpp:673-674 — 1 mΩ damping; prevents (M+I) singularity at exact resonance.
+    p.rLr2 = 1e-3;
+
+    const double VHV_drv = Vhv;   // MKF Clllc.cpp:676-677 (forward: no active/passive swap)
+    const double VLV_drv = Vlv;
+
+    const double Thalf = 0.5 / fsw;   // MKF Clllc.cpp:679
+    constexpr int N = 512;            // MKF Clllc.cpp:680
+    const double dt = Thalf / N;
+
+    ClllcState x0 = clllc_solve_steady_state(Thalf, VHV_drv, VLV_drv, p, N);   // MKF Clllc.cpp:683
+
+    // Re-propagate to fill the positive-half waveforms (MKF Clllc.cpp:685-701).
+    std::vector<double> iLr1H(N + 1), iLr2H(N + 1), iLmH(N + 1), vCr1H(N + 1), vCr2H(N + 1);
+    auto fill_at = [&](int k, const ClllcState& s) {
+        iLr1H[k] = s.iLr1;
+        iLr2H[k] = s.iLr2;
+        iLmH[k]  = s.iLr1 - s.iLr2 / p.n;   // ampere-turn balance
+        vCr1H[k] = s.vCr1;
+        vCr2H[k] = s.vCr2;
+    };
+    ClllcState x = x0;
+    fill_at(0, x);
+    for (int k = 1; k <= N; ++k) {
+        x = clllc_rk4_step(x, dt, +VHV_drv, +VLV_drv, p);
+        fill_at(k, x);
+    }
+
+    // Build the full-period (2N+1 samples) by mirroring the negative half (MKF Clllc.cpp:710-724).
+    const int total = 2 * N + 1;
+    std::vector<double> tF(total), iLr1F(total), iLr2F(total), iLmF(total),
+                        vCr1F(total), vCr2F(total), vPriF(total), vSecF(total);
+    for (int k = 0; k <= N; ++k) {
+        tF[k] = k * dt;
+        iLr1F[k] = iLr1H[k]; iLr2F[k] = iLr2H[k]; iLmF[k] = iLmH[k];
+        vCr1F[k] = vCr1H[k]; vCr2F[k] = vCr2H[k];
+    }
+    for (int k = 1; k <= N; ++k) {
+        tF[N + k]    = Thalf + k * dt;
+        iLr1F[N + k] = -iLr1H[k]; iLr2F[N + k] = -iLr2H[k]; iLmF[N + k] = -iLmH[k];
+        vCr1F[N + k] = -vCr1H[k]; vCr2F[N + k] = -vCr2H[k];
+    }
+
+    // Recover the primary/secondary winding voltages from the ODE: v_pri = Lm·di_Lm/dt (MKF Clllc.cpp:726-735).
+    for (int k = 0; k < total; ++k) {
+        double uHV_full = (k <= N) ? +VHV_drv : -VHV_drv;
+        double uLV_full = (k <= N) ? +VLV_drv : -VLV_drv;
+        ClllcState xk{iLr1F[k], iLr2F[k], vCr1F[k], vCr2F[k]};
+        ClllcState d = clllc_dxdt(xk, uHV_full, uLV_full, p);
+        double diLm = d.iLr1 - d.iLr2 / p.n;
+        vPriF[k] = p.Lm * diLm;
+        vSecF[k] = vPriF[k] / p.n;
+    }
+
+    // ── Excitations: exactly MKF's winding set (MKF Clllc.cpp:851-866, forward frame): Primary + Secondary.
+    MAS::OperatingPoint operatingPoint;
+    // PRIMARY winding (MKF Clllc.cpp:852-860): current = i_Lr1 (HV-side series tank current), voltage =
+    // v_pri (the primary magnetizing voltage the core sees — not the bridge voltage).
+    {
+        MAS::Waveform currentWaveform;
+        currentWaveform.set_ancillary_label(Lbl::CUSTOM);
+        currentWaveform.set_data(iLr1F);
+        currentWaveform.set_time(tF);
+        MAS::Waveform voltageWaveform;
+        voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
+        voltageWaveform.set_data(vPriF);
+        voltageWaveform.set_time(tF);
+        operatingPoint.get_mutable_excitations_per_winding().push_back(
+            WP::complete_excitation(currentWaveform, voltageWaveform, fsw, "Primary"));
+    }
+    // SECONDARY winding. MKF Clllc.cpp:861-866 pushes a SINGLE full-wave "Secondary": current = i_Lr2
+    // (LV-side series tank current), voltage = v_sec = v_pri/n. FULL_BRIDGE (default) reproduces that exact
+    // MKF winding. CENTER_TAPPED (family-consistent with analytical_llc/_cllc/_src) instead splits i_Lr2
+    // into two polarity half-windings.
+    if (rectifier == SrcRectifier::CENTER_TAPPED) {
+        for (size_t halfIdx = 0; halfIdx < 2; ++halfIdx) {
+            std::vector<double> iSec(total, 0.0), vSec(total, 0.0);
+            for (int k = 0; k < total; ++k) {
+                double Id = std::isfinite(iLr2F[k]) ? iLr2F[k] : 0.0;
+                iSec[k] = (halfIdx == 0) ? std::max(0.0, Id) : std::max(0.0, -Id);
+                vSec[k] = std::isfinite(vSecF[k]) ? vSecF[k] : 0.0;
+            }
+            MAS::Waveform currentWaveform;
+            currentWaveform.set_ancillary_label(Lbl::CUSTOM);
+            currentWaveform.set_data(iSec); currentWaveform.set_time(tF);
+            MAS::Waveform voltageWaveform;
+            voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
+            voltageWaveform.set_data(vSec); voltageWaveform.set_time(tF);
+            operatingPoint.get_mutable_excitations_per_winding().push_back(
+                WP::complete_excitation(currentWaveform, voltageWaveform, fsw,
+                                        "Secondary 0 Half " + std::to_string(halfIdx + 1)));
+        }
+    } else {
+        MAS::Waveform currentWaveform;
+        currentWaveform.set_ancillary_label(Lbl::CUSTOM);
+        currentWaveform.set_data(iLr2F); currentWaveform.set_time(tF);
+        MAS::Waveform voltageWaveform;
+        voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
+        voltageWaveform.set_data(vSecF); voltageWaveform.set_time(tF);
+        operatingPoint.get_mutable_excitations_per_winding().push_back(
+            WP::complete_excitation(currentWaveform, voltageWaveform, fsw, "Secondary 0"));
+    }
+
+    return operatingPoint;
+}
+
 } // namespace analytical
 } // namespace Kirchhoff
