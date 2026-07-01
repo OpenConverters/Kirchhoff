@@ -53,7 +53,7 @@ endif()
 set(MKF_DIR "/home/alf/OpenMagnetics/MKF" CACHE PATH "Path to the MKF checkout (for the shared WaveformProcessor)")
 set(MKF_WAVEFORM_PROCESSOR "${MKF_DIR}/src/processors/WaveformProcessor.cpp")
 
-add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/Dab.cpp src/IsolatedBuck.cpp src/IsolatedBuckBoost.cpp src/Weinberg.cpp src/Llc.cpp src/Src.cpp src/Cllc.cpp src/Clllc.cpp src/Pfc.cpp src/Vienna.cpp src/TasAssembler.cpp src/NgspiceRunner.cpp src/Analytical.cpp src/ConverterAnalytical.cpp src/ConverterExtract.cpp src/KirchhoffApi.cpp "${MKF_WAVEFORM_PROCESSOR}")
+add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/Dab.cpp src/IsolatedBuck.cpp src/IsolatedBuckBoost.cpp src/Weinberg.cpp src/Llc.cpp src/Src.cpp src/Cllc.cpp src/Clllc.cpp src/Pfc.cpp src/Vienna.cpp src/TasAssembler.cpp src/NgspiceRunner.cpp src/Analytical.cpp src/ConverterAnalytical.cpp src/ConverterExtract.cpp "${MKF_WAVEFORM_PROCESSOR}")
 target_include_directories(kirchhoff PUBLIC
     src
     "${PSMA_ROOT}/PEAS/src"
@@ -150,11 +150,11 @@ if (KIRCHHOFF_BUILD_PYBIND AND NOT EMSCRIPTEN)
 endif()
 
 # --- libKirchhoff: the Emscripten/embind WASM module (the WebLibMKF converter-surface replacement) ---
-# Built only under emscripten (emcmake cmake ...). Mirrors MKF's WebLibMKF string API so the OpenMagnetics
-# Wizard can drive KH. ngspice is OFF in the browser build (the analytical/deck/extract-analytical surface
-# needs no simulator); the ngspice-in-wasm path is a separate integration (P5), so extract(NGSPICE) throws.
+# Built only under emscripten (emcmake cmake ...). Thin embind over Kirchhoff::api (KirchhoffApi.cpp is
+# compiled directly here — it is NOT in the static core lib, so it can also go into the hidden-visibility
+# shared lib below without a duplicate symbol).
 if (EMSCRIPTEN)
-    add_executable(libKirchhoff src/libKirchhoff.cpp)
+    add_executable(libKirchhoff src/libKirchhoff.cpp src/KirchhoffApi.cpp)
     target_link_libraries(libKirchhoff PRIVATE kirchhoff)
     set_target_properties(libKirchhoff PROPERTIES OUTPUT_NAME "kirchhoff")
     target_link_options(libKirchhoff PRIVATE
@@ -162,6 +162,31 @@ if (EMSCRIPTEN)
         "-sMODULARIZE=1" "-sEXPORT_NAME=createKirchhoffModule"
         "-sENVIRONMENT=web,worker" "-sALLOW_MEMORY_GROWTH=1"
         "-sEXPORT_ES6=1" "-sSINGLE_FILE=1")
+endif()
+
+# --- libKirchhoffApi: a native SHARED library exposing ONLY Kirchhoff::api (the string/JSON facade) with
+# hidden internals. This is how MKF / WebLibMKF link Kirchhoff WITHOUT a symbol clash: KH and MKF BOTH
+# generate their types into `namespace MAS`, so linking KH's objects directly into MKF would collide. Here
+# the whole typed core + all deps are bundled into the .so and compiled -fvisibility=hidden; only the
+# KH_API-marked string functions are exported, so KH's MAS:: symbols never cross the library boundary.
+# Off by default (native tests/demos don't need it); MKF's ExternalProject turns it ON.
+option(KIRCHHOFF_BUILD_SHARED_API "Build libKirchhoffApi.so (string API only, hidden internals)" OFF)
+if (KIRCHHOFF_BUILD_SHARED_API AND NOT EMSCRIPTEN)
+    add_library(KirchhoffApi SHARED src/KirchhoffApi.cpp)
+    target_compile_definitions(KirchhoffApi PRIVATE KIRCHHOFF_API_EXPORTS)
+    target_compile_options(KirchhoffApi PRIVATE -fvisibility=hidden -fvisibility-inlines-hidden)
+    # Pull the ENTIRE static core (+ its deps) into the .so so nothing dangles, but keep it all hidden.
+    target_link_libraries(KirchhoffApi PRIVATE
+        -Wl,--whole-archive kirchhoff -Wl,--no-whole-archive
+        RAS CAS SAS AAS CTAS MAS_kirchhoff CIAS nlohmann_json::nlohmann_json)
+    if (ENABLE_NGSPICE AND NGSPICE_LIB)
+        target_link_libraries(KirchhoffApi PRIVATE "${NGSPICE_LIB}")
+    endif()
+    # the static core was compiled WITHOUT -fvisibility=hidden, so hide its symbols at link with a version
+    # script that exports only the C++ mangled Kirchhoff::api names (and the std/global new/delete the .so
+    # must still export for its own allocations are kept local via the default localizer).
+    target_link_options(KirchhoffApi PRIVATE
+        "-Wl,--exclude-libs,ALL")   # localize every symbol pulled from the linked static archives
 endif()
 
 add_executable(clllc_demo examples/clllc_demo.cpp)
@@ -224,3 +249,11 @@ add_executable(test_requirements tests/test_requirements.cpp)
 target_link_libraries(test_requirements PRIVATE kirchhoff Catch2::Catch2WithMain)
 target_compile_definitions(test_requirements PRIVATE KIRCHHOFF_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests")
 
+
+# Native consumer of libKirchhoffApi.so (mimics MKF's bridge: string header only, no MAS types) — a
+# regression guard that the isolated shared-API link keeps working. Built with the shared API.
+if (KIRCHHOFF_BUILD_SHARED_API AND NOT EMSCRIPTEN)
+    add_executable(api_consumer examples/api_consumer.cpp)
+    target_include_directories(api_consumer PRIVATE src "${PSMA_ROOT}/PEAS/src")
+    target_link_libraries(api_consumer PRIVATE KirchhoffApi)
+endif()
