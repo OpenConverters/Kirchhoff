@@ -366,3 +366,38 @@ TEST_CASE("analytical_dab rejects bad inputs", "[analytical][solver][dab]") {
     CHECK_THROWS(analytical_dab(400, {100}, {5}, {4}, 100000, 1e-3, 0,    0, 0, 30));   // Lr=0
     CHECK_THROWS(analytical_dab(400, {100}, {5}, {4}, 100000, 0,    5e-6, 0, 0, 30));   // Lm=0
 }
+
+// ─── Phase 5: resonant family (FHA) ─────────────────────────────────────────
+
+TEST_CASE("analytical_src FHA above resonance: sinusoidal tank, 2 windings", "[analytical][solver][src]") {
+    using Kirchhoff::analytical::analytical_src;
+    // Lr=40 uH, Cr=63.3 nF -> fr ~ 100 kHz; fsw=120 kHz (Lambda=1.2, above res); 400 V -> 48 V, 5 A, n=8.
+    const double Lr = 40e-6, Cr = 63.3e-9;
+    MAS::OperatingPoint op = analytical_src(400, {48}, {5}, {8}, 120000, Lr, Cr);
+    REQUIRE(op.get_excitations_per_winding().size() == 2);   // Primary + Secondary 0 (full-bridge)
+    // FHA tank current is a pure sinusoid: zero-mean, RMS = Ipk/sqrt(2).
+    CHECK(*processed_current(op, 0).get_average() == Catch::Approx(0.0).margin(0.2));
+    const double ipk = *op.get_excitations_per_winding()[0].get_current()->get_processed()->get_peak();
+    CHECK(ipk > 0.0);
+    CHECK(*processed_current(op, 0).get_rms() == Catch::Approx(ipk / std::sqrt(2.0)).margin(0.08 * ipk));
+    // Square bridge voltage +/- Vin: zero-mean.
+    CHECK(voltage_average(op, 0) == Catch::Approx(0.0).margin(2.0));
+}
+
+TEST_CASE("analytical_src center-tapped rectifier: 3 windings", "[analytical][solver][src]") {
+    using Kirchhoff::analytical::analytical_src;
+    using Kirchhoff::analytical::SrcRectifier;
+    MAS::OperatingPoint op = analytical_src(400, {48}, {5}, {8}, 120000, 40e-6, 63.3e-9, 1.0,
+                                            SrcRectifier::CENTER_TAPPED);
+    REQUIRE(op.get_excitations_per_winding().size() == 3);   // Primary + 2 half-windings
+    // Each half-winding only conducts its half-cycle => non-negative current.
+    CHECK(*processed_current(op, 1).get_negative_peak() >= -0.05);
+    CHECK(*processed_current(op, 2).get_negative_peak() >= -0.05);
+}
+
+TEST_CASE("analytical_src rejects below-resonance and bad tank", "[analytical][solver][src]") {
+    using Kirchhoff::analytical::analytical_src;
+    CHECK_THROWS(analytical_src(400, {48}, {5}, {8}, 80000, 40e-6, 63.3e-9));   // Lambda=0.8 < 1
+    CHECK_THROWS(analytical_src(400, {48}, {5}, {8}, 120000, 0, 63.3e-9));      // Lr=0
+    CHECK_THROWS(analytical_src(400, {48}, {5}, {8}, 120000, 40e-6, 0));        // Cr=0
+}

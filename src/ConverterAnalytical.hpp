@@ -242,5 +242,27 @@ MAS::OperatingPoint analytical_dab(double inputVoltage,
                                    double innerPhaseShiftD2Degrees = 0.0,
                                    double outerPhaseShiftD3Degrees = 0.0);
 
+// ── Phase 5: resonant converter family (FHA) ────────────────────────────────
+
+// Secondary rectifier topology for the resonant converters.
+enum class SrcRectifier { FULL_BRIDGE, CENTER_TAPPED };
+
+// Series Resonant Converter (SRC) via First-Harmonic Approximation (FHA), ABOVE-RESONANCE only
+// (Λ = fsw/fr ≥ 1; the capacitive/hard-switching region throws, matching MKF Phase 2). The series
+// Lr-Cr tank is driven by the bridge square wave; FHA reduces it to a sinusoidal divider:
+// Rac = (8/π²)·n²·Rload, Zin = √(Rac² + X²), X = ωLr − 1/(ωCr), ILr_pk = (4/π)·k_bridge·Vin / Zin,
+// φ = atan2(X, Rac). `bridgeVoltageFactor` k_bridge = 1.0 (full bridge) or 0.5 (half bridge). Pushes
+// Primary (sinusoidal tank current + square bridge voltage) + per output either one full-bridge
+// Secondary i or two center-tapped "Secondary i Half {1,2}" half-windings. Ported from MKF
+// Src.cpp:338. Throws on Λ < 1, non-positive fsw / Lr / Cr / turns ratio.
+MAS::OperatingPoint analytical_src(double inputVoltage,
+                                   const std::vector<double>& outputVoltages,
+                                   const std::vector<double>& outputCurrents,
+                                   const std::vector<double>& turnsRatios,
+                                   double switchingFrequency,
+                                   double resonantInductance, double resonantCapacitance,
+                                   double bridgeVoltageFactor = 1.0,
+                                   SrcRectifier rectifier = SrcRectifier::FULL_BRIDGE);
+
 } // namespace analytical
 } // namespace Kirchhoff

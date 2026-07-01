@@ -1569,5 +1569,121 @@ MAS::OperatingPoint analytical_dab(double inputVoltage,
     return operatingPoint;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 5: resonant converter family (First-Harmonic Approximation).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Ported from MKF converter_models/Src.cpp:338 (process_operating_point_for_input_voltage).
+MAS::OperatingPoint analytical_src(double inputVoltage,
+                                   const std::vector<double>& outputVoltages,
+                                   const std::vector<double>& outputCurrents,
+                                   const std::vector<double>& turnsRatios,
+                                   double switchingFrequency,
+                                   double resonantInductance, double resonantCapacitance,
+                                   double bridgeVoltageFactor, SrcRectifier rectifier) {
+    using Lbl = MAS::WaveformLabel;
+    if (outputVoltages.empty() || outputVoltages.size() != outputCurrents.size() ||
+        outputVoltages.size() != turnsRatios.size())
+        throw std::invalid_argument("analytical_src: outputVoltages/outputCurrents/turnsRatios "
+                                    "must be non-empty and equal length");
+    const double fsw = switchingFrequency;
+    if (fsw <= 0) throw std::invalid_argument("analytical_src: switching frequency must be > 0");
+    const double Lr = resonantInductance, Cr = resonantCapacitance;
+    if (Lr <= 0 || Cr <= 0) throw std::invalid_argument("analytical_src: resonant Lr/Cr must be > 0");
+    const double k_bridge = bridgeVoltageFactor;
+
+    const double fr = 1.0 / (2.0 * M_PI * std::sqrt(Lr * Cr));
+    const double Lambda = fsw / fr;
+    if (Lambda < 1.0)
+        throw std::invalid_argument("analytical_src: below-resonance operation (Lambda = " +
+                                    std::to_string(Lambda) + " < 1) not supported (capacitive / hard-switching)");
+
+    const size_t nOutputs = outputVoltages.size();
+    const double n_main = turnsRatios[0];
+    if (n_main <= 0) throw std::invalid_argument("analytical_src: turns ratio must be > 0");
+    const double Rload = outputVoltages[0] / outputCurrents[0];
+    const double Rac = (8.0 * n_main * n_main) / (M_PI * M_PI) * Rload;   // canonical FHA Rac
+
+    const double w = 2.0 * M_PI * fsw;
+    const double XLr = w * Lr;
+    const double XCr = 1.0 / (w * Cr);
+    const double X = XLr - XCr;                  // > 0 above resonance (inductive)
+    const double Zin = std::sqrt(Rac * Rac + X * X);
+
+    const double Vbridge_pk_fund = (4.0 / M_PI) * k_bridge * inputVoltage;
+    const double ILr_pk = Vbridge_pk_fund / Zin;
+    const double phi = std::atan2(X, Rac);
+    const double Vbridge_lvl = k_bridge * inputVoltage;
+
+    const int N = 256;
+    const int totalSamples = N + 1;              // closed period (last == first)
+    const double period = 1.0 / fsw;
+    const double dt = period / N;
+    std::vector<double> time_full(totalSamples), ILr_full(totalSamples), Vpri_full(totalSamples);
+    for (int k = 0; k < totalSamples; ++k) {
+        double t = k * dt;
+        double theta = w * t;
+        time_full[k] = t;
+        ILr_full[k] = ILr_pk * std::sin(theta - phi);
+        double thetaMod = std::fmod(theta, 2.0 * M_PI);
+        if (thetaMod < 0) thetaMod += 2.0 * M_PI;
+        Vpri_full[k] = (thetaMod < M_PI) ? +Vbridge_lvl : -Vbridge_lvl;
+    }
+
+    MAS::OperatingPoint operatingPoint;
+    // Primary: sinusoidal tank current, square bridge voltage.
+    {
+        MAS::Waveform iW; iW.set_ancillary_label(Lbl::CUSTOM); iW.set_data(ILr_full); iW.set_time(time_full);
+        MAS::Waveform vW; vW.set_ancillary_label(Lbl::CUSTOM); vW.set_data(Vpri_full); vW.set_time(time_full);
+        operatingPoint.get_mutable_excitations_per_winding().push_back(
+            WP::complete_excitation(iW, vW, fsw, "Primary"));
+    }
+
+    double total_g = 0.0;
+    for (size_t i = 0; i < nOutputs; ++i)
+        if (outputVoltages[i] > 0 && outputCurrents[i] > 0) total_g += outputCurrents[i] / outputVoltages[i];
+    if (total_g <= 0) total_g = 1.0;
+
+    for (size_t outputIdx = 0; outputIdx < nOutputs; ++outputIdx) {
+        double n_i = turnsRatios[outputIdx];
+        if (n_i <= 0) n_i = 1.0;
+        const double Vout_i = outputVoltages[outputIdx];
+        const double Iout_i = outputCurrents[outputIdx];
+        const double share = (Vout_i > 0 && Iout_i > 0) ? (Iout_i / Vout_i) / total_g
+                                                        : (outputIdx == 0 ? 1.0 : 0.0);
+
+        if (rectifier == SrcRectifier::CENTER_TAPPED) {
+            for (size_t halfIdx = 0; halfIdx < 2; ++halfIdx) {
+                std::vector<double> iSecData(totalSamples, 0.0), vSecData(totalSamples, 0.0);
+                for (int k = 0; k < totalSamples; ++k) {
+                    double iPri = ILr_full[k];
+                    double i_share = iPri * n_i * share;
+                    double i_half = (halfIdx == 0) ? std::max(0.0, +i_share) : std::max(0.0, -i_share);
+                    double v_half = (halfIdx == 0) ? ((iPri >= 0.0) ? +Vout_i : -Vout_i)
+                                                   : ((iPri >= 0.0) ? -Vout_i : +Vout_i);
+                    iSecData[k] = i_half;
+                    vSecData[k] = v_half;
+                }
+                MAS::Waveform iW; iW.set_ancillary_label(Lbl::CUSTOM); iW.set_data(iSecData); iW.set_time(time_full);
+                MAS::Waveform vW; vW.set_ancillary_label(Lbl::CUSTOM); vW.set_data(vSecData); vW.set_time(time_full);
+                operatingPoint.get_mutable_excitations_per_winding().push_back(
+                    WP::complete_excitation(iW, vW, fsw, "Secondary " + std::to_string(outputIdx) +
+                                                         " Half " + std::to_string(halfIdx + 1)));
+            }
+        } else {  // FULL_BRIDGE: single secondary winding sees the full sinusoid.
+            std::vector<double> iSecData(totalSamples, 0.0), vSecData(totalSamples, 0.0);
+            for (int k = 0; k < totalSamples; ++k) {
+                iSecData[k] = ILr_full[k] * n_i * share;
+                vSecData[k] = (ILr_full[k] >= 0.0) ? +Vout_i : -Vout_i;
+            }
+            MAS::Waveform iW; iW.set_ancillary_label(Lbl::CUSTOM); iW.set_data(iSecData); iW.set_time(time_full);
+            MAS::Waveform vW; vW.set_ancillary_label(Lbl::CUSTOM); vW.set_data(vSecData); vW.set_time(time_full);
+            operatingPoint.get_mutable_excitations_per_winding().push_back(
+                WP::complete_excitation(iW, vW, fsw, "Secondary " + std::to_string(outputIdx)));
+        }
+    }
+    return operatingPoint;
+}
+
 } // namespace analytical
 } // namespace Kirchhoff
