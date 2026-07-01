@@ -103,19 +103,24 @@ Two hard constraints make "compile KH *into* WebLibMKF's single wasm module" the
 
 So the clean architecture is **two wasm modules**: `webMKF` (WebLibMKF — magnetics) and **`webKirchhoff`**
 (`libKirchhoff.js` — converters *and* simulation), loaded side-by-side by the Wizard. Separate modules =
-separate `MAS` = no clash, and each is internally EH-consistent. `webKirchhoff` is built with
-`-fwasm-exceptions` (so it can link the in-browser ngspice) and `ENABLE_NGSPICE=ON`, pointing
-`NGSPICE_LIB`/`NGSPICE_INCLUDE_DIR` at a wasm libngspice (reuse WebLibMKF's
-`build/_deps/ngspice/install`). Build:
+separate `MAS` = no clash, and each is internally EH-consistent. **This is built and VERIFIED:**
+`webKirchhoff` compiled `-fwasm-exceptions` with `ENABLE_NGSPICE=ON` links the in-browser libngspice and
+**runs a real transient in Node** — `simulate_ngspice` returns `success=true` with ~97k points, and
+`extract_operating_point(tas,"ngspice")` rebuilds the winding currents from that sim
+(`tests/wasm/test_libkirchhoff_ngspice.mjs`). Build:
 
 ```
-emcmake cmake -S . -B build-wasm-kh -G Ninja -DKIRCHHOFF_BUILD_PYBIND=OFF \
+emcmake cmake -S . -B build-wasm-ng -G Ninja -DKIRCHHOFF_BUILD_PYBIND=OFF \
   -DENABLE_NGSPICE=ON \
   -DNGSPICE_LIB=<...>/ngspice/install/lib/libngspice.so.0.0.14 \
   -DNGSPICE_INCLUDE_DIR=<...>/ngspice/install/include
-cmake --build build-wasm-kh --target libKirchhoff
+cmake --build build-wasm-ng --target libKirchhoff
 ```
+
+Two link settings are essential (both in the CMake): `-fwasm-exceptions` + `-sSUPPORT_LONGJMP=wasm` to match
+the ngspice EH model, and `-sSTACK_SIZE=64MB -sINITIAL_MEMORY=128MB` — the emscripten default 64 KB stack
+overflows mid-simulation ("memory access out of bounds") without it (WebLibMKF's proven sizing).
 
 If instead a single module is mandated, KH must be an emscripten **SIDE_MODULE** (`dlopen`ed by WebLibMKF as
 MAIN_MODULE) — the wasm analogue of the hidden-symbol `.so` — or KH and MKF must be refactored to share one
-generated MAS. Both are larger efforts; the two-module split is recommended.
+generated MAS. Both are larger efforts; the two-module split is recommended and working.

@@ -163,8 +163,12 @@ if (EMSCRIPTEN)
     target_link_options(libKirchhoff PRIVATE
         "--bind"
         "-sMODULARIZE=1" "-sEXPORT_NAME=createKirchhoffModule"
-        "-sENVIRONMENT=web,worker" "-sALLOW_MEMORY_GROWTH=1"
-        "-sEXPORT_ES6=1" "-sSINGLE_FILE=1")
+        "-sENVIRONMENT=web,worker,node" "-sALLOW_MEMORY_GROWTH=1"
+        "-sEXPORT_ES6=1" "-sSINGLE_FILE=1"
+        # ngspice is stack- and memory-hungry: match WebLibMKF's proven sizing (the emscripten default
+        # 64 KB stack blows out mid-simulation -> "memory access out of bounds"). Harmless when ngspice
+        # is off, required when it is on.
+        "-sSTACK_SIZE=67108864" "-sINITIAL_MEMORY=134217728" "-sMAXIMUM_MEMORY=4gb")
 endif()
 
 # --- libKirchhoffApi: a native SHARED library exposing ONLY Kirchhoff::api (the string/JSON facade) with
