@@ -3,7 +3,7 @@
 //         -DENABLE_NGSPICE=OFF -DKIRCHHOFF_BUILD_PYBIND=OFF && cmake --build build-wasm-kh --target libKirchhoff
 // Run:    node tests/wasm/test_libkirchhoff.mjs   (expects build-wasm-kh/kirchhoff.js next to build dir)
 // Exercises design_tas / diagnostics / extract_operating_point / main_magnetic_inputs /
-// extra_components_inputs / generate_ngspice_circuit / process_converter + the Exception-string path.
+// generate_ngspice_circuit / process_converter + the Exception-string path.
 
 import createKirchhoffModule from '../../build-wasm-kh/kirchhoff.js';
 
@@ -39,10 +39,6 @@ check("extract op has 3 windings", op.excitationsPerWinding?.length === 3);
 const mi = JSON.parse(M.main_magnetic_inputs(tas));
 check("main_magnetic_inputs has designRequirements", !!mi.designRequirements);
 
-// 5. extra_components_inputs
-const extra = JSON.parse(M.extra_components_inputs(tas));
-check("extra_components has Lr + caps", extra.some(e => e.name === "Lr") && extra.some(e => e.componentType === "capacitor"));
-
 // 6. generate_ngspice_circuit
 const deck = M.generate_ngspice_circuit(tas, JSON.stringify({ origin: "REQUIREMENTS" }));
 check("ngspice deck is a netlist", deck.includes(".tran") || deck.includes(".param") || deck.includes("\n"));
@@ -50,8 +46,8 @@ check("deck not an Exception", !deck.startsWith("Exception"));
 
 // 7. process_converter one-shot
 const pc = JSON.parse(M.process_converter("llc", spec, "analytical"));
-check("process_converter has inputs+diagnostics+extraComponents+tas",
-      !!pc.inputs && !!pc.diagnostics && Array.isArray(pc.extraComponents) && !!pc.tas);
+check("process_converter has inputs+diagnostics+tas",
+      !!pc.inputs && !!pc.diagnostics && !!pc.tas);
 
 // 8. error path surfaces as Exception string
 const bad = M.design_tas("not_a_topology", spec);

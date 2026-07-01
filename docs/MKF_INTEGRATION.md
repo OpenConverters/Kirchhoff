@@ -12,62 +12,36 @@ which already carries every magnetic's `MAS::Inputs` and the wired circuit.
 | `<Topo>::simulate_and_extract_operating_points()` → `vector<OperatingPoint>` | `Kirchhoff::extract_operating_point(tas, engine, magneticName)` → `MAS::OperatingPoint` — `engine` = `ANALYTICAL` or `NGSPICE` |
 | `<Topo>::simulate_and_extract_topology_waveforms()` | `Kirchhoff::topology_waveforms(tas)` → `vector<MagneticExtract>` (every magnetic + its `MAS::Inputs`, `isMain` flagged) |
 | `<Topo>::generate_ngspice_circuit()` | `Kirchhoff::tas_to_ngspice(tas, fidelity)` (generic) |
-| `<Topo>::get_extra_components_inputs(mode, magnetic)` | `Kirchhoff::extra_components_inputs(tas)` (see below) |
+| `<Topo>::get_extra_components_inputs(mode, magnetic)` | **removed** — obsolete in Heaviside (the whole TAS already carries every extra component as its own stage; see below) |
 | `<Topo>::process_design_requirements()` (the adviser's `DesignRequirements`) | `Kirchhoff::main_magnetic_inputs(tas)` → `MAS::Inputs` (the main magnetic) |
 | the `<name>Diagnostics` object WebLibMKF serialized | `Kirchhoff::diagnostics(tas)` → JSON |
 | `Advanced<Name>` reference-design classes | `design_<topo>(spec)` already honors the `desired*` PEAS pins (see "Advanced path") |
 
-`ConverterExtract.hpp` is the single header for the extract/diagnostics/shim surface.
+`ConverterExtract.hpp` is the single header for the extract/diagnostics surface.
 
-## The two MKF-side shims the migration plan calls for
+## No more `get_extra_components_inputs`
 
-The user's plan: *"two methods in MKF that get this TAS and return the design requirements for a MAS and the
-get_extra_components_inputs, to maintain the legacy."* Because KH owns the TAS format and the KH↔MKF
-boundary is JSON (KH's CAS submodule is a converter, not a generated-types lib), the TAS walk lives once in
-KH; the MKF methods are **thin deserializing wrappers** — no duplicate TAS walk, no re-derived physics.
-They require MKF to link `kirchhoff` (one `target_link_libraries(MKF ... kirchhoff)` line) OR to receive the
-JSON that KH's functions already produce.
+In Heaviside the converter step returns the **whole TAS**, and every extra component the converter needs
+(output inductor, resonant Lr, resonant Cr, output Co, snubbers) is already present as its own
+`topology.stages[].circuit.components[]` entry with its `data.inputs`. A separate "extra components"
+extraction is therefore redundant and has been removed. To reach them:
+
+- extra **magnetics** (Lr, output inductor, CM/DM chokes): `Kirchhoff::topology_waveforms(tas)` returns
+  every magnetic with its `MAS::Inputs`; the non-`isMain` ones are the extras.
+- extra **capacitors** (Cr, Co): walk `topology.stages[].circuit.components[]` for `data.capacitor` and
+  read `data.inputs.designRequirements` (`capacitance` / `ratedVoltage` / `role`).
+
+## The one MKF-side shim the migration needs
+
+`Kirchhoff::main_magnetic_inputs(tas)` gives the adviser's `MAS::Inputs`. Because the KH↔MKF boundary is
+JSON (same MAS schema), MKF's wrapper is a one-liner re-parse into MKF's own `Inputs`:
 
 ```cpp
-// MKF-side, e.g. src/converter_models/KirchhoffBridge.cpp  (MKF's own MAS/CAS generated types)
-#include "Kirchhoff.hpp"   // if MKF links kirchhoff; else accept the JSON these produce
-
-namespace OpenMagnetics {
-
-// (1) TAS -> the DesignRequirements-bearing Inputs the MagneticAdviser designs around.
+// MKF-side (MKF's own generated Inputs). MKF FetchContents kirchhoff (see below), so it links KH directly.
 Inputs design_requirements_from_tas(const nlohmann::json& tas) {
-    // KH extracts the main magnetic's MAS::Inputs; re-parse into MKF's Inputs (same JSON schema).
-    nlohmann::json mainInputs = Kirchhoff::main_magnetic_inputs(tas);  // MAS::Inputs -> json
-    return mainInputs.get<Inputs>();
+    return nlohmann::json(Kirchhoff::main_magnetic_inputs(tas)).get<Inputs>();
 }
-
-// (2) TAS -> the legacy get_extra_components_inputs vector<variant<Inputs, CAS::Inputs>>.
-std::vector<std::variant<Inputs, CAS::Inputs>> extra_components_inputs_from_tas(const nlohmann::json& tas) {
-    std::vector<std::variant<Inputs, CAS::Inputs>> out;
-    for (const auto& e : Kirchhoff::extra_components_inputs(tas)) {   // tagged JSON array
-        const std::string kind = e.at("componentType");
-        if (kind == "magnetic")       out.emplace_back(e.at("inputs").get<Inputs>());
-        else if (kind == "capacitor") out.emplace_back(e.at("inputs").get<CAS::Inputs>());
-    }
-    return out;
-}
-
-}  // namespace OpenMagnetics
 ```
-
-`Kirchhoff::extra_components_inputs(tas)` returns:
-
-```json
-[ { "componentType": "magnetic",  "name": "Lr",  "inputs": { <MAS::Inputs json> } },
-  { "componentType": "capacitor", "name": "Cr",  "inputs": { "designRequirements": { "capacitance": {"nominal": …}, "ratedVoltage": …, "role": "resonant" } } } ]
-```
-
-**Known gap (surfaced, not hidden):** capacitor entries carry the TAS `designRequirements`
-(capacitance / ratedVoltage / role) but *not* per-operating-point cap voltage/current waveforms — the KH
-TAS does not embed those today (MKF's `get_extra_components_inputs` computed them from stored
-`extraCapVoltageWaveforms`). If the Wizard needs cap operating points, add per-OP cap excitations to the
-TAS cap components in `build_<topo>_tas` (they can come from `extract_operating_point`'s simulated node
-voltages), then extend `extra_components_inputs` to emit them.
 
 ## Advanced path
 
@@ -89,10 +63,10 @@ pins them.
 exposing the string-in/string-out API the Wizard's `taskQueue.js` expects:
 
 - `design_tas(topology, spec)` — the 24-row topology dispatcher → TAS JSON
-- `process_converter(topology, spec, engine)` — one-shot → `{inputs, operatingPoint, diagnostics, extraComponents, tas}`
+- `process_converter(topology, spec, engine)` — one-shot → `{inputs, operatingPoint, diagnostics, tas}`
 - `generate_ngspice_circuit(tas, fidelity)` / `generate_ltspice_circuit(tas, fidelity)` → deck
 - `extract_operating_point(tas, engine, magneticName)` / `topology_waveforms(tas)` / `diagnostics(tas)` /
-  `main_magnetic_inputs(tas)` / `extra_components_inputs(tas)` → JSON
+  `main_magnetic_inputs(tas)` → JSON
 
 Errors surface as a returned string starting `"Exception: "` (the JS side already checks that). The browser
 build has `ENABLE_NGSPICE=OFF`; `extract_operating_point(..., "ngspice")` throws there until the

@@ -54,28 +54,14 @@ std::vector<MagneticExtract> topology_waveforms(const nlohmann::json& tas);
 MAS::OperatingPoint extract_operating_point(const nlohmann::json& tas, ExtractEngine engine,
                                             const std::string& magneticName = "");
 
-// --- Legacy-compatibility shims (consumed by MKF-side wrappers) ------------------------------------
-// The user's migration plan: "two methods in MKF that get this TAS and return the design requirements for
-// a MAS and the get_extra_components_inputs, to maintain the legacy." Because KH owns the TAS format and
-// the KH<->MKF boundary is JSON (KH's CAS submodule is a converter, not a generated-types lib), the TAS
-// walk lives HERE (single authority, no duplicate walk in MKF); the two MKF methods are thin wrappers that
-// call these and deserialize into MKF's own types.
-
 // The MAS::Inputs the converter is designed around — the main magnetic (transformer / single inductor).
 // This IS "the design requirements for a MAS": a full MAS::Inputs (designRequirements + operatingPoints)
 // ready to hand to MKF's MagneticAdviser. Equivalent to the isMain entry of topology_waveforms(tas).
+// (There is deliberately no extra_components_inputs: in Heaviside the consumer receives the whole TAS,
+// which already carries every extra component — output inductor, resonant Lr/Cr, output Co — as its own
+// stage component, so a separate "extra components" extraction is redundant. Use topology_waveforms(tas)
+// for the non-main magnetics and walk the TAS caps directly if needed.)
 MAS::Inputs main_magnetic_inputs(const nlohmann::json& tas);
-
-// The legacy get_extra_components_inputs content: every NON-main component the converter needs designed
-// besides the main magnetic — the extra magnetics (output inductor, resonant Lr, CM choke, …) and the
-// capacitors (resonant Cr, output Co, …). Returned as a tagged JSON array so an MKF-side wrapper can
-// deserialize each element into the legacy std::variant<Inputs, CAS::Inputs>:
-//   [ { "componentType": "magnetic",   "inputs": <MAS::Inputs json> },
-//     { "componentType": "capacitor",  "inputs": <CAS::Inputs-shaped designRequirements json> }, ... ]
-// (The magnetic entries carry full per-winding operating points; the capacitor entries carry the TAS's
-// designRequirements — capacitance/ratedVoltage/role — but not per-OP cap waveforms, which the TAS does
-// not currently embed. Documented gap, surfaced not hidden.)
-nlohmann::json extra_components_inputs(const nlohmann::json& tas);
 
 // Per-topology design diagnostics, derived from the assembled TAS. Replaces MKF's per-model
 // "<name>Diagnostics" objects (Flyback::get_last_*, Llc::get_computed_*, …) with the topology-AGNOSTIC

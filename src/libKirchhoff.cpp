@@ -123,10 +123,6 @@ std::string main_magnetic_inputs(std::string tas) {
     });
 }
 
-std::string extra_components_inputs(std::string tas) {
-    return guarded([&] { return Kirchhoff::extra_components_inputs(json::parse(tas)).dump(); });
-}
-
 // ---- the one-shot the Wizard calls: spec -> everything MKF's calculate_*/simulate_* returned -----------
 // Mirrors WebLibMKF's process_converter(topology, json, useNgspice): assemble the TAS, then return the
 // adviser-ready main-magnetic Inputs, the diagnostics, the extra components, and the TAS itself. `engine`
@@ -139,12 +135,13 @@ std::string process_converter(std::string topology, std::string spec, std::strin
         MAS::OperatingPoint op = Kirchhoff::extract_operating_point(tas, engine_from(engine));
         json inputsJson = mainInputs;
         json opJson = op;
+        // The full TAS is returned, so every extra component (output inductor, resonant Lr/Cr, output Co)
+        // is already present as its own stage — no separate extra-components extraction needed in HS.
         return json{
             {"topology", topology},
             {"inputs", std::move(inputsJson)},
             {"operatingPoint", std::move(opJson)},
             {"diagnostics", Kirchhoff::diagnostics(tas)},
-            {"extraComponents", Kirchhoff::extra_components_inputs(tas)},
             {"tas", std::move(tas)},
         }.dump();
     });
@@ -164,7 +161,6 @@ EMSCRIPTEN_BINDINGS(kirchhoff) {
     em::function("topology_waveforms", &topology_waveforms);
     em::function("diagnostics", &diagnostics);
     em::function("main_magnetic_inputs", &main_magnetic_inputs);
-    em::function("extra_components_inputs", &extra_components_inputs);
     // the one-shot Wizard entry point
     em::function("process_converter", &process_converter);
 }
