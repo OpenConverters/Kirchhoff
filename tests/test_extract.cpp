@@ -134,7 +134,41 @@ TEST_CASE("extract: bad TAS throws (no silent fallback)", "[extract][errors]") {
     json empty = json::object();
     CHECK_THROWS(Kirchhoff::topology_waveforms(empty));
     CHECK_THROWS(Kirchhoff::extract_operating_point(empty, Kirchhoff::ExtractEngine::ANALYTICAL));
+    CHECK_THROWS(Kirchhoff::main_magnetic_inputs(empty));
+    CHECK_THROWS(Kirchhoff::extra_components_inputs(empty));
     // named magnetic that doesn't exist
     json tas = Kirchhoff::build_buck_tas(Kirchhoff::design_buck(spec_for(24, 12, 60, 100000)));
     CHECK_THROWS(Kirchhoff::extract_operating_point(tas, Kirchhoff::ExtractEngine::ANALYTICAL, "no_such_magnetic"));
+}
+
+TEST_CASE("extract: legacy shims — main_magnetic_inputs + extra_components_inputs", "[extract][legacy]") {
+    json tas = Kirchhoff::build_llc_tas(Kirchhoff::design_llc(spec_for(400, 12, 120, 100000)));
+
+    // main_magnetic_inputs = the transformer (3-winding) MAS::Inputs the adviser designs around.
+    MAS::Inputs main = Kirchhoff::main_magnetic_inputs(tas);
+    REQUIRE(main.get_operating_points().size() >= 1);
+    CHECK(main.get_operating_points().at(0).get_excitations_per_winding().size() == 3);
+
+    // extra_components_inputs = every non-main component: the resonant Lr magnetic + the capacitors.
+    json extras = Kirchhoff::extra_components_inputs(tas);
+    REQUIRE(extras.is_array());
+    size_t magnetics = 0, capacitors = 0;
+    bool resonantCap = false, lrMagnetic = false;
+    for (const auto& e : extras) {
+        const std::string kind = e.at("componentType");
+        REQUIRE(e.at("inputs").contains("designRequirements"));
+        if (kind == "magnetic") {
+            ++magnetics;
+            if (e.value("name", std::string{}) == "Lr") lrMagnetic = true;
+        } else if (kind == "capacitor") {
+            ++capacitors;
+            if (e.at("inputs").at("designRequirements").value("role", std::string{}) == "resonant") resonantCap = true;
+        }
+    }
+    CHECK(magnetics == 1);        // the resonant inductor Lr
+    CHECK(lrMagnetic);
+    CHECK(capacitors >= 1);       // at least the resonant cap Cr
+    CHECK(resonantCap);
+    // the main transformer must NOT appear among the extras
+    for (const auto& e : extras) CHECK(e.value("name", std::string{}) != "T1");
 }

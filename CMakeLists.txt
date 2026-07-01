@@ -7,6 +7,15 @@ if (NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 endif()
 
+# Emscripten disables C++ exception CATCHING by default (throws still abort). libKirchhoff's guarded()
+# wrapper must actually catch, and it must be consistent across every TU (this lib + the submodule deps),
+# so enable it globally for the WASM build at both compile and link. Applied before add_subdirectory so
+# the submodule targets pick it up too.
+if (EMSCRIPTEN)
+    add_compile_options(-fexceptions)
+    add_link_options(-fexceptions)
+endif()
+
 # PSMA-org sibling repos (PEAS/RAS/CAS/SAS/MAS/CIAS) are git submodules under deps/.
 # After cloning Kirchhoff: `git submodule update --init` to fetch them.
 set(PSMA_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/deps" CACHE PATH "Directory holding the PSMA-org sibling repos (submodules)")
@@ -138,6 +147,21 @@ if (KIRCHHOFF_BUILD_PYBIND AND NOT EMSCRIPTEN)
              COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_tas_schema.py)
     set_tests_properties(tas_schema_valid PROPERTIES
         ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR};KIRCHHOFF_PSMA_ROOT=${PSMA_ROOT}")
+endif()
+
+# --- libKirchhoff: the Emscripten/embind WASM module (the WebLibMKF converter-surface replacement) ---
+# Built only under emscripten (emcmake cmake ...). Mirrors MKF's WebLibMKF string API so the OpenMagnetics
+# Wizard can drive KH. ngspice is OFF in the browser build (the analytical/deck/extract-analytical surface
+# needs no simulator); the ngspice-in-wasm path is a separate integration (P5), so extract(NGSPICE) throws.
+if (EMSCRIPTEN)
+    add_executable(libKirchhoff src/libKirchhoff.cpp)
+    target_link_libraries(libKirchhoff PRIVATE kirchhoff)
+    set_target_properties(libKirchhoff PROPERTIES OUTPUT_NAME "kirchhoff")
+    target_link_options(libKirchhoff PRIVATE
+        "--bind"
+        "-sMODULARIZE=1" "-sEXPORT_NAME=createKirchhoffModule"
+        "-sENVIRONMENT=web,worker" "-sALLOW_MEMORY_GROWTH=1"
+        "-sEXPORT_ES6=1" "-sSINGLE_FILE=1")
 endif()
 
 add_executable(clllc_demo examples/clllc_demo.cpp)

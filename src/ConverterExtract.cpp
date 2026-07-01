@@ -234,6 +234,36 @@ std::vector<RawCapacitor> raw_capacitors(const json& tas) {
 
 }  // namespace
 
+MAS::Inputs main_magnetic_inputs(const json& tas) {
+    auto mags = raw_magnetics(tas);
+    if (mags.empty())
+        throw std::runtime_error("main_magnetic_inputs: TAS has no magnetic components");
+    return mags[main_index(mags)].inputs->get<MAS::Inputs>();
+}
+
+json extra_components_inputs(const json& tas) {
+    auto mags = raw_magnetics(tas);
+    if (mags.empty())
+        throw std::runtime_error("extra_components_inputs: TAS has no magnetic components");
+    const size_t mi = main_index(mags);
+    json out = json::array();
+    // every NON-main magnetic (output inductor, resonant Lr, CM choke, ...) as a full MAS::Inputs
+    for (size_t i = 0; i < mags.size(); ++i) {
+        if (i == mi) continue;
+        out.push_back(json{{"componentType", "magnetic"}, {"name", mags[i].name}, {"inputs", *mags[i].inputs}});
+    }
+    // every capacitor as its (CAS::Inputs-shaped) designRequirements
+    for (const auto& c : raw_capacitors(tas)) {
+        json dr = json::object();
+        if (c.capacitance)  dr["capacitance"]["nominal"] = *c.capacitance;
+        if (c.ratedVoltage) dr["ratedVoltage"] = *c.ratedVoltage;
+        if (!c.role.empty()) dr["role"] = c.role;
+        out.push_back(json{{"componentType", "capacitor"}, {"name", c.name},
+                           {"inputs", json{{"designRequirements", std::move(dr)}}}});
+    }
+    return out;
+}
+
 json diagnostics(const json& tas) {
     auto mags = raw_magnetics(tas);
     if (mags.empty())
