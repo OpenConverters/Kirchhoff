@@ -202,17 +202,26 @@ TEST_CASE("analytical_weinberg boost regime: 6 windings, input-current magnitude
     REQUIRE(op.get_excitations_per_winding().size() == 6);
     const double M = vout / vin;                              // 3
     const double D = 1.0 - 1.0 / (2.0 * n * M);               // 0.8333
-    const double overlap = 2.0 * D - 1.0;                     // 0.6667
     const double inputCurrent = iout * M;                     // 6  (Iin = Iout*M, power balance)
-    const double deltaIL1 = vin * std::max(overlap, D) / (L1 * fsw);
-    const double iL1_high = inputCurrent + deltaIL1 / 2.0;
-    // L1 windings [0,1] and T1 primary halves [2,3] carry the SAME input-inductor current (series path):
-    // avg ~ Iin/2, peak ~ iL1_high — verified identical against the ngspice deck.
+    // All four primary-side windings are half-period PULSES of peak ~Iin, avg magnitude Iin/2.
     for (size_t w = 0; w < 4; ++w) {
-        CHECK(*processed_current(op, w).get_average() == Catch::Approx(inputCurrent / 2.0).margin(0.5));
-        CHECK(*processed_current(op, w).get_peak() == Catch::Approx(iL1_high).margin(0.5));
+        CHECK(std::abs(*processed_current(op, w).get_average()) == Catch::Approx(inputCurrent / 2.0).margin(0.6));
+        CHECK(*processed_current(op, w).get_peak() == Catch::Approx(inputCurrent).margin(0.6));
     }
-    CHECK(*processed_current(op, 4).get_peak() == Catch::Approx(iL1_high * n).margin(0.5));  // secondary ~ primary*n
+    // L1's two windings share sense (both +Iin/2); the T1 push-pull halves are opposite-wound, so their
+    // DC offsets take OPPOSITE sign — net transformer DC-MMF ~0 (both primary halves AND both secondary
+    // halves cancel), as measured on the ngspice deck. This is the physical push-pull flux balance.
+    CHECK(*processed_current(op, 0).get_average() > 0.0);                                   // L1a +
+    CHECK(*processed_current(op, 1).get_average() > 0.0);                                   // L1b +
+    CHECK(*processed_current(op, 2).get_average() * *processed_current(op, 3).get_average() < 0.0);  // T1 pri opposite
+    CHECK(*processed_current(op, 4).get_average() * *processed_current(op, 5).get_average() < 0.0);  // T1 sec opposite
+    CHECK((*processed_current(op, 2).get_average() + *processed_current(op, 3).get_average())
+          == Catch::Approx(0.0).margin(0.2));                                              // net primary DC-MMF ~0
+    CHECK((*processed_current(op, 4).get_average() + *processed_current(op, 5).get_average())
+          == Catch::Approx(0.0).margin(0.2));                                              // net secondary DC-MMF ~0
+    // Secondary halves conduct only during single-conduction (1-D)*T: |avg| ~ Iin*n*(1-D).
+    CHECK(std::abs(*processed_current(op, 4).get_average())
+          == Catch::Approx(inputCurrent * n * (1.0 - D)).margin(0.3));
     CHECK(voltage_average(op, 2) == Catch::Approx(0.0).margin(0.5));   // T1 primary bipolar rectangular
 }
 
