@@ -221,6 +221,20 @@ json build_ahb_tas(const AhbDesign& d) {
         c["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::node_snubber_cap(d.config);
         c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) * 3;
         return c; };
+    // Series-RC damper across the transformer primary. The AHB transformer is tightly coupled (K=0.9999),
+    // so its leakage (~Lm(1-K^2)) is tiny and rings (a few MHz) against the switch Coss at every dead-time
+    // commutation; with ideal zero-DCR windings nothing damps it and the transient timestep collapses
+    // (ngspice "Timestep too small"). This RC damps that ring — R ~ tank Z0 = sqrt(Lleak/Coss) — while the
+    // series C is high-impedance at fsw so it barely loads the switching fundamental (loss ~ mW, unlike a
+    // series winding DCR whose copper loss would drop the efficiency). NOT a dV/dt node snubber -> the
+    // "dmp" name keeps it out of the fidelity snubber strip (Csn/Rsn/Csw), so it survives in the real deck.
+    auto dampR = [&]() { json c; c["resistor"] = json::object();
+        auto& dr = c["inputs"]["designRequirements"]; dr["deviceType"] = "resistor";
+        dr["resistance"]["nominal"] = cfg::get(d.config, "leakDampR", 10.0);
+        dr["powerRating"] = 1.0; dr["role"] = "damping"; return c; };
+    auto dampC = [&]() { json c; c["capacitor"] = json::object();
+        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::get(d.config, "leakDampC", 1.0e-9);
+        c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) * 3; return c; };
 
     // CURRENT_DOUBLER second output inductor + loop-breaker.
     auto outInductor2 = [&]() { json m; m["magnetic"] = json::object();
@@ -239,13 +253,14 @@ json build_ahb_tas(const AhbDesign& d) {
     // Half bridge + DC-blocking cap + transformer primary — identical for every rectifier variant.
     std::vector<json> comps{
         comp("Q1", mosfetReq), comp("Q2", mosfetReq), comp("D1", diode()), comp("D2", diode()),
-        comp("Cb", cb), comp("T1", xfmr), comp("Csw", snub())};
+        comp("Cb", cb), comp("T1", xfmr), comp("Csw", snub()), comp("Rdmp", dampR()), comp("Cdmp", dampC())};
     std::vector<json> conns{
         conn("vin_net",  {pin("Q1", "drain"), pin("D1", "cathode"), pin("Cb", "1"), prt("vin")}),
         conn("sw_net",   {pin("Q1", "source"), pin("Q2", "drain"),
                           pin("D1", "anode"), pin("D2", "cathode"),
-                          pin("T1", "primary_end"), pin("Csw", "1")}),
-        conn("cb_mid",   {pin("Cb", "2"), pin("T1", "primary_start")})};
+                          pin("T1", "primary_end"), pin("Csw", "1"), pin("Cdmp", "2")}),
+        conn("cb_mid",   {pin("Cb", "2"), pin("T1", "primary_start"), pin("Rdmp", "1")}),
+        conn("dmp_mid",  {pin("Rdmp", "2"), pin("Cdmp", "1")})};
     std::vector<json> gndEps{pin("Q2", "source"), pin("D2", "anode"), pin("Csw", "2")};
 
     switch (d.rectifierType) {
