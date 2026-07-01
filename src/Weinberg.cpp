@@ -2,6 +2,8 @@
 #include "DimensionJson.hpp"
 #include "KirchhoffConfig.hpp"
 #include "ComponentRequirements.hpp"
+#include "ConverterAnalytical.hpp"
+#include <stdexcept>
 #include <cmath>
 #include <algorithm>
 #include <vector>
@@ -149,13 +151,24 @@ json build_weinberg_tas(const WeinbergDesign& d) {
     // Input coupled inductor L1 (1:1, two windings), K=0.999. winding0=L1a (vin->l1a_mid),
     // secondary1=L1b (vin->l1b_mid). Both dots at vin (primary_start/secondary1_start).
     // turnsRatios=[1] -> 2 physical windings -> 2 excitations (both carry Iin/2, DC-biased).
+    // Both magnetics' excitations come from the SINGLE FHA source — analytical_weinberg emits all SIX
+    // windings in order [L1a, L1b, T1_pri_a, T1_pri_b, T1_sec_a, T1_sec_b]; slice them into the two
+    // magnetics. This CORRECTS the inline model, which undersized L1 by ~40% on peak current and used a
+    // zero DC offset on the DC-biased current-fed windings — verified against the ngspice deck (the
+    // input-inductor and push-pull-primary windings measure identical DC-biased current, and the
+    // secondary windings carry a real DC bias, none of which the inline zero-offset model captured).
+    namespace AN = Kirchhoff::analytical;
+    const std::vector<json> wAll = AN::excitations_processed(AN::analytical_weinberg(
+        Vin, Vout, Iout, fsw, d.inputInductance, n, 0.0, d.efficiency));
+    if (wAll.size() != 6)
+        throw std::runtime_error("build_weinberg_tas: analytical_weinberg must emit 6 windings (L1 x2 + T1 x4), got "
+                                 + std::to_string(wAll.size()));
+    const std::vector<json> wL1(wAll.begin(), wAll.begin() + 2);
+    const std::vector<json> wT1(wAll.begin() + 2, wAll.end());
+
     json l1; l1["magnetic"] = json::object();
     l1["inputs"] = req::magnetic_inputs(d.inputInductance, 0.2, {1.0}, {"primary", "primary"},
-        std::nullopt, 25.0, {
-            req::winding_excitation("triangular", fsw, IpkL1, IrmsL1, IL1avg, dIL1, dEff,
-                                    vL1Pk, vL1Rms, 0.0, vL1PkPk),
-            req::winding_excitation("triangular", fsw, IpkL1, IrmsL1, IL1avg, dIL1, dEff,
-                                    vL1Pk, vL1Rms, 0.0, vL1PkPk)});
+        std::nullopt, 25.0, wL1);
     { const double kCpl = cfg::get(d.config, "transformerCoupling", 0.999);
       l1["inputs"]["designRequirements"]["leakageInductance"] =
           json::array({ json{{"nominal", (1.0 - kCpl*kCpl) * d.inputInductance}} }); }
@@ -166,15 +179,7 @@ json build_weinberg_tas(const WeinbergDesign& d) {
     // isolationVoltage -> nullopt.
     json t1; t1["magnetic"] = json::object();
     t1["inputs"] = req::magnetic_inputs(d.magnetizingInductance, 0.1, {1.0, n, n},
-        {"primary", "primary", "secondary", "secondary"}, std::nullopt, 25.0, {
-            req::winding_excitation("pushPullPrimary",   fsw, IpkPri, IrmsPri, 0.0, dIL1, D,
-                                    vPriPk, vPriRms, 0.0, vPriPkPk),
-            req::winding_excitation("pushPullPrimary",   fsw, IpkPri, IrmsPri, 0.0, dIL1, D,
-                                    vPriPk, vPriRms, 0.0, vPriPkPk),
-            req::winding_excitation("pushPullSecondary", fsw, IpkSec, IrmsSec, 0.0, Iout, D,
-                                    vSecPk, vSecRms, 0.0, vSecPkPk),
-            req::winding_excitation("pushPullSecondary", fsw, IpkSec, IrmsSec, 0.0, Iout, D,
-                                    vSecPk, vSecRms, 0.0, vSecPkPk)});
+        {"primary", "primary", "secondary", "secondary"}, std::nullopt, 25.0, wT1);
 
     json cout; cout["capacitor"] = json::object();
     cout["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;

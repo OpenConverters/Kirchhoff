@@ -678,7 +678,10 @@ MAS::OperatingPoint analytical_weinberg(double inputVoltage, double outputVoltag
     double M = (regime == 2) ? weinberg_conversion_ratio_boost(dutyCycle, turnsRatio)
                              : weinberg_conversion_ratio_buck(dutyCycle, turnsRatio);
 
-    double inputCurrent = (M > 0) ? outputCurrent / (efficiency * M) : 0.0;
+    // Input current from power balance: Vin·Iin = Vout·Iout/η, and M = Vout/Vin (conversion ratio), so
+    // Iin = Iout·M/η. (The earlier Iout/(η·M) was inverted — ~M² too small; confirmed vs the ngspice deck,
+    // which draws Iin = Pin/Vin ≈ Iout·M and splits it Iin/2 per L1 / push-pull-primary winding.)
+    double inputCurrent = (M > 0) ? outputCurrent * M / efficiency : 0.0;
     double inductanceL1 = inductance;
     double deltaIL1 = inductanceL1 > 0 ? (inputVoltage * std::max(overlap, dutyCycle)) / (inductanceL1 * switchingFrequency) : 0.0;
 
@@ -700,28 +703,37 @@ MAS::OperatingPoint analytical_weinberg(double inputVoltage, double outputVoltag
         iTime = {0.0, tOn, tOn, period};
     }
 
-    MAS::OperatingPoint operatingPoint;
-    {
-        MAS::Waveform iPri;
-        iPri.set_ancillary_label(Lbl::CUSTOM);
-        iPri.set_data(iData);
-        iPri.set_time(iTime);
-        MAS::Waveform vPri = WP::create_waveform(Lbl::BIPOLAR_RECTANGULAR, 2.0 * inputVoltage, switchingFrequency, 0.5, 0.0, 0);
-        operatingPoint.get_mutable_excitations_per_winding().push_back(
-            WP::complete_excitation(iPri, vPri, switchingFrequency, "Primary"));
+    // Weinberg carries TWO magnetics; this solver emits all SIX windings in a fixed order so the build
+    // can slice them: [0,1] = input coupled inductor L1 (two 1:1 halves), [2,3] = T1 push-pull primary
+    // halves, [4,5] = T1 push-pull secondary halves. The current-fed front end puts the SAME input-
+    // inductor half current (DC-biased Iin/2) through both L1 windings AND both T1 primary halves (they
+    // are in series) — confirmed against the ngspice deck (L1 and T1-primary windings measure identical
+    // avg/rms/peak). The secondary halves carry the reflected current (·turnsRatio) at ±Vout.
+    const double nInv = (turnsRatio > 1e-9) ? (1.0 / turnsRatio) : 0.0;
+    // L1 input inductor voltage: charges at +Vin for the effective fraction dEff, resets at −vL1Reset
+    // (volt-second balanced). dEff = max(2D−1, D) (the boost-overlap charge fraction).
+    const double dEff = std::max(2.0 * dutyCycle - 1.0, dutyCycle);
+    const double vL1Reset = (dEff < 1.0) ? inputVoltage * dEff / (1.0 - dEff) : inputVoltage;
+    std::vector<double> iSecData;
+    iSecData.reserve(iData.size());
+    for (double v : iData) iSecData.push_back(v * turnsRatio);
+    auto customCurrent = [&](const std::vector<double>& data) {
+        MAS::Waveform w; w.set_ancillary_label(Lbl::CUSTOM); w.set_data(data); w.set_time(iTime); return w; };
 
-        const double nInv = (turnsRatio > 1e-9) ? (1.0 / turnsRatio) : 0.0;
-        MAS::Waveform iSec;
-        std::vector<double> iSecData;
-        iSecData.reserve(iData.size());
-        for (double v : iData) iSecData.push_back(v * turnsRatio);
-        iSec.set_ancillary_label(Lbl::CUSTOM);
-        iSec.set_data(iSecData);
-        iSec.set_time(iTime);
-        MAS::Waveform vSec = WP::create_waveform(Lbl::BIPOLAR_RECTANGULAR, 2.0 * inputVoltage * nInv, switchingFrequency, 0.5, 0.0, 0);
-        operatingPoint.get_mutable_excitations_per_winding().push_back(
-            WP::complete_excitation(iSec, vSec, switchingFrequency, "Secondary"));
-    }
+    MAS::OperatingPoint operatingPoint;
+    auto& exc = operatingPoint.get_mutable_excitations_per_winding();
+    // [0,1] L1: input-inductor half current (DC-biased Iin/2), voltage +Vin (dEff) / −vL1Reset.
+    MAS::Waveform vL1 = WP::create_waveform(Lbl::RECTANGULAR, inputVoltage + vL1Reset, switchingFrequency, dEff, 0.0, 0);
+    exc.push_back(WP::complete_excitation(customCurrent(iData), vL1, switchingFrequency, "L1 primary a"));
+    exc.push_back(WP::complete_excitation(customCurrent(iData), vL1, switchingFrequency, "L1 primary b"));
+    // [2,3] T1 push-pull primary halves: same current as L1 (series current-fed path), voltage ±Vout/n.
+    MAS::Waveform vPri = WP::create_waveform(Lbl::BIPOLAR_RECTANGULAR, 2.0 * outputVoltage * nInv, switchingFrequency, 0.5, 0.0, 0);
+    exc.push_back(WP::complete_excitation(customCurrent(iData), vPri, switchingFrequency, "T1 primary a"));
+    exc.push_back(WP::complete_excitation(customCurrent(iData), vPri, switchingFrequency, "T1 primary b"));
+    // [4,5] T1 push-pull secondary halves: reflected current (·n), voltage ±Vout.
+    MAS::Waveform vSec = WP::create_waveform(Lbl::BIPOLAR_RECTANGULAR, 2.0 * outputVoltage, switchingFrequency, 0.5, 0.0, 0);
+    exc.push_back(WP::complete_excitation(customCurrent(iSecData), vSec, switchingFrequency, "T1 secondary a"));
+    exc.push_back(WP::complete_excitation(customCurrent(iSecData), vSec, switchingFrequency, "T1 secondary b"));
     return operatingPoint;
 }
 

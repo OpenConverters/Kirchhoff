@@ -190,22 +190,30 @@ TEST_CASE("analytical_push_pull rejects t_on > T/2", "[analytical][solver][pushp
     CHECK_THROWS(analytical_push_pull(24, 5, 10, 100000, 6, 1e-3, 10e-6, 0.3));
 }
 
-TEST_CASE("analytical_weinberg boost regime: 2 windings, primary peak", "[analytical][solver][weinberg]") {
+TEST_CASE("analytical_weinberg boost regime: 6 windings, input-current magnitude", "[analytical][solver][weinberg]") {
     using Kirchhoff::analytical::analytical_weinberg;
-    // 24 V -> 72 V (M=3, boost regime D=0.833), 2 A, 100 kHz, L1=50 uH, n=1.
+    // 24 V -> 72 V (M=3, boost regime D=0.833), 2 A, 100 kHz, L1=50 uH, n=1. Weinberg has TWO magnetics,
+    // so the solver emits all 6 windings: [L1a, L1b, T1_pri_a, T1_pri_b, T1_sec_a, T1_sec_b]. Power balance
+    // gives Iin = Iout*M = 6 A (the earlier Iout/M = 0.667 was an INVERTED-magnitude bug — this test used
+    // to pin it). The current-fed front end splits Iin/2 per L1 / push-pull-primary winding (avg ~3).
     const double vin = 24, vout = 72, iout = 2, fsw = 100000, L1 = 50e-6, n = 1;
     MAS::OperatingPoint op = analytical_weinberg(vin, vout, iout, fsw, L1, n);
 
-    REQUIRE(op.get_excitations_per_winding().size() == 2);   // Primary + Secondary
+    REQUIRE(op.get_excitations_per_winding().size() == 6);
     const double M = vout / vin;                              // 3
     const double D = 1.0 - 1.0 / (2.0 * n * M);               // 0.8333
     const double overlap = 2.0 * D - 1.0;                     // 0.6667
-    const double inputCurrent = iout / M;                     // 0.6667
-    const double deltaIL1 = vin * std::max(overlap, D) / (L1 * fsw);   // 4.0
-    const double iL1_high = inputCurrent + deltaIL1 / 2.0;    // 2.667
-    CHECK(*processed_current(op, 0).get_peak() == Catch::Approx(iL1_high).margin(0.15));
-    CHECK(*processed_current(op, 1).get_peak() == Catch::Approx(iL1_high * n).margin(0.15));   // secondary = primary*n
-    CHECK(voltage_average(op, 0) == Catch::Approx(0.0).margin(0.5));   // bipolar rectangular
+    const double inputCurrent = iout * M;                     // 6  (Iin = Iout*M, power balance)
+    const double deltaIL1 = vin * std::max(overlap, D) / (L1 * fsw);
+    const double iL1_high = inputCurrent + deltaIL1 / 2.0;
+    // L1 windings [0,1] and T1 primary halves [2,3] carry the SAME input-inductor current (series path):
+    // avg ~ Iin/2, peak ~ iL1_high — verified identical against the ngspice deck.
+    for (size_t w = 0; w < 4; ++w) {
+        CHECK(*processed_current(op, w).get_average() == Catch::Approx(inputCurrent / 2.0).margin(0.5));
+        CHECK(*processed_current(op, w).get_peak() == Catch::Approx(iL1_high).margin(0.5));
+    }
+    CHECK(*processed_current(op, 4).get_peak() == Catch::Approx(iL1_high * n).margin(0.5));  // secondary ~ primary*n
+    CHECK(voltage_average(op, 2) == Catch::Approx(0.0).margin(0.5));   // T1 primary bipolar rectangular
 }
 
 TEST_CASE("analytical_sepic: 1 winding, IL1avg and zero-mean voltage", "[analytical][solver][sepic]") {
