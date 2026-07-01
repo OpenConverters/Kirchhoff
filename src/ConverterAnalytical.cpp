@@ -1,6 +1,6 @@
 #include "ConverterAnalytical.hpp"
 #include "processors/WaveformProcessor.h"   // the shared DSP (MKF), reused — not re-implemented
-#include "converter_models/PwmBridgeSolver.h"  // shared phase-shifted-bridge kernel (MKF), reused — not re-implemented
+#include "PwmBridgeSolver.h"  // phase-shifted-bridge kernel — RELOCATED into KH (was MKF converter_models/)
 
 #include <algorithm>
 #include <array>
