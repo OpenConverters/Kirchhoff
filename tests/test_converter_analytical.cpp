@@ -505,7 +505,7 @@ TEST_CASE("analytical_cllc center-tapped rectifier: 3 windings", "[analytical][s
     CHECK(*processed_current(op, 2).get_negative_peak() >= -0.05);
 }
 
-TEST_CASE("analytical_cllc rejects bad inputs and infeasible gain", "[analytical][solver][cllc]") {
+TEST_CASE("analytical_cllc rejects bad inputs", "[analytical][solver][cllc]") {
     using Kirchhoff::analytical::analytical_cllc;
     // fsw / Lm / turns ratio / tank values non-positive.
     CHECK_THROWS(analytical_cllc(kCllcVin, {kCllcVout}, {kCllcIout}, {kCllcN}, 0,
@@ -521,9 +521,8 @@ TEST_CASE("analytical_cllc rejects bad inputs and infeasible gain", "[analytical
     // Vector length mismatch.
     CHECK_THROWS(analytical_cllc(kCllcVin, {kCllcVout}, {kCllcIout, 1}, {kCllcN}, kCllcFsub,
                                  kCllcLm, kCllcLr1, kCllcCr1, kCllcLr2, kCllcCr2));
-    // Infeasible conversion gain: n=1 for a 400→48 step-down gives M_req = 48/400 = 0.12 < 0.5.
-    CHECK_THROWS(analytical_cllc(kCllcVin, {kCllcVout}, {kCllcIout}, {1.0}, kCllcFsub,
-                                 kCllcLm, kCllcLr1, kCllcCr1, kCllcLr2, kCllcCr2));
+    // (The old TDA also threw on "infeasible gain" n=1 → M_req=0.12; the load-aware FHA has no such
+    // convergence limitation — it computes that off-design point fine — so that assertion is dropped.)
 }
 
 // ─── Phase 5: CLLLC bidirectional resonant converter (4-state RK4 affine-propagator TDA) ──────────────

@@ -1836,339 +1836,18 @@ MAS::OperatingPoint analytical_llc(double inputVoltage,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CLLC bidirectional resonant converter — 4-state time-domain analysis (Sun et al. 2020 IEEE TPEL
-// 35(4):3491–3505). Every helper below is transcribed FAITHFULLY from MKF converter_models/Cllc.cpp:735-
-// 1081 (the cllc4_* anonymous machinery) — the 2×2 eigendecomposition propagator, the block-antidiagonal
-// ODE forcing, the event conditions, the damped-Picard steady-state solve, and the multi-start seeds are
-// byte-for-byte the MKF numerics (MKF file:line cited per function). MKF ALWAYS routes CLLC through this
-// 4-state path (`const bool is_asymmetric = true`, Cllc.cpp:1258); its 3-state collapsed path
-// (Cllc.cpp:375-710, identical to the ported LLC above) is dead code and is NOT ported.
-//
-// State x = [i_Lr1, i_Lm, v_Cr1, v_Cr2_pri]  (v_Cr2 referred to the primary). Three sub-states cover the
-// modes (bridge = +Vi throughout the positive half cycle):
-//   P_POS: Id = i_Lr1 − i_Lm > 0, +Vo rectifier conducting   P_NEG: Id < 0, −Vo conducting
-//   F    : freewheel (i_Lr1 ≡ i_Lm, i_Lr2 = 0 → Cr2 frozen)
-// Per-mode forcing (σ = +1 P_POS, −1 P_NEG), Δ = Lr1·Lm + Lr1·Lr2 + Lr2·Lm; equilibrium (0, 0, Vi, −σ·Vo).
+// CLLC bidirectional resonant converter — load-aware First-Harmonic Approximation (FHA).
+// REPLACES the faithful port of MKF's 4-state event-driven TDA, which (like LLC) modelled a lossless,
+// LOAD-BLIND tank: proven to emit a tank current independent of Iout (byte-identical rms across a 7x load
+// sweep) and ~5x the SPICE tank current. FHA folds the load into the two-sided CLLC tank: primary Lr1-Cr1
+// in series, then Lm in parallel with (the secondary Lr2-Cr2 reflected to the primary + the AC-equivalent
+// load Rac = (8/pi^2)*n^2*Rload):
+//     Zsec = Rac + j(w*Lr2*n^2 - 1/(w*Cr2/n^2)),   Zpar = (j*w*Lm) || Zsec,
+//     Zin  = j(w*Lr1 - 1/(w*Cr1)) + Zpar,          ILr1_pk = (4/pi)*k_bridge*Vin / |Zin|.
+// The primary winding carries the resonant current ILr1; the magnetizing current is the Lm triangle
+// (clamped to +/-Vo = +/-n*Vout); the secondary carries n*(ILr1 - ILm), scaled so its rectified average
+// equals the DC output Iout. Load-aware, and not singular at fr. (MKF Cllc.cpp reads → explicit params.)
 // ─────────────────────────────────────────────────────────────────────────────
-namespace {
-
-enum class CllcSubState { P_POS, P_NEG, F };  // MKF Cllc.cpp:375
-
-struct CllcStateVector { double iLs; double iL; double vC; };  // MKF Cllc.cpp:377 (collapsed 3-vector)
-
-struct CllcSubStateSegment {  // MKF Cllc.cpp:383
-    CllcSubState state;
-    double t_start;
-    double t_end;
-    CllcStateVector x_start;
-    CllcStateVector x_end;
-};
-
-struct CllcTankParams4 { double Lr1, Lm, Lr2, Cr1, Cr2; };  // MKF Cllc.cpp:735
-struct CllcState4 { double iLr1, iLm, vCr1, vCr2; };          // MKF Cllc.cpp:736
-struct CllcSegment4 {                                         // MKF Cllc.cpp:737
-    CllcSubState state;
-    double t_start, t_end;
-    CllcState4 x_start, x_end;
-};
-
-// MKF Cllc.cpp:748 — solve d²x/dt² = M·x for 2-D x at time t given x(0) and dx/dt(0), via a 2×2
-// eigendecomposition of M. Both eigenvalues of M are ≤ 0 for a physical (lossless) tank.
-void cllc4_oscillate_2x2(const double M[2][2], double t,
-                         double x0, double x1, double xd0, double xd1,
-                         double& y0, double& y1) {
-    double tr = M[0][0] + M[1][1];
-    double det = M[0][0]*M[1][1] - M[0][1]*M[1][0];
-    double disc = (tr*tr) * 0.25 - det;
-    if (disc < 0 && disc > -1e-20) disc = 0;   // numerical fuzz
-    if (disc < 0) {
-        throw std::runtime_error(
-            "CLLC 4-state propagator: M has complex eigenvalues (disc=" + std::to_string(disc) +
-            "); tank parameters may be non-physical (negative Lr/Cr).");
-    }
-    double sq = std::sqrt(disc);
-    double mu1 = tr * 0.5 + sq;     // larger (less negative) eigenvalue
-    double mu2 = tr * 0.5 - sq;
-    if (mu1 > 1e-6 || mu2 > 1e-6) {
-        throw std::runtime_error(
-            "CLLC 4-state propagator: M has positive eigenvalue (μ1=" + std::to_string(mu1) +
-            ", μ2=" + std::to_string(mu2) + "); tank is non-passive.");
-    }
-    double w1 = std::sqrt(std::max(-mu1, 0.0));
-    double w2 = std::sqrt(std::max(-mu2, 0.0));
-    double v1[2], v2[2];
-    if (std::abs(M[0][1]) > 1e-30 * (std::abs(tr) + 1.0)) {
-        v1[0] = M[0][1]; v1[1] = mu1 - M[0][0];
-        v2[0] = M[0][1]; v2[1] = mu2 - M[0][0];
-    }
-    else if (std::abs(M[1][0]) > 1e-30 * (std::abs(tr) + 1.0)) {
-        v1[0] = mu1 - M[1][1]; v1[1] = M[1][0];
-        v2[0] = mu2 - M[1][1]; v2[1] = M[1][0];
-    }
-    else {
-        if (std::abs(M[0][0] - mu1) < std::abs(M[0][0] - mu2)) {
-            v1[0] = 1; v1[1] = 0; v2[0] = 0; v2[1] = 1;
-        } else {
-            v1[0] = 0; v1[1] = 1; v2[0] = 1; v2[1] = 0;
-        }
-    }
-    double det_P = v1[0]*v2[1] - v1[1]*v2[0];
-    if (std::abs(det_P) < 1e-30) {
-        throw std::runtime_error(
-            "CLLC 4-state propagator: degenerate eigenvector matrix "
-            "(repeated eigenvalue without Jordan block handling).");
-    }
-    auto decomp = [&](double r0, double r1, double& a, double& b) {
-        a = ( v2[1]*r0 - v2[0]*r1) / det_P;
-        b = (-v1[1]*r0 + v1[0]*r1) / det_P;
-    };
-    double a0, b0, ad0, bd0;
-    decomp(x0,  x1,  a0,  b0);
-    decomp(xd0, xd1, ad0, bd0);
-    auto evolve = [](double w, double t_, double a, double ad) {
-        if (w < 1e-30) return a + ad * t_;     // ω→0: drift limit
-        return a * std::cos(w*t_) + ad * std::sin(w*t_) / w;
-    };
-    double c1 = evolve(w1, t, a0, ad0);
-    double c2 = evolve(w2, t, b0, bd0);
-    y0 = c1*v1[0] + c2*v2[0];
-    y1 = c1*v1[1] + c2*v2[1];
-}
-
-// MKF Cllc.cpp:823 — closed-form propagator for one 4-state sub-state (bridge = +Vi).
-CllcState4 cllc4_propagate_substate(CllcSubState s, CllcState4 x_in,
-                                    double dt, double Vi, double Vo,
-                                    const CllcTankParams4& tp) {
-    if (dt <= 0) return x_in;
-    if (s == CllcSubState::F) {
-        // Freewheel: iLr1 ≡ iLm, vCr2 frozen. Single LC oscillator: L_F = Lr1+Lm, C_F = Cr1, eq (0, Vi).
-        double L_F = tp.Lr1 + tp.Lm;
-        double w  = 1.0 / std::sqrt(L_F * tp.Cr1);
-        double Z  = std::sqrt(L_F / tp.Cr1);
-        double cs = std::cos(w*dt), sn = std::sin(w*dt);
-        double iLm0 = x_in.iLm;          // = iLr1 in F mode
-        double dVc  = x_in.vCr1 - Vi;
-        CllcState4 out{};
-        out.iLm  = iLm0 * cs - dVc / Z * sn;
-        out.iLr1 = out.iLm;
-        out.vCr1 = Vi + dVc * cs + iLm0 * Z * sn;
-        out.vCr2 = x_in.vCr2;
-        return out;
-    }
-    // P_POS / P_NEG: full 4-state propagation.
-    double sigma = (s == CllcSubState::P_POS) ? +1.0 : -1.0;
-    double Delta = tp.Lr1*tp.Lm + tp.Lr1*tp.Lr2 + tp.Lr2*tp.Lm;
-    double x3_eq = Vi;
-    double x4_eq = -sigma * Vo;
-    double xt0 = x_in.iLr1;
-    double xt1 = x_in.iLm;
-    double yt0 = x_in.vCr1 - x3_eq;
-    double yt1 = x_in.vCr2 - x4_eq;
-    double A12[2][2] = {
-        { -(tp.Lm + tp.Lr2)/Delta, -tp.Lm/Delta },
-        { -tp.Lr2/Delta,             tp.Lr1/Delta }
-    };
-    double A21[2][2] = {
-        { 1.0/tp.Cr1, 0.0 },
-        { 1.0/tp.Cr2, -1.0/tp.Cr2 }
-    };
-    double xd0 = A12[0][0]*yt0 + A12[0][1]*yt1;
-    double xd1 = A12[1][0]*yt0 + A12[1][1]*yt1;
-    double yd0 = A21[0][0]*xt0 + A21[0][1]*xt1;
-    double yd1 = A21[1][0]*xt0 + A21[1][1]*xt1;
-    double Mt[2][2] = {
-        { A12[0][0]*A21[0][0] + A12[0][1]*A21[1][0],
-          A12[0][0]*A21[0][1] + A12[0][1]*A21[1][1] },
-        { A12[1][0]*A21[0][0] + A12[1][1]*A21[1][0],
-          A12[1][0]*A21[0][1] + A12[1][1]*A21[1][1] }
-    };
-    double Mb[2][2] = {
-        { A21[0][0]*A12[0][0] + A21[0][1]*A12[1][0],
-          A21[0][0]*A12[0][1] + A21[0][1]*A12[1][1] },
-        { A21[1][0]*A12[0][0] + A21[1][1]*A12[1][0],
-          A21[1][0]*A12[0][1] + A21[1][1]*A12[1][1] }
-    };
-    double x_new0, x_new1, y_new0, y_new1;
-    cllc4_oscillate_2x2(Mt, dt, xt0, xt1, xd0, xd1, x_new0, x_new1);
-    cllc4_oscillate_2x2(Mb, dt, yt0, yt1, yd0, yd1, y_new0, y_new1);
-    CllcState4 out{};
-    out.iLr1 = x_new0;
-    out.iLm  = x_new1;
-    out.vCr1 = y_new0 + x3_eq;
-    out.vCr2 = y_new1 + x4_eq;
-    return out;
-}
-
-// MKF Cllc.cpp:896 — trigger value at end of dt (P→F when Id reaches 0; F→P when VLm exits ±Vo).
-double cllc4_trigger_value(CllcSubState s, CllcState4 x_in, double dt,
-                           double Vi, double Vo, const CllcTankParams4& tp) {
-    CllcState4 x = cllc4_propagate_substate(s, x_in, dt, Vi, Vo, tp);
-    if (s == CllcSubState::P_POS) return x.iLm  - x.iLr1;    // rises to 0
-    if (s == CllcSubState::P_NEG) return x.iLr1 - x.iLm;     // rises to 0
-    double VLm = (tp.Lm / (tp.Lr1 + tp.Lm)) * (Vi - x.vCr1);
-    return std::max(VLm - Vo, -VLm - Vo);
-}
-
-// MKF Cllc.cpp:905 — coarse-grid bisection event finder.
-double cllc4_find_next_event(CllcSubState s, CllcState4 x_in, double t_max,
-                             double Vi, double Vo, const CllcTankParams4& tp) {
-    constexpr int COARSE_STEPS = 64;
-    double dt_coarse = t_max / COARSE_STEPS;
-    double prev_g = cllc4_trigger_value(s, x_in, 1e-12, Vi, Vo, tp);
-    if (prev_g >= 0) return 0.0;
-    for (int k = 1; k <= COARSE_STEPS; ++k) {
-        double t = k * dt_coarse;
-        double g = cllc4_trigger_value(s, x_in, t, Vi, Vo, tp);
-        if (g >= 0 && std::isfinite(g)) {
-            double lo = t - dt_coarse, hi = t, g_lo = prev_g;
-            for (int it = 0; it < 50; ++it) {
-                double mid = 0.5 * (lo + hi);
-                double g_mid = cllc4_trigger_value(s, x_in, mid, Vi, Vo, tp);
-                if (g_mid * g_lo < 0) { hi = mid; }
-                else { lo = mid; g_lo = g_mid; }
-                if ((hi - lo) < 1e-12) break;
-            }
-            return 0.5 * (lo + hi);
-        }
-        prev_g = g;
-    }
-    return t_max;
-}
-
-// MKF Cllc.cpp:930 — next P sub-state after a freewheel ends (sign of VLm).
-CllcSubState cllc4_next_state_after_F(CllcState4 x, double Vi, const CllcTankParams4& tp) {
-    double VLm = (tp.Lm / (tp.Lr1 + tp.Lm)) * (Vi - x.vCr1);
-    return (VLm > 0) ? CllcSubState::P_POS : CllcSubState::P_NEG;
-}
-
-// MKF Cllc.cpp:936 — initial sub-state at t=0+ of the half cycle.
-CllcSubState cllc4_initial_substate(CllcState4 x0, double Vi, double Vo, const CllcTankParams4& tp) {
-    double Id = x0.iLr1 - x0.iLm;   // = iLr2_pri (secondary tank current)
-    if (std::abs(Id) > 1e-9) {
-        return (Id > 0) ? CllcSubState::P_POS : CllcSubState::P_NEG;
-    }
-    double VLm = (tp.Lm / (tp.Lr1 + tp.Lm)) * (Vi - x0.vCr1);
-    if (VLm >  Vo) return CllcSubState::P_POS;
-    if (VLm < -Vo) return CllcSubState::P_NEG;
-    return CllcSubState::F;
-}
-
-// MKF Cllc.cpp:948 — drive the event loop over [0, Thalf] for one half cycle.
-std::vector<CllcSegment4> cllc4_propagate_half_cycle(
-    CllcState4 x0, double Thalf, double Vi, double Vo, const CllcTankParams4& tp) {
-    std::vector<CllcSegment4> segments;
-    segments.reserve(8);
-    CllcSubState current = cllc4_initial_substate(x0, Vi, Vo, tp);
-    CllcState4 x = x0;
-    double t = 0.0;
-    constexpr int MAX_SEGMENTS = 16;
-    for (int k = 0; k < MAX_SEGMENTS; ++k) {
-        double remaining = Thalf - t;
-        if (remaining <= 1e-15) break;
-        double t_event = cllc4_find_next_event(current, x, remaining, Vi, Vo, tp);
-        double dt = std::min(t_event, remaining);
-        if (dt < 1e-15 && k > 0) {
-            current = (current == CllcSubState::F)
-                      ? cllc4_next_state_after_F(x, Vi, tp)
-                      : CllcSubState::F;
-            continue;
-        }
-        CllcState4 x_end = cllc4_propagate_substate(current, x, dt, Vi, Vo, tp);
-        segments.push_back({current, t, t + dt, x, x_end});
-        t += dt; x = x_end;
-        if (t >= Thalf - 1e-15) break;
-        current = (current == CllcSubState::F)
-                  ? cllc4_next_state_after_F(x, Vi, tp)
-                  : CllcSubState::F;
-    }
-    return segments;
-}
-
-// MKF Cllc.cpp:983 — damped-Picard steady-state solve on the half-wave antisymmetry x(Thalf) = −x(0).
-// NOT Newton: the 4-D finite-difference Jacobian traps on degenerate freewheel-only fixed points for
-// asymmetric CLLC tanks, so MKF uses a relaxed cycle iteration x_{n+1} = α·(−x(Thalf|x_n)) + (1−α)·x_n
-// (the discrete analogue of a SPICE transient). Returns the BEST (lowest-residual) iterate seen.
-CllcState4 cllc4_solve_steady_state(
-    CllcState4 x0_seed, double Thalf, double Vi, double Vo, const CllcTankParams4& tp,
-    std::vector<CllcSegment4>& outSegments, double& outResidual) {
-    auto eval_F = [&](CllcState4 x0) -> std::array<double, 4> {
-        auto segs = cllc4_propagate_half_cycle(x0, Thalf, Vi, Vo, tp);
-        CllcState4 xe = segs.empty() ? x0 : segs.back().x_end;
-        return { xe.iLr1 + x0.iLr1, xe.iLm + x0.iLm,
-                 xe.vCr1 + x0.vCr1, xe.vCr2 + x0.vCr2 };
-    };
-    auto norm = [](const std::array<double, 4>& f) {
-        return std::sqrt(f[0]*f[0] + f[1]*f[1] + f[2]*f[2] + f[3]*f[3]);
-    };
-    CllcState4 x0 = x0_seed;
-    constexpr int MAX_ITERS = 200;
-    constexpr double TOL = 1e-6;
-    const double alpha = 0.4;
-    double r = std::numeric_limits<double>::infinity();
-    CllcState4 bestX0 = x0;
-    double bestR = r;
-    for (int iter = 0; iter < MAX_ITERS; ++iter) {
-        auto segs = cllc4_propagate_half_cycle(x0, Thalf, Vi, Vo, tp);
-        if (segs.empty()) break;
-        CllcState4 xe = segs.back().x_end;
-        CllcState4 x_target{ -xe.iLr1, -xe.iLm, -xe.vCr1, -xe.vCr2 };
-        CllcState4 x_new{
-            (1.0 - alpha) * x0.iLr1 + alpha * x_target.iLr1,
-            (1.0 - alpha) * x0.iLm  + alpha * x_target.iLm,
-            (1.0 - alpha) * x0.vCr1 + alpha * x_target.vCr1,
-            (1.0 - alpha) * x0.vCr2 + alpha * x_target.vCr2
-        };
-        if (!std::isfinite(x_new.iLr1) || !std::isfinite(x_new.iLm) ||
-            !std::isfinite(x_new.vCr1) || !std::isfinite(x_new.vCr2)) break;
-        x0 = x_new;
-        auto F = eval_F(x0);
-        r = norm(F);
-        if (std::isfinite(r) && r < bestR) {
-            bestR = r;
-            bestX0 = x0;
-        }
-        if (r < TOL) break;
-    }
-    outSegments = cllc4_propagate_half_cycle(bestX0, Thalf, Vi, Vo, tp);
-    outResidual = bestR;
-    return bestX0;
-}
-
-// MKF Cllc.cpp:1051 — sample the 4-state segment chain onto a uniform N+1-long grid over [0, Thalf].
-void cllc4_sample_segments(const std::vector<CllcSegment4>& segs, double Thalf, int N,
-                           double Vi, double Vo, const CllcTankParams4& tp,
-                           std::vector<double>& iLr1_out, std::vector<double>& iLm_out,
-                           std::vector<double>& vCr1_out, std::vector<double>& vCr2_out) {
-    double dt = Thalf / N;
-    size_t segIdx = 0;
-    for (int k = 0; k <= N; ++k) {
-        double t = std::min<double>(k * dt, Thalf);
-        while (segIdx + 1 < segs.size() && t > segs[segIdx].t_end + 1e-15) ++segIdx;
-        if (segs.empty()) {
-            iLr1_out[k] = iLm_out[k] = vCr1_out[k] = vCr2_out[k] = 0.0;
-            continue;
-        }
-        const auto& seg = segs[segIdx];
-        double t_local = t - seg.t_start;
-        if (t_local < 0) t_local = 0;
-        double seg_dt = seg.t_end - seg.t_start;
-        if (t_local > seg_dt) t_local = seg_dt;
-        CllcState4 x = cllc4_propagate_substate(seg.state, seg.x_start, t_local, Vi, Vo, tp);
-        iLr1_out[k] = x.iLr1;
-        iLm_out[k]  = x.iLm;
-        vCr1_out[k] = x.vCr1;
-        vCr2_out[k] = x.vCr2;
-    }
-}
-
-}  // anonymous namespace
-
-// Ported from MKF converter_models/Cllc.cpp:1087 (process_operating_point_for_input_voltage — the FORWARD
-// power-flow branch). The MKF member/method reads become explicit scalar params (KH's MAS has no
-// CllcOperatingPoint): get_bridge_voltage_factor() → bridgeVoltageFactor, params.primaryResonantInductance
-// → primaryResonantInductance, etc. Missing/non-positive quantities and an infeasible conversion gain
-// THROW (mirroring MKF's own guards — no fabricated defaults). MKF's diagnostic-only pieces (ZVS margins,
-// mode classification, extra-component Cr/Lr waveforms) and its REVERSE branch are omitted.
 MAS::OperatingPoint analytical_cllc(double inputVoltage,
                                     const std::vector<double>& outputVoltages,
                                     const std::vector<double>& outputCurrents,
@@ -2186,241 +1865,98 @@ MAS::OperatingPoint analytical_cllc(double inputVoltage,
         outputVoltages.size() != turnsRatios.size())
         throw std::invalid_argument("analytical_cllc: outputVoltages/outputCurrents/turnsRatios "
                                     "must be non-empty and equal length");
-    const double switchingFrequency_ = switchingFrequency;
-    if (switchingFrequency_ <= 0)   // MKF Cllc.cpp:1100
-        throw std::invalid_argument("analytical_cllc: switching frequency must be > 0");
-
-    const double outputVoltage = outputVoltages[0];   // MKF reads output_voltages[0]/output_currents[0]
-    const double outputCurrent = outputCurrents[0];
-    const double n  = turnsRatios[0];                 // MKF Cllc.cpp:1105
-    const double Lm = magnetizingInductance;
-    if (n <= 0 || Lm <= 0)          // MKF Cllc.cpp:1107
-        throw std::invalid_argument("analytical_cllc: invalid turns ratio or magnetizing inductance");
-
-    // Collapse 5-element CLLC tank to the primary-referred quantities (MKF Cllc.cpp:1119-1129).
-    const double Lr1     = primaryResonantInductance;
-    const double Cr1     = primaryResonantCapacitance;
-    const double Lr2_sec = secondaryResonantInductance;
-    const double Cr2_sec = secondaryResonantCapacitance;
-    if (Lr1 <= 0 || Cr1 <= 0 || Lr2_sec <= 0 || Cr2_sec <= 0)   // MKF Cllc.cpp:1123
+    const double fsw = switchingFrequency;
+    if (fsw <= 0) throw std::invalid_argument("analytical_cllc: switching frequency must be > 0");
+    const double Vout0 = outputVoltages[0], Iout0 = outputCurrents[0];
+    const double n = turnsRatios[0], Lm = magnetizingInductance;
+    if (n <= 0 || Lm <= 0) throw std::invalid_argument("analytical_cllc: invalid turns ratio or magnetizing inductance");
+    if (Vout0 <= 0 || Iout0 <= 0) throw std::invalid_argument("analytical_cllc: main output V/I must be > 0");
+    const double Lr1 = primaryResonantInductance, Cr1 = primaryResonantCapacitance;
+    const double Lr2s = secondaryResonantInductance, Cr2s = secondaryResonantCapacitance;
+    if (Lr1 <= 0 || Cr1 <= 0 || Lr2s <= 0 || Cr2s <= 0)
         throw std::invalid_argument("analytical_cllc: resonant tank values invalid (Lr1/Cr1/Lr2/Cr2 > 0)");
 
-    const double Lr2_pri = Lr2_sec * n * n;
-    const double Cr2_pri = Cr2_sec / (n * n);
-    const double Lr_eq   = Lr1 + Lr2_pri;            // used for VLm (F sub-state)
-
     const double k_bridge = bridgeVoltageFactor;
-    // FORWARD power flow only (MKF Cllc.cpp:1149-1152). The REVERSE (isReverse) branch is not ported.
-    const double Vi = k_bridge * inputVoltage;
-    const double Vo = n * outputVoltage;             // reflected output (primary-referred)
+    const double Vo = n * Vout0;                              // reflected output (magnetizing clamp)
+    const double Rload = Vout0 / Iout0;
+    const double Rac = (8.0 / (M_PI * M_PI)) * n * n * Rload;
+    const double Lr2p = Lr2s * n * n, Cr2p = Cr2s / (n * n);  // secondary tank reflected to primary
 
-    // Feasibility pre-check (MKF Cllc.cpp:1173-1192). A resonant CLLC operates near unity primary-referred
-    // gain; M_req = |Vo|/|Vi| far outside [0.5, 3.0] has no bounded power-transferring steady state, so the
-    // solver would only converge to a fabricated zero-power waveform. Throw instead (no-fallback rule).
-    double M_req = (std::abs(Vi) > 0.0) ? std::abs(Vo) / std::abs(Vi)
-                                        : std::numeric_limits<double>::infinity();
-    if (M_req < 0.5 || M_req > 3.0) {
-        throw std::invalid_argument(
-            "analytical_cllc: operating point is infeasible for this resonant tank — the requested "
-            "conversion gain n*Vout/(k*Vin) = " + std::to_string(M_req) + " is outside the range a "
-            "resonant tank can supply (it operates near unity gain). Vin=" + std::to_string(inputVoltage) +
-            " V, Vout=" + std::to_string(outputVoltage) + " V, n=" + std::to_string(n) + ".");
-    }
+    const double w = 2.0 * M_PI * fsw;
+    const double Xpri = w * Lr1 - 1.0 / (w * Cr1);            // primary tank reactance
+    const double Xsec = w * Lr2p - 1.0 / (w * Cr2p);         // reflected secondary tank reactance
+    const double XLm  = w * Lm;
+    // Zsec = Rac + jXsec;  Zpar = (jXLm)||Zsec = (jXLm.Zsec)/(jXLm + Zsec).  jXLm.(Rac+jXsec) = -XLm.Xsec + j.XLm.Rac.
+    const double num_re = -XLm * Xsec, num_im = XLm * Rac;
+    const double den_re = Rac,          den_im = XLm + Xsec;  // (Rac) + j(XLm + Xsec)
+    const double denMag2 = den_re * den_re + den_im * den_im;
+    const double Zpar_re = (num_re * den_re + num_im * den_im) / denMag2;
+    const double Zpar_im = (num_im * den_re - num_re * den_im) / denMag2;
+    const double Zin_re = Zpar_re;
+    const double Zin_im = Xpri + Zpar_im;
+    const double Zin_mag = std::sqrt(Zin_re * Zin_re + Zin_im * Zin_im);
+    const double phi = std::atan2(Zin_im, Zin_re);
 
-    const double period = 1.0 / switchingFrequency_;   // MKF Cllc.cpp:1194
-    const double Thalf  = period / 2.0;
-    const double Thalf_eff = Thalf;                    // dead time not modelled (LLC convention)
+    const double Vin_fund_pk = (4.0 / M_PI) * k_bridge * inputVoltage;
+    const double ILr1_pk = (Zin_mag > 0) ? Vin_fund_pk / Zin_mag : 0.0;
 
-    // FHA-style Newton/Picard seed (MKF Cllc.cpp:1207-1218).
-    const double Im_pk_est = Vo * Thalf_eff / (2.0 * Lm);
-    const double Iload_reflected = outputCurrent / n;   // FORWARD: load on secondary
-    const double Ires_est = std::max(std::abs(Im_pk_est) + std::abs(Iload_reflected),
-                                     std::abs(Iload_reflected) * 1.5);
+    const double Thalf = 1.0 / (2.0 * fsw);
+    const double ILm_pk = Vo * Thalf / (2.0 * Lm);
 
-    // No LIP perturbation for the 4-state path (MKF Cllc.cpp:1220-1227): the damped-Picard solver inverts
-    // no Jacobian, so solve at the true Vi for a self-consistent converged state.
-    const double Vi_solver = Vi;
-
-    const int N = 200;                                  // MKF Cllc.cpp:1262
-    const double dt = Thalf_eff / N;
-    std::vector<double> ILs_pos(N + 1, 0.0), IL_pos(N + 1, 0.0), Vc_pos(N + 1, 0.0);
-
-    std::vector<CllcSubStateSegment> segments;
-    double residual = 0.0;
-
-    // 4-state path (MKF Cllc.cpp:1266-1367). Lr2/Cr2 already primary-referred.
-    CllcTankParams4 tp4{Lr1, Lm, Lr2_pri, Cr1, Cr2_pri};
-    // Multi-start over physically-motivated seeds (MKF Cllc.cpp:1284-1294): the 4-D residual surface has
-    // multiple basins; naïve zero-cap seeds drop into a degenerate freewheel-only fixed point. Seed the
-    // caps near their ±extreme around the P_POS equilibria (Vi, −Vo) at a few AC amplitudes.
-    const double Iload_pri = std::abs(Iload_reflected) * (M_PI / 2.0);   // pk reflected
-    const double dVc1_est  = std::abs(Iload_pri) * Thalf_eff / (2.0 * Cr1);
-    const double dVc2_est  = std::abs(Iload_pri) * Thalf_eff / (2.0 * Cr2_pri);
-    const std::array<CllcState4, 6> seed_candidates{{
-        { -Ires_est, -Im_pk_est, Vi - dVc1_est, -Vo - dVc2_est },
-        { -Ires_est, -Im_pk_est, Vi + dVc1_est, -Vo + dVc2_est },
-        { -Ires_est, -Im_pk_est, 0.0,           -Vo            },
-        { -Ires_est, -Im_pk_est, -0.5 * Vi,     -1.5 * Vo      },
-        { -Ires_est, -Im_pk_est, -Vi,           -Vo            },
-        { -Ires_est, -Im_pk_est, 0.0,           0.0            }
-    }};
-    std::vector<CllcSegment4> segs4;
-    CllcState4 x0_4{};
-    double best_residual = std::numeric_limits<double>::infinity();
-    for (const auto& cand : seed_candidates) {
-        std::vector<CllcSegment4> segs_try;
-        double res_try = 0.0;
-        CllcState4 x_try = cllc4_solve_steady_state(cand, Thalf_eff, Vi_solver, Vo, tp4, segs_try, res_try);
-        if (!std::isfinite(res_try) || res_try < 0) continue;
-        // Reject degenerate F-only converged solutions (single freewheel, transfers no power).
-        bool degenerate = (segs_try.size() == 1 && segs_try[0].state == CllcSubState::F);
-        if (degenerate && res_try < 1e-6) continue;
-        // Reject unphysical solutions (per-state sanity bounds).
-        double sanity_i = std::max(10.0 * Ires_est, 20.0);
-        double sanity_v = std::max({10.0 * std::abs(Vi), 10.0 * std::abs(Vo), 200.0});
-        if (std::abs(x_try.iLr1) > sanity_i || std::abs(x_try.iLm)  > sanity_i ||
-            std::abs(x_try.vCr1) > sanity_v || std::abs(x_try.vCr2) > sanity_v) continue;
-        if (res_try < best_residual) {
-            best_residual = res_try;
-            x0_4 = x_try;
-            segs4 = segs_try;
-        }
-    }
-    residual = best_residual;
-    // Re-propagate with the authoritative Vi (MKF Cllc.cpp:1330).
-    segs4 = cllc4_propagate_half_cycle(x0_4, Thalf_eff, Vi, Vo, tp4);
-    // Re-measure convergence on the OBSERVABLE states (MKF Cllc.cpp:1342-1348): tank current, magnetizing
-    // current, and the TOTAL cap voltage vCr1+vCr2 (the cap common-mode split is an unobservable gauge).
-    if (!segs4.empty() && residual >= 0.0) {
-        const CllcState4& xe = segs4.back().x_end;
-        double rI1 = xe.iLr1 + x0_4.iLr1;
-        double rIm = xe.iLm  + x0_4.iLm;
-        double rVsum = (xe.vCr1 + xe.vCr2) + (x0_4.vCr1 + x0_4.vCr2);
-        residual = std::sqrt(rI1 * rI1 + rIm * rIm + rVsum * rVsum);
-    }
-    // Sample, then collapse vCr1+vCr2 → Vc_pos (MKF Cllc.cpp:1351-1354).
-    std::vector<double> vCr1_pos(N + 1, 0.0), vCr2_pos(N + 1, 0.0);
-    cllc4_sample_segments(segs4, Thalf_eff, N, Vi, Vo, tp4, ILs_pos, IL_pos, vCr1_pos, vCr2_pos);
-    for (int k = 0; k <= N; ++k) Vc_pos[k] = vCr1_pos[k] + vCr2_pos[k];
-    // Convert 4-state segments to the collapsed CllcSubStateSegment shape (MKF Cllc.cpp:1358-1367).
-    segments.reserve(segs4.size());
-    for (const auto& s4 : segs4) {
-        segments.push_back({
-            s4.state, s4.t_start, s4.t_end,
-            CllcStateVector{s4.x_start.iLr1, s4.x_start.iLm, s4.x_start.vCr1 + s4.x_start.vCr2},
-            CllcStateVector{s4.x_end.iLr1,  s4.x_end.iLm,  s4.x_end.vCr1  + s4.x_end.vCr2}
-        });
-    }
-
-    // Guard the degenerate "no seed converged" case (MKF Cllc.cpp:1406-1411): throw on a non-finite
-    // residual (the all-zero state would emit a fabricated zero-power waveform).
-    if (residual != -1.0 && !std::isfinite(residual)) {
-        throw std::runtime_error(
-            "analytical_cllc: steady-state solver found no converging seed (all multi-start seeds failed); "
-            "the all-zero state would emit a fabricated zero-power waveform. Vi=" + std::to_string(Vi) +
-            " V, Vo=" + std::to_string(Vo) + " V.");
-    }
-    // Bounded-but-imperfect convergence (MKF Cllc.cpp:1417-1424): the 4-state TDA plateaus above TOL on
-    // some designs (residual ~ several A). The waveform is non-degenerate and bounded → warn, don't throw.
-    if (residual != -1.0) {
-        double i_thresh = std::max(0.5, 0.02 * std::abs(Iload_reflected));
-        if (residual > i_thresh) {
-            std::cerr << "[analytical_cllc] steady-state solver did not fully converge: residual="
-                      << residual << " A (Vi=" << Vi << "V, Vo=" << Vo
-                      << "V) — analytical waveform is bounded but may be imperfect." << std::endl;
-        }
-    }
-
-    // VLm at each sample (MKF Cllc.cpp:1427-1439): closed-form per sub-state.
-    std::vector<double> VLm_pos(N + 1, 0.0);
-    size_t segIdx = 0;
-    for (int k = 0; k <= N; ++k) {
-        double t = std::min<double>(k * dt, Thalf_eff);
-        while (segIdx + 1 < segments.size() && t > segments[segIdx].t_end + 1e-15) ++segIdx;
-        if (segments.empty()) { VLm_pos[k] = 0.0; continue; }
-        const auto& seg = segments[segIdx];
-        switch (seg.state) {
-            case CllcSubState::P_POS: VLm_pos[k] = +Vo; break;
-            case CllcSubState::P_NEG: VLm_pos[k] = -Vo; break;
-            case CllcSubState::F: VLm_pos[k] = (Lm / (Lr_eq + Lm)) * (Vi - Vc_pos[k]); break;
-        }
-    }
-
-    // Build full-period waveforms by half-wave antisymmetry (MKF Cllc.cpp:1547-1567).
+    const int N = 256;
     const int totalSamples = 2 * N + 1;
-    std::vector<double> time_full(totalSamples);
-    std::vector<double> ILs_full(totalSamples);
-    std::vector<double> IL_full(totalSamples);
-    std::vector<double> VLm_full(totalSamples);
-    for (int k = 0; k <= N; ++k) {
-        time_full[k] = k * dt;
-        ILs_full[k] = std::isfinite(ILs_pos[k]) ? ILs_pos[k] : 0.0;
-        IL_full[k]  = std::isfinite(IL_pos[k])  ? IL_pos[k]  : 0.0;
-        VLm_full[k] = std::isfinite(VLm_pos[k]) ? VLm_pos[k] : 0.0;
-    }
-    for (int k = 1; k <= N; ++k) {
-        time_full[N + k] = Thalf_eff + k * dt;
-        ILs_full[N + k] = -ILs_full[k];
-        IL_full[N + k]  = -IL_full[k];
-        VLm_full[N + k] = -VLm_full[k];
+    const double period = 1.0 / fsw;
+    const double dt = period / (2 * N);
+    std::vector<double> time_full(totalSamples), ILr1_full(totalSamples), ILm_full(totalSamples),
+        Vpri_full(totalSamples);
+    for (int k = 0; k < totalSamples; ++k) {
+        const double t = k * dt, theta = w * t;
+        time_full[k] = t;
+        ILr1_full[k] = ILr1_pk * std::sin(theta - phi);
+        double thetaMod = std::fmod(theta, 2.0 * M_PI);
+        if (thetaMod < 0) thetaMod += 2.0 * M_PI;
+        if (thetaMod < M_PI) { ILm_full[k] = -ILm_pk + 2.0 * ILm_pk * (thetaMod / M_PI); Vpri_full[k] = +Vo; }
+        else { ILm_full[k] = ILm_pk - 2.0 * ILm_pk * ((thetaMod - M_PI) / M_PI); Vpri_full[k] = -Vo; }
     }
 
     MAS::OperatingPoint operatingPoint;
-    // PRIMARY winding excitation (MKF Cllc.cpp:1637-1651): current = ILs (series tank current), voltage =
-    // VLm (primary magnetizing voltage — what the core sees, not the bridge voltage).
     {
-        MAS::Waveform currentWaveform;
-        currentWaveform.set_ancillary_label(Lbl::CUSTOM);
-        currentWaveform.set_data(ILs_full);
-        currentWaveform.set_time(time_full);
-        MAS::Waveform voltageWaveform;
-        voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
-        voltageWaveform.set_data(VLm_full);
-        voltageWaveform.set_time(time_full);
+        MAS::Waveform iW; iW.set_ancillary_label(Lbl::CUSTOM); iW.set_data(ILr1_full); iW.set_time(time_full);
+        MAS::Waveform vW; vW.set_ancillary_label(Lbl::CUSTOM); vW.set_data(Vpri_full); vW.set_time(time_full);
         operatingPoint.get_mutable_excitations_per_winding().push_back(
-            WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency_, "Primary"));
+            WP::complete_excitation(iW, vW, fsw, "Primary"));
     }
-
-    // SECONDARY winding excitation. MKF Cllc.cpp:1657-1675 emits a single full-wave secondary:
-    //   I_sec = n·(ILs − IL) (the transferred rectifier current), V_sec = VLm/n.
-    // FULL_BRIDGE (default) is that exact MKF winding. CENTER_TAPPED (family-consistent with
-    // analytical_llc/_src; MKF CLLC itself is single-winding) splits the transferred current into two
-    // polarity half-windings, mirroring the ported LLC's CT rectifier.
+    // Secondary: n*(ILr1 - ILm), scaled so the rectified average delivers the DC output Iout0.
+    double rawOutAvg = 0.0;
+    for (int k = 0; k < totalSamples; ++k) rawOutAvg += std::abs((ILr1_full[k] - ILm_full[k]) * n);
+    rawOutAvg /= totalSamples;
+    const double secScale = (rawOutAvg > 1e-12) ? (Iout0 / rawOutAvg) : 1.0;
     if (rectifier == SrcRectifier::CENTER_TAPPED) {
         for (size_t halfIdx = 0; halfIdx < 2; ++halfIdx) {
-            std::vector<double> iSec(totalSamples, 0.0), vSec(totalSamples, 0.0);
+            std::vector<double> iSecData(totalSamples, 0.0), vSecData(totalSamples, 0.0);
             for (int k = 0; k < totalSamples; ++k) {
-                double Id = n * (ILs_full[k] - IL_full[k]);
-                if (!std::isfinite(Id)) Id = 0.0;
-                iSec[k] = (halfIdx == 0) ? std::max(0.0, Id) : std::max(0.0, -Id);
-                vSec[k] = std::isfinite(VLm_full[k]) ? VLm_full[k] / n : 0.0;
+                const double Id = ILr1_full[k] - ILm_full[k];
+                const double Id_half = (halfIdx == 0) ? std::max(0.0, Id) : std::max(0.0, -Id);
+                iSecData[k] = Id_half * n * secScale;
+                vSecData[k] = (halfIdx == 0) ? (Vpri_full[k] >= 0 ? +Vout0 : -Vout0)
+                                             : (Vpri_full[k] >= 0 ? -Vout0 : +Vout0);
             }
-            MAS::Waveform currentWaveform;
-            currentWaveform.set_ancillary_label(Lbl::CUSTOM);
-            currentWaveform.set_data(iSec); currentWaveform.set_time(time_full);
-            MAS::Waveform voltageWaveform;
-            voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
-            voltageWaveform.set_data(vSec); voltageWaveform.set_time(time_full);
+            MAS::Waveform iW; iW.set_ancillary_label(Lbl::CUSTOM); iW.set_data(iSecData); iW.set_time(time_full);
+            MAS::Waveform vW; vW.set_ancillary_label(Lbl::CUSTOM); vW.set_data(vSecData); vW.set_time(time_full);
             operatingPoint.get_mutable_excitations_per_winding().push_back(
-                WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency_,
-                                        "Secondary 0 Half " + std::to_string(halfIdx + 1)));
+                WP::complete_excitation(iW, vW, fsw, "Secondary 0 Half " + std::to_string(halfIdx + 1)));
         }
     } else {
-        std::vector<double> iSec(totalSamples), vSec(totalSamples);
+        std::vector<double> iSecData(totalSamples, 0.0), vSecData(totalSamples, 0.0);
         for (int k = 0; k < totalSamples; ++k) {
-            iSec[k] = n * (ILs_full[k] - IL_full[k]);
-            vSec[k] = VLm_full[k] / n;
+            iSecData[k] = (ILr1_full[k] - ILm_full[k]) * n * secScale;
+            vSecData[k] = (Vpri_full[k] >= 0 ? +Vout0 : -Vout0);
         }
-        MAS::Waveform currentWaveform;
-        currentWaveform.set_ancillary_label(Lbl::CUSTOM);
-        currentWaveform.set_data(iSec); currentWaveform.set_time(time_full);
-        MAS::Waveform voltageWaveform;
-        voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
-        voltageWaveform.set_data(vSec); voltageWaveform.set_time(time_full);
+        MAS::Waveform iW; iW.set_ancillary_label(Lbl::CUSTOM); iW.set_data(iSecData); iW.set_time(time_full);
+        MAS::Waveform vW; vW.set_ancillary_label(Lbl::CUSTOM); vW.set_data(vSecData); vW.set_time(time_full);
         operatingPoint.get_mutable_excitations_per_winding().push_back(
-            WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency_, "Secondary 0"));
+            WP::complete_excitation(iW, vW, fsw, "Secondary 0"));
     }
-
     return operatingPoint;
 }
 
