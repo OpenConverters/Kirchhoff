@@ -68,6 +68,54 @@ exposing the string-in/string-out API the Wizard's `taskQueue.js` expects:
 - `extract_operating_point(tas, engine, magneticName)` / `topology_waveforms(tas)` / `diagnostics(tas)` /
   `main_magnetic_inputs(tas)` → JSON
 
-Errors surface as a returned string starting `"Exception: "` (the JS side already checks that). The browser
-build has `ENABLE_NGSPICE=OFF`; `extract_operating_point(..., "ngspice")` throws there until the
-ngspice-in-wasm path (P5) is wired.
+Errors surface as a returned string starting `"Exception: "` (the JS side already checks that).
+
+## Native linking (MKF) — the isolation that makes it safe
+
+MKF and KH **both** generate their types into `namespace MAS` (MKF's `OpenMagnetics::Inputs : public
+MAS::Inputs`). Linking KH's objects straight into MKF would therefore be an ODR collision on the `MAS::`
+symbols. The fix, verified end-to-end:
+
+- KH builds a **shared** `libKirchhoffApi.so` (`-DKIRCHHOFF_BUILD_SHARED_API=ON`) that exports **only** the
+  `Kirchhoff::api` string functions (marked `KH_API` = visibility default). Everything else — the whole
+  typed core, KH's `MAS::`, CAS/SAS/… — is compiled `-fvisibility=hidden` and localized with
+  `-Wl,--exclude-libs,ALL`. `nm -D` shows the 9 api funcs and **zero** strong `MAS::` symbols.
+- MKF FetchContents KH via **ExternalProject** (`MKF_USE_KIRCHHOFF=ON`) so KH is *configured in its own
+  CMake context* — its `CAS`/`SAS`/`MAS_kirchhoff` targets never enter MKF's target namespace. MKF links
+  `libKirchhoffApi.so` and its bridge TU (`src/converter_models/KirchhoffBridge.cpp`) includes **only**
+  `KirchhoffApi.hpp` (plain `std::string` signatures) → no KH MAS type ever reaches an MKF TU.
+- **ngspice moves to KH.** MKF's `ENABLE_NGSPICE` stays OFF (its default); KH is built `ENABLE_NGSPICE=ON`
+  inside the ExternalProject, so the simulator lives in `libKirchhoffApi.so`. Any MKF path that must solve a
+  circuit calls `OpenMagnetics::simulate_tas(...)` → `Kirchhoff::api::simulate_ngspice`. (No MAS material DB
+  is pulled for KH — it has none; MKF's `EMBED_MAS_*` is separate and only for HS magnetics.)
+
+`examples/api_consumer.cpp` in KH is the reduced proof: it links `libKirchhoffApi.so` with only the string
+header and runs a 151k-point ngspice transient through KH.
+
+## WASM (browser) — why KH is its own module, not folded into WebLibMKF
+
+Two hard constraints make "compile KH *into* WebLibMKF's single wasm module" the wrong shape:
+
+1. **The same `namespace MAS` ODR clash** — but wasm has no hidden-visibility shared libs, so the native
+   `.so` trick does not apply; both MAS type sets would statically link into one module and collide.
+2. **Exception-handling model** — WebLibMKF/MKF and the in-browser ngspice are built with
+   `-fwasm-exceptions` + `-sSUPPORT_LONGJMP=wasm`; you cannot mix that with a differently-compiled module.
+
+So the clean architecture is **two wasm modules**: `webMKF` (WebLibMKF — magnetics) and **`webKirchhoff`**
+(`libKirchhoff.js` — converters *and* simulation), loaded side-by-side by the Wizard. Separate modules =
+separate `MAS` = no clash, and each is internally EH-consistent. `webKirchhoff` is built with
+`-fwasm-exceptions` (so it can link the in-browser ngspice) and `ENABLE_NGSPICE=ON`, pointing
+`NGSPICE_LIB`/`NGSPICE_INCLUDE_DIR` at a wasm libngspice (reuse WebLibMKF's
+`build/_deps/ngspice/install`). Build:
+
+```
+emcmake cmake -S . -B build-wasm-kh -G Ninja -DKIRCHHOFF_BUILD_PYBIND=OFF \
+  -DENABLE_NGSPICE=ON \
+  -DNGSPICE_LIB=<...>/ngspice/install/lib/libngspice.so.0.0.14 \
+  -DNGSPICE_INCLUDE_DIR=<...>/ngspice/install/include
+cmake --build build-wasm-kh --target libKirchhoff
+```
+
+If instead a single module is mandated, KH must be an emscripten **SIDE_MODULE** (`dlopen`ed by WebLibMKF as
+MAIN_MODULE) — the wasm analogue of the hidden-symbol `.so` — or KH and MKF must be refactored to share one
+generated MAS. Both are larger efforts; the two-module split is recommended.

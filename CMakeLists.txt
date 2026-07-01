@@ -10,10 +10,13 @@ endif()
 # Emscripten disables C++ exception CATCHING by default (throws still abort). libKirchhoff's guarded()
 # wrapper must actually catch, and it must be consistent across every TU (this lib + the submodule deps),
 # so enable it globally for the WASM build at both compile and link. Applied before add_subdirectory so
-# the submodule targets pick it up too.
+# the submodule targets pick it up too. We use the NATIVE wasm EH (-fwasm-exceptions), NOT the legacy
+# JS-based -fexceptions, because the in-browser ngspice (ENABLE_NGSPICE for wasm) is built with
+# -fwasm-exceptions + -sSUPPORT_LONGJMP=wasm (WebLibMKF's recipe) and the two EH models cannot be mixed in
+# one module — matching it here is what lets KH's wasm build link libngspice and simulate in the browser.
 if (EMSCRIPTEN)
-    add_compile_options(-fexceptions)
-    add_link_options(-fexceptions)
+    add_compile_options(-fwasm-exceptions)
+    add_link_options(-fwasm-exceptions -sSUPPORT_LONGJMP=wasm)
 endif()
 
 # PSMA-org sibling repos (PEAS/RAS/CAS/SAS/MAS/CIAS) are git submodules under deps/.
