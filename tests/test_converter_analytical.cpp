@@ -883,3 +883,61 @@ TEST_CASE("analytical_common_mode_choke rejects bad winding count / non-positive
     CHECK_THROWS(analytical_common_mode_choke(1e-3, 5, 0.0, 150000));      // operatingVoltage = 0
     CHECK_THROWS(analytical_common_mode_choke(1e-3, 5, 230, 0.0));         // excitationFrequency = 0
 }
+
+// ─── Load-scaling regression guard ──────────────────────────────────────────
+// The resonant solvers were once LOAD-BLIND (a faithful port of MKF's lossless TDA emitted a tank current
+// independent of Iout — ~5x the SPICE value). That defect is now caught here: every current-carrying
+// solver's primary current MUST increase with load. A future regression to a load-independent model fails.
+TEST_CASE("all solvers scale with load (no load-blind regression)", "[analytical][scaling]") {
+    using namespace Kirchhoff::analytical;
+    auto rms0 = [](const MAS::OperatingPoint& op) {
+        return *op.get_excitations_per_winding()[0].get_current()->get_processed()->get_rms();
+    };
+    const double n = 8.0, f = 95000, Lm = 4.9e-4, Lr1 = 1.1e-4, Cr1 = 2.3e-8, Lr2 = Lr1/(n*n), Cr2 = Cr1*n*n;
+    // Resonant: primary tank rms at 4x load must be clearly larger than at 1x (magnetizing is load-
+    // independent, reflected load scales — so > 1.3x is a conservative, always-true-if-load-aware bound).
+    {
+        double lo = rms0(analytical_llc(400,{12},{2.5},{n},f,Lm,Lr1,Cr1,0.5,SrcRectifier::CENTER_TAPPED));
+        double hi = rms0(analytical_llc(400,{12},{10.0},{n},f,Lm,Lr1,Cr1,0.5,SrcRectifier::CENTER_TAPPED));
+        CHECK(hi > 1.3 * lo);
+    }
+    {
+        double lo = rms0(analytical_cllc(400,{48},{2.5},{n},f,Lm,Lr1,Cr1,Lr2,Cr2,1.0));
+        double hi = rms0(analytical_cllc(400,{48},{10.0},{n},f,Lm,Lr1,Cr1,Lr2,Cr2,1.0));
+        CHECK(hi > 1.3 * lo);
+    }
+    {
+        double lo = rms0(analytical_clllc(400,{48},{2.5},{n},f,Lm,Lr1,Cr1,Lr2,Cr2,1.0));
+        double hi = rms0(analytical_clllc(400,{48},{10.0},{n},f,Lm,Lr1,Cr1,Lr2,Cr2,1.0));
+        CHECK(hi > 1.3 * lo);
+    }
+    // SRC (FHA, already load-aware).
+    {
+        double lo = rms0(analytical_src(400,{48},{2.5},{n},120000,40e-6,63.3e-9));
+        double hi = rms0(analytical_src(400,{48},{10.0},{n},120000,40e-6,63.3e-9));
+        CHECK(hi > 1.3 * lo);
+    }
+    // Vienna / PFC: boost-inductor peak scales with power.
+    {
+        double lo = *analytical_vienna(230,800,5000,50,70000,500e-6).get_excitations_per_winding()[0].get_current()->get_processed()->get_peak();
+        double hi = *analytical_vienna(230,800,10000,50,70000,500e-6).get_excitations_per_winding()[0].get_current()->get_processed()->get_peak();
+        CHECK(hi > 1.5 * lo);
+    }
+    {
+        double lo = *analytical_pfc(230,400,1500,50,65000,500e-6).get_excitations_per_winding()[0].get_current()->get_processed()->get_peak();
+        double hi = *analytical_pfc(230,400,3000,50,65000,500e-6).get_excitations_per_winding()[0].get_current()->get_processed()->get_peak();
+        CHECK(hi > 1.5 * lo);
+    }
+    // Current transformer: secondary scales with primary (ampere-turn balance).
+    {
+        double lo = *analytical_current_transformer(MAS::WaveformLabel::SINUSOIDAL,50,100000,0.01,10.0).get_excitations_per_winding()[1].get_current()->get_processed()->get_peak();
+        double hi = *analytical_current_transformer(MAS::WaveformLabel::SINUSOIDAL,100,100000,0.01,10.0).get_excitations_per_winding()[1].get_current()->get_processed()->get_peak();
+        CHECK(hi > 1.8 * lo);
+    }
+    // Differential-mode choke: winding rms scales with the line current.
+    {
+        double lo = rms0(analytical_differential_mode_choke(5,230,50,100000));
+        double hi = rms0(analytical_differential_mode_choke(10,230,50,100000));
+        CHECK(hi > 1.8 * lo);
+    }
+}
