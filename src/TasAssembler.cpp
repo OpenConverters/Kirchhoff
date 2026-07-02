@@ -569,7 +569,10 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
     if (deckHasRealComponent) {
         // Real-deck convergence aids (ABT #33): cshunt = node-to-ground dV/dt; rshunt = node-to-ground DC
         // reference that breaks a stiff MKF_MODEL core's near-singular branch (cshunt alone can't); itl4 lets
-        // the transient grind through a hard point instead of collapsing to "timestep too small".
+        // the transient grind through a hard point instead of collapsing to "timestep too small". NOTE: these
+        // are GLOBAL ngspice `.options` and PERSIST across in-process runs (remcirc does not reset them), so a
+        // topology that needs a per-node DC path on its IDEAL deck must NOT bolt them on here — it would leak
+        // into the next deck's sim. Use a deck-local bleed resistor in the brick instead (see e.g. Psfb).
         const json in = cfg::object_of(tasDoc.at("inputs"));
         os << " cshunt=" << cfg::node_shunt_cap(in)
            << " rshunt=" << cfg::node_shunt_res(in)

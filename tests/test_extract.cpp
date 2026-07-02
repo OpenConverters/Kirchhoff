@@ -241,13 +241,12 @@ TEST_CASE("api: ngspice extract reconstructs winding voltage across topologies",
         return;
     }
     // (vin, vout): boost steps up; everyone else here steps down. Power 60 W, 100 kHz.
-    // psfb is intentionally NOT here: its ideal-diode secondary deck fails ngspice transient convergence
-    // ("Timestep too small") at these operating points — a PRE-EXISTING sim issue orthogonal to the voltage
-    // reconstruction under test (which runs only after a successful sim). Tracked separately, not silenced.
+    // psfb converges now that its ideal deck opts into the rshunt DC-reference aid (its full-bridge secondary
+    // floats when all four rectifier diodes are reverse-biased) — see build_psfb_tas / TasAssembler.
     const std::vector<std::pair<std::string, std::pair<double, double>>> topos = {
         {"buck", {48, 12}}, {"boost", {12, 48}}, {"fsbb", {24, 12}}, {"flyback", {48, 12}},
         {"forward", {48, 12}}, {"two_switch_forward", {48, 12}}, {"acf", {48, 12}},
-        {"push_pull", {48, 12}}, {"ahb", {48, 12}}, {"pshb", {400, 24}},
+        {"push_pull", {48, 12}}, {"ahb", {48, 12}}, {"psfb", {400, 24}}, {"pshb", {400, 24}},
         {"dab", {48, 12}}, {"llc", {400, 12}}, {"src", {400, 12}},
     };
     for (const auto& [topo, vv] : topos) {
@@ -279,3 +278,4 @@ TEST_CASE("extract: main_magnetic_inputs = the adviser's MAS::Inputs", "[extract
     for (const auto& m : mags) if (m.name == "Lr") lr = true;
     CHECK(lr);
 }
+

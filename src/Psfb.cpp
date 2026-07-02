@@ -257,6 +257,20 @@ json build_psfb_tas(const PsfbDesign& d) {
         auto& dr = c["inputs"]["designRequirements"]; dr["deviceType"] = "resistor";
         dr["resistance"]["nominal"] = cfg::loop_breaker_res(d.config, d.loadResistance);
         dr["powerRating"] = 0.25; dr["role"] = "balancing"; return c; };
+    // FUNCTIONAL bleed resistor for the full-bridge secondary. When all four ideal rectifier diodes are
+    // reverse-biased, sec_a/sec_b hang on their snubber caps alone — a node with no DC path, so the IDEAL
+    // ngspice deck goes singular ("timestep too small; trouble with sec_b"). A high-value bleed to gnd gives
+    // each end a DC reference. Deck-local (a resistor in the brick), NOT a global `.options rshunt`: the
+    // latter persists across in-process runs and would corrupt the next deck's sim. Sized by the bias-loss
+    // rule (<= biasLossFrac of rated P at V_block=Vout) so the bleed is negligible; role="bleed" keeps the
+    // snubber-strip from removing it. (center-tapped / current-doubler secondaries already have a DC path
+    // through the winding / output inductors, so they don't need it.)
+    const double secBleedRes = cfg::bias_res(d.config, d.outputVoltage, d.outputPower);
+    auto secBleedR = [&]() { json c; c["resistor"] = json::object();
+        auto& dr = c["inputs"]["designRequirements"]; dr["deviceType"] = "resistor";
+        dr["resistance"]["nominal"] = secBleedRes;
+        dr["powerRating"] = d.outputVoltage * d.outputVoltage / secBleedRes;  // bleed: P = V^2/R
+        dr["role"] = "bleed"; return c; };
 
     json cell; cell["name"] = "psfb-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"),
@@ -288,16 +302,17 @@ json build_psfb_tas(const PsfbDesign& d) {
         // One secondary -> 4-diode bridge -> output inductor. (Original validated topology.)
         comps.insert(comps.end(), {comp("Dr1", diodeReq), comp("Dr2", diodeReq), comp("Dr3", diodeReq),
             comp("Dr4", diodeReq), comp("Lout", lout), comp("CsnA", snub()), comp("CsnC", snub()),
-            comp("CsnSA", snub()), comp("CsnSB", snub())});
+            comp("CsnSA", snub()), comp("CsnSB", snub()), comp("Rbsa", secBleedR()), comp("Rbsb", secBleedR())});
         conns.push_back(conn("sec_a", {pin("T1", "secondary1_start"), pin("Dr1", "anode"),
-                                       pin("Dr3", "cathode"), pin("CsnSA", "1")}));
+                                       pin("Dr3", "cathode"), pin("CsnSA", "1"), pin("Rbsa", "1")}));
         conns.push_back(conn("sec_b", {pin("T1", "secondary1_end"), pin("Dr2", "anode"),
-                                       pin("Dr4", "cathode"), pin("CsnSB", "1")}));
+                                       pin("Dr4", "cathode"), pin("CsnSB", "1"), pin("Rbsb", "1")}));
         conns.push_back(conn("out_rect", {pin("Dr1", "cathode"), pin("Dr2", "cathode"),
                                           pin("Lout", "primary_start")}));
         conns.push_back(conn("vout_net", {pin("Lout", "primary_end"), prt("vout")}));
         gndEps.insert(gndEps.end(), {pin("Dr3", "anode"), pin("Dr4", "anode"),
-                                     pin("CsnSA", "2"), pin("CsnSB", "2"), prt("gnd")});
+                                     pin("CsnSA", "2"), pin("CsnSB", "2"),
+                                     pin("Rbsa", "2"), pin("Rbsb", "2"), prt("gnd")});
         conns.push_back(conn("gnd_net", gndEps));
         break; }
     case RectifierType::CenterTapped: {
