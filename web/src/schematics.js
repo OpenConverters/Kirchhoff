@@ -327,7 +327,7 @@ function flyback(bom) {
     mosfetV('Q1', bom, 250, 228), wire(250, 254, 250, 260),
     gnd(180, 260),
     // secondary — flyback polarity: dot at the bottom, diode from the top end
-    wire(270, 100, 270, 90, 330, 90),
+    wire(270, 100, 270, 90, 340, 90),
     diode('D1', bom, 360, 90, 'right'), wire(380, 90, 620, 90), dot(470, 90),
     wire(270, 180, 270, 268, 620, 268), dot(470, 268),
     capV('Cout', bom, 470, 180), wire(470, 90, 470, 160), wire(470, 200, 470, 268),

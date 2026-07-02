@@ -14,6 +14,16 @@ export const FAMILIES = [
   'PFC (AC input)',
 ]
 
+// Short labels for the rotary family dial (an instrument-mode selector: one detent per family).
+export const FAMILY_SHORT = {
+  'Non-isolated DC-DC': 'DC·DC',
+  'Flyback & isolated buck': 'FLYBK',
+  'Forward family': 'FWD',
+  'Bridge & phase-shift': 'BRIDGE',
+  'Resonant': 'RES',
+  'PFC (AC input)': 'PFC',
+}
+
 const T = (id, name, family, desc, preset = {}) => ({
   id, name, family, desc,
   preset: {
