@@ -336,6 +336,15 @@ MAS::OperatingPoint analytical_forward(double inputVoltage,
     double magnetizationCurrent = inputVoltage * t1 / inductance;
     double minimumPrimaryCurrent = -magnetizationCurrent / 2;
     double maximumPrimaryCurrent = magnetizationCurrent / 2;
+    // CCM/DCM detection convention (shared by the buck-derived-output solvers: two-switch forward,
+    // push-pull, …). minimumPrimaryCurrent is the DCM discriminant: DCM is entered when it goes negative,
+    // i.e. when the reflected load current falls below the magnetizing peak (Σ minSec/n < mag/2). This is
+    // NOT the textbook output-inductor DCM boundary (Io < ΔIL/2 for a fixed Lo — Erickson & Maksimović §5),
+    // because the model represents the output ripple as load-PROPORTIONAL (currentRippleRatio*Io), so minSec
+    // never reaches zero. That representation is EXACT at the rated operating point these solvers are called
+    // at (it is how Lo was sized) and only diverges under a light-load sweep, which the solvers don't do.
+    // Accurate light-load DCM would need load-INDEPENDENT ripple (ΔIL = V_L·t_on/Lo) plus a minSec<0 test —
+    // a deliberate cross-solver redesign, intentionally not undertaken here.
 
     std::vector<double> minimumSecondaryCurrents, maximumSecondaryCurrents;
     for (size_t i = 0; i < outputVoltages.size(); ++i) {
@@ -538,6 +547,8 @@ MAS::OperatingPoint analytical_push_pull(double inputVoltage, double outputVolta
     double magnetizationCurrent = inputVoltage * t1 / inductance;
     double minimumSecondaryCurrent = outputCurrent - inductorCurrentRipple / 2;
     double maximumSecondaryCurrent = outputCurrent + inductorCurrentRipple / 2;
+    // DCM discriminant: minimumPrimaryCurrent < 0 (reflected load below the magnetizing peak). See the
+    // CCM/DCM convention note in analytical_forward — load-proportional ripple, exact at the rated point.
     double minimumPrimaryCurrent = minimumSecondaryCurrent / mainSecondaryTurnsRatio - magnetizationCurrent / 2;
     double maximumPrimaryCurrent = maximumSecondaryCurrent / mainSecondaryTurnsRatio + magnetizationCurrent / 2;
 
