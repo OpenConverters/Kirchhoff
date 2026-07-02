@@ -61,18 +61,37 @@ body {
   line-height: 1.5;
 }
 
-.wrap { max-width: 1680px; margin: 0 auto; padding: 0 1.1rem 1rem; }
+/* The whole bench is a viewport-tall column: header + footnote take their natural height, the
+   workbench fills the rest. Nothing overflows the page, so there is no global scrollbar — the left
+   card and each pane scroll inside themselves instead. */
+.wrap {
+  max-width: 1680px; margin: 0 auto; padding: 0 1.1rem 0.6rem;
+  height: 100vh; display: flex; flex-direction: column; min-height: 0;
+}
 
-/* ── workbench: pinned controls sidebar + two output panes ──────────────── */
-.workbench { display: flex; gap: 1rem; align-items: flex-start; }
-.controls {
+/* ── workbench: controls sidebar + two output panes, filling the page height ──────────── */
+.workbench { flex: 1; display: flex; gap: 1rem; align-items: stretch; min-height: 0; }
+.controls.panel {
   width: 366px; flex: 0 0 366px;
-  position: sticky; top: 10px;
-  max-height: calc(100vh - 20px); overflow-y: auto;
-  padding: 0.9rem 1rem 1rem;
+  max-height: 100%; overflow-y: auto;
+  padding: 0 1rem 1rem; margin-bottom: 0;
 }
 .controls .section-label { margin-bottom: 0.55rem; }
-.workspace { flex: 1; min-width: 0; }
+.workspace { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+
+/* the topology header is pinned to the top of the (scrolling) controls card: the family dial and the
+   Solve button ride along so an action is always one click away no matter how far the form is scrolled */
+.topo-head {
+  position: sticky; top: 0; z-index: 5;
+  margin: 0 -1rem; padding: 0.7rem 1rem 0.6rem;
+  background: linear-gradient(180deg, var(--panel-hi) 60%, var(--panel));
+  border-bottom: 1px solid var(--line-soft); border-radius: 6px 6px 0 0;
+}
+.dial-solve { display: flex; align-items: center; gap: 0.5rem; }
+.dial-solve .dial { flex: 1; min-width: 0; }
+.solve-col { flex: 0 0 96px; display: flex; flex-direction: column; align-items: stretch; gap: 0.45rem; }
+.solve-col .solve-btn { width: 100%; padding: 0.55rem 0.4rem; font-size: 0.82rem; }
+.solve-col .boot, .solve-col .chip, .solve-col .hint { align-self: center; text-align: center; }
 
 /* the vertical list of a family's converters (replaces the full grid) */
 .topo-list { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.6rem; }
@@ -104,15 +123,16 @@ body {
 .view-fill .wavepane-fill .stat-row.compact .stat { padding: 0.28rem 0.5rem; flex: 0 0 auto; }
 .view-fill .wavepane-fill .stat-row.compact .stat .k { font-size: 0.56rem; }
 .view-fill .wavepane-fill .stat-row.compact .stat .n { font-size: 0.82rem; }
+/* the two output panes fill the workspace: a compact status strip on top, the panes below */
+.panes { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 /* two panes stacked top/bottom — each full-width (landscape), which fits a schematic
    and a waveform far better than two narrow columns */
 .pane-grid {
+  flex: 1; min-height: 0;
   display: grid; grid-template-rows: 1fr 1fr; gap: 1rem;
-  height: calc(100vh - 128px);
 }
 .workspace-empty {
-  display: flex; align-items: center; justify-content: center;
-  min-height: calc(100vh - 160px);
+  flex: 1; display: flex; align-items: center; justify-content: center;
   border: 1px dashed var(--line); border-radius: 6px; text-align: center;
   background: rgba(0, 0, 0, 0.15);
 }
@@ -120,10 +140,15 @@ body {
 .ws-sub { font-family: var(--mono); font-size: 0.8rem; color: var(--ink-dim); margin-top: 0.4rem; }
 .ws-hint { font-size: 0.82rem; color: var(--ink-dim); max-width: 460px; margin: 1rem auto 0; line-height: 1.6; }
 
+/* desktop: each grid cell may shrink below its content — the pane scrolls/fits inside */
+.pane-grid > * { min-height: 0; }
+
 @media (max-width: 1100px) {
-  .workbench { flex-direction: column; }
-  .controls { position: static; width: 100%; flex: none; max-height: none; }
-  .pane-grid { grid-template-rows: none; height: auto; }
+  /* narrow: give up the single-screen fit and let the page scroll normally */
+  .wrap { height: auto; min-height: 100vh; }
+  .workbench { flex-direction: column; flex: none; }
+  .controls.panel { width: 100%; flex: none; max-height: none; overflow-y: visible; }
+  .pane-grid { grid-template-rows: none; }
   .pane-grid > * { min-height: 420px; }
   .workspace-empty { min-height: 300px; }
 }
@@ -360,6 +385,22 @@ input.fld-in:focus, select.fld-in:focus {
   box-shadow: 0 0 0 1px rgba(255, 179, 71, 0.35);
 }
 input.fld-in.bad { border-color: var(--fault); }
+
+/* Native <select> popups: force the whole control (closed field AND the dropped option list) onto the
+   amber-on-carbon theme. `color-scheme: dark` themes the popup chrome + selected-row highlight; the
+   per-option colours cover the list rows. */
+select { color-scheme: dark; accent-color: var(--amber); }
+select option {
+  background: #0f0b06; color: var(--ink);
+  font-family: var(--mono);
+}
+select option:checked, select option:hover {
+  background: var(--amber-deep); color: #120c04;
+}
+select optgroup {
+  background: #0b0805; color: var(--amber);
+  font-family: var(--disp); font-style: normal; letter-spacing: 0.06em;
+}
 
 .chk {
   display: inline-flex; align-items: center; gap: 0.45rem;

@@ -5,22 +5,28 @@
 // Preset fields drive the spec form; buildSpec() assembles the TAS
 // design-requirements JSON the engine expects.
 
-// The canonical converter families (docs/TOPOLOGY_ROADMAP.md), in engine order.
+// The converter families, named and ordered EXACTLY as the OpenMagnetics wizard picker groups them
+// (the /wizards dropdown): Filters/PFC → Non-Isolated → Forward/Flyback → Bridge/Push-Pull → Resonant
+// → Three-Phase PFC. Keeping the same taxonomy across the tools means a family means the same thing
+// in Kirchhoff and OpenMagnetics.
 export const FAMILIES = [
-  'Non-isolated DC-DC',
-  'Isolated single/two-switch',
-  'Isolated bridge / phase-shift',
+  'Filters / PFC',
+  'Non-Isolated DC-DC',
+  'Isolated Forward / Flyback',
+  'Isolated Bridge / Push-Pull',
   'Resonant',
-  'AC-input PFC',
+  'Three-Phase PFC',
 ]
 
-// Short labels for the rotary family dial (an instrument-mode selector: one detent per family).
+// Labels for the rotary family dial (one detent per family). Real words, stacked on two lines where the
+// family name has two parts — mirrors how the OpenMagnetics wizard picker names them.
 export const FAMILY_SHORT = {
-  'Non-isolated DC-DC': 'DC·DC',
-  'Isolated single/two-switch': 'ISO·SW',
-  'Isolated bridge / phase-shift': 'BRIDGE',
-  'Resonant': 'RES',
-  'AC-input PFC': 'PFC',
+  'Filters / PFC': ['1-φ', 'PFC'],
+  'Non-Isolated DC-DC': ['Non-isol.', 'DC-DC'],
+  'Isolated Forward / Flyback': ['Forward', 'Flyback'],
+  'Isolated Bridge / Push-Pull': ['Bridge', 'Push-pull'],
+  'Resonant': ['Resonant'],
+  'Three-Phase PFC': ['3-φ', 'PFC'],
 }
 
 const T = (id, name, family, desc, preset = {}) => ({
@@ -36,64 +42,62 @@ const T = (id, name, family, desc, preset = {}) => ({
 })
 
 export const TOPOLOGIES = [
-  // ── Non-isolated ──────────────────────────────────────────────────────
-  T('buck', 'Buck', 'Non-isolated DC-DC',
+  // ── Non-Isolated DC-DC ──────────────────────────────────────────────────
+  T('buck', 'Buck', 'Non-Isolated DC-DC',
     'Step-down switching cell: Q + D + L + Cout.'),
-  T('boost', 'Boost', 'Non-isolated DC-DC',
+  T('boost', 'Boost', 'Non-Isolated DC-DC',
     'Step-up cell; requires Vout > Vin/η.',
     { vinNom: 12, outputs: [{ name: 'out', voltage: 48, power: 60 }] }),
-  T('sepic', 'SEPIC', 'Non-isolated DC-DC',
+  T('sepic', 'SEPIC', 'Non-Isolated DC-DC',
     'Step-up/down, non-inverting, coupled via Cs.'),
-  T('cuk', 'Ćuk', 'Non-isolated DC-DC',
+  T('cuk', 'Ćuk', 'Non-Isolated DC-DC',
     'Step-up/down, inverting; continuous input & output current.'),
-  T('zeta', 'Zeta', 'Non-isolated DC-DC',
+  T('zeta', 'Zeta', 'Non-Isolated DC-DC',
     'Step-up/down, non-inverting; buck-like output.'),
-  T('fsbb', '4-switch buck-boost', 'Non-isolated DC-DC',
+  T('fsbb', '4-switch buck-boost', 'Non-Isolated DC-DC',
     'Full bridge over one inductor; seamless up/down.',
     { vinNom: 24, outputs: [{ name: 'out', voltage: 20, power: 60 }] }),
 
-  // ── Isolated single/two-switch ───────────────────────────────────────────
-  T('flyback', 'Flyback', 'Isolated single/two-switch',
+  // ── Isolated Forward / Flyback ────────────────────────────────────────────
+  T('flyback', 'Flyback', 'Isolated Forward / Flyback',
     'Isolated single-switch; energy stored in the transformer (CCM).',
     { vinMin: 36, vinNom: 48, vinMax: 60, isolation: 1500,
       outputs: [{ name: 'out', voltage: 12, power: 24 }] }),
-  T('isolated_buck', 'Isolated buck (Fly-Buck)', 'Isolated single/two-switch',
+  T('isolated_buck', 'Isolated buck (Fly-Buck)', 'Isolated Forward / Flyback',
     'Buck with a coupled secondary; needs primary + isolated outputs.',
     { isolation: 1500, minOutputs: 2,
       outputs: [{ name: 'pri', voltage: 12, power: 30 }, { name: 'sec', voltage: 12, power: 30 }] }),
-  T('isolated_buck_boost', 'Isolated buck-boost', 'Isolated single/two-switch',
+  T('isolated_buck_boost', 'Isolated buck-boost', 'Isolated Forward / Flyback',
     'Inverting Fly-Buck-Boost; primary + isolated outputs.',
     { isolation: 1500, minOutputs: 2,
       outputs: [{ name: 'pri', voltage: 12, power: 30 }, { name: 'sec', voltage: -12, power: 30 }] }),
-
-  // ── (isolated single/two-switch, cont.) ────────────────────────────────────────────────────
-  T('forward', 'Forward', 'Isolated single/two-switch',
+  T('forward', 'Forward', 'Isolated Forward / Flyback',
     'Single-switch forward with demagnetization winding.',
     { isolation: 1500 }),
-  T('two_switch_forward', 'Two-switch forward', 'Isolated single/two-switch',
+  T('two_switch_forward', 'Two-switch forward', 'Isolated Forward / Flyback',
     'Clamp diodes recycle magnetizing energy to the bus.',
     { isolation: 1500 }),
-  T('acf', 'Active-clamp forward', 'Isolated single/two-switch',
+  T('acf', 'Active-clamp forward', 'Isolated Forward / Flyback',
     'Active clamp resets the core; synchronous rectifier.',
     { isolation: 1500 }),
-  T('push_pull', 'Push-pull', 'Isolated single/two-switch',
+
+  // ── Isolated Bridge / Push-Pull ──────────────────────────────────────────
+  T('push_pull', 'Push-pull', 'Isolated Bridge / Push-Pull',
     'Center-tapped primary, two switches; current-doubling output.',
     { isolation: 1500 }),
-  T('weinberg', 'Weinberg', 'Isolated single/two-switch',
+  T('weinberg', 'Weinberg', 'Isolated Bridge / Push-Pull',
     'Current-fed push-pull with input choke.',
     { isolation: 1500 }),
-
-  // ── Isolated bridge / phase-shift ──────────────────────────────────────────────
-  T('ahb', 'Asymmetric half-bridge', 'Isolated single/two-switch',
+  T('ahb', 'Asymmetric half-bridge', 'Isolated Bridge / Push-Pull',
     'Complementary duty half-bridge, ZVS capable.',
     { vinNom: 400, isolation: 3000, outputs: [{ name: 'out', voltage: 12, power: 240 }] }),
-  T('psfb', 'Phase-shifted full bridge', 'Isolated bridge / phase-shift',
+  T('psfb', 'Phase-shifted full bridge', 'Isolated Bridge / Push-Pull',
     'ZVS full bridge; phase shift regulates the output.',
     { vinNom: 400, isolation: 3000, outputs: [{ name: 'out', voltage: 12, power: 600 }] }),
-  T('pshb', 'Phase-shifted half bridge', 'Isolated bridge / phase-shift',
+  T('pshb', 'Phase-shifted half bridge', 'Isolated Bridge / Push-Pull',
     '3-level NPC phase-shift half bridge.',
     { vinNom: 400, isolation: 3000, outputs: [{ name: 'out', voltage: 12, power: 300 }] }),
-  T('dab', 'Dual active bridge', 'Isolated bridge / phase-shift',
+  T('dab', 'Dual active bridge', 'Isolated Bridge / Push-Pull',
     'Bidirectional; Vout floats to the power balance.',
     { vinNom: 400, isolation: 3000, outputs: [{ name: 'out', voltage: 48, power: 1000 }] }),
 
@@ -111,12 +115,14 @@ export const TOPOLOGIES = [
     'CLLC plus discrete secondary resonant inductor.',
     { vinNom: 400, isolation: 3000, outputs: [{ name: 'out', voltage: 48, power: 1000 }] }),
 
-  // ── AC-input PFC ───────────────────────────────────────────────────────────────
-  T('pfc', 'Boost PFC (1-φ)', 'AC-input PFC',
+  // ── Filters / PFC (single-phase) ─────────────────────────────────────────────
+  T('pfc', 'Boost PFC (1-φ)', 'Filters / PFC',
     'Single-phase boost power-factor correction.',
     { inputType: 'acSinglePhase', vinNom: 230, lineFrequency: 50,
       outputs: [{ name: 'out', voltage: 400, power: 300 }] }),
-  T('vienna', 'Vienna (3-φ)', 'AC-input PFC',
+
+  // ── Three-Phase PFC ──────────────────────────────────────────────────────────
+  T('vienna', 'Vienna (3-φ)', 'Three-Phase PFC',
     'Three-phase three-level Vienna rectifier.',
     { inputType: 'acThreePhase', vinNom: 230, lineFrequency: 50,
       outputs: [{ name: 'out', voltage: 700, power: 3000 }] }),
@@ -124,11 +130,11 @@ export const TOPOLOGIES = [
 
 // Not yet in the engine (docs/TOPOLOGY_ROADMAP.md) — shown greyed out.
 export const PLANNED = [
-  { id: 'inverting_buck_boost', name: 'Inverting buck-boost', family: 'Non-isolated DC-DC', desc: 'Planned.' },
-  { id: 'half_bridge', name: 'Hard-switched half bridge', family: 'Isolated bridge / phase-shift', desc: 'Planned.' },
-  { id: 'full_bridge', name: 'Hard-switched full bridge', family: 'Isolated bridge / phase-shift', desc: 'Planned.' },
-  { id: 'acf_flyback', name: 'Active-clamp flyback', family: 'Isolated single/two-switch', desc: 'Planned.' },
-  { id: 'totem_pole_pfc', name: 'Totem-pole PFC', family: 'AC-input PFC', desc: 'Planned.' },
+  { id: 'inverting_buck_boost', name: 'Inverting buck-boost', family: 'Non-Isolated DC-DC', desc: 'Planned.' },
+  { id: 'half_bridge', name: 'Hard-switched half bridge', family: 'Isolated Bridge / Push-Pull', desc: 'Planned.' },
+  { id: 'full_bridge', name: 'Hard-switched full bridge', family: 'Isolated Bridge / Push-Pull', desc: 'Planned.' },
+  { id: 'acf_flyback', name: 'Active-clamp flyback', family: 'Isolated Forward / Flyback', desc: 'Planned.' },
+  { id: 'totem_pole_pfc', name: 'Totem-pole PFC', family: 'Filters / PFC', desc: 'Planned.' },
 ]
 
 export function topologyById(id) {

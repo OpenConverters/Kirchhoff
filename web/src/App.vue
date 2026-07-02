@@ -456,7 +456,7 @@ provide('kh', {
           <div>
             <div class="kh-title">KIRCHHOFF</div>
             <div class="kh-sub">
-              power-converter design bench · runs entirely in your browser · <b>Σ I = 0</b>
+              power-converter design bench · nothing leaves the bench · <b>Σ I = 0</b>
             </div>
           </div>
         </div>
@@ -488,8 +488,22 @@ provide('kh', {
     <div class="workbench">
       <!-- left: topology dial + list, spec, simulation, solve -->
       <aside class="controls panel">
-        <div class="section-label"><span class="idx">1</span> Topology <span class="hint">{{ topo.name }}</span></div>
-        <FamilyDial v-model="family" :families="FAMILIES" :short="FAMILY_SHORT" />
+        <!-- pinned: the family dial + the Solve button stay on top while the rest of the form scrolls -->
+        <div class="topo-head">
+          <div class="section-label"><span class="idx">1</span> Topology <span class="hint">{{ topo.name }}</span></div>
+          <div class="dial-solve">
+            <FamilyDial v-model="family" :families="FAMILIES" :short="FAMILY_SHORT" />
+            <div class="solve-col">
+              <button class="btn solve-btn" :disabled="running || engineState !== 'ready'" @click="solve">
+                {{ running ? (form.engine === 'ngspice' ? 'Simulating…' : 'Solving…') : 'Solve' }}
+              </button>
+              <div v-if="engineState === 'loading'" class="boot"><div class="spin"></div> loading…</div>
+              <span v-else-if="result" class="chip ok">ready</span>
+              <span v-else class="hint" style="font-size: 0.62rem">set spec ▸ solve</span>
+            </div>
+          </div>
+          <div v-if="runError" class="err-banner" style="margin-top: 0.5rem"><b>ENGINE ▸</b> {{ runError }}</div>
+        </div>
         <div class="topo-list">
           <button
             v-for="t in familyTopologies" :key="t.id"
@@ -603,14 +617,6 @@ provide('kh', {
           </div>
         </details>
 
-        <div style="margin-top: 1rem; display: flex; gap: 0.7rem; align-items: center; flex-wrap: wrap">
-          <button class="btn" :disabled="running || engineState !== 'ready'" @click="solve">
-            {{ running ? (form.engine === 'ngspice' ? 'Simulating…' : 'Solving…') : 'Solve' }}
-          </button>
-          <div v-if="engineState === 'loading'" class="boot"><div class="spin"></div> loading engine…</div>
-          <span v-else-if="result" class="chip ok">ready</span>
-        </div>
-        <div v-if="runError" class="err-banner"><b>ENGINE ▸</b> {{ runError }}</div>
       </aside>
 
       <!-- right: two selectable output panes -->

@@ -11,8 +11,9 @@ const props = defineProps({
 })
 const emit = defineEmits(['update:modelValue'])
 
-const CX = 70, CY = 66, R = 46, RTICK = 40, RLABEL = 60, RPTR = 34
+const CX = 70, CY = 66, R = 46, RTICK = 40, RLABEL = 62, RPTR = 34
 const START = -140, SWEEP = 280
+const LINEH = 8.4   // label line height (px in viewBox units)
 
 const detents = computed(() => {
   const n = props.families.length
@@ -20,14 +21,18 @@ const detents = computed(() => {
     const deg = START + (n > 1 ? (SWEEP * i) / (n - 1) : 0)
     const a = (deg * Math.PI) / 180
     const sin = Math.sin(a), cos = Math.cos(a)
+    const raw = props.short[fam] ?? fam
+    const lines = Array.isArray(raw) ? raw : [raw]   // a label may be one or two words, stacked
     return {
-      fam, deg,
+      fam, deg, lines,
       tx: CX + RTICK * sin, ty: CY - RTICK * cos,
       ox: CX + R * sin, oy: CY - R * cos,
       lx: CX + RLABEL * sin, ly: CY - RLABEL * cos,
     }
   })
 })
+// vertical-centre a 1- or 2-line label about its anchor point
+const lineY = (d, li) => d.ly + (li - (d.lines.length - 1) / 2) * LINEH + 3
 const idx = computed(() => Math.max(0, props.families.indexOf(props.modelValue)))
 const pointer = computed(() => {
   const d = detents.value[idx.value]
@@ -46,7 +51,7 @@ const advance = (step) => {
   <div class="dial" @keydown.left.prevent="advance(-1)" @keydown.right.prevent="advance(1)"
        @keydown.up.prevent="advance(-1)" @keydown.down.prevent="advance(1)" tabindex="0"
        role="listbox" :aria-label="`Converter family: ${modelValue}`">
-    <svg viewBox="-14 -2 168 132" xmlns="http://www.w3.org/2000/svg">
+    <svg viewBox="-30 -6 200 146" xmlns="http://www.w3.org/2000/svg">
       <!-- dial face -->
       <circle class="dial-face" :cx="CX" :cy="CY" :r="R + 6" />
       <circle class="dial-ring" :cx="CX" :cy="CY" :r="R" />
@@ -54,7 +59,7 @@ const advance = (step) => {
       <g v-for="d in detents" :key="d.fam" class="detent" :class="{ on: d.fam === modelValue }"
          @click="select(d.fam)" role="option" :aria-selected="d.fam === modelValue">
         <line :x1="d.tx" :y1="d.ty" :x2="d.ox" :y2="d.oy" />
-        <text :x="d.lx" :y="d.ly + 3">{{ short[d.fam] }}</text>
+        <text v-for="(ln, li) in d.lines" :key="li" :x="d.lx" :y="lineY(d, li)">{{ ln }}</text>
       </g>
       <!-- pointer + knob (click to advance) -->
       <g class="knob" @click="advance(1)">
@@ -70,13 +75,13 @@ const advance = (step) => {
 <style scoped>
 .dial { text-align: center; outline: none; }
 .dial:focus-visible { outline: 2px solid var(--amber); outline-offset: 3px; border-radius: 8px; }
-.dial svg { width: 100%; max-width: 200px; height: auto; }
+.dial svg { width: 100%; max-width: 230px; height: auto; }
 .dial-face { fill: #100c07; stroke: var(--line); stroke-width: 1; }
 .dial-ring { fill: none; stroke: var(--line-soft); stroke-width: 1; }
 .detent line { stroke: var(--line); stroke-width: 2; }
 .detent text {
-  font-family: var(--mono); font-size: 8px; fill: var(--ink-dim);
-  text-anchor: middle; letter-spacing: 0.05em;
+  font-family: var(--mono); font-size: 8.4px; fill: var(--ink-dim);
+  text-anchor: middle; letter-spacing: 0.02em;
 }
 .detent { cursor: pointer; }
 .detent:hover text { fill: var(--amber-hi); }
