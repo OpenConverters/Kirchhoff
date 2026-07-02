@@ -39,16 +39,25 @@ AcfDesign design_acf(const json& tasInputs) {
 
     const double Vo = d.outputVoltage, Fs = d.switchingFrequency, Io = d.outputPower / Vo;
     d.diodeDrop = req::dideal_diode_drop(Io);  // forward+freewheel ~ one DIDEAL drop at the rectifier current
-    const double D = cfg::get(d.config, "operatingDutyCycle", kDuty);
-    d.dutyCycle = D;
+    const double Dmax = cfg::get(d.config, "operatingDutyCycle", kDuty);   // MAX forward duty, occurs at Vin_min
     d.deadFraction = cfg::get(d.config, "deadTimeFraction", kDeadFrac);
 
-    // Turns ratio n = Vin_min*D/(Vo+Vd) so the forward gain reaches Vo at min input (MKF). Vd=0.
-    double n = d.inputVoltage * D / (Vo + d.diodeDrop);  // operating Vin (open-loop hits spec at the op point, not +5% at vinMin)
+    // Turns ratio at the MIN-Vin corner with the max duty: n = Vin_min·Dmax/(Vo+Vd) (MKF sizing). The forward
+    // interval the solver derives is t1 = (Vo+Vd)·n·period/Vin, so at Vin_min t1 = Dmax·period < period/2 for
+    // Dmax < 0.5 — i.e. the analytical embed's worst corner (Vin_min) stays inside the reset limit. (Sizing at
+    // NOMINAL Vin, as before, put t1 at exactly Dmax·Vin_nom/Vin_min·period = period/2 for a ±10% range, which
+    // the turns-ratio rounding then tipped over the guard.)
+    double n = vinMin * Dmax / (Vo + d.diodeDrop);
     // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
     // the duty-derived value so the rest of the stage is sized around the fixed transformer.
     d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(std::round(n * 100.0) / 100.0);
     n = d.turnsRatio;
+
+    // Open-loop deck drive: the duty that regulates at the NOMINAL operating point (the PtP deck simulates at
+    // nominal Vin), D_op = (Vo+Vd)·n/Vin_nom ≤ Dmax. So the open-loop deck lands on spec at the OP while the
+    // physical stage below is sized at the worst (Vin_min / Dmax) corner.
+    const double D = (Vo + d.diodeDrop) * n / d.inputVoltage;
+    d.dutyCycle = D;
 
     // Magnetizing inductance: Lm = Vin_min * n / (Fs * Io)  (reflected secondary current Io/n).
     d.magnetizingInductance = req::provided_inductance(dr).value_or(
@@ -92,8 +101,8 @@ json build_acf_tas(const AcfDesign& d) {
     // (NOT one of the solver's windings) and keeps its inline excitation; the magnetizing reset current
     // (clamp-switch rating) also stays inline (the solver folds it into the combined primary winding, so
     // there is no separate magnetizing winding to read). Worst-case corner (Vin_min) drives the main-switch
-    // rating; the declared nominal OP is what the TAS embeds. (ACF sizes n at D=0.45 on the NOMINAL Vin, so
-    // t1/period stays comfortably < 0.5 at Vin_min — the solver is safe at both corners here.)
+    // rating; the declared nominal OP is what the TAS embeds. (ACF sizes n at Vin_min with Dmax, so the
+    // solver's t1 = Dmax·period < period/2 at Vin_min and is even smaller at Vin_nom — safe at both corners.)
     const MAS::OperatingPoint aopWorst = AN::analytical_active_clamp_forward(d.inputVoltageMin, {Vout}, {iout},
                                             {n}, fsw, Lm, d.outputInductance, ripple, Dn, d.diodeDrop);
     const MAS::OperatingPoint aopNom   = AN::analytical_active_clamp_forward(Vin, {Vout}, {iout},

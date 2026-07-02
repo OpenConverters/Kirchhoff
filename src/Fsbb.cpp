@@ -134,7 +134,7 @@ json build_fsbb_tas(const FsbbDesign& d) {
         comp("D1", diode()),  comp("D2", diode()),  comp("D3", diode()),  comp("D4", diode()),
         comp("L", lind), comp("Csw1", snub()), comp("Csw2", snub())});
     cell["connections"] = json::array({
-        conn("vin_net",  {pin("Q1", "drain"), pin("Q3", "drain"), pin("D1", "cathode"), prt("vin")}),
+        conn("vin_net",  {pin("Q1", "drain"), pin("D1", "cathode"), prt("vin")}),
         conn("sw1_net",  {pin("Q1", "source"), pin("Q2", "drain"),
                           pin("D1", "anode"), pin("D2", "cathode"),
                           pin("L", "primary_start"), pin("Csw1", "1")}),

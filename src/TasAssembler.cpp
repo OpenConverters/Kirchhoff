@@ -77,15 +77,18 @@ std::string emit_load_card(const std::string& node, const json& inputs, size_t o
     const double P = hasPower ? power : vout * current;
     const double I = hasCurrent ? current : (vout != 0 ? power / vout : 0);
 
+    // Distinct element name per output: bare for the primary (outputIndex 0, keeps the single-output
+    // decks byte-identical), numeric-suffixed for additional outputs so names never collide.
+    const std::string sfx = (outputIndex == 0) ? std::string() : std::to_string(outputIndex);
     std::ostringstream c;
     c.precision(10);
     if (loadType == "resistive") {
         if (P <= 0 || vout == 0)
             throw std::runtime_error("TasAssembler: cannot size a resistive load (need Vout>0 and power>0)");
-        c << "Rload " << node << " 0 " << (vout * vout / P) << "\n";
+        c << "Rload" << sfx << " " << node << " 0 " << (vout * vout / P) << "\n";
     } else if (loadType == "constantCurrent") {
         // Ideal current sink: I flows node -> 0 through the source, i.e. drawn out of the output.
-        c << "Iload " << node << " 0 DC " << I << "\n";
+        c << "Iload" << sfx << " " << node << " 0 DC " << I << "\n";
     } else if (loadType == "constantPower") {
         // CPL — behavioural sink drawing constant power P (negative incremental resistance). A naive
         // i = P/v pins the output at 0 forever at startup (v->0 => ~unbounded sink). A resistive soft
@@ -96,7 +99,7 @@ std::string emit_load_card(const std::string& node, const json& inputs, size_t o
         if (P <= 0 || vout <= 0)
             throw std::runtime_error("TasAssembler: cannot size a constant-power load (need Vout>0 and power>0)");
         const double vKnee = 0.5 * vout;   // Imax = P/Vk = 2*Iop; constant power for v > Vout/2
-        c << "Bload " << node << " 0 I = " << P << " / max(V(" << node << "), " << vKnee << ")\n";
+        c << "Bload" << sfx << " " << node << " 0 I = " << P << " / max(V(" << node << "), " << vKnee << ")\n";
     } else {
         throw std::runtime_error("TasAssembler: loadType '" + loadType + "' is not supported by the "
                                  "ngspice emitter yet (battery / converter loads need extra parameters)");
@@ -187,8 +190,12 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
     std::map<std::string, std::string> groupKind, groupDir;
     for (const auto& ic : interStage) {
         const std::string name = ic.at("name").get<std::string>();
-        groupKind[name] = ic.value("kind", "wire");
-        groupDir[name] = ic.value("direction", "");
+        // kind is schema-required for every interStageConnection (internalNet "wire" / externalNet
+        // "externalPort"); direction is schema-required for external ports. Read them as required — a
+        // missing kind/direction is a malformed topology, not something to silently default (no-fallback rule).
+        const std::string kind = ic.at("kind").get<std::string>();
+        groupKind[name] = kind;
+        groupDir[name] = (kind == "externalPort") ? ic.at("direction").get<std::string>() : std::string();
         for (const auto& ep : ic.at("endpoints"))
             groupOf[{ep.at("stage").get<std::string>(), ep.at("port").get<std::string>()}] = name;
     }
@@ -430,6 +437,8 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
     const std::string inputType = dreq.value("inputType", "dc");
     std::string outputNode;
     std::vector<std::string> acInputNodes;   // collected for a single floating AC source (acSinglePhase)
+    size_t outputIdx = 0;                     // enumerates output external ports -> outputs[] index
+    const size_t nOutputs = dreq.at("outputs").size();
     for (const auto& [g, kind] : groupKind) {
         if (kind != "externalPort") continue;
         const std::string node = group_node(g);
@@ -440,10 +449,15 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
             else os << "V" << g << " " << node << " 0 DC " << vin << "\n";
         }
         if (groupDir[g] == "output") {
-            outputNode = node;
-            // Synthesize the load from the per-OP outputs condition (boundary condition, not a
-            // converter stage — the dual of the input source above). loadType picks R / I-sink / CPL.
-            os << emit_load_card(node, tasDoc.at("inputs"), 0);
+            // One load per output external port, each sized from its OWN outputs[] condition and given a
+            // distinct element name (bare for the primary output, suffixed for the rest) so a multi-output
+            // deck does not collide two loads on one name / size both from output 0.
+            if (outputIdx >= nOutputs)
+                throw std::runtime_error("TasAssembler: more output external ports than declared outputs[] ("
+                                         + std::to_string(nOutputs) + ")");
+            if (outputIdx == 0) outputNode = node;   // primary output drives the vout meas
+            os << emit_load_card(node, tasDoc.at("inputs"), outputIdx);
+            ++outputIdx;
         }
     }
     // Single-phase AC input: ONE sinusoidal source. `inputVoltage` is RMS line voltage (schema), so the
@@ -480,20 +494,22 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
                << " 0 0 " << phase[i] << ")\n";
     }
 
-    double fsw = 100000, dmax = 0.5;
+    double fsw = 0.0;
+    bool fswKnown = false;   // set once a pwm stimulus supplies the switching frequency
     for (const auto& st : sim.value("stimulus", json::array())) {
         const json& wf = st.at("waveform");
         if (wf.value("type", "") != "pwm") continue;
         const std::string stage = st.at("stage").get<std::string>();
         const std::string comp = st.at("component").get<std::string>();
-        const std::string sig = st.value("signal", "gate");
+        const std::string sig = st.at("signal").get<std::string>();   // schema-required on a stimulus
         auto it = pinPort.find({stage, comp, sig});
         if (it == pinPort.end())
             throw std::runtime_error("TasAssembler: stimulus target " + stage + "." + comp +
                                      "." + sig + " is not exposed on a stage port");
         const std::string stimNode = node_for_stage_port(stage, it->second);
-        fsw = wf.value("frequency", 100000.0);
-        const double duty = wf.value("dutyCycle", 0.5);
+        fsw = wf.at("frequency").get<double>();          // schema-required on a pwmWaveform
+        fswKnown = true;
+        const double duty = wf.at("dutyCycle").get<double>();   // schema-required on a pwmWaveform
         const double period = 1.0 / fsw, ton = duty * period;
         // Optional phase shift (degrees) -> PULSE delay TD = phaseDeg/360 * period. Enables
         // interleaved / phase-shifted multi-switch drives (push-pull 180 deg, bridges, etc.).
@@ -507,13 +523,25 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
     double stopTime = 0, maxStep = 0;
     for (const auto& an : sim.value("analyses", json::array())) {
         if (an.value("type", "") == "transient") {
-            stopTime = an.value("stopTime", 0.0);
-            maxStep = an.value("maximumTimeStep", 0.0);
+            stopTime = an.at("stopTime").get<double>();   // schema-required on a transientAnalysis
+            maxStep = an.value("maximumTimeStep", 0.0);   // optional (defaulted from the reference period)
         }
     }
-    const double period = 1.0 / fsw;
-    if (stopTime <= 0) stopTime = 600 * period;
-    if (maxStep <= 0) maxStep = period / 200.0;
+    // Reference period for the default stopTime/maxStep AND the output-averaging window. A switching
+    // converter uses its switching period; a closed-loop AC-input converter (PFC/Vienna, no pwm stimulus)
+    // has no switching stimulus in the deck, so use the line period. With neither, there is no timescale to
+    // invent — throw (no-fallback rule) rather than fall back to a magic 100 kHz seed.
+    double refPeriod = 0.0;
+    if (fswKnown) {
+        refPeriod = 1.0 / fsw;
+    } else if ((inputType == "acSinglePhase" || inputType == "acThreePhase") && dreq.contains("lineFrequency")) {
+        refPeriod = 1.0 / PEAS::resolve_dimensional_values(dreq.at("lineFrequency"));
+    }
+    if (refPeriod <= 0)
+        throw std::runtime_error("TasAssembler: cannot determine a reference period — the deck has no pwm "
+                                 "stimulus frequency and no lineFrequency to size the transient / averaging window");
+    if (stopTime <= 0) stopTime = 600 * refPeriod;
+    if (maxStep <= 0) maxStep = refPeriod / 200.0;
 
     // Optional initial conditions: pre-charge nodes at t=0 (e.g. a resonant converter's output cap)
     // and run the transient with use-initial-conditions (UIC) so ngspice SKIPS the DC operating point.
@@ -545,7 +573,12 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
     }
     os << "\n";
     os << ".tran " << maxStep << " " << stopTime << " 0 " << maxStep << (useIc ? " uic" : "") << "\n";
-    const double from = stopTime - 50 * period;
+    // Output-averaging window: cover an integer number of the lowest output-ripple cycle so the mean is not
+    // biased by ripple phase. A switching converter ripples at fsw → average 50 switching periods; an
+    // AC-input converter's output ripples at 2·fline → average a full line period (refPeriod). Clamp at 0 so
+    // a short stopTime can never produce a negative window start.
+    const double measSpan = fswKnown ? 50.0 / fsw : refPeriod;
+    const double from = std::max(0.0, stopTime - measSpan);
     if (lt) {
         // LTspice (-b batch) auto-runs the .tran and evaluates deck-level .meas directives — no ngspice
         // .control/interactive block. The same measurement, in LTspice's .meas dialect.
