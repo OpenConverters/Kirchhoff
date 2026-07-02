@@ -88,6 +88,36 @@ TEST_CASE("design_dmc: an EMPTY minimumImpedance array never shadows minimumIndu
     CHECK(Kirchhoff::design_dmc(both).computedInductance == Approx(5e-3));
 }
 
+TEST_CASE("design_dmc: a filterCapacitance switches the requirement to the LC inductance (ABT #78 b)",
+          "[dmc][design]") {
+    // A real DM EMI filter is an LC low-pass. When the design pairs the choke with a cap, the choke
+    // must be sized by the LC cutoff — the SAME inductance propose_dmc_design synthesises — not by its
+    // own reactance (Z/(2πf)), which would over-design it by ~70× and disagree with the ngspice sim.
+    json spec = dmc_spec();
+    spec["filterCapacitance"] = 1e-6;
+    Kirchhoff::DmcDesign d = Kirchhoff::design_dmc(spec);
+
+    const double chokeOnly = Kirchhoff::impedance_to_inductance(800.0, 150000.0);  // the OLD value
+    const double proposedL = Kirchhoff::propose_dmc_design(spec)["inductance"].get<double>();
+    CHECK(d.computedInductance == Approx(proposedL));       // design == propose (advise == verify)
+    CHECK(d.computedInductance < chokeOnly);                // LC needs far less L than the choke alone
+    CHECK(d.impedancePoints.size() == 2);                   // points survive as CoreAdviser metadata
+    CHECK(d.computedImpedanceAtMinFreq == Approx(800.0));   // diagnostics still describe the spec
+
+    // The help-mode wizard re-sends propose's L as minimumInductance alongside the cap — same result.
+    json help = spec;
+    help["minimumInductance"] = proposedL;
+    CHECK(Kirchhoff::design_dmc(help).computedInductance == Approx(proposedL));
+
+    // An explicit L floor stricter than the LC value still wins (a caller demanding more inductance).
+    json floored = spec;
+    floored["minimumInductance"] = 10.0 * chokeOnly;
+    CHECK(Kirchhoff::design_dmc(floored).computedInductance == Approx(10.0 * chokeOnly));
+
+    // No cap → the choke IS the whole filter, so the choke-only bound is unchanged.
+    CHECK(Kirchhoff::design_dmc(dmc_spec()).computedInductance == Approx(chokeOnly));
+}
+
 TEST_CASE("build_dmc_inputs requires the switching frequency (no silent lineFrequency ripple)",
           "[dmc][inputs]") {
     json spec = dmc_spec();

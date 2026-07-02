@@ -44,6 +44,37 @@ const char* config_name(MAS::Configuration cfg) {
     return "singlePhase";
 }
 
+// The single most demanding DM attenuation requirement: the impedance point forcing the lowest LC
+// cutoff fc = f/10^(A/40), where A = 20·log10(Z/Rload). Satisfying it satisfies every other point on
+// the 40 dB/dec slope. Falls back to (switchingFrequency, 40 dB) when there are no impedance points.
+// SHARED by propose_dmc_design and design_dmc's LC branch so the proposed filter and the designed
+// inductance requirement can never drift apart. Throws when neither an impedance point nor a switching
+// frequency yields a target frequency (no silent fallback, per the no-fallbacks rule).
+struct DmcFilterTarget { double frequency; double attenuationDb; double cutoffFrequency; };
+
+DmcFilterTarget dmc_filter_target(double loadImpedance,
+                                  const std::vector<MAS::ImpedanceAtFrequency>& impedancePoints,
+                                  double switchingFrequency) {
+    double targetFrequency = switchingFrequency;
+    double targetAttenuation = 40.0;
+    double lowestRequiredCutoff = std::numeric_limits<double>::max();
+    for (const auto& pt : impedancePoints) {
+        const double f = pt.get_frequency();
+        const double atten = 20.0 * std::log10(pt.get_impedance().get_magnitude() / loadImpedance);
+        const double requiredCutoff = f / std::pow(10.0, atten / 40.0);
+        if (requiredCutoff < lowestRequiredCutoff) {
+            lowestRequiredCutoff = requiredCutoff;
+            targetFrequency = f;
+            targetAttenuation = atten;
+        }
+    }
+    if (!(targetFrequency > 0))
+        throw std::invalid_argument(
+            "dmc_filter_target: needs a target frequency — supply minimumImpedance[] or switchingFrequency");
+    const double cutoffFrequency = targetFrequency / std::pow(10.0, targetAttenuation / 40.0);
+    return {targetFrequency, targetAttenuation, cutoffFrequency};
+}
+
 }  // namespace
 
 // ═══ dmc_required_inductance — ported verbatim from MKF calculate_required_inductance (:549) ═════════
@@ -89,9 +120,12 @@ DmcDesign design_dmc(const json& spec) {
             throw std::invalid_argument("design_dmc: filterCapacitance must be > 0 when supplied");
     }
 
-    // Impedance spec → points + L_min at the LOWEST spec frequency (MKF :78-95, :108-123). NOT an
-    // else-if against minimumInductance: an EMPTY minimumImpedance array (a UI serializing its blank
-    // impedance table) must never shadow a supplied minimumInductance.
+    // Impedance spec → points + diagnostics + the choke-ONLY L_min (Z/(2πf) at the lowest spec
+    // frequency, MKF :78-95). The points are ALWAYS kept: they feed the CoreAdviser's complex-
+    // permeability scoring in build_dmc_inputs regardless of which formula ends up sizing the choke.
+    // NOT an else-if against minimumInductance: an EMPTY minimumImpedance array (a UI serializing its
+    // blank impedance table) must never shadow a supplied minimumInductance.
+    double chokeOnlyInductance = 0.0;   // Z/(2πf) at the lowest point; 0 when no impedance points
     if (spec.contains("minimumImpedance")) {
         double lowestFreq = std::numeric_limits<double>::max();
         double highestFreq = 0.0;
@@ -104,17 +138,35 @@ DmcDesign design_dmc(const json& spec) {
             if (f > highestFreq) highestFreq = f;
         }
         if (!d.impedancePoints.empty()) {
-            d.computedInductance = impedance_to_inductance(zAtLowest, lowestFreq);
+            chokeOnlyInductance = impedance_to_inductance(zAtLowest, lowestFreq);
             d.computedMinFrequency = lowestFreq;
             d.computedMaxFrequency = highestFreq;
             d.computedImpedanceAtMinFreq = zAtLowest;
         }
     }
+
+    // Inductance requirement (ABT #78, option b). A real DM EMI filter is an LC low-pass: when a
+    // filterCapacitance is supplied the choke is sized by the LC cutoff — the SAME inductance
+    // propose_dmc_design synthesises — NOT by its own reactance. Using the choke-only Z/(2πf) here
+    // would hand the MagneticAdviser a ~70× larger part than the ngspice sim + verify_dmc_attenuation
+    // (which include the cap) exercise, so the advised part and the verified part disagree. With no
+    // cap the choke IS the whole filter, so the choke-only bound stands. The impedance points survive
+    // as minimumImpedance metadata either way (kept above, consumed by build_dmc_inputs).
+    if (d.filterCapacitance && (!d.impedancePoints.empty() || d.switchingFrequency > 0)) {
+        const double loadImpedance = d.inputVoltage / d.operatingCurrent;
+        const DmcFilterTarget target =
+            dmc_filter_target(loadImpedance, d.impedancePoints, d.switchingFrequency);
+        d.computedInductance =
+            dmc_required_inductance(target.attenuationDb, target.frequency, *d.filterCapacitance);
+    } else {
+        d.computedInductance = chokeOnlyInductance;
+    }
+
     if (spec.contains("minimumInductance")) {
         d.minimumInductance = spec.at("minimumInductance").get<double>();
         if (*d.minimumInductance <= 0)
             throw std::invalid_argument("design_dmc: minimumInductance must be > 0");
-        // Both modes given → the stricter (larger) bound wins.
+        // An explicit L floor still raises the requirement if it is stricter (larger).
         d.computedInductance = std::max(d.computedInductance, *d.minimumInductance);
     }
 
@@ -191,25 +243,11 @@ json propose_dmc_design(const json& spec) {
     // required attenuation A = 20·log10(Z/Rload) forces the lowest LC cutoff fc = f/10^(A/40).
     // Satisfying it satisfies every other point on the 40 dB/dec slope. (Deviates from MKF, which
     // took minImpedance->front() — an order-dependent pick that could propose a filter missing the
-    // user's harder requirement.) Falls back to the switching frequency at a default 40 dB.
-    double targetFrequency = d.switchingFrequency;
-    double targetAttenuation = 40.0;
-    double lowestRequiredCutoff = std::numeric_limits<double>::max();
-    for (const auto& pt : d.impedancePoints) {
-        const double f = pt.get_frequency();
-        const double atten = 20.0 * std::log10(pt.get_impedance().get_magnitude() / loadImpedance);
-        const double requiredCutoff = f / std::pow(10.0, atten / 40.0);
-        if (requiredCutoff < lowestRequiredCutoff) {
-            lowestRequiredCutoff = requiredCutoff;
-            targetFrequency = f;
-            targetAttenuation = atten;
-        }
-    }
-    if (!(targetFrequency > 0))
-        throw std::invalid_argument(
-            "propose_dmc_design: needs a target frequency — supply minimumImpedance[] or switchingFrequency");
-
-    const double cutoffFrequency = targetFrequency / std::pow(10.0, targetAttenuation / 40.0);
+    // user's harder requirement.) Falls back to the switching frequency at a default 40 dB. Shared
+    // with design_dmc via dmc_filter_target so the proposed and designed inductances stay identical.
+    const DmcFilterTarget target = dmc_filter_target(loadImpedance, d.impedancePoints, d.switchingFrequency);
+    const double targetAttenuation = target.attenuationDb;
+    const double cutoffFrequency = target.cutoffFrequency;
 
     // Choose a practical capacitance (MKF :700-714): default via a 470 µH target inductance, clamped
     // to [100 nF, 10 µF], overridden by an explicit filterCapacitance.
