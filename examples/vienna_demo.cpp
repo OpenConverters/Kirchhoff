@@ -4,7 +4,7 @@
 #include <nlohmann/json.hpp>
 #include <iostream>
 using nlohmann::json;
-int main(int argc, char** argv) {
+int main() {
     json di;
     di["designRequirements"]["efficiency"] = 1.0;
     di["designRequirements"]["inputType"] = "acThreePhase";

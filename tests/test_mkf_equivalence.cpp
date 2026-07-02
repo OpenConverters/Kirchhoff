@@ -820,7 +820,6 @@ TEST_CASE("LLC: Kirchhoff design+simulation matches MKF ideal reference", "[equi
     // diodes. The two agree to ~2-2.5% on Vout — the real switches' ZVS transitions + the ~0.9V diode
     // drop vs MKF's ideal source. (LLC.h itself notes ±10% vs bench is normal; this is a documented
     // model-fidelity difference, not a relaxed bug threshold.)
-    constexpr double kResTol = 0.03;
     json fx = load_fixture("llc");
     const json& in = fx.at("inputs");
     const json& sim = fx.at("sim");

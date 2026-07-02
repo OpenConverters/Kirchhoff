@@ -26,7 +26,8 @@ static std::string run_ngspice(const std::string& deck, const std::string& tag) 
 static std::string fmt(double v) { std::ostringstream os; os.precision(12); os << v; return os.str(); }
 static bool parse_meas(const std::string& o, const std::string& n, double& v) {
     std::smatch m; std::regex re(n + R"(\s*=\s*([-0-9.eE+]+))");
-    if (!std::regex_search(o, m, re)) return false; v = std::stod(m[1].str()); return true;
+    if (!std::regex_search(o, m, re)) { return false; }
+    v = std::stod(m[1].str()); return true;
 }
 
 int main(int argc, char** argv) {

@@ -168,7 +168,7 @@ if (KIRCHHOFF_BUILD_PYBIND AND NOT EMSCRIPTEN)
     FetchContent_Declare(pybind11
         GIT_REPOSITORY https://github.com/pybind/pybind11.git GIT_TAG v2.13.6)
     FetchContent_Declare(pybind11_json
-        GIT_REPOSITORY https://github.com/pybind/pybind11_json.git)
+        GIT_REPOSITORY https://github.com/pybind/pybind11_json.git GIT_TAG 0.2.15)
     FetchContent_MakeAvailable(pybind11 pybind11_json)
     pybind11_add_module(PyKirchhoff src/bindings.cpp)
     target_include_directories(PyKirchhoff PRIVATE "${pybind11_json_SOURCE_DIR}/include")
@@ -292,4 +292,22 @@ if (KIRCHHOFF_BUILD_SHARED_API AND NOT EMSCRIPTEN)
     add_executable(api_consumer examples/api_consumer.cpp)
     target_include_directories(api_consumer PRIVATE src "${PSMA_ROOT}/PEAS/src")
     target_link_libraries(api_consumer PRIVATE KirchhoffApi)
+endif()
+
+# Enforce -Wall -Wextra on Kirchhoff's own tests + example demos too (their sources are already clean —
+# this keeps them so). Dependency headers are marked SYSTEM above and Catch2 is external, so only our code
+# is flagged. The binding modules (PyKirchhoff / libKirchhoff / KirchhoffApi) are intentionally excluded —
+# their pybind11 / embind headers are noisy under -Wextra and carry no converter logic.
+if (NOT MSVC)
+    foreach(_kh_warn_target
+            test_advanced test_analytical test_control_stage test_converter_analytical test_diagnostics
+            test_extract test_ltspice_backend test_mkf_equivalence test_ngspice_runner test_nrmse_gate
+            test_pfc test_ptp test_real_fidelity test_real_magnetic test_requirements
+            test_resonant_validation test_settings test_vienna
+            flyback_demo tas_flyback_demo boost_demo psfb_demo ahb_demo acf_demo fsbb_demo pshb_demo
+            clllc_demo pfc_demo vienna_demo api_consumer)
+        if (TARGET ${_kh_warn_target})
+            target_compile_options(${_kh_warn_target} PRIVATE -Wall -Wextra)
+        endif()
+    endforeach()
 endif()
