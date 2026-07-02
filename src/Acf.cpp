@@ -14,6 +14,8 @@ double nominal(const json& j) { return PEAS::resolve_dimensional_values(j); }
 constexpr double kDuty       = 0.45;   // main-switch operating duty (MKF ACF maximumDutyCycle)
 constexpr double kDeadFrac   = 0.01;   // 100ns dead time between main & clamp switches at 100kHz
 constexpr double kRippleRatio = 0.4;   // output-inductor current ripple
+constexpr double kIdealSwRon = 0.01;   // ideal-deck switch on-resistance (matches SAS IDEAL_SW_RON) — the
+                                       // synchronous-rectifier forward drop is Iout*Rds, not a diode Vf
 } // namespace
 
 AcfDesign design_acf(const json& tasInputs) {
@@ -38,7 +40,10 @@ AcfDesign design_acf(const json& tasInputs) {
     d.inputVoltageMax = vinMax;
 
     const double Vo = d.outputVoltage, Fs = d.switchingFrequency, Io = d.outputPower / Vo;
-    d.diodeDrop = req::dideal_diode_drop(Io);  // forward+freewheel ~ one DIDEAL drop at the rectifier current
+    // Output rectifier is a SYNCHRONOUS rectifier (gated MOSFETs SRfwd/SRfw), so its forward drop is the
+    // small ohmic Iout*Rds of the conducting SR — NOT a ~0.9 V diode Vf. Sizing n/duty against a diode Vf
+    // would over-deliver Vout by ~Vf (fatal on a low-Vout rail: a 3.3 V/30 A design overshot to 3.9 V).
+    d.diodeDrop = Io * kIdealSwRon;  // SR conduction drop = rectifier forward drop used for n/duty/Lo sizing
     const double Dmax = cfg::get(d.config, "operatingDutyCycle", kDuty);   // MAX forward duty, occurs at Vin_min
     d.deadFraction = cfg::get(d.config, "deadTimeFraction", kDeadFrac);
 
@@ -86,8 +91,6 @@ json build_acf_tas(const AcfDesign& d) {
     auto isc = [](const char* name, const char* kind, const char* dir, std::vector<json> eps) {
         json c; c["name"] = name; c["kind"] = kind; if (dir[0]) c["direction"] = dir; c["endpoints"] = eps; return c; };
     auto mosfet = []() { json j; j["semiconductor"]["mosfet"] = json::object(); return j; };
-    auto diode  = [&]() { json j; j["semiconductor"]["diode"] = json::object();
-        j["inputs"]["designRequirements"] = req::body_diode(d.inputVoltage, d.outputPower / d.inputVoltage); return j; };
 
     namespace AN = Kirchhoff::analytical;
     const double n = d.turnsRatio, Lm = d.magnetizingInductance, fsw = d.switchingFrequency;
@@ -136,16 +139,22 @@ json build_acf_tas(const AcfDesign& d) {
     const double maxRdsOnClamp = (ImagRms > 0.0)
         ? cfg::rds_on_loss_fraction(d.config) * d.outputPower / (ImagRms * ImagRms)
         : maxRdsOnMain;
-    // Output forward/freewheel rectifiers reverse-block the secondary peak Vin_max/n, carry ~Iout.
-    const double ratedVrSec = (d.inputVoltageMax / n) / cfg::v_derate_diode(d.config);
-    const double maxVfSec    = (ratedVrSec < 100.0) ? 0.6 : 1.2;
-    const double maxTrr      = 0.05 * T;
+    // Output SYNCHRONOUS rectifiers (SRfwd forward + SRfw freewheel): gated MOSFETs, not diodes. At a
+    // low-Vout/high-current rail (e.g. 3.3 V / 30 A) the ideal-diode Vf (~0.92 V) was ~28% of the output on
+    // the rectifier alone, so the ideal deck looked implausibly lossy; an SR's I²·Rds is a small fraction of
+    // that. Each SR reverse-blocks the reflected secondary peak Vin_max/n and carries the output-inductor
+    // current (peak IpkLout, rms IrmsLout). Body diodes (DSfwd/DSfw) are bare seeds — the FET's intrinsic
+    // diode — for the switching dead-time and for startup rectification before the gates take over.
+    const double ratedVdsSR  = (d.inputVoltageMax / n) / cfg::v_derate_mosfet(d.config);
+    const double maxRdsOnSR  = (IrmsLout > 0.0)
+        ? cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IrmsLout * IrmsLout) : maxRdsOnMain;
+    const json reqSR = req::mosfet("mainSwitch", ratedVdsSR, IpkLout, maxRdsOnSR, 125.0);
     json mainSw = mosfet();
     mainSw["inputs"]["designRequirements"] = req::mosfet("mainSwitch", ratedVds, IpkPri, maxRdsOnMain, 125.0);
     json clampSw = mosfet();
     clampSw["inputs"]["designRequirements"] = req::mosfet("mainSwitch", ratedVds, ImagPk, maxRdsOnClamp, 125.0);
-    auto rectDiode = [&]() { json j = diode();
-        j["inputs"]["designRequirements"] = req::diode(ratedVrSec, iout / 0.7, maxVfSec, maxTrr); return j; };
+    auto srFet   = [&]() { json j = mosfet(); j["inputs"]["designRequirements"] = reqSR; return j; };
+    auto bodyDio = []()  { json j; j["semiconductor"]["diode"] = json::object(); return j; };  // bare (FET body diode)
 
     // 2-winding transformer (primary + 1 secondary, NO demag winding — active clamp resets it) -> 2 excitations (from the solver).
     std::vector<std::string> xfmrIso{"primary", "secondary"};
@@ -177,12 +186,14 @@ json build_acf_tas(const AcfDesign& d) {
 
     // Active-clamp forward cell: main switch Q1 (vin->sw), 2-winding transformer (sw->gnd primary), the
     // clamp leg (Sc: vin->clamp_node, Cc: clamp_node->sw — clamp_node gets its DC path through Sc's
-    // ROFF, like MKF's 1Meg bleeder), and the forward output (Dfwd + Dfw + Lout). Dot orientation
+    // ROFF, like MKF's 1Meg bleeder), and the forward output (SRfwd + SRfw synchronous rectifier + Lout). Dot orientation
     // matches MKF (primary & secondary in-phase: primary_start=sw, secondary1_start=sec_in).
     json cell; cell["name"] = "acf-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate_main"), port("gate_clamp")});
     cell["components"] = json::array({comp("Q1", mainSw), comp("Sc", clampSw), comp("Cc", cc),
-                                      comp("T1", xfmr), comp("Dfwd", rectDiode()), comp("Dfw", rectDiode()),
+                                      comp("T1", xfmr),
+                                      comp("SRfwd", srFet()), comp("DSfwd", bodyDio()),
+                                      comp("SRfw", srFet()),  comp("DSfw", bodyDio()),
                                       comp("Lout", lout), comp("Csn", snb), comp("Csn2", snb)});
     cell["connections"] = json::array({
         conn("vin_net",  {pin("Q1", "drain"), pin("Sc", "drain"), prt("vin")}),
@@ -190,14 +201,20 @@ json build_acf_tas(const AcfDesign& d) {
         // clamp_node is the stiff one (its only DC path is the clamp switch ROFF); a node snubber there clears
         // the last high-Vin/light-load/high-fsw corner. Both Csn* strip together for a real-fidelity deck.
         conn("clamp_node", {pin("Sc", "source"), pin("Cc", "1"), pin("Csn2", "1")}),
-        // secondary -> forward rectifier (forward diode + freewheel diode) -> output inductor
-        conn("sec_in",   {pin("T1", "secondary1_start"), pin("Dfwd", "anode")}),
-        conn("sec_rect", {pin("Dfwd", "cathode"), pin("Dfw", "cathode"), pin("Lout", "primary_start")}),
+        // secondary -> SYNCHRONOUS forward rectifier (SRfwd) + freewheel SR (SRfw) -> output inductor.
+        // Body-diode orientation matches the diodes they replace: DSfwd conducts sec_in->sec_rect (so
+        // SRfwd source=sec_in, drain=sec_rect); DSfw conducts gnd->sec_rect (SRfw source=gnd, drain=sec_rect).
+        conn("sec_in",   {pin("T1", "secondary1_start"), pin("SRfwd", "source"), pin("DSfwd", "anode")}),
+        conn("sec_rect", {pin("SRfwd", "drain"), pin("DSfwd", "cathode"),
+                          pin("SRfw", "drain"),  pin("DSfw", "cathode"), pin("Lout", "primary_start")}),
         conn("vout_net", {pin("Lout", "primary_end"), prt("vout")}),
         conn("gnd_net",  {pin("T1", "primary_end"), pin("T1", "secondary1_end"),
-                          pin("Dfw", "anode"), pin("Csn", "2"), pin("Csn2", "2"), prt("gnd")}),
-        conn("gate_main_net",  {pin("Q1", "gate"), prt("gate_main")}),
-        conn("gate_clamp_net", {pin("Sc", "gate"), prt("gate_clamp")})});
+                          pin("SRfw", "source"), pin("DSfw", "anode"),
+                          pin("Csn", "2"), pin("Csn2", "2"), prt("gnd")}),
+        // SRfwd gated synchronous with Q1 (conducts during the power-transfer interval D); SRfw with the
+        // clamp switch Sc (on during exactly the reset/freewheel interval 1-D) — no extra stimulus needed.
+        conn("gate_main_net",  {pin("Q1", "gate"), pin("SRfwd", "gate"), prt("gate_main")}),
+        conn("gate_clamp_net", {pin("Sc", "gate"), pin("SRfw", "gate"),  prt("gate_clamp")})});
 
     json filt; filt["name"] = "output-filter";
     filt["ports"] = json::array({port("in"), port("rtn")});
