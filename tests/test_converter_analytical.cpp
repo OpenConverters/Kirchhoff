@@ -849,12 +849,14 @@ TEST_CASE("analytical_current_transformer: 2 windings, secondary = primary*turns
     // Secondary current = primary × turnsRatio (Ip·Np = Is·Ns).
     CHECK(*processed_current(op, 1).get_peak() == Catch::Approx(ipk * n).margin(0.05));   // 1.0 A
     CHECK(*processed_current(op, 1).get_average() == Catch::Approx(0.0).margin(0.05));
-    // Secondary voltage = Is·burden + (Vdiode + Rsec_dc): sine of peak Is_pk·burden riding on the DC term.
-    CHECK(voltage_average(op, 1) == Catch::Approx(vd + rdc).margin(0.05));                 // 1.2 V DC
-    CHECK(*processed_voltage(op, 1).get_peak() == Catch::Approx(ipk * n * burden + vd + rdc).margin(0.1)); // 11.2
+    // Secondary voltage = Is·(burden + Rsec_dc) + Vdiode: a zero-mean sine of peak Is_pk·(burden+Rsec_dc)
+    // riding on the diode-drop DC term. The winding DCR drop i·Rsec_dc is zero-mean (rides on the AC
+    // current), so it does NOT enter the DC average — only the rectifier drop does.
+    CHECK(voltage_average(op, 1) == Catch::Approx(vd).margin(0.05));                       // 0.7 V DC (diode only)
+    CHECK(*processed_voltage(op, 1).get_peak() == Catch::Approx(ipk * n * (burden + rdc) + vd).margin(0.1)); // 11.2
     // Primary winding voltage is the secondary voltage reflected back: V_pri = V_sec × turnsRatio.
     CHECK(*processed_voltage(op, 0).get_peak() ==
-          Catch::Approx((ipk * n * burden + vd + rdc) * n).margin(0.02));                  // 0.112 V
+          Catch::Approx((ipk * n * (burden + rdc) + vd) * n).margin(0.02));                // 0.112 V
 }
 
 TEST_CASE("analytical_current_transformer rejects bad waveform label and non-positive inputs",

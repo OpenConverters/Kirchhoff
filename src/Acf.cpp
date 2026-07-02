@@ -110,7 +110,10 @@ json build_acf_tas(const AcfDesign& d) {
     const double IpkPri  = AN::winding_current(aopWorst, 0, "peak");   // primary peak (main-switch rating)
     const double IrmsPri = AN::winding_current(aopWorst, 0, "rms");    // primary rms (main-switch RdsOn conduction)
     const double ImagPk  = Vin * Dn * T / Lm;                          // magnetizing reset peak (clamp-switch rating)
-    const double ImagRms = ImagPk * std::sqrt(Dn / 3.0);              // magnetizing reset rms  (clamp-switch RdsOn)
+    // Clamp switch conducts during the RESET interval (1-Dn)*T, carrying the magnetizing triangle from
+    // ImagPk down to 0; its full-period rms is therefore ImagPk*sqrt((1-Dn)/3), NOT sqrt(Dn/3) (the ON
+    // interval, when the magnetizing current flows through the MAIN switch, not the clamp).
+    const double ImagRms = ImagPk * std::sqrt((1.0 - Dn) / 3.0);      // magnetizing reset rms  (clamp-switch RdsOn)
 
     // Output filter inductor Lout (single winding) — inline excitation (not one of the solver's windings).
     const double dILout  = (Vin / n - d.diodeDrop - Vout) * (Dn * T) / d.outputInductance;

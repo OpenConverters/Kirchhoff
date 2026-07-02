@@ -480,8 +480,9 @@ MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
 // UNIPOLAR_TRIANGULAR}, peak `maximumPrimaryCurrentPeak`). Ampere-turn balance Ip·Np = Is·Ns with
 // `turnsRatio` = Np/Ns gives the secondary current = primary × turnsRatio (for a step-up-turns CT, Np<Ns
 // ⇒ turnsRatio<1 ⇒ the secondary is a scaled-DOWN replica of the line current). The secondary develops
-// V_sec = Is·burdenResistor + (diodeVoltageDrop + secondaryDcResistance) across the burden + rectifier +
-// winding DC resistance; the primary winding voltage is that reflected back V_pri = V_sec × turnsRatio.
+// V_sec = Is·(burdenResistor + secondaryDcResistance) + diodeVoltageDrop — the burden and the winding DC
+// resistance are both ohms in series with Is (i·R terms), only the rectifier drop is a DC volt offset;
+// the primary winding voltage is that reflected back V_pri = V_sec × turnsRatio.
 // Ported from MKF converter_models/CurrentTransformer.cpp:42 (process_operating_points(turnsRatio,
 // secondaryDcResistance)); MKF's multiply_waveform/sum_waveform/reflect_waveform data ops are inlined and
 // the two SignalDescriptors are completed via WP::complete_excitation (same DSP MKF runs inline). Throws

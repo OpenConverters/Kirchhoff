@@ -74,7 +74,9 @@ PshbDesign design_pshb(const json& tasInputs) {
     // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
     // the duty-derived value so the rest of the stage is sized around the fixed transformer.
     d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(std::round(n * 100.0) / 100.0);
-    d.outputInductance = Vo * (1.0 - Deff) / (Fs * cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Io);
+    // 2*Fs: the NPC bridge secondary delivers two power pulses per switching period, so the output filter
+    // ripples at 2*Fs — sizing at Fs oversized Lo by 2x for the target ripple ratio.
+    d.outputInductance = Vo * (1.0 - Deff) / (2.0 * Fs * cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Io);
     // Magnetizing inductance from a target magnetizing-current FRACTION of the reflected load current.
     // A small fraction maximises Lm — but Lm = N^2*AL ungapped, so a large Lm forces MANY primary turns,
     // and the absolute leakage scales ~N^2: a 10% target gave Lm~940uH / ~110 turns / ~80uH leakage, whose
@@ -118,8 +120,8 @@ json build_pshb_tas(const PshbDesign& d) {
     const double VhbMax = 0.5 * d.inputVoltageMax;   // worst-case half bus for device VOLTAGE ratings
 
     // --- stresses ---
-    // Output inductor (CCM): avg=Io, ripple from the Lo sizing volt-seconds.
-    const double dILo = Vo * (1.0 - Deff) / (d.outputInductance * fsw);   // pk-pk (= ripple sizing)
+    // Output inductor (CCM): avg=Io, ripple from the Lo sizing volt-seconds at the 2*fsw output rate.
+    const double dILo = Vo * (1.0 - Deff) / (d.outputInductance * 2.0 * fsw);   // pk-pk (= ripple sizing)
     const double IloPk  = Io + dILo / 2.0;
     const double IloRms = std::sqrt(Io * Io + dILo * dILo / 12.0);
     const double vLoPk = std::max(std::abs(Vhb / N - Vo), Vo), vLoPkPk = Vhb / N, vLoRms = Vo;

@@ -387,10 +387,13 @@ MAS::OperatingPoint analytical_forward(double inputVoltage,
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Primary"));
     }
-    // Demagnetization winding — inverted voltage polarity.
+    // Demagnetization winding — inverted voltage polarity. Its current is the UNIPOLAR magnetizing-reset
+    // pulse (0 during the on-time, then magnetizationCurrent ramping back to 0 during the reset interval),
+    // so its baseline offset is 0 — NOT minimumPrimaryCurrent, which folds in the reflected secondary LOAD
+    // current that flows only in the primary/secondaries, never in the diode-clamped demag winding.
     {
         MAS::Waveform currentWaveform = WP::create_waveform(Lbl::FLYBACK_SECONDARY_WITH_DEADTIME, magnetizationCurrent,
-                                                            switchingFrequency, actualDutyCycle, minimumPrimaryCurrent, deadTime);
+                                                            switchingFrequency, actualDutyCycle, 0.0, deadTime);
         MAS::Waveform voltageWaveform;
         voltageWaveform.set_data(std::vector<double>{0, -inputVoltage, -inputVoltage, inputVoltage, inputVoltage, 0, 0});
         voltageWaveform.set_time(std::vector<double>{0, 0, t1, t1, t1 + td, t1 + td, period});
@@ -2584,12 +2587,15 @@ MAS::OperatingPoint analytical_current_transformer(MAS::WaveformLabel primaryCur
         WP::create_waveform(primaryCurrentWaveformLabel, peakToPeak, frequency, dutyCycle);
 
     // MKF :66-68 — secondary current = primary × turnsRatio (Ip·Np = Is·Ns); secondary voltage =
-    // Is·burden + (Vdiode + Rsec_dc). MKF derives the secondary current via reflect_waveform (2-arg,
+    // Is·(burden + Rsec_dc) + Vdiode. MKF derives the secondary current via reflect_waveform (2-arg,
     // Inputs.cpp:1222) which likewise multiplies the data by the ratio.
+    // NOTE: the burden AND the secondary DC resistance are both OHMS in series with Is, so both scale the
+    // current (i·R); only the rectifier drop is a true DC volt offset. The ported form added Rsec_dc as a
+    // volt offset (ohms + volts), which inflated the DC average by i·0 → Rsec_dc regardless of current.
     MAS::Waveform secondaryCurrentWaveform = ca_scale_waveform(primaryCurrentWaveform, turnsRatio);
     MAS::Waveform secondaryVoltageWaveform =
-        ca_offset_waveform(ca_scale_waveform(secondaryCurrentWaveform, burdenResistor),
-                           diodeVoltageDrop + secondaryDcResistance);
+        ca_offset_waveform(ca_scale_waveform(secondaryCurrentWaveform, burdenResistor + secondaryDcResistance),
+                           diodeVoltageDrop);
 
     // MKF :73 — the primary winding voltage is the secondary voltage reflected back: V_pri = V_sec × turnsRatio.
     MAS::Waveform primaryVoltageWaveform = ca_scale_waveform(secondaryVoltageWaveform, turnsRatio);

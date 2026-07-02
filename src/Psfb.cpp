@@ -98,8 +98,10 @@ PsfbDesign design_psfb(const json& tasInputs) {
     // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
     // the duty-derived value so the rest of the stage is sized around the fixed transformer.
     d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(std::round(n * 100.0) / 100.0);
-    // Output inductor: Lo = Vo*(1 - Deff)/(Fs * ripple * Io).
-    d.outputInductance = Vo * (1.0 - Deff) / (Fs * cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Io);
+    // Output inductor: Lo = Vo*(1 - Deff)/(2*Fs * ripple * Io). The full-bridge secondary delivers TWO
+    // power pulses per switching period, so the output filter sees ripple at 2*Fs — sizing at Fs oversized
+    // Lo by 2x for the target ripple ratio.
+    d.outputInductance = Vo * (1.0 - Deff) / (2.0 * Fs * cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Io);
 
     // Magnetizing inductance: Im_peak target = 10% of reflected load current; Lm = Vin*Deff/(4*Fs*Im).
     double ImTarget = 0.1 * Io / d.turnsRatio;
@@ -140,8 +142,8 @@ json build_psfb_tas(const PsfbDesign& d) {
     const double Vin = d.inputVoltage, Deff = d.effectiveDuty;
 
     // --- stresses ---
-    // Output inductor (CCM): avg=Io, ripple from the Lo sizing volt-seconds.
-    const double dILo = Vo * (1.0 - Deff) / (d.outputInductance * fsw);   // pk-pk (= ripple sizing)
+    // Output inductor (CCM): avg=Io, ripple from the Lo sizing volt-seconds at the 2*fsw output rate.
+    const double dILo = Vo * (1.0 - Deff) / (d.outputInductance * 2.0 * fsw);   // pk-pk (= ripple sizing)
     const double IloPk  = Io + dILo / 2.0;
     const double IloRms = std::sqrt(Io * Io + dILo * dILo / 12.0);
     const double vLoPk = std::max(std::abs(Vin / N - Vo), Vo), vLoPkPk = Vin / N, vLoRms = Vo;
