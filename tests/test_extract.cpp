@@ -97,6 +97,14 @@ void check_ngspice(const json& tas) {
     for (size_t w = 0; w < excs.size(); ++w) {
         CHECK(current_rms(excs[w]) > 0.0);
         CHECK(current_waveform_points(excs[w]) == 128);   // sim populated the waveform
+        // ABT #3: the winding VOLTAGE is now reconstructed from the simulated node difference too — the
+        // extract throws if either terminal node is unresolvable, so a return means every winding carries a
+        // real 128-sample simulated voltage (not the analytical one riding through).
+        auto vol = excs[w].get_voltage();
+        REQUIRE(vol);
+        auto vwf = vol->get_waveform();
+        REQUIRE(vwf);
+        CHECK(vwf->get_data().size() == 128);
     }
 }
 
@@ -184,6 +192,77 @@ TEST_CASE("api: full analytical waveforms captured out-of-band", "[extract][api]
     const json j2 = json::parse(Kirchhoff::api::design_tas_full("buck", spec_for(24, 12, 60, 100000).dump()));
     REQUIRE(j2.at("analyticalWaveforms").contains("L1"));
     CHECK_FALSE(j2.at("analyticalWaveforms").contains("T1"));
+}
+
+TEST_CASE("api: weinberg captures both magnetics into the registry", "[extract][api][waveforms][weinberg]") {
+    // Regression (ABT #4): Weinberg used to bake its TAS via the UNNAMED excitations_processed overload,
+    // so it registered NOTHING — the only topology absent from analyticalWaveforms, forcing the wizard onto
+    // its synthesis fallback. The 6-winding solver op is now sliced into a 2-winding L1 op + 4-winding T1
+    // op, each captured under its TAS component name with full waveforms + harmonics.
+    const std::string out = Kirchhoff::api::design_tas_full("weinberg", spec_for(48, 12, 60, 100000).dump());
+    REQUIRE(out.rfind("Exception:", 0) != 0);
+    const json j = json::parse(out);
+    REQUIRE(j.at("analyticalWaveforms").contains("L1"));
+    REQUIRE(j.at("analyticalWaveforms").contains("T1"));
+    CHECK(j.at("analyticalWaveforms").at("L1").at("excitationsPerWinding").size() == 2);
+    CHECK(j.at("analyticalWaveforms").at("T1").at("excitationsPerWinding").size() == 4);
+    for (const char* mag : {"L1", "T1"}) {
+        const json& op = j.at("analyticalWaveforms").at(mag);
+        for (const auto& e : op.at("excitationsPerWinding")) {
+            REQUIRE(e.at("current").contains("waveform"));    // full waveform arrays (the point of the capture)
+            REQUIRE(e.at("current").contains("harmonics"));   // and harmonics, like the other 23 topologies
+            REQUIRE(e.at("voltage").contains("harmonics"));
+        }
+    }
+}
+
+TEST_CASE("api: captured operating points carry a sane ambient temperature", "[extract][api][waveforms]") {
+    // Regression (ABT #5): the analytical solvers build only excitations, so the registry op's
+    // conditions.ambientTemperature was uninitialized (denormal garbage). It is now stamped at capture time.
+    for (const char* topo : {"buck", "llc", "weinberg"}) {
+        const json j = json::parse(Kirchhoff::api::design_tas_full(topo, spec_for(48, 12, 60, 100000).dump()));
+        for (const auto& [name, op] : j.at("analyticalWaveforms").items()) {
+            REQUIRE(op.contains("conditions"));
+            REQUIRE(op.at("conditions").contains("ambientTemperature"));
+            const double amb = op.at("conditions").at("ambientTemperature").get<double>();
+            INFO(topo << " / " << name << " ambient=" << amb);
+            CHECK(amb == Catch::Approx(25.0));   // the documented emitted default, not garbage
+        }
+    }
+}
+
+TEST_CASE("api: ngspice extract reconstructs winding voltage across topologies", "[extract][api][ngspice][voltage]") {
+    // ABT #3 de-risk: the winding-voltage reconstruction THROWS if a winding terminal node can't be
+    // resolved to a sim vector, so it must be exercised broadly — not just on buck/llc/flyback — to prove
+    // the pin convention (primary_/secondary<i>_{start,end}) holds for every topology whose main magnetic
+    // the wizard extracts. Runs the real process_converter(ngspice) path per topology.
+    if (!Kirchhoff::ngspice_in_process_available()) {
+        WARN("libngspice not linked — ngspice voltage extract skipped");
+        return;
+    }
+    // (vin, vout): boost steps up; everyone else here steps down. Power 60 W, 100 kHz.
+    // psfb is intentionally NOT here: its ideal-diode secondary deck fails ngspice transient convergence
+    // ("Timestep too small") at these operating points — a PRE-EXISTING sim issue orthogonal to the voltage
+    // reconstruction under test (which runs only after a successful sim). Tracked separately, not silenced.
+    const std::vector<std::pair<std::string, std::pair<double, double>>> topos = {
+        {"buck", {48, 12}}, {"boost", {12, 48}}, {"fsbb", {24, 12}}, {"flyback", {48, 12}},
+        {"forward", {48, 12}}, {"two_switch_forward", {48, 12}}, {"acf", {48, 12}},
+        {"push_pull", {48, 12}}, {"ahb", {48, 12}}, {"pshb", {400, 24}},
+        {"dab", {48, 12}}, {"llc", {400, 12}}, {"src", {400, 12}},
+    };
+    for (const auto& [topo, vv] : topos) {
+        const std::string out = Kirchhoff::api::process_converter(
+            topo, spec_for(vv.first, vv.second, 60, 100000).dump(), "ngspice");
+        INFO("topology=" << topo << " out=" << out.substr(0, 240));
+        REQUIRE(out.rfind("Exception:", 0) != 0);
+        const json j = json::parse(out);
+        const auto& excs = j.at("operatingPoint").at("excitationsPerWinding");
+        REQUIRE(excs.size() >= 1);
+        for (const auto& e : excs) {
+            REQUIRE(e.at("current").at("waveform").at("data").size() == 128);
+            REQUIRE(e.at("voltage").at("waveform").at("data").size() == 128);   // simulated V, not analytical
+        }
+    }
 }
 
 TEST_CASE("extract: main_magnetic_inputs = the adviser's MAS::Inputs", "[extract][legacy]") {

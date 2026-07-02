@@ -37,7 +37,14 @@ std::vector<nlohmann::json> excitations_processed(const MAS::OperatingPoint& op)
 // to callers OUT-OF-BAND — the TAS document itself stays minimal and schema-valid. Builders should use
 // THIS variant for every magnetic they bake, so custom-label (resonant/phase-shift) waveforms reach the
 // frontend without an ngspice run.
-std::vector<nlohmann::json> excitations_processed(const MAS::OperatingPoint& op, const std::string& component);
+//
+// `ambientTemperature` [°C] is stamped onto the captured operating point's conditions before it is
+// serialized into the registry — the analytical solvers build only excitations, so without this the
+// conditions block would carry an uninitialized (denormal-garbage) ambient temperature that any registry
+// consumer (PyOM, HS agents) would step on. It defaults to 25.0, the documented emitted default (SPEC §2);
+// pass the operating point's real ambient where a builder has it.
+std::vector<nlohmann::json> excitations_processed(const MAS::OperatingPoint& op, const std::string& component,
+                                                  double ambientTemperature = 25.0);
 
 // The per-build full-waveform registry (thread_local; api clears it before each build). Pairs of
 // (TAS component name, MAS::OperatingPoint as json).

@@ -2,6 +2,7 @@
 
 #include "TasAssembler.hpp"          // tas_to_ngspice
 #include "NgspiceRunner.hpp"         // run_ngspice_in_process, ngspice_in_process_available
+#include "NgspiceNodes.hpp"          // shared TAS->ngspice node reconstruction (node_of_pin/node_voltage)
 #include "DimensionJson.hpp"         // PEAS::resolve_dimensional_values (nlohmann::json overload)
 #include "processors/WaveformProcessor.h"  // the shared DSP (sampled/harmonics/processed) — reused, not re-implemented
 
@@ -19,7 +20,7 @@ using nlohmann::json;
 
 // Walk the TAS topology.stages[].circuit.components[] and collect every magnetic component (the ones the
 // build carries a `data.magnetic` object + `data.inputs` for). Preserves stage/component order.
-struct RawMagnetic { std::string name; const json* inputs; size_t windings; };
+struct RawMagnetic { std::string name; const json* inputs; size_t windings; std::string stage; const json* circuit; };
 
 std::vector<RawMagnetic> raw_magnetics(const json& tas) {
     std::vector<RawMagnetic> out;
@@ -27,6 +28,8 @@ std::vector<RawMagnetic> raw_magnetics(const json& tas) {
     for (const auto& st : tas.at("topology").at("stages")) {
         if (!st.contains("circuit") || !st.at("circuit").is_object() || !st.at("circuit").contains("components"))
             continue;
+        const std::string stageName = st.value("name", std::string{});
+        const json& circuit = st.at("circuit");
         for (const auto& c : st.at("circuit").at("components")) {
             if (!c.contains("data") || !c.at("data").is_object()) continue;
             const json& data = c.at("data");
@@ -39,7 +42,7 @@ std::vector<RawMagnetic> raw_magnetics(const json& tas) {
                 if (op0.contains("excitationsPerWinding") && op0.at("excitationsPerWinding").is_array())
                     nw = op0.at("excitationsPerWinding").size();
             }
-            out.push_back({c.value("name", std::string{}), &data.at("inputs"), nw});
+            out.push_back({c.value("name", std::string{}), &data.at("inputs"), nw, stageName, &circuit});
         }
     }
     return out;
@@ -128,6 +131,44 @@ MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vecto
                                  + "s — cannot extract a cycle for magnetic '" + mags[idx].name + "'");
     const double tBeg = tEnd - period;
 
+    // Resample a full-length simulated signal (one sample per r.time point) onto N=128 points over the LAST
+    // switching period, mapped to t∈[0,period) — the exact grid ComponentWaveforms and the winding current
+    // share, so every waveform in the app lines up.
+    const int N = 128;
+    auto resample_last_period = [&](const std::vector<double>& src) -> MAS::Waveform {
+        std::vector<double> data(N), time(N);
+        size_t j = 0;
+        for (int k = 0; k < N; ++k) {
+            double t = tBeg + period * k / N;
+            while (j + 1 < r.time.size() && r.time[j + 1] < t) ++j;
+            if (j + 1 >= r.time.size()) j = r.time.size() - 2;   // clamp: keep [j, j+1] in bounds (size>=2)
+            double f = (r.time[j + 1] - r.time[j] > 0) ? (t - r.time[j]) / (r.time[j + 1] - r.time[j]) : 0.0;
+            data[k] = src[j] + f * (src[std::min(j + 1, src.size() - 1)] - src[j]);
+            time[k] = period * k / N;
+        }
+        MAS::Waveform wf;
+        wf.set_ancillary_label(MAS::WaveformLabel::CUSTOM);
+        wf.set_data(data);
+        wf.set_time(time);
+        return wf;
+    };
+    auto to_signal = [&](const MAS::Waveform& wf) -> MAS::SignalDescriptor {
+        MAS::SignalDescriptor sd;
+        sd.set_waveform(wf);
+        sd.set_harmonics(OpenMagnetics::WaveformProcessor::calculate_harmonics_data(wf, fsw));
+        sd.set_processed(OpenMagnetics::WaveformProcessor::calculate_processed_data(wf, fsw));
+        return sd;
+    };
+
+    // Node reconstruction for the winding VOLTAGES: the winding pins follow the TAS convention
+    // primary_/secondary<i>_{start,end}; each maps to an ngspice node via the shared node resolver. The
+    // winding voltage is the node difference V(start) − V(end) (passive sign, same orientation as the
+    // branch current). This replaces the analytical voltage that used to ride through — the whole point of
+    // ABT #3: the "Simulated" view must not mix simulated current with a synthesized voltage.
+    const ngnodes::InterStage inter = ngnodes::read_inter_stage(tas.at("topology"));
+    const ngnodes::BrickNets brickNets = ngnodes::read_brick_nets(*mags[idx].circuit);
+    const std::string& stage = mags[idx].stage;
+
     // The CIAS->ngspice serializer names each winding's inductor deterministically (CiasCircuitConverter.cpp):
     // the primary is "L<comp>_pri", secondary i is "L<comp>_sec<i>". ngspice reports each inductor's branch
     // current lowercased as "...l<comp>_<suffix>#branch". We reconstruct that exact token per winding and
@@ -137,7 +178,8 @@ MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vecto
     const std::string magTok = "l" + lower(mags[idx].name) + "_";
     auto& excs = op.get_mutable_excitations_per_winding();
     for (size_t w = 0; w < excs.size(); ++w) {
-        const std::string token = magTok + (w == 0 ? std::string("pri") : "sec" + std::to_string(w));
+        const std::string suffix = (w == 0 ? std::string("pri") : "sec" + std::to_string(w));
+        const std::string token = magTok + suffix;
         const std::vector<double>* sig = nullptr;
         for (const auto& kv : r.vectors) {
             std::string k = lower(kv.first);
@@ -152,27 +194,25 @@ MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vecto
                                      + "' for winding " + std::to_string(w) + " of magnetic '" + mags[idx].name
                                      + "'. Available branches:" + avail);
         }
+        excs[w].set_current(to_signal(resample_last_period(*sig)));
 
-        const int N = 128;
-        std::vector<double> data(N), time(N);
-        size_t j = 0;
-        for (int k = 0; k < N; ++k) {
-            double t = tBeg + period * k / N;
-            while (j + 1 < r.time.size() && r.time[j + 1] < t) ++j;
-            if (j + 1 >= r.time.size()) j = r.time.size() - 2;   // clamp: keep [j, j+1] in bounds (size>=2)
-            double f = (r.time[j + 1] - r.time[j] > 0) ? (t - r.time[j]) / (r.time[j + 1] - r.time[j]) : 0.0;
-            data[k] = (*sig)[j] + f * ((*sig)[std::min(j + 1, sig->size() - 1)] - (*sig)[j]);
-            time[k] = period * k / N;
-        }
-        MAS::Waveform wf;
-        wf.set_ancillary_label(MAS::WaveformLabel::CUSTOM);
-        wf.set_data(data);
-        wf.set_time(time);
-        MAS::SignalDescriptor cur;
-        cur.set_waveform(wf);
-        cur.set_harmonics(OpenMagnetics::WaveformProcessor::calculate_harmonics_data(wf, fsw));
-        cur.set_processed(OpenMagnetics::WaveformProcessor::calculate_processed_data(wf, fsw));
-        excs[w].set_current(cur);
+        // Winding voltage = difference of the two terminal node voltages.
+        const std::string posPin = (w == 0 ? "primary_start" : "secondary" + std::to_string(w) + "_start");
+        const std::string negPin = (w == 0 ? "primary_end"   : "secondary" + std::to_string(w) + "_end");
+        const std::string np = ngnodes::node_of_pin(stage, mags[idx].name, posPin, brickNets, inter);
+        const std::string nn = ngnodes::node_of_pin(stage, mags[idx].name, negPin, brickNets, inter);
+        bool okP = false, okN = false;
+        const std::vector<double> A = ngnodes::node_voltage(np, r, okP);
+        const std::vector<double> B = ngnodes::node_voltage(nn, r, okN);
+        if (!okP || !okN)
+            throw std::runtime_error("extract_operating_point(NGSPICE): could not resolve voltage nodes for "
+                                     "winding " + std::to_string(w) + " of magnetic '" + mags[idx].name
+                                     + "' (pins '" + posPin + "'->'" + np + "', '" + negPin + "'->'" + nn
+                                     + "'); cannot build a simulated winding voltage");
+        std::vector<double> vdiff(r.time.size());
+        for (size_t i = 0; i < vdiff.size(); ++i)
+            vdiff[i] = (i < A.size() ? A[i] : 0.0) - (i < B.size() ? B[i] : 0.0);
+        excs[w].set_voltage(to_signal(resample_last_period(vdiff)));
     }
     return op;
 }

@@ -5,6 +5,7 @@
 #include "KirchhoffConfig.hpp"
 #include <cmath>
 #include <algorithm>
+#include <stdexcept>
 #include <vector>
 
 namespace Kirchhoff {
@@ -30,6 +31,14 @@ DabDesign design_dab(const json& tasInputs) {
     DabDesign d{};
     const json config = cfg::object_of(tasInputs);
     const double d3deg = cfg::get(config, "dabPhaseShiftDeg", kD3Deg);
+    // `dabPhaseShiftDeg` is the SPS outer phase shift D3 in DEGREES (inner shifts D1=D2=0). Power transfer
+    // and the series-inductance sizing L = N·V1·V2·D3·(π−|D3|)/(2π²·Fs·P) are only physical for
+    // 0 < D3 < 180° (L ≤ 0 outside that band); the controllable SPS band is ~0–90°. Guard loudly rather
+    // than emitting a negative/zero Lr downstream. (A common mistake is passing a per-unit shift ×180 — e.g.
+    // D3=0.3 → 54°, not 0.3.)
+    if (!(d3deg > 0.0 && d3deg < 180.0))
+        throw std::invalid_argument("design_dab: dabPhaseShiftDeg must be a degrees value in (0, 180) — SPS "
+                                    "outer phase shift D3 (recommended 0–90°); got " + std::to_string(d3deg));
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 0.9);

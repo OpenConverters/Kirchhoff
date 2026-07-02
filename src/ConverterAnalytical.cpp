@@ -62,8 +62,14 @@ const std::vector<std::pair<std::string, nlohmann::json>>& captured_operating_po
     return captured_registry();
 }
 
-std::vector<nlohmann::json> excitations_processed(const MAS::OperatingPoint& op, const std::string& component) {
-    nlohmann::json full = op;   // MAS-typed serialization: waveforms + harmonics + processed, schema-shaped
+std::vector<nlohmann::json> excitations_processed(const MAS::OperatingPoint& op, const std::string& component,
+                                                  double ambientTemperature) {
+    // Stamp the ambient temperature onto a copy's conditions before serializing: the analytical solvers
+    // build only excitations, so the default-constructed conditions block otherwise carries an
+    // uninitialized (denormal-garbage) ambient temperature into the registry.
+    MAS::OperatingPoint stamped = op;
+    stamped.get_mutable_conditions().set_ambient_temperature(ambientTemperature);
+    nlohmann::json full = stamped;   // MAS-typed serialization: waveforms + harmonics + processed, schema-shaped
     captured_registry().emplace_back(component, std::move(full));
     return excitations_processed(op);
 }

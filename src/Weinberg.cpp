@@ -145,15 +145,23 @@ json build_weinberg_tas(const WeinbergDesign& d) {
     // input-inductor and push-pull-primary windings measure identical DC-biased current, and the
     // secondary windings carry a real DC bias, none of which the inline zero-offset model captured).
     namespace AN = Kirchhoff::analytical;
-    // Unnamed (no full-waveform capture): this single operating point spans BOTH magnetics (6 windings
-    // sliced into L1 + T1 below), so a per-component key would lie about the winding layout.
-    const std::vector<json> wAll = AN::excitations_processed(AN::analytical_weinberg(
-        Vin, Vout, Iout, fsw, d.inputInductance, n, 0.0, d.efficiency));
-    if (wAll.size() != 6)
+    // analytical_weinberg emits ONE operating point spanning BOTH magnetics (6 windings, order
+    // [L1a, L1b, T1_pri_a, T1_pri_b, T1_sec_a, T1_sec_b]). Slice it into a 2-winding L1 op and a 4-winding
+    // T1 op so each magnetic captures an HONEST per-component operating point into the full-waveform
+    // registry (keys "L1"/"T1", matching the TAS component names). The earlier code baked the TAS via the
+    // unnamed overload and so registered NOTHING — Weinberg was the only topology missing from
+    // analyticalWaveforms, forcing the wizard onto its synthesis fallback.
+    const MAS::OperatingPoint wOp = AN::analytical_weinberg(
+        Vin, Vout, Iout, fsw, d.inputInductance, n, 0.0, d.efficiency);
+    const auto& allExc = wOp.get_excitations_per_winding();
+    if (allExc.size() != 6)
         throw std::runtime_error("build_weinberg_tas: analytical_weinberg must emit 6 windings (L1 x2 + T1 x4), got "
-                                 + std::to_string(wAll.size()));
-    const std::vector<json> wL1(wAll.begin(), wAll.begin() + 2);
-    const std::vector<json> wT1(wAll.begin() + 2, wAll.end());
+                                 + std::to_string(allExc.size()));
+    MAS::OperatingPoint opL1, opT1;
+    opL1.get_mutable_excitations_per_winding().assign(allExc.begin(), allExc.begin() + 2);
+    opT1.get_mutable_excitations_per_winding().assign(allExc.begin() + 2, allExc.end());
+    const std::vector<json> wL1 = AN::excitations_processed(opL1, "L1");
+    const std::vector<json> wT1 = AN::excitations_processed(opT1, "T1");
 
     json l1; l1["magnetic"] = json::object();
     l1["inputs"] = req::magnetic_inputs(d.inputInductance, 0.2, {1.0}, {"primary", "primary"},
