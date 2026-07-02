@@ -231,6 +231,36 @@ TEST_CASE("api: captured operating points carry a sane ambient temperature", "[e
     }
 }
 
+TEST_CASE("api: spec ambient temperature threads to registry + magnetic conditions", "[extract][api][ambient]") {
+    // Broader ABT #5: a non-default operatingPoints[0].ambientTemperature must flow to BOTH the captured
+    // registry ops (PyOM/HS) AND every magnetic's TAS operating-point conditions (what MKF's adviser designs
+    // the core against) — not the hardcoded 25 C the builders stamp. Threaded centrally in build_tas_for.
+    for (const char* topo : {"buck", "llc", "weinberg"}) {
+        json spec = spec_for(48, 12, 60, 100000);
+        spec["operatingPoints"][0]["ambientTemperature"] = 85.0;
+        const json j = json::parse(Kirchhoff::api::process_converter(topo, spec.dump(), "analytical"));
+        // registry
+        for (const auto& [name, op] : j.at("analyticalWaveforms").items()) {
+            INFO(topo << " registry/" << name);
+            CHECK(op.at("conditions").at("ambientTemperature").get<double>() == Catch::Approx(85.0));
+        }
+        // every magnetic's TAS operating-point conditions
+        size_t magsChecked = 0;
+        for (const auto& st : j.at("tas").at("topology").at("stages")) {
+            if (!st.contains("circuit") || !st.at("circuit").is_object()) continue;
+            for (const auto& c : st.at("circuit").at("components")) {
+                if (!c.contains("data") || !c.at("data").contains("magnetic")) continue;
+                for (const auto& op : c.at("data").at("inputs").at("operatingPoints")) {
+                    INFO(topo << " magnetic " << c.value("name", std::string{}));
+                    CHECK(op.at("conditions").at("ambientTemperature").get<double>() == Catch::Approx(85.0));
+                    ++magsChecked;
+                }
+            }
+        }
+        CHECK(magsChecked >= 1);
+    }
+}
+
 TEST_CASE("api: ngspice extract reconstructs winding voltage across topologies", "[extract][api][ngspice][voltage]") {
     // ABT #3 de-risk: the winding-voltage reconstruction THROWS if a winding terminal node can't be
     // resolved to a sim vector, so it must be exercised broadly — not just on buck/llc/flyback — to prove
@@ -278,4 +308,5 @@ TEST_CASE("extract: main_magnetic_inputs = the adviser's MAS::Inputs", "[extract
     for (const auto& m : mags) if (m.name == "Lr") lr = true;
     CHECK(lr);
 }
+
 

@@ -27,6 +27,8 @@ struct DabDesign {
     double outputVoltage, outputPower, switchingFrequency, efficiency;
     double turnsRatio;             // N = V1_nom : V2_nom (primary-to-secondary)
     double phaseShiftDeg;          // D3 — inter-bridge outer shift in degrees (drives power)
+    double innerPhaseShift1Deg;    // D1 — primary intra-bridge shift [deg] (0 = SPS; >0 = EPS/DPS/TPS)
+    double innerPhaseShift2Deg;    // D2 — secondary intra-bridge shift [deg]
     double switchDuty;             // per-switch on-fraction (~0.5 minus dead time)
     double seriesInductance;       // L (leakage + external resonant inductor Lr)
     double magnetizingInductance;  // Lm

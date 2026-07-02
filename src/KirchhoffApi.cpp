@@ -57,6 +57,45 @@ const std::unordered_map<std::string, TasBuilder>& tas_builders() {
     return table;
 }
 
+// The spec's operating ambient temperature [°C]: operatingPoints[0].ambientTemperature, else the documented
+// emitted default of 25 (SPEC §2). The 24 converter builders each stamp a hardcoded 25 into the TAS and the
+// registry; the api layer resolves the real value here and threads it through in one place (apply_ambient +
+// restamp_captured_ambient) rather than editing every builder.
+double spec_ambient(const json& spec) {
+    if (spec.contains("operatingPoints") && spec.at("operatingPoints").is_array()
+        && !spec.at("operatingPoints").empty()) {
+        const json& op0 = spec.at("operatingPoints").at(0);
+        if (op0.contains("ambientTemperature") && op0.at("ambientTemperature").is_number())
+            return op0.at("ambientTemperature").get<double>();
+    }
+    return 25.0;
+}
+
+// Overwrite every ambient the builders stamped uniformly at 25 °C with the spec's real ambient: the TAS-level
+// operating points AND every magnetic component's operatingPoints[].conditions (what MKF's adviser designs
+// the core against). Only touches magnetics that already carry an ambient, so a component designer's own
+// ambient is never clobbered.
+void apply_ambient(json& tas, double ambientC) {
+    if (tas.contains("inputs") && tas.at("inputs").contains("operatingPoints"))
+        for (auto& op : tas.at("inputs").at("operatingPoints"))
+            if (op.contains("ambientTemperature")) op["ambientTemperature"] = ambientC;
+    if (!tas.contains("topology") || !tas.at("topology").contains("stages")) return;
+    for (auto& st : tas.at("topology").at("stages")) {
+        if (!st.contains("circuit") || !st.at("circuit").is_object()
+            || !st.at("circuit").contains("components")) continue;
+        for (auto& c : st.at("circuit").at("components")) {
+            if (!c.contains("data") || !c.at("data").is_object()) continue;
+            json& data = c.at("data");
+            if (!data.contains("magnetic")) continue;
+            if (!data.contains("inputs") || !data.at("inputs").is_object()
+                || !data.at("inputs").contains("operatingPoints")) continue;
+            for (auto& op : data.at("inputs").at("operatingPoints"))
+                if (op.contains("conditions") && op.at("conditions").contains("ambientTemperature"))
+                    op.at("conditions").at("ambientTemperature") = ambientC;
+        }
+    }
+}
+
 json build_tas_for(const std::string& topology, const json& spec) {
     auto it = tas_builders().find(topology);
     if (it == tas_builders().end())
@@ -64,7 +103,13 @@ json build_tas_for(const std::string& topology, const json& spec) {
     // Every build starts with an empty full-waveform registry; the builders' named
     // excitations_processed(op, component) calls fill it as they bake the TAS.
     Kirchhoff::analytical::clear_captured_operating_points();
-    return it->second(spec);
+    json tas = it->second(spec);
+    // Thread the spec's ambient (default 25 °C) through the artifacts the builders stamped at 25: the TAS
+    // operating points, every magnetic's operating-point conditions, and the captured full-waveform registry.
+    const double ambientC = spec_ambient(spec);
+    apply_ambient(tas, ambientC);
+    Kirchhoff::analytical::restamp_captured_ambient(ambientC);
+    return tas;
 }
 
 // The registry as a json object {"<component>": <full MAS::OperatingPoint>}. Read it immediately after
@@ -251,8 +296,14 @@ std::string design_current_transformer(const std::string& spec) {
 std::string simulate_cmc_ideal_waveforms(const std::string& spec, double inductance,
                                          double parasiticCapPf, double dvdtVPerNs) {
     return guarded([&] {
-        Kirchhoff::CmcDesign d = Kirchhoff::design_cmc(json::parse(spec));
-        return Kirchhoff::simulate_cmc_ideal_waveforms(d, inductance, parasiticCapPf, dvdtVPerNs).dump();
+        const json specJson = json::parse(spec);
+        Kirchhoff::CmcDesign d = Kirchhoff::design_cmc(specJson);
+        // Legacy wizard contract: the aux spec may carry the waveform-window controls
+        // (ConverterWizardBase injects them); honor them instead of pinning the defaults.
+        const int numberOfPeriods = specJson.value("numberOfPeriods", 2);
+        const int numberOfSteadyStatePeriods = specJson.value("numberOfSteadyStatePeriods", 10);
+        return Kirchhoff::simulate_cmc_ideal_waveforms(d, inductance, parasiticCapPf, dvdtVPerNs,
+                                                       numberOfPeriods, numberOfSteadyStatePeriods).dump();
     });
 }
 

@@ -445,6 +445,27 @@ TEST_CASE("analytical_dab power-flow direction flips with D3 sign", "[analytical
     CHECK(*processed_current(opPos, 0).get_rms() > 0.0);
 }
 
+TEST_CASE("dab_series_inductance_for_power round-trips the general power model", "[analytical][solver][dab][eps]") {
+    using Kirchhoff::analytical::dab_power_transfer;
+    using Kirchhoff::analytical::dab_series_inductance_for_power;
+    // For SPS and every inner-shift modulation (EPS/DPS/TPS), the L sized for a target power must, fed back
+    // through the SAME kernel the waveforms use, reproduce that power — so an EPS/DPS/TPS design delivers spec.
+    const double V1 = 400, V2 = 100, N = 4, Fs = 100000, Ptar = 500;
+    const double D3 = 25.0 * M_PI / 180.0, deg = M_PI / 180.0;
+    const std::vector<std::pair<double, double>> mods = {
+        {0, 0}, {30 * deg, 0}, {30 * deg, 30 * deg}, {40 * deg, 20 * deg}};   // SPS, EPS, DPS, TPS
+    for (const auto& [D1, D2] : mods) {
+        const double L = dab_series_inductance_for_power(V1, V2, N, D3, D1, D2, Fs, Ptar);
+        CHECK(L > 0.0);
+        CHECK(dab_power_transfer(V1, V2, N, D3, D1, D2, Fs, L) == Catch::Approx(Ptar).epsilon(0.005));
+    }
+    // Adding an inner shift at a FIXED L reduces the transferred power (the zero plateaus shrink the
+    // volt-second area) — the reactive-power / ZVS trade EPS/DPS/TPS exist for.
+    const double Lfix = 5e-6;
+    CHECK(dab_power_transfer(V1, V2, N, D3, 30 * deg, 0, Fs, Lfix)
+          < dab_power_transfer(V1, V2, N, D3, 0, 0, Fs, Lfix));
+}
+
 TEST_CASE("analytical_dab rejects bad inputs", "[analytical][solver][dab]") {
     using Kirchhoff::analytical::analytical_dab;
     CHECK_THROWS(analytical_dab(400, {100}, {5}, {4}, 0,      1e-3, 5e-6, 0, 0, 30));   // Fs=0

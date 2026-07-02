@@ -49,6 +49,10 @@ std::vector<nlohmann::json> excitations_processed(const MAS::OperatingPoint& op,
 // The per-build full-waveform registry (thread_local; api clears it before each build). Pairs of
 // (TAS component name, MAS::OperatingPoint as json).
 void clear_captured_operating_points();
+// Overwrite conditions.ambientTemperature on every captured operating point with `ambientTemperature`. The
+// api layer calls this after a build, once it has resolved the spec's real ambient — so the registry ambient
+// matches the TAS instead of the capture-time 25 C default.
+void restamp_captured_ambient(double ambientTemperature);
 const std::vector<std::pair<std::string, nlohmann::json>>& captured_operating_points();
 
 // Read a processed current/voltage stress of winding `w` from an operating point (for component ratings).
@@ -298,6 +302,15 @@ MAS::OperatingPoint analytical_dab(double inputVoltage,
                                    double innerPhaseShiftD1Degrees = 0.0,
                                    double innerPhaseShiftD2Degrees = 0.0,
                                    double outerPhaseShiftD3Degrees = 0.0);
+
+// General DAB average power transfer for any modulation (D1/D2/D3 in RADIANS), and the inverse: the series
+// inductance L that delivers `P` at a given modulation. Both use the same subinterval kernel as
+// analytical_dab, so the sized L and the emitted waveforms are self-consistent. dab_series_inductance_for_
+// power THROWS if the requested power is unreachable at that modulation (no silent saturation).
+double dab_power_transfer(double V1, double V2, double N, double D3rad, double D1rad, double D2rad,
+                          double Fs, double L);
+double dab_series_inductance_for_power(double V1, double V2, double N, double D3rad, double D1rad,
+                                       double D2rad, double Fs, double P);
 
 // ── Phase 5: resonant converter family (FHA) ────────────────────────────────
 

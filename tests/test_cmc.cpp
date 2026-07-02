@@ -48,6 +48,7 @@ TEST_CASE("cmc spec-conversion helpers match the MKF formulas", "[cmc][helpers]"
     CHECK(Kirchhoff::cmc_noise_params_to_impedance(100.0, 5.0, 50.0, 6.0) == Approx(expectedZ));
 
     CHECK(Kirchhoff::cmc_emissions_limit_dbuv("CISPR 32 Class B") == 66.0);
+    CHECK(Kirchhoff::cmc_emissions_limit_dbuv("EN 55032 Class B") == 66.0);  // EN alias of CISPR 32
     CHECK(Kirchhoff::cmc_emissions_limit_dbuv("FCC Part 15 Class A") == 79.0);
     CHECK_THROWS(Kirchhoff::cmc_emissions_limit_dbuv("EN 12345"));  // no silent 66 fallback
 }

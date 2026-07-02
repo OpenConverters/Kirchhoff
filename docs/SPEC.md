@@ -72,7 +72,10 @@ collapses it with `resolve_dimensional_values(j, preferred)`:
 - `designRequirements.efficiency` — scalar, optional, per-topology default.
 - `operatingPoints[0].inputVoltage` — **raw scalar** (`.get<double>()`, no dimensional resolution).
 - `operatingPoints[0].outputs[i].power` — **raw scalar**.
-- `operatingPoints[0].ambientTemperature` — scalar; emitted default `25.0` if absent.
+- `operatingPoints[0].ambientTemperature` — scalar, default `25.0` if absent. Threads through to the TAS
+  operating points, **every magnetic's operating-point `conditions.ambientTemperature`** (what MKF's adviser
+  designs the core against), and the captured `analyticalWaveforms` registry — so a non-25 °C ambient is
+  honored, not just echoed.
 
 **operatingPoints fallback:** when `operatingPoints` is absent/empty, the design value comes from
 `designRequirements` instead: `inputVoltage → nominal(dr.inputVoltage)`, `power → nominal(dr.outputs[i].power)`.
@@ -177,16 +180,24 @@ output, not input.
 | **pshb** (phase-shifted half bridge) | 0.9 | inductance, turnsRatios[0] | `commandedDuty`(0.7), `magnetizingCurrentFraction`(0.3), `rectifierType`("fullBridge") | 3-level NPC; ratings on **half** bus Vin/2; sets `config.nodeShuntCap=1e-9` internally |
 | **dab** (dual active bridge) | 0.9 | inductance, turnsRatios[0] | `dabPhaseShiftDeg`(25.0), `switchDutyFraction`(0.499) | **SPS only** (see below); Lr from phase shift; 8 driven switches |
 
-**DAB modulation (`dabPhaseShiftDeg`).** Kirchhoff implements **Single-Phase-Shift (SPS)** only: the inner
-bridge shifts D1 = D2 = 0, and `dabPhaseShiftDeg` is the **outer inter-bridge shift D3, in degrees**. It
-drives both the power transfer and the series-inductance sizing
-`Lr = N·V1·V2·D3·(π − |D3|) / (2π²·Fs·P)` (with D3 in radians). Valid range is `(0, 180)` degrees — the
-formula gives `Lr ≤ 0` outside it — and the controllable SPS band is ~**0–90°**; the default 25° matches
-MKF's controllability-margin choice. **Common mistake:** passing a per-unit shift ×180 (e.g. `0.3·180 =
-54`) — send the angle directly. Out-of-range values now throw a clear `design_dab: dabPhaseShiftDeg …`
-error instead of producing a negative Lr. There is **no** `modulationType`/`innerPhaseShift`/`D1`/`D2`
-config yet (EPS/DPS/TPS): the solver `analytical_dab` carries D1/D2 slots but they are wired to 0, so any
-wizard EPS/DPS/TPS knobs are decorative until those are exposed.
+**DAB modulation — SPS / EPS / DPS / TPS.** The DAB accepts all three phase shifts (degrees):
+
+| config key | symbol | meaning | range | default |
+|---|---|---|---|---|
+| `dabPhaseShiftDeg` | D3 | outer inter-bridge shift — drives power & its direction | `(0, 180)` (band 0–90) | 25 |
+| `dabInnerPhaseShift1Deg` | D1 | primary intra-bridge shift | `[0, 90)` | 0 |
+| `dabInnerPhaseShift2Deg` | D2 | secondary intra-bridge shift | `[0, 90)` | 0 (or D1 if `dabModulationType:"DPS"`) |
+| `dabModulationType` | — | `SPS`\|`EPS`\|`DPS`\|`TPS` — optional hint; for `DPS` an unset D2 mirrors D1 | — | — |
+
+Modulation is defined by which shifts are non-zero: **SPS** D1=D2=0, **EPS** one inner shift, **DPS** D1=D2,
+**TPS** D1≠D2. **Sizing:** SPS uses the exact closed form `Lr = N·V1·V2·D3·(π−|D3|)/(2π²·Fs·P)`; any inner
+shift switches to sizing Lr numerically from the general power model (same tank kernel the waveforms use) so
+the design still delivers rated power at the chosen `(D1, D2, D3)`. Out-of-range shifts throw a clear
+`design_dab: …` error. **Common mistake:** passing a per-unit shift ×180 (e.g. `0.3·180 = 54`) — send the
+angle directly. **Sim caveat:** the analytical design + waveforms are correct at any power, but the *ideal*
+ngspice deck for a non-SPS modulation only converges up to ~100 W at 400→24 (the zero-voltage plateaus
+commutate the ideal rectifier stiffly); SPS converges at full power. This limits only the in-browser
+"Simulated" view for high-power EPS/DPS/TPS, not the design.
 
 ### Resonant
 

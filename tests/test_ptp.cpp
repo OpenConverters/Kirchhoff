@@ -215,3 +215,31 @@ TEST_CASE("PtP: ngspice and analytical engines agree per topology", "[ptp]") {
         CHECK(loss <= 0.35);           // sane ceiling for an ideal-device deck (catches gross bugs)
     }
 }
+
+TEST_CASE("PtP: DAB EPS/DPS deliver spec through inner phase shift", "[ptp][dab][eps]") {
+    // End-to-end validation that the EPS/DPS deck gate timing matches the analytical design: with an inner
+    // phase shift, design_dab re-sizes the series inductance from the general power model so the OPEN-LOOP
+    // ngspice deck still lands on the target output. If the leg-shift gate convention (QA@D1 / QE@D3+D2)
+    // disagreed with the solver's Vab_at/Vcd_at, Vout would miss badly.
+    if (!Kirchhoff::ngspice_in_process_available()) {
+        WARN("Kirchhoff built without libngspice — skipping DAB EPS/DPS PtP");
+        return;
+    }
+    // Power kept moderate (100 W): the IDEAL non-SPS deck's zero-voltage plateaus commutate the rectifier
+    // hard, and above ~100 W the ideal-switch transient stops converging ("timestep too small"). That is a
+    // sim-robustness limit of the ideal deck, NOT the design — design_dab sizes L from the general power
+    // model at any power (see the analytical round-trip test), and the SPS deck converges at full power.
+    const double P = 100.0, Vout = 24.0;
+    struct Mod { const char* name; double d1; double d2; };
+    for (const Mod m : {Mod{"SPS", 0.0, 0.0}, Mod{"EPS", 30.0, 0.0}, Mod{"DPS", 25.0, 25.0}, Mod{"TPS", 40.0, 20.0}}) {
+        INFO("modulation: " << m.name << " D1=" << m.d1 << " D2=" << m.d2);
+        json spec = spec_for(400, Vout, P, 100000);
+        spec["config"]["dabInnerPhaseShift1Deg"] = m.d1;
+        spec["config"]["dabInnerPhaseShift2Deg"] = m.d2;
+        json tas = Kirchhoff::build_dab_tas(Kirchhoff::design_dab(spec));
+        SimResult s = run_spice(tas, 100000, (Vout * Vout / P) * 100e-6 /* DAB output cap ~100u */);
+        REQUIRE(s.ok);
+        INFO("ngspice Vout=" << s.vout);
+        CHECK(s.vout == Catch::Approx(Vout).epsilon(0.12));   // open-loop within 12% of the 24 V target
+    }
+}

@@ -32,14 +32,15 @@ double cmc_noise_params_to_impedance(double parasiticCapPf,
 }
 
 double cmc_emissions_limit_dbuv(const std::string& standardName) {
-    // Quasi-peak conducted-emissions limits at 150 kHz (dBµV).
-    if (standardName == "CISPR 32 Class A") return 79.0;
-    if (standardName == "CISPR 32 Class B") return 66.0;
+    // Quasi-peak conducted-emissions limits at 150 kHz (dBµV). EN 55032 is the European
+    // adoption of CISPR 32 — same document, same limits — so both names are accepted.
+    if (standardName == "CISPR 32 Class A" || standardName == "EN 55032 Class A") return 79.0;
+    if (standardName == "CISPR 32 Class B" || standardName == "EN 55032 Class B") return 66.0;
     if (standardName == "FCC Part 15 Class A") return 79.0;
     if (standardName == "FCC Part 15 Class B") return 66.0;
     throw std::invalid_argument(
         "cmc_emissions_limit_dbuv: unknown regulatory standard '" + standardName +
-        "' (supported: CISPR 32 Class A/B, FCC Part 15 Class A/B)");
+        "' (supported: CISPR 32 / EN 55032 Class A/B, FCC Part 15 Class A/B)");
 }
 
 // ═══ design_cmc — ported from the MKF CommonModeChoke(json) constructor (CommonModeChoke.cpp:110)

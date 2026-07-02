@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, provide, reactive, ref, watch } from 'vue'
-import { FAMILIES, FAMILY_SHORT, PLANNED, TOPOLOGIES, buildSpec, topologyById } from './topologies.js'
+import { FAMILIES, FAMILY_SHORT, PLANNED, TOPOLOGIES, buildSpec, topologyById, variantAxis, defaultVariant } from './topologies.js'
 import { loadEngine, processConverter, topologyWaveforms, extractOperatingPoint, componentWaveforms, realizeTas, generateNetlist } from './kh.js'
 import { extractBom } from './bom.js'
 import { hasSchematic, renderSchematic } from './schematics.js'
@@ -33,6 +33,7 @@ function selectTopology(id) {
   topoId.value = id
   const t = topologyById(id)
   if (t) family.value = t.family   // keep the dial in sync when a converter is picked directly
+  form.variant = defaultVariant(id)
   const p = t.preset
   Object.assign(form, {
     inputType: p.inputType,
@@ -67,6 +68,26 @@ watch(family, (f) => {
   const first = TOPOLOGIES.find((t) => t.family === f)
   if (first) selectTopology(first.id)
 })
+
+// ── the three-stage control flow: Topology ▸ Variant ▸ Spec ────────────────────
+// One stage is open at a time; picking in a stage collapses it and opens the next,
+// and any stage header re-opens that stage (Fallout-terminal fold, see style.css).
+const stage = ref('topology')          // 'topology' | 'variant' | 'spec'
+const axis = computed(() => variantAxis(topoId.value))
+const variantOptions = computed(() => axis.value.options)
+const currentVariant = computed(() => variantOptions.value.find((o) => o.id === form.variant) ?? variantOptions.value[0])
+// A single-option axis (no real variant) is trivially "chosen" — the header reads Standard.
+const hasVariantChoice = computed(() => variantOptions.value.length > 1)
+
+function pickTopology(id) {
+  selectTopology(id)
+  // a topology with a single canonical build has nothing to choose — skip straight to the spec
+  stage.value = hasVariantChoice.value ? 'variant' : 'spec'
+}
+function pickVariant(id) {
+  form.variant = id
+  stage.value = 'spec'
+}
 
 function addOutput() {
   form.outputs.push({ name: `out${form.outputs.length + 1}`, voltage: 12, power: 20 })
@@ -113,7 +134,7 @@ async function solve() {
   componentWaves.value = null
   realizedTas.value = null
   try {
-    const spec = buildSpec(form)
+    const spec = buildSpec(form, topoId.value)
     const res = await processConverter(topoId.value, spec, form.engine)
     result.value = res
     // datasheet models: realize the design once so every ngspice re-sim uses real-conduction parts
@@ -488,34 +509,56 @@ provide('kh', {
     <div class="workbench">
       <!-- left: topology dial + list, spec, simulation, solve -->
       <aside class="controls panel">
-        <!-- pinned: the family dial + the Solve button stay on top while the rest of the form scrolls -->
-        <div class="topo-head">
-          <div class="section-label"><span class="idx">1</span> Topology <span class="hint">{{ topo.name }}</span></div>
-          <div class="dial-solve">
-            <FamilyDial v-model="family" :families="FAMILIES" :short="FAMILY_SHORT" />
-            <div class="solve-col">
-              <button class="btn solve-btn" :disabled="running || engineState !== 'ready'" @click="solve">
-                {{ running ? (form.engine === 'ngspice' ? 'Simulating…' : 'Solving…') : 'Solve' }}
-              </button>
-              <div v-if="engineState === 'loading'" class="boot"><div class="spin"></div> loading…</div>
-              <span v-else-if="result" class="chip ok">ready</span>
-              <span v-else class="hint" style="font-size: 0.62rem">set spec ▸ solve</span>
-            </div>
-          </div>
-          <div v-if="runError" class="err-banner" style="margin-top: 0.5rem"><b>ENGINE ▸</b> {{ runError }}</div>
-        </div>
-        <div class="topo-list">
-          <button
-            v-for="t in familyTopologies" :key="t.id"
-            class="topo-card" :class="{ active: t.id === topoId, planned: t.planned }"
-            :disabled="t.planned" @click="selectTopology(t.id)"
-          >
-            <div class="t-name">{{ t.name }}<span v-if="t.planned" class="t-tag">planned</span></div>
-            <div class="t-desc">{{ t.desc }}</div>
-          </button>
-        </div>
+        <!-- three-stage terminal fold: Topology ▸ Variant ▸ Spec. One open at a time; a header re-opens its stage. -->
+        <div class="acc">
+          <!-- Stage 1 — Topology -->
+          <section class="acc-stage" :class="{ open: stage === 'topology' }">
+            <button class="acc-head" @click="stage = 'topology'">
+              <span class="idx">1</span><span class="acc-title">Topology</span>
+              <span class="acc-pick">{{ topo.name }}</span><span class="acc-chev">▸</span>
+            </button>
+            <div class="acc-fold"><div class="acc-inner"><div class="acc-pad">
+              <FamilyDial v-model="family" :families="FAMILIES" :short="FAMILY_SHORT" />
+              <div class="topo-list">
+                <button
+                  v-for="t in familyTopologies" :key="t.id"
+                  class="topo-card" :class="{ active: t.id === topoId, planned: t.planned }"
+                  :disabled="t.planned" @click="pickTopology(t.id)"
+                >
+                  <div class="t-name">{{ t.name }}<span v-if="t.planned" class="t-tag">planned</span></div>
+                  <div class="t-desc">{{ t.desc }}</div>
+                </button>
+              </div>
+            </div></div></div>
+          </section>
 
-        <div class="section-label" style="margin-top: 1rem"><span class="idx">2</span> Specification</div>
+          <!-- Stage 2 — Variant (only when the topology actually has a choice) -->
+          <section v-if="hasVariantChoice" class="acc-stage" :class="{ open: stage === 'variant' }">
+            <button class="acc-head" @click="stage = 'variant'">
+              <span class="idx">2</span><span class="acc-title">{{ axis.label }}</span>
+              <span class="acc-pick">{{ currentVariant.name }}</span><span class="acc-chev">▸</span>
+            </button>
+            <div class="acc-fold"><div class="acc-inner"><div class="acc-pad">
+              <div class="variant-list">
+                <button
+                  v-for="v in variantOptions" :key="v.id"
+                  class="topo-card variant-card" :class="{ active: v.id === form.variant }"
+                  @click="pickVariant(v.id)"
+                >
+                  <div class="t-name">{{ v.name }}<span v-if="v.id === axis.default" class="t-tag t-default">default</span></div>
+                  <div class="t-desc">{{ v.desc }}</div>
+                </button>
+              </div>
+            </div></div></div>
+          </section>
+
+          <!-- Stage 3 — Specification & Simulation -->
+          <section class="acc-stage" :class="{ open: stage === 'spec' }">
+            <button class="acc-head" @click="stage = 'spec'">
+              <span class="idx">{{ hasVariantChoice ? '3' : '2' }}</span><span class="acc-title">Specification &amp; Simulation</span>
+              <span class="acc-chev">▸</span>
+            </button>
+            <div class="acc-fold"><div class="acc-inner"><div class="acc-pad">
         <div class="grid2">
           <label class="fld" v-if="form.inputType === 'dc'">
             <span class="fld-label">Vin min <span class="u">V</span></span>
@@ -617,6 +660,18 @@ provide('kh', {
           </div>
         </details>
 
+              <div class="solve-row">
+                <button class="btn solve-btn" :disabled="running || engineState !== 'ready'" @click="solve">
+                  {{ running ? (form.engine === 'ngspice' ? 'Simulating…' : 'Solving…') : 'Solve' }}
+                </button>
+                <div v-if="engineState === 'loading'" class="boot"><div class="spin"></div> loading…</div>
+                <span v-else-if="result" class="chip ok">ready</span>
+                <span v-else class="hint" style="font-size: 0.62rem">set spec ▸ solve</span>
+              </div>
+              <div v-if="runError" class="err-banner" style="margin-top: 0.5rem"><b>ENGINE ▸</b> {{ runError }}</div>
+            </div></div></div>
+          </section>
+        </div>
       </aside>
 
       <!-- right: two selectable output panes -->

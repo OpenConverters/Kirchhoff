@@ -58,6 +58,13 @@ std::vector<std::pair<std::string, nlohmann::json>>& captured_registry() {
 
 void clear_captured_operating_points() { captured_registry().clear(); }
 
+void restamp_captured_ambient(double ambientTemperature) {
+    // Overwrite the ambient the capturing overload stamped (its 25 C default) with the build's real ambient,
+    // once the api layer has read it from the spec. Keeps the registry ambient consistent with the TAS.
+    for (auto& kv : captured_registry())
+        kv.second["conditions"]["ambientTemperature"] = ambientTemperature;
+}
+
 const std::vector<std::pair<std::string, nlohmann::json>>& captured_operating_points() {
     return captured_registry();
 }
@@ -1652,6 +1659,43 @@ double dab_sample(double theta, const std::vector<double>& bt, const std::vector
 }
 
 }  // anonymous namespace
+
+// General DAB average power transfer for ANY modulation (SPS/EPS/DPS/TPS): averages Vab·iL over the period,
+// reusing the exact subinterval/propagation kernel analytical_dab emits — so this power equals the power the
+// emitted waveforms carry (no separate closed form to drift out of sync). D1/D2/D3 in RADIANS. Ported from
+// MKF Dab::compute_power_general.
+double dab_power_transfer(double V1, double V2, double N, double D3rad, double D1rad, double D2rad,
+                          double Fs, double L) {
+    auto segs = dab_build_subintervals(V1, V2, D1rad, D2rad, D3rad);
+    constexpr double Lm_dummy = 1.0;   // power depends on iL only; Im (needs Lm) is irrelevant here
+    double iL0, Im0;
+    dab_initial_conditions(segs, N, L, Lm_dummy, Fs, iL0, Im0);
+    std::vector<double> bt, bi, bm;
+    dab_propagate_period(segs, N, L, Lm_dummy, Fs, iL0, Im0, bt, bi, bm);
+    double power = 0.0;
+    for (size_t k = 0; k < segs.size(); ++k)
+        power += segs[k].Vab * 0.5 * (bi[k] + bi[k + 1]) * (segs[k].theta_end - segs[k].theta_start);
+    return power / (2.0 * M_PI);
+}
+
+// Series inductance L that delivers `P` at the given modulation (D1/D2/D3 in RADIANS). Power is monotonically
+// decreasing in L, so geometric-bisect. Throws if P is unreachable even at minimal L (the modulation cannot
+// deliver the requested power — no silent saturation, per the no-fallback rule). Used to size L for
+// EPS/DPS/TPS designs so they still deliver the target power; SPS keeps its exact closed form.
+double dab_series_inductance_for_power(double V1, double V2, double N, double D3rad, double D1rad,
+                                       double D2rad, double Fs, double P) {
+    if (P <= 0) throw std::invalid_argument("dab_series_inductance_for_power: power must be positive");
+    double lo = 1e-12, hi = 1.0;   // L bounds spanning any realistic tank
+    if (dab_power_transfer(V1, V2, N, D3rad, D1rad, D2rad, Fs, lo) < P)
+        throw std::runtime_error("analytical_dab: requested power exceeds the achievable maximum at this "
+                                 "modulation (D1/D2/D3) — cannot size the series inductance");
+    for (int i = 0; i < 200; ++i) {
+        double mid = std::sqrt(lo * hi);
+        if (dab_power_transfer(V1, V2, N, D3rad, D1rad, D2rad, Fs, mid) > P) lo = mid; else hi = mid;
+        if (hi / lo < 1.0 + 1e-10) break;
+    }
+    return std::sqrt(lo * hi);
+}
 
 // Ported from MKF converter_models/Dab.cpp:701 (process_operating_point_for_input_voltage).
 MAS::OperatingPoint analytical_dab(double inputVoltage,

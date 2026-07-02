@@ -5,7 +5,9 @@
 #include "KirchhoffConfig.hpp"
 #include <cmath>
 #include <algorithm>
+#include <cctype>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace Kirchhoff {
@@ -39,6 +41,20 @@ DabDesign design_dab(const json& tasInputs) {
     if (!(d3deg > 0.0 && d3deg < 180.0))
         throw std::invalid_argument("design_dab: dabPhaseShiftDeg must be a degrees value in (0, 180) — SPS "
                                     "outer phase shift D3 (recommended 0–90°); got " + std::to_string(d3deg));
+    // Inner (intra-bridge) phase shifts D1 (primary) / D2 (secondary), in DEGREES, for EPS/DPS/TPS. Default
+    // 0 (SPS). `dabModulationType` = SPS|EPS|DPS|TPS is an optional hint: for DPS an unspecified D2 mirrors D1
+    // (the defining DPS constraint); an explicit dabInnerPhaseShift2Deg always wins. Bounds [0, 90) — 90°
+    // collapses the half-cycle to zero width (Huang 2018 / standard TPS literature).
+    const double d1deg = cfg::get(config, "dabInnerPhaseShift1Deg", 0.0);
+    std::string modType = config.value("dabModulationType", std::string{});
+    for (char& ch : modType) ch = (char)std::toupper((unsigned char)ch);
+    const double d2deg = cfg::get(config, "dabInnerPhaseShift2Deg", modType == "DPS" ? d1deg : 0.0);
+    if (!(d1deg >= 0.0 && d1deg < 90.0))
+        throw std::invalid_argument("design_dab: dabInnerPhaseShift1Deg (D1) must be in [0, 90) degrees; got "
+                                    + std::to_string(d1deg));
+    if (!(d2deg >= 0.0 && d2deg < 90.0))
+        throw std::invalid_argument("design_dab: dabInnerPhaseShift2Deg (D2) must be in [0, 90) degrees; got "
+                                    + std::to_string(d2deg));
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 0.9);
@@ -65,10 +81,17 @@ DabDesign design_dab(const json& tasInputs) {
     // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
     // the duty-derived value so the rest of the stage is sized around the fixed transformer.
     d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(std::round(N * 100.0) / 100.0);
-    // 2. Series inductance L for the rated power at D3 = 25° (SPS):
-    //    L = N·V1·V2·D3·(π−|D3|) / (2π²·Fs·P).  (MKF Dab::compute_series_inductance — the exact ideal SPS
-    //    power, not FHA.) With minimal dead time (above) the open-loop output lands on spec; no derating.
-    d.seriesInductance = N * Vin * Vo * D3 * (M_PI - std::abs(D3)) / (2.0 * M_PI * M_PI * Fs * P);
+    // 2. Series inductance L for the rated power at D3 = 25° (default).
+    if (d1deg == 0.0 && d2deg == 0.0) {
+        //    SPS: L = N·V1·V2·D3·(π−|D3|) / (2π²·Fs·P).  (MKF Dab::compute_series_inductance — the exact ideal
+        //    SPS power, not FHA.) With minimal dead time (above) the open-loop output lands on spec.
+        d.seriesInductance = N * Vin * Vo * D3 * (M_PI - std::abs(D3)) / (2.0 * M_PI * M_PI * Fs * P);
+    } else {
+        //    EPS/DPS/TPS: the SPS closed form no longer holds — size L from the general power model (same tank
+        //    kernel analytical_dab emits) so the design still delivers P at the chosen (D1, D2, D3).
+        d.seriesInductance = Kirchhoff::analytical::dab_series_inductance_for_power(
+            Vin, Vo, N, D3, d1deg * M_PI / 180.0, d2deg * M_PI / 180.0, Fs, P);
+    }
 
     // 3. Magnetizing inductance: max(Vin²/(1.2·Fs·P), 10·L) — 30% magnetizing-ripple target, floored
     //    at 10× the series inductance (MKF Dab::process_design_requirements step 4).
@@ -77,6 +100,8 @@ DabDesign design_dab(const json& tasInputs) {
         std::max(LmFromCurrent, 10.0 * d.seriesInductance));
 
     d.phaseShiftDeg = d3deg;
+    d.innerPhaseShift1Deg = d1deg;
+    d.innerPhaseShift2Deg = d2deg;
     d.switchDuty = cfg::get(config, "switchDutyFraction", kSwitchDuty);
     d.loadResistance = Vo * Vo / P;
     d.config = config;
@@ -159,7 +184,8 @@ json build_dab_tas(const DabDesign& d) {
     namespace AN = Kirchhoff::analytical;
     const double IoutDab = d.outputPower / d.outputVoltage;
     const MAS::OperatingPoint aopT1 = AN::analytical_dab(d.inputVoltage, {d.outputVoltage}, {IoutDab}, {N},
-                                                         fsw, Lm, Lr_H, 0.0, 0.0, d.phaseShiftDeg);
+                                                         fsw, Lm, Lr_H, d.innerPhaseShift1Deg,
+                                                         d.innerPhaseShift2Deg, d.phaseShiftDeg);
     const std::vector<json> windings = AN::excitations_processed(aopT1, "T1");
     std::vector<std::string> isoSides{"primary", "secondary"};
     json xfmr; xfmr["magnetic"] = json::object();
@@ -285,18 +311,22 @@ json build_dab_tas(const DabDesign& d) {
 
     json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
     tas["simulation"]["analyses"] = json::array({an});
-    // Eight PWM drives. Primary: diagonal pairs (QA,QD) at 0° and (QB,QC) at 180° -> ±Vin square wave.
-    // Secondary: the same square wave phase-shifted by D3 — diagonal pairs (QE,QH) at D3 and (QF,QG)
-    // at D3+180°. The inter-bridge phase D3 drives the power transfer (SPS modulation).
+    // Eight PWM drives. Each half-bridge leg is 50 %-duty; the bridge output is the difference of its two
+    // legs. Modulation (degrees):
+    //   Primary   Vab: leg A (QA top / QB bot) shifted by D1 vs leg C (QC/QD). D1=0 → ±Vin square wave.
+    //   Secondary Vcd: whole bridge shifted by D3 vs the primary; leg E (QE/QF) shifted by D2 vs leg G (QG/QH).
+    // This reproduces analytical_dab's dab_Vab_at(θ,V1,D1) / dab_Vcd_at(θ,V2,D2,D3) exactly: shifting leg A's
+    // turn-on to D1 makes Vab = Va−Vc give a zero plateau on [0,D1) then +Vin on [D1,π) (and mirror), and the
+    // same for the secondary with D2/D3. D1=D2=0 collapses to the original SPS drive.
     auto stim = [&](const char* sw, double phaseDeg) {
         json st; st["stage"] = "dabCell"; st["component"] = sw; st["signal"] = "gate";
         st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;
         st["waveform"]["dutyCycle"] = d.switchDuty; st["waveform"]["phase"] = phaseDeg;
         return st; };
-    const double p3 = d.phaseShiftDeg;
+    const double p3 = d.phaseShiftDeg, p1 = d.innerPhaseShift1Deg, p2 = d.innerPhaseShift2Deg;
     tas["simulation"]["stimulus"] = json::array({
-        stim("QA", 0.0),       stim("QB", 180.0),       stim("QC", 180.0),       stim("QD", 0.0),
-        stim("QE", p3),        stim("QF", 180.0 + p3),  stim("QG", 180.0 + p3),  stim("QH", p3)});
+        stim("QA", p1),          stim("QB", 180.0 + p1),      stim("QC", 180.0),          stim("QD", 0.0),
+        stim("QE", p3 + p2),     stim("QF", 180.0 + p3 + p2), stim("QG", 180.0 + p3),     stim("QH", p3)});
     req::finalize_control_seeds(tas, Topology::DUAL_ACTIVE_BRIDGE_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }

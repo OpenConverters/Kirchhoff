@@ -137,13 +137,50 @@ export const PLANNED = [
   { id: 'totem_pole_pfc', name: 'Totem-pole PFC', family: 'Filters / PFC', desc: 'Planned.' },
 ]
 
+// ── Variants ─────────────────────────────────────────────────────────────────
+// Design knobs the engine reads from the spec's `config` object (KirchhoffConfig.hpp →
+// cfg::get_str(d.config, key, default)). Each topology with real alternatives lists its
+// variant axis; everything else offers a single "Standard" build. `key` is the config
+// field the engine keys off; `default` mirrors the C++ builder's own default.
+const RECTIFIER_3 = [
+  { id: 'fullBridge', name: 'Full-bridge', desc: 'One secondary winding into a 4-diode bridge.' },
+  { id: 'centerTapped', name: 'Center-tapped', desc: 'Two half-windings, 2-diode full-wave — low-V / high-I.' },
+  { id: 'currentDoubler', name: 'Current-doubler', desc: 'Two output inductors — halves the rectifier RMS.' },
+]
+const SYNC_RECT = [
+  { id: 'diode', name: 'Diode', desc: 'Schottky rectifier — simplest and most robust.' },
+  { id: 'synchronous', name: 'Synchronous', desc: 'MOSFET rectifier — higher efficiency, esp. at low Vout.' },
+]
+
+export const VARIANTS = {
+  buck: { key: 'rectifier', label: 'Rectifier', default: 'diode', options: SYNC_RECT },
+  boost: { key: 'rectifier', label: 'Rectifier', default: 'diode', options: SYNC_RECT },
+  ahb: { key: 'rectifierType', label: 'Secondary rectifier', default: 'fullBridge', options: RECTIFIER_3 },
+  psfb: { key: 'rectifierType', label: 'Secondary rectifier', default: 'fullBridge', options: RECTIFIER_3 },
+  pshb: { key: 'rectifierType', label: 'Secondary rectifier', default: 'fullBridge', options: RECTIFIER_3 },
+  src: { key: 'rectifierType', label: 'Secondary rectifier', default: 'centerTapped', options: RECTIFIER_3 },
+  llc: { key: 'rectifierType', label: 'Secondary rectifier', default: 'centerTapped', options: RECTIFIER_3 },
+}
+
+// The single fallback offered when a topology has no real variant axis.
+const STANDARD = { key: null, label: 'Build', default: 'standard',
+  options: [{ id: 'standard', name: 'Standard', desc: 'The canonical build for this topology.' }] }
+
+export function variantAxis(topologyId) {
+  return VARIANTS[topologyId] ?? STANDARD
+}
+export function defaultVariant(topologyId) {
+  return variantAxis(topologyId).default
+}
+
 export function topologyById(id) {
   return TOPOLOGIES.find((t) => t.id === id)
 }
 
 // Assemble the design-requirements spec the engine consumes.
-// `form` mirrors the preset shape (numbers already parsed).
-export function buildSpec(form) {
+// `form` mirrors the preset shape (numbers already parsed); `topologyId` selects the
+// variant axis so the chosen variant lands in spec.config under the engine's key.
+export function buildSpec(form, topologyId) {
   const dr = {
     efficiency: form.efficiency,
     inputType: form.inputType,
@@ -172,12 +209,18 @@ export function buildSpec(form) {
     })),
   }
 
+  const config = {}
+  // Variant knob → the engine's config key (rectifier / rectifierType). The "standard"
+  // sentinel and default selections are left off so the builder keeps its own default.
+  const axis = variantAxis(topologyId)
+  if (axis.key && form.variant && form.variant !== axis.default) config[axis.key] = form.variant
   // Transient length in switching periods (settling + shown), DC topologies only:
   // AC-input converters (PFC/Vienna) need line-cycle-scale stop times, which their
   // builders manage themselves.
   if (form.inputType === 'dc' && form.fs > 0 && form.settlePeriods > 0 && form.showPeriods > 0) {
-    spec.config = { tranStopTime: (form.settlePeriods + form.showPeriods) / form.fs }
+    config.tranStopTime = (form.settlePeriods + form.showPeriods) / form.fs
   }
+  if (Object.keys(config).length) spec.config = config
   return spec
 }
 
