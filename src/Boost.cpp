@@ -94,8 +94,6 @@ json build_boost_tas(const BoostDesign& d) {
     const MAS::OperatingPoint aopNom   = AN::analytical_boost(d.inputVoltage,    d.outputVoltage, Iout, fsw,
                                                               L_H, 0.0, d.efficiency);
     const double Dmax  = AN::winding_current(aopWorst, 0, "dutyCycle");
-    const double dIL   = AN::winding_current(aopWorst, 0, "peakToPeak");
-    const double ILavg = AN::winding_current(aopWorst, 0, "offset");
     const double IpkL  = AN::winding_current(aopWorst, 0, "peak");
     const double IrmsL = AN::winding_current(aopWorst, 0, "rms");
     const double IswRms   = std::sqrt(Dmax) * IrmsL;                       // switch conducts during D

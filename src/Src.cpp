@@ -113,7 +113,6 @@ json build_src_tas(const SrcDesign& d) {
         json c; c["name"] = name; c["kind"] = kind; if (dir[0]) c["direction"] = dir; c["endpoints"] = eps; return c; };
     // Bare seeds (no designRequirements). Body diodes (anti-parallel to a FET) use these as-is — the HS
     // fill DEFERS a requirement-less diode as a FET body diode. REAL switches/rectifiers take a `req`.
-    auto mosfet = []() { json j; j["semiconductor"]["mosfet"] = json::object(); return j; };
     auto diode  = [&]() { json j; j["semiconductor"]["diode"] = json::object();
         j["inputs"]["designRequirements"] = req::body_diode(d.inputVoltage, d.outputPower / d.inputVoltage); return j; };
     auto mosfetReq = [](const json& r) { json j; j["semiconductor"]["mosfet"] = json::object();
@@ -139,21 +138,13 @@ json build_src_tas(const SrcDesign& d) {
     const double ItankPk   = std::sqrt(2.0) * ItankRms;                 // sinusoidal peak
     const double ItankPkPk = 2.0 * ItankPk;
     const int wpo = rectifier_windings_per_output(d.rectifierType);  // 2 (CT) | 1 (FB/CD)
-    // Secondary winding current stresses (per rectifier variant). CT: two half-windings, each a rectified
-    // half-sine (pk=(π/2)Iout, rms=(π/4)Iout). Single-winding variants (FB/CD): one secondary carrying the
-    // full bipolar reflected current (rms=(π/2√2)Iout). SRC has no voltage-doubler, so vSec is always ±Vo.
-    double IsecPk, IsecRms, IsecPkPk;
-    if (d.rectifierType == RectifierType::CenterTapped) {
-        IsecPk = (M_PI / 2.0) * Iout; IsecRms = (M_PI / 4.0) * Iout; IsecPkPk = IsecPk;
-    } else {
-        IsecPk = (M_PI / 2.0) * Iout; IsecRms = (M_PI / (2.0 * std::sqrt(2.0))) * Iout; IsecPkPk = 2.0 * IsecPk;
-    }
-    // Winding voltages (sinusoidal at fr): Lr sees i·Zr (Zr=2π·fr·Lr); the transformer primary clamps to
-    // the reflected secondary ±n·Vo; the secondary clamps to ±Vo.
+    // Secondary rectifier current peak: a rectified half-sine of the reflected tank current, pk=(π/2)·Iout
+    // (same for every rectifier variant; the diode reverse-block level and winding count differ elsewhere).
+    const double IsecPk = (M_PI / 2.0) * Iout;
+    // Resonant-inductor winding voltage (sinusoidal at fr): i·Zr, Zr=2π·fr·Lr. The TRANSFORMER winding
+    // voltages come from the embedded analytical-SRC excitations below, not an inline reflected-clamp calc.
     const double Zr     = 2.0 * M_PI * fr * d.resonantInductance;
     const double vLrPk  = ItankPk * Zr, vLrRms = vLrPk / std::sqrt(2.0), vLrPkPk = 2.0 * vLrPk;
-    const double vSecPk = d.outputVoltage, vSecRms = vSecPk / std::sqrt(2.0), vSecPkPk = 2.0 * vSecPk;
-    const double vPriPk = n * vSecPk, vPriRms = vPriPk / std::sqrt(2.0), vPriPkPk = 2.0 * vPriPk;
 
     // --- semiconductor requirements (sourceable) ---
     // Primary half-bridge MOSFETs Q1/Q2 each block the full bus Vin when off and carry the resonant

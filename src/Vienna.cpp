@@ -116,7 +116,6 @@ json build_vienna_tas(const ViennaDesign& d) {
     // Per-phase boost-inductor excitation. Each Vienna leg boosts its phase to the HALF-bus (Vout/2, the
     // 3-level step). Current is a rectified-sine envelope (per-phase peak) with HF ripple; voltages are the
     // half-bus boost levels. (Mirrors the single-phase PFC inductor; per-phase current = total/3.)
-    const double vpeakV = d.inputVoltageRms * std::sqrt(2.0);
     const double Vhalf  = 0.5 * d.outputVoltage;
     // Per-phase boost-inductor excitation from the SINGLE FHA source (the SPICE-validated 3-phase Vienna
     // line-cycle solver): the per-phase rectified-sine current envelope + HF ripple, as processed
@@ -129,7 +128,6 @@ json build_vienna_tas(const ViennaDesign& d) {
     const double IpkLV  = AN::winding_current(aopVienna, 0, "peak");
     const double IrmsLV = AN::winding_current(aopVienna, 0, "rms");
     const double IavgLV = AN::winding_current(aopVienna, 0, "offset");
-    const double DpkV   = std::max(0.0, (Vhalf - vpeakV) / Vhalf);      // boost duty at line peak (ratings)
     const json indExcV = AN::excitations_processed(aopVienna).at(0);
     auto resBrick = [&](double r) { json j; j["resistor"] = json::object();
         auto& dr = j["inputs"]["designRequirements"];

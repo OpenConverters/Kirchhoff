@@ -75,8 +75,10 @@ if (NOT EXISTS "${MKF_WAVEFORM_PROCESSOR}")
 endif()
 
 add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/Dab.cpp src/IsolatedBuck.cpp src/IsolatedBuckBoost.cpp src/Weinberg.cpp src/Llc.cpp src/Src.cpp src/Cllc.cpp src/Clllc.cpp src/Pfc.cpp src/Vienna.cpp src/TasAssembler.cpp src/NgspiceRunner.cpp src/Analytical.cpp src/ConverterAnalytical.cpp src/ConverterExtract.cpp "${MKF_WAVEFORM_PROCESSOR}")
-target_include_directories(kirchhoff PUBLIC
-    src
+target_include_directories(kirchhoff PUBLIC src)
+# The PSMA/MAS/json dependency headers are marked SYSTEM so the -Wall/-Wextra enabled below reports only
+# Kirchhoff's OWN code, not warnings inside generated/vendored dependency headers (e.g. MAS.hpp).
+target_include_directories(kirchhoff SYSTEM PUBLIC
     "${PSMA_ROOT}/PEAS/src"
     "${PSMA_ROOT}/RAS/src" "${PSMA_ROOT}/CAS/src" "${PSMA_ROOT}/SAS/src"
     "${PSMA_ROOT}/AAS/src" "${PSMA_ROOT}/CTAS/src"
@@ -89,8 +91,14 @@ target_include_directories(kirchhoff PUBLIC
 # "support/Exceptions.h"), both self-contained (MAS types + std). PRIVATE so it's on the path for
 # kirchhoff's own TUs (ConverterAnalytical.cpp + WaveformProcessor.cpp) but does NOT propagate to test
 # binaries (no risk of an MKF header shadowing a Kirchhoff one).
-target_include_directories(kirchhoff PRIVATE "${MKF_DIR}/src")
+target_include_directories(kirchhoff SYSTEM PRIVATE "${MKF_DIR}/src")
 target_link_libraries(kirchhoff PUBLIC RAS CAS SAS AAS CTAS MAS_kirchhoff CIAS nlohmann_json::nlohmann_json)
+# Compile Kirchhoff's OWN sources with -Wall -Wextra (dep headers are SYSTEM above, so this flags only our
+# code). The vendored MKF WaveformProcessor is not ours to clean — suppress its warnings with a trailing -w.
+if (NOT MSVC)
+    target_compile_options(kirchhoff PRIVATE -Wall -Wextra)
+    set_source_files_properties("${MKF_WAVEFORM_PROCESSOR}" PROPERTIES COMPILE_OPTIONS "-w")
+endif()
 if (ENABLE_NGSPICE AND NGSPICE_LIB AND NGSPICE_INCLUDE_DIR)
     target_compile_definitions(kirchhoff PUBLIC ENABLE_NGSPICE)
     target_include_directories(kirchhoff PUBLIC "${NGSPICE_INCLUDE_DIR}")

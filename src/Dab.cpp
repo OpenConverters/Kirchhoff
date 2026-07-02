@@ -89,7 +89,7 @@ json build_dab_tas(const DabDesign& d) {
     auto isc = [](const char* name, const char* kind, const char* dir, std::vector<json> eps) {
         json c; c["name"] = name; c["kind"] = kind; if (dir[0]) c["direction"] = dir; c["endpoints"] = eps; return c; };
     auto mosfet = [](json reqs = json()) { json j; j["semiconductor"]["mosfet"] = json::object();
-        if (!reqs.is_null()) j["inputs"]["designRequirements"] = reqs; return j; };
+        if (!reqs.is_null()) { j["inputs"]["designRequirements"] = reqs; } return j; };
     auto diode  = [&](json reqs = json()) { json j; j["semiconductor"]["diode"] = json::object();
         j["inputs"]["designRequirements"] = reqs.is_null()
             ? req::body_diode(d.inputVoltage, d.outputPower / d.inputVoltage) : reqs; return j; };

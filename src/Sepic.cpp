@@ -43,7 +43,6 @@ SepicDesign design_sepic(const json& tasInputs) {
 
     const double iout = d.outputPower / d.outputVoltage, fsw = d.switchingFrequency;
     d.diodeDrop = req::dideal_diode_drop(d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
-    const double Vo = d.outputVoltage + d.diodeDrop;
     // Operating duty (deck/stimulus) at the nominal input.
     d.dutyCycle = duty(d.inputVoltage, d.outputVoltage, d.diodeDrop, d.efficiency);
 
