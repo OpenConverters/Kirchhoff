@@ -60,18 +60,21 @@ endif()
 # The converter-waveform DSP (FFT, create_waveform, sampled/processed/harmonics, complete_excitation)
 # is NOT re-implemented in Kirchhoff — it lives once in MKF's self-contained WaveformProcessor (extracted
 # out of Inputs.cpp; depends only on the MAS types + std, no magnetics/Settings). Kirchhoff compiles that
-# single file directly (no dependency on the rest of MKF). MKF_DIR points at the MKF checkout.
-set(MKF_DIR "/home/alf/OpenMagnetics/MKF" CACHE PATH "Path to the MKF checkout (for the shared WaveformProcessor)")
+# single file directly (no dependency on the rest of MKF). MKF is vendored as the deps/MKF git submodule
+# (pinned to a specific OpenMagnetics/MKF commit) so a fresh clone is reproducible: run
+#   git submodule update --init deps/MKF
+# MKF_DIR defaults to that submodule but stays overridable — point it at a live local MKF checkout for
+# co-development (e.g. -DMKF_DIR=/home/alf/OpenMagnetics/MKF).
+set(MKF_DIR "${CMAKE_CURRENT_SOURCE_DIR}/deps/MKF" CACHE PATH "Path to the MKF checkout (for the shared WaveformProcessor)")
 set(MKF_WAVEFORM_PROCESSOR "${MKF_DIR}/src/processors/WaveformProcessor.cpp")
 # Fail configure with a clear message instead of a cryptic mid-compile "file not found" when MKF_DIR does
-# not point at a real checkout. NOTE: MKF is currently an UNPINNED local path (unlike the pinned deps/
-# submodules), so the build is only reproducible where that checkout exists — vendoring or submodule-pinning
-# this single self-contained file is a follow-up (see review notes).
+# not point at a real checkout (e.g. the submodule was never initialised).
 if (NOT EXISTS "${MKF_WAVEFORM_PROCESSOR}")
     message(FATAL_ERROR
         "MKF WaveformProcessor not found:\n  ${MKF_WAVEFORM_PROCESSOR}\n"
         "Kirchhoff compiles this one self-contained MKF file for its converter-waveform DSP. "
-        "Point -DMKF_DIR=<path-to-MKF-checkout> at your MKF clone (default /home/alf/OpenMagnetics/MKF).")
+        "Initialise the submodule ('git submodule update --init deps/MKF') or point "
+        "-DMKF_DIR=<path-to-MKF-checkout> at a local MKF clone.")
 endif()
 
 add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/Dab.cpp src/IsolatedBuck.cpp src/IsolatedBuckBoost.cpp src/Weinberg.cpp src/Llc.cpp src/Src.cpp src/Cllc.cpp src/Clllc.cpp src/Pfc.cpp src/Vienna.cpp src/TasAssembler.cpp src/NgspiceRunner.cpp src/Analytical.cpp src/ConverterAnalytical.cpp src/ConverterExtract.cpp "${MKF_WAVEFORM_PROCESSOR}")

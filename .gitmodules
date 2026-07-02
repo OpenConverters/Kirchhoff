@@ -38,3 +38,7 @@
 	path = deps/CTAS
 	url = git@github.com:Power-Supply-Manufacturers-Association/CTAS.git
 	branch = main
+[submodule "deps/MKF"]
+	path = deps/MKF
+	url = git@github.com:OpenMagnetics/MKF.git
+	branch = main
