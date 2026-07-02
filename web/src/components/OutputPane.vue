@@ -44,13 +44,11 @@ const winding = computed(() => waveExcitations.value[windingIdx.value] ?? null)
     </div>
 
     <div class="pane-body">
-      <!-- schematic -->
-      <div v-if="view === 'schematic'">
+      <!-- schematic (scaled to fit the pane, no crop) -->
+      <div v-if="view === 'schematic'" class="view-fill">
         <template v-if="schematicSvg">
-          <div class="schematic-frame" v-html="schematicSvg" @click="schematicClick"></div>
-          <div class="sch-caption">
-            Power-path sketch — click any component for its requirements, stresses and waveforms.
-          </div>
+          <div class="schematic-frame fit" v-html="schematicSvg" @click="schematicClick"></div>
+          <div class="sch-caption">Power-path sketch — click any component for its details.</div>
         </template>
         <div v-else class="wave-empty">
           No schematic sketch for <code>{{ topo.name }}</code> yet — see the BOM view for every component.
@@ -75,7 +73,7 @@ const winding = computed(() => waveExcitations.value[windingIdx.value] ?? null)
       </div>
 
       <!-- waveforms -->
-      <div v-else-if="view === 'waveforms'">
+      <div v-else-if="view === 'waveforms'" class="view-fill">
         <div class="wave-toolbar">
           <select class="fld-in" style="width: auto" v-model="waveTarget">
             <optgroup label="Magnetics">
@@ -109,7 +107,7 @@ const winding = computed(() => waveExcitations.value[windingIdx.value] ?? null)
             <div class="mono wave-name">▸ {{ winding.name ?? `winding ${windingIdx}` }}
               <span class="chip" style="margin-left: 0.4rem">{{ si(winding.frequency, 'Hz') }}</span>
             </div>
-            <WavePane :excitation="winding" :source-kind="waveSource.kind" :periods="form.showPeriods" />
+            <WavePane :excitation="winding" :source-kind="waveSource.kind" :periods="form.showPeriods" fill />
           </template>
           <div class="wave-readout">
             <span class="i"><b>—</b> current{{ waveSource.kind === 'ngspice' ? ' · measured' : '' }}</span>
@@ -121,7 +119,7 @@ const winding = computed(() => waveExcitations.value[windingIdx.value] ?? null)
             <div class="mono wave-name">▸ {{ deviceExcitation.name }}
               <span class="chip" style="margin-left: 0.4rem">{{ si(deviceExcitation.frequency, 'Hz') }}</span>
             </div>
-            <WavePane :excitation="deviceExcitation" source-kind="ngspice" :periods="form.showPeriods" />
+            <WavePane :excitation="deviceExcitation" source-kind="ngspice" :periods="form.showPeriods" fill />
             <div class="wave-readout">
               <span class="i"><b>—</b> current · measured</span>
               <span class="v"><b>—</b> {{ deviceComp?.voltage?.label ?? 'V' }} · measured</span>

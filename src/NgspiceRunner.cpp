@@ -58,6 +58,18 @@ std::optional<double> NgspiceRunResult::average(const std::string& name, double 
     return area / span;
 }
 
+void NgspiceRunResult::drop_samples_before(double tStart) {
+    size_t k = 0;
+    while (k < time.size() && time[k] < tStart) ++k;
+    if (k == 0) return;
+    time.erase(time.begin(), time.begin() + static_cast<std::ptrdiff_t>(k));
+    for (auto& kv : vectors) {
+        auto& v = kv.second;
+        const size_t n = std::min(k, v.size());
+        v.erase(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(n));
+    }
+}
+
 } // namespace Kirchhoff
 
 #ifdef ENABLE_NGSPICE

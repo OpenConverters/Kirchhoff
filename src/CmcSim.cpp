@@ -180,6 +180,9 @@ json simulate_cmc_ideal_waveforms(const CmcDesign& d, double inductance, double 
     NgspiceRunResult r = run_ngspice_in_process(deck);
     if (!r.success)
         return json{{"success", false}, {"error", "CMC ideal simulation failed: " + r.error}};
+    // The deck's .tran tstart does NOT trim what the runner captures (the data callback streams
+    // every timepoint) — drop the settling periods here so the operating point is steady state.
+    r.drop_samples_before(double(numberOfSteadyStatePeriods) / excFreq);
 
     const auto names = winding_names(d.numberOfWindings);
     MAS::OperatingPoint op;

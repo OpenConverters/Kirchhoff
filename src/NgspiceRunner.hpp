@@ -31,6 +31,12 @@ struct NgspiceRunResult {
     // `name` is matched case-insensitively, with or without a "v(...)"/"i(...)" wrapper and any plot
     // prefix (e.g. "tran1.vout"). Returns nullopt if the vector or window has no samples.
     std::optional<double> average(const std::string& name, double from, double to) const;
+
+    // Drop every sample with t < tStart from `time` and all `vectors`. NEEDED because the
+    // shared-library data callback streams EVERY computed timepoint — a `.tran step stop tstart`
+    // directive does NOT trim what this runner captures (tstart only gates ngspice's own stored
+    // plot), so any deck that relies on a settle window must call this after the run.
+    void drop_samples_before(double tStart);
 };
 
 // True iff Kirchhoff was built with libngspice (ENABLE_NGSPICE). When false, run_in_process throws.

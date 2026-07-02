@@ -10,6 +10,7 @@ const props = defineProps({
   excitation: { type: Object, required: true }, // MAS OperatingPointExcitation
   sourceKind: { type: String, default: 'analytical' }, // 'ngspice' | 'analytical...'
   periods: { type: Number, default: 1 }, // periodic steady state: repeat the cycle N times
+  fill: { type: Boolean, default: false }, // fill the parent's height (chart scales, stats compact below)
 })
 
 const freq = computed(() => props.excitation.frequency)
@@ -75,8 +76,10 @@ const missing = computed(() => {
 </script>
 
 <template>
-  <div>
-    <WaveformChart v-if="traces.length" :traces="traces" />
+  <div :class="{ 'wavepane-fill': fill }">
+    <!-- fill mode uses a wide viewBox aspect so the contain-fit nearly fills the pane width
+         (a stacked pane is wide-and-short); the SVG then scales to that slot with no distortion -->
+    <WaveformChart v-if="traces.length" :traces="traces" :height="fill ? 150 : 240" :class="{ 'chart-fill': fill }" />
     <div v-if="missing.length" class="wave-empty" style="margin-top: 0.6rem">
       <template v-if="sourceKind === 'ngspice'">
         The ngspice extraction rebuilds winding <b>currents</b> from the simulation; the
@@ -89,7 +92,7 @@ const missing = computed(() => {
         in the toolbar for the full simulated trace.
       </template>
     </div>
-    <div class="stat-row">
+    <div class="stat-row" :class="{ compact: fill }">
       <div v-for="s in stats" :key="s.k" class="stat" :class="s.cls">
         <div class="k">{{ s.k }}</div>
         <div class="n">{{ s.n }}</div>

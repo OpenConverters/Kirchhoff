@@ -40,6 +40,19 @@ std::vector<double> vec_of(const NgspiceRunResult& r, const std::string& name) {
     return {};
 }
 
+// Settle window before the measurement opens: the LC natural mode (at the CUTOFF, far below the
+// test frequency) must ring down, or the sine turn-on transient dominates v(filter_out) and the
+// "measured" attenuation reads tens of dB low. The ring-down is set by the ACTUAL RLC decay: with
+// the load R across C the poles decay no slower than max(2RC, L/R) (underdamped: tau = 2RC;
+// overdamped slow pole: R/L) — 10 cutoff periods alone is ~1 tau for high-Q filters. Callers use
+// the SAME value to trim the captured samples (NgspiceRunResult::drop_samples_before — the data
+// callback streams every timepoint; .tran's tstart does not trim what the runner captures).
+double dmc_settle_time(double inductance, double filterCap, double loadResistance) {
+    const double cutoff = 1.0 / (2.0 * M_PI * std::sqrt(inductance * filterCap));
+    const double decayTau = std::max(2.0 * loadResistance * filterCap, inductance / loadResistance);
+    return std::max(10.0 / cutoff, 8.0 * decayTau);
+}
+
 // LC low-pass filter test deck (MKF DifferentialModeChoke::generate_ngspice_circuit). DC bus + DM noise
 // sine → DMC L → filter cap → load. filterCap is the CALLER'S capacitance — the deck must simulate the
 // exact filter the caller designed/reports on, never re-size its own per test frequency.
@@ -49,11 +62,7 @@ std::string dmc_deck(double inductance, double filterCap, double frequency,
     const int numPeriods = 20;
     const double stepTime = period / 100.0;
     const double loadResistance = operatingVoltage / operatingCurrent;
-    // Let the LC natural mode (at the CUTOFF, far below the test frequency) ring down before the
-    // measurement window opens — without tstart the sine turn-on transient dominates v(filter_out)
-    // and the "measured" attenuation reads tens of dB low.
-    const double cutoff = 1.0 / (2.0 * M_PI * std::sqrt(inductance * filterCap));
-    const double settleTime = 10.0 / cutoff;
+    const double settleTime = dmc_settle_time(inductance, filterCap, loadResistance);
     const double simTime = settleTime + numPeriods * period;
 
     std::ostringstream c;
@@ -125,6 +134,7 @@ json simulate_dmc_waveforms(const DmcDesign& d, double inductance, double capaci
 
     json converterWaveforms = json::array();
     json failedFrequencies = json::array();
+    const double settle = dmc_settle_time(inductance, filterCap, d.inputVoltage / d.operatingCurrent);
     for (double frequency : test_frequencies(d)) {
         NgspiceRunResult r = run_ngspice_in_process(
             dmc_deck(inductance, filterCap, frequency, d.inputVoltage, d.operatingCurrent));
@@ -132,6 +142,7 @@ json simulate_dmc_waveforms(const DmcDesign& d, double inductance, double capaci
             failedFrequencies.push_back(json{{"frequency", frequency}, {"error", r.error}});
             continue;
         }
+        r.drop_samples_before(settle);   // measure steady state only (see dmc_settle_time)
         std::vector<double> inputVoltage = vec_of(r, "noise_src");
         std::vector<double> outputVoltage = vec_of(r, "filter_out");
         std::vector<double> inductorCurrent = vec_of(r, "vsense");
@@ -189,10 +200,13 @@ json verify_dmc_attenuation(const DmcDesign& d, double inductance, double capaci
         if (ngspiceAvailable) {
             NgspiceRunResult r = run_ngspice_in_process(
                 dmc_deck(inductance, filterCap, frequency, d.inputVoltage, d.operatingCurrent));
-            if (r.success)
+            if (r.success) {
+                r.drop_samples_before(
+                    dmc_settle_time(inductance, filterCap, d.inputVoltage / d.operatingCurrent));
                 measured = dm_attenuation(vec_of(r, "noise_src"), vec_of(r, "filter_out"));
-            else
+            } else {
                 simFailure = "ngspice run failed: " + r.error;
+            }
         } else {
             simFailure = "built without libngspice";
         }

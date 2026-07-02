@@ -82,6 +82,28 @@ body {
   font-family: var(--mono); font-size: 0.72rem; color: var(--ink-dim);
   padding: 0.1rem 0.2rem 0.55rem;
 }
+
+/* fit-to-pane: the schematic and the waveform scale to their pane's height (contain,
+   no distortion, no crop). A view flexes as a column; the drawing/chart takes the
+   spare height and its SVG fills that slot; captions/stats stay compact. */
+.view-fill { height: 100%; display: flex; flex-direction: column; min-height: 0; }
+.view-fill .schematic-frame.fit {
+  flex: 1; min-height: 0; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+}
+.view-fill .schematic-frame.fit svg { width: 100%; height: 100%; }
+.view-fill .wave-toolbar, .view-fill .wave-name, .view-fill .wave-readout { flex: 0 0 auto; }
+.view-fill .wavepane-fill { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.view-fill .wavepane-fill .chart-fill { flex: 1; min-height: 130px; display: flex; }
+.view-fill .wavepane-fill .chart-fill svg { width: 100%; height: 100%; }
+/* compact stats: a single horizontal strip so the chart keeps most of the pane height */
+.view-fill .wavepane-fill .stat-row.compact {
+  flex: 0 0 auto; margin-top: 0.4rem;
+  display: flex; flex-wrap: nowrap; gap: 0.4rem; overflow-x: auto;
+}
+.view-fill .wavepane-fill .stat-row.compact .stat { padding: 0.28rem 0.5rem; flex: 0 0 auto; }
+.view-fill .wavepane-fill .stat-row.compact .stat .k { font-size: 0.56rem; }
+.view-fill .wavepane-fill .stat-row.compact .stat .n { font-size: 0.82rem; }
 /* two panes stacked top/bottom — each full-width (landscape), which fits a schematic
    and a waveform far better than two narrow columns */
 .pane-grid {
