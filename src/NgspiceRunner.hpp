@@ -23,7 +23,8 @@ struct NgspiceRunResult {
     bool success = false;
     std::string error;
     std::vector<double> time;                                 // transient time vector
-    std::map<std::string, std::vector<double>> vectors;       // lower-cased vector name -> samples
+    std::map<std::string, std::vector<double>> vectors;       // RAW ngspice vector name -> samples
+                                                              // (look up via average(), which canonicalizes)
 
     // Time-average of a vector over [from, to] — the in-process equivalent of `meas tran <x> AVG ...`.
     // Trapezoidal integration over the captured samples in the window, divided by the window length.

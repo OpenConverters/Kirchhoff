@@ -119,7 +119,14 @@ MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vecto
                                  + "' has no positive excitation frequency");
     const double period = 1.0 / fsw;
     const double tEnd = r.time.back();
-    const double tBeg = std::max(0.0, tEnd - period);
+    // The extraction resamples the LAST switching period [tEnd-period, tEnd]. A transient shorter than one
+    // period has no full cycle to read; extracting it would resample past the end of the time vector. Throw
+    // loudly (per the no-fallback rule) instead of extrapolating a bogus waveform.
+    if (tEnd < period)
+        throw std::runtime_error("extract_operating_point(NGSPICE): transient span " + std::to_string(tEnd)
+                                 + "s is shorter than one switching period " + std::to_string(period)
+                                 + "s — cannot extract a cycle for magnetic '" + mags[idx].name + "'");
+    const double tBeg = tEnd - period;
 
     // The CIAS->ngspice serializer names each winding's inductor deterministically (CiasCircuitConverter.cpp):
     // the primary is "L<comp>_pri", secondary i is "L<comp>_sec<i>". ngspice reports each inductor's branch
@@ -152,6 +159,7 @@ MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vecto
         for (int k = 0; k < N; ++k) {
             double t = tBeg + period * k / N;
             while (j + 1 < r.time.size() && r.time[j + 1] < t) ++j;
+            if (j + 1 >= r.time.size()) j = r.time.size() - 2;   // clamp: keep [j, j+1] in bounds (size>=2)
             double f = (r.time[j + 1] - r.time[j] > 0) ? (t - r.time[j]) / (r.time[j + 1] - r.time[j]) : 0.0;
             data[k] = (*sig)[j] + f * ((*sig)[std::min(j + 1, sig->size() - 1)] - (*sig)[j]);
             time[k] = period * k / N;

@@ -62,24 +62,50 @@ std::optional<double> NgspiceRunResult::average(const std::string& name, double 
 
 #ifdef ENABLE_NGSPICE
 #include <ngspice/sharedspice.h>
+#include <atomic>
 #include <chrono>
+#include <memory>
+#include <mutex>
 #include <thread>
 
 namespace Kirchhoff {
 namespace {
 
-// Per-run capture state, passed to libngspice via the userData pointer (avoids a process-global
-// singleton; libngspice itself is global, so runs are serialized by the caller, but the state pointer
-// keeps the callbacks self-contained).
+// Per-run capture state, passed to libngspice via the userData pointer. The ngspice transient runs on a
+// BACKGROUND thread that writes this state concurrently with the wait loop reading it, so the shared flags
+// are atomic and the sample buffers are mutex-guarded. The state is heap-allocated and kept alive past the
+// function return (see g_activeCapture) so a lingering background thread can never write freed memory.
 struct Capture {
+    std::mutex mtx;                                            // guards time / vectors / errorMessage
     std::vector<double> time;
     std::map<std::string, std::vector<double>> vectors;
-    bool complete = false;
-    bool error = false;
+    std::atomic<bool> complete{false};
+    std::atomic<bool> error{false};
     std::string errorMessage;
 };
 
-extern "C" int kh_send_char(char* /*out*/, int /*id*/, void* /*ud*/) { return 0; }
+// Definitive ngspice signatures that the transient did NOT complete correctly. ngspice does not always
+// call controlled_exit on a mid-run abort (the bg thread just stops), so these are detected from the
+// character output — otherwise a crashed run returns partial data that looks like success.
+bool line_is_fatal(const char* out) {
+    static const char* const sigs[] = {
+        "Timestep too small", "simulation(s) aborted", "singular matrix", "Fatal error"
+    };
+    for (const char* sig : sigs)
+        if (std::strstr(out, sig)) return true;
+    return false;
+}
+
+extern "C" int kh_send_char(char* out, int /*id*/, void* ud) {
+    if (!out || !ud) return 0;
+    if (line_is_fatal(out)) {
+        auto* c = static_cast<Capture*>(ud);
+        std::lock_guard<std::mutex> lk(c->mtx);
+        c->error = true;
+        if (c->errorMessage.empty()) c->errorMessage = out;
+    }
+    return 0;
+}
 
 extern "C" int kh_send_stat(char* out, int /*id*/, void* ud) {
     if (out && ud && std::strstr(out, "--ready--")) static_cast<Capture*>(ud)->complete = true;
@@ -89,8 +115,12 @@ extern "C" int kh_send_stat(char* out, int /*id*/, void* ud) {
 extern "C" int kh_controlled_exit(int status, bool /*immediate*/, bool /*quit*/, int /*id*/, void* ud) {
     if (ud) {
         auto* c = static_cast<Capture*>(ud);
+        if (status != 0) {
+            std::lock_guard<std::mutex> lk(c->mtx);
+            c->error = true;
+            if (c->errorMessage.empty()) c->errorMessage = "ngspice exit status " + std::to_string(status);
+        }
         c->complete = true;
-        if (status != 0) { c->error = true; c->errorMessage = "ngspice exit status " + std::to_string(status); }
     }
     return status;
 }
@@ -98,6 +128,7 @@ extern "C" int kh_controlled_exit(int status, bool /*immediate*/, bool /*quit*/,
 extern "C" int kh_send_data(pvecvaluesall vecs, int /*count*/, int /*id*/, void* ud) {
     if (!ud || !vecs) return 0;
     auto* c = static_cast<Capture*>(ud);
+    std::lock_guard<std::mutex> lk(c->mtx);
     for (int i = 0; i < vecs->veccount; ++i) {
         const char* nm = vecs->vecsa[i]->name;
         if (!nm) continue;
@@ -116,6 +147,11 @@ extern "C" int kh_bg_running(bool running, int /*id*/, void* ud) {
     if (ud && !running) static_cast<Capture*>(ud)->complete = true;
     return 0;
 }
+
+// The most recent run's capture state, held so it outlives run_ngspice_in_process even if a timed-out
+// background thread is still (briefly) writing to it. libngspice serializes runs, so a single slot is
+// enough; the next run replaces it only after that run has waited for its own thread to stop.
+std::shared_ptr<Capture> g_activeCapture;
 
 // Drop a trailing `.control … .endc` block (case-insensitive) — we run via the API, not the deck's
 // interactive block — and keep everything else (circuit + .options/.ic/.tran + .end).
@@ -142,10 +178,14 @@ bool ngspice_in_process_available() { return true; }
 
 NgspiceRunResult run_ngspice_in_process(const std::string& deck, double timeoutSeconds) {
     NgspiceRunResult result;
-    Capture cap;
+    // Heap-allocate the capture and publish it before wiring the callbacks. Replacing g_activeCapture here
+    // drops the previous run's state (whose thread we already waited for) and keeps THIS run's state alive
+    // for the whole function — and beyond, if we have to abandon a hung background thread.
+    auto cap = std::make_shared<Capture>();
+    g_activeCapture = cap;
 
     if (ngSpice_Init(kh_send_char, kh_send_stat, kh_controlled_exit,
-                     kh_send_data, kh_send_initdata, kh_bg_running, &cap) != 0)
+                     kh_send_data, kh_send_initdata, kh_bg_running, cap.get()) != 0)
         throw std::runtime_error("libngspice: ngSpice_Init failed");
 
     // WASM workaround #1: under emscripten there is no /proc/meminfo, so ngspice's available-memory
@@ -179,12 +219,20 @@ NgspiceRunResult run_ngspice_in_process(const std::string& deck, double timeoutS
     // callback, with a fallback (data captured + thread idle) and a hard timeout.
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::milliseconds(static_cast<long>(timeoutSeconds * 1000.0));
-    while (!cap.complete) {
-        if (!ngSpice_running() && !cap.time.empty()) break;   // finished, callback may not have fired
+    auto timeHasSamples = [&] {                                // read shared buffer under the lock
+        std::lock_guard<std::mutex> lk(cap->mtx);
+        return !cap->time.empty();
+    };
+    while (!cap->complete) {
+        if (!ngSpice_running() && timeHasSamples()) break;    // finished, callback may not have fired
         if (std::chrono::steady_clock::now() > deadline) {
+            // bg_halt only REQUESTS a stop; wait for the background thread to actually stop before we let
+            // the circuit and capture state go, so it can never write into freed memory.
             ngSpice_Command(const_cast<char*>("bg_halt"));
-            result.error = "timeout after " + std::to_string(timeoutSeconds) + "s";
+            for (int i = 0; i < 500 && ngSpice_running(); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
             ngSpice_Command(const_cast<char*>("remcirc"));
+            result.error = "timeout after " + std::to_string(timeoutSeconds) + "s";
             return result;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -193,10 +241,15 @@ NgspiceRunResult run_ngspice_in_process(const std::string& deck, double timeoutS
     // Free the circuit so the next run starts clean (libngspice keeps loaded circuits otherwise).
     ngSpice_Command(const_cast<char*>("remcirc"));
 
-    result.time = std::move(cap.time);
-    result.vectors = std::move(cap.vectors);
-    result.error = cap.errorMessage;
-    result.success = !cap.error && !result.time.empty();
+    // The thread has stopped (complete set by bg_running(false)/controlled_exit, or ngSpice_running()==false
+    // above); copy the captured data out under the lock.
+    {
+        std::lock_guard<std::mutex> lk(cap->mtx);
+        result.time = cap->time;
+        result.vectors = cap->vectors;
+        result.error = cap->errorMessage;
+    }
+    result.success = !cap->error && !result.time.empty();
     return result;
 }
 
