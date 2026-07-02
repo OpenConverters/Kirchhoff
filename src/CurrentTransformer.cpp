@@ -33,7 +33,10 @@ MAS::Inputs design_current_transformer(const json& spec) {
     // ── DesignRequirements (MKF :21-40) — a 2-winding transformer, NOT a filter choke ──
     MAS::DesignRequirements dr;
     MAS::DimensionWithTolerance ratio;
-    ratio.set_nominal(round_to(turnsRatio, 2));   // MKF roundFloat(turnsRatio, 2)
+    // Trim float noise at 10 decimals (like the Lm bound). Deliberately NOT MKF's roundFloat(2):
+    // step-down sensing ratios are ≤ 0.01 (1:100), so 2 decimals turned a 1:250 CT (0.004) into a
+    // 0.0 turns-ratio requirement and distorted 1:150 (0.00667 → 0.01) by 50%.
+    ratio.set_nominal(round_to(turnsRatio, 10));
     dr.get_mutable_turns_ratios().push_back(ratio);
     MAS::DimensionWithTolerance lmSpec;
     lmSpec.set_minimum(round_to(1e-6, 10));       // defaults.currentTransformerMinimumMagnetizingInductance

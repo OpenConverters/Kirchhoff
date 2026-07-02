@@ -62,6 +62,12 @@ export function componentWaveforms(tas, fidelity = { origin: 'REQUIREMENTS' }) {
   return callJson('component_waveforms', JSON.stringify(tas), JSON.stringify(fidelity))
 }
 
+// Add requirements-derived datasheet models (real Rds(on)/Vf) to every semiconductor so a
+// DATASHEET-fidelity sim renders real-conduction devices. Returns the realized TAS.
+export function realizeTas(tas) {
+  return callJson('realize_tas', JSON.stringify(tas))
+}
+
 export function extractOperatingPoint(tas, engine = 'analytical', magneticName = '') {
   return callJson('extract_operating_point', JSON.stringify(tas), engine, magneticName)
 }

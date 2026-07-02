@@ -74,6 +74,28 @@ TEST_CASE("design_dmc throws when no inductance target is derivable", "[dmc][des
     CHECK_THROWS(Kirchhoff::design_dmc(missing));
 }
 
+TEST_CASE("design_dmc: an EMPTY minimumImpedance array never shadows minimumInductance", "[dmc][design]") {
+    // The UI serializes its blank impedance table as [] — the supplied minimumInductance must win.
+    json spec = dmc_spec();
+    spec["minimumImpedance"] = json::array();
+    spec["minimumInductance"] = 1.2e-3;
+    Kirchhoff::DmcDesign d = Kirchhoff::design_dmc(spec);
+    CHECK(d.computedInductance == Approx(1.2e-3));
+    CHECK(d.impedancePoints.empty());
+    // Both modes populated → the stricter (larger) bound wins.
+    json both = dmc_spec();   // impedance mode gives 0.849 mH at 150 kHz / 800 Ω
+    both["minimumInductance"] = 5e-3;
+    CHECK(Kirchhoff::design_dmc(both).computedInductance == Approx(5e-3));
+}
+
+TEST_CASE("build_dmc_inputs requires the switching frequency (no silent lineFrequency ripple)",
+          "[dmc][inputs]") {
+    json spec = dmc_spec();
+    spec.erase("switchingFrequency");
+    Kirchhoff::DmcDesign d = Kirchhoff::design_dmc(spec);   // design itself is fine without it
+    CHECK_THROWS(Kirchhoff::build_dmc_inputs(d));           // MKF require_input parity
+}
+
 TEST_CASE("build_dmc_inputs: MKF-parity design requirements", "[dmc][inputs]") {
     json spec = dmc_spec();
     spec["configuration"] = "threePhase";
@@ -121,13 +143,32 @@ TEST_CASE("dmc_required_inductance + propose_dmc_design synthesize a consistent 
     CHECK(fcPair == Approx(p["cutoffFrequency"].get<double>()).epsilon(1e-6));
 }
 
+TEST_CASE("propose_dmc_design targets the MOST DEMANDING impedance point, not the lowest-frequency one",
+          "[dmc][propose]") {
+    // Rload = 230/8 = 28.75 Ω. Point 1 (150 kHz, 30 Ω) needs ~0.37 dB → required fc ≈ 147 kHz.
+    // Point 2 (500 kHz, 5000 Ω) needs 44.8 dB → required fc ≈ 37.9 kHz — the binding requirement.
+    // A lowest-frequency (or MKF front()) pick would design to point 1 and miss point 2 by ~30 dB.
+    json spec = dmc_spec();
+    spec["minimumImpedance"] = json::array({{{"frequency", 150000.0}, {"impedance", 30.0}},
+                                            {{"frequency", 500000.0}, {"impedance", 5000.0}}});
+    json p = Kirchhoff::propose_dmc_design(spec);
+    const double expectedAtten = 20.0 * std::log10(5000.0 / 28.75);
+    CHECK(p["targetAttenuation_dB"].get<double>() == Approx(expectedAtten).epsilon(1e-6));
+    const double expectedCutoff = 500000.0 / std::pow(10.0, expectedAtten / 40.0);
+    CHECK(p["cutoffFrequency"].get<double>() == Approx(expectedCutoff).epsilon(1e-6));
+    // The proposed LC pair meets BOTH points on the 40 dB/dec slope.
+    const double fc = p["cutoffFrequency"].get<double>();
+    CHECK(40.0 * std::log10(500000.0 / fc) >= expectedAtten - 1e-9);
+    CHECK(40.0 * std::log10(150000.0 / fc) >= 20.0 * std::log10(30.0 / 28.75) - 1e-9);
+}
+
 TEST_CASE("design_current_transformer: MKF-parity requirements + sensing operating point", "[ct][inputs]") {
     MAS::Inputs in = Kirchhoff::design_current_transformer(ct_spec());
     const auto& dr = in.get_design_requirements();
 
     CHECK(dr.get_topology() == MAS::Topology::CURRENT_TRANSFORMER);
     REQUIRE(dr.get_turns_ratios().size() == 1);
-    CHECK(dr.get_turns_ratios()[0].get_nominal() == Approx(0.01));   // round(turnsRatio, 2)
+    CHECK(dr.get_turns_ratios()[0].get_nominal() == Approx(0.01));   // full precision (float-noise trim only)
     CHECK(dr.get_magnetizing_inductance().get_minimum().value() == Approx(1e-6));  // CT Lm floor
     const auto sides = dr.get_isolation_sides();
     REQUIRE(sides.has_value());
@@ -144,6 +185,16 @@ TEST_CASE("design_current_transformer: MKF-parity requirements + sensing operati
     REQUIRE(secCur.has_value());
     REQUIRE(secCur->get_processed().has_value());
     CHECK(secCur->get_processed()->get_peak().value() == Approx(20.0 * 0.01).epsilon(0.02));
+}
+
+TEST_CASE("design_current_transformer keeps fine step-down ratios intact", "[ct][inputs]") {
+    // A 1:250 sensing CT: turnsRatio = 0.004. MKF's roundFloat(.., 2) collapsed this to a 0.0 turns-
+    // ratio requirement (and 1:150 → 0.01, a 50% error); the requirement must carry the real ratio.
+    json spec = ct_spec();
+    spec["turnsRatio"] = 0.004;
+    MAS::Inputs in = Kirchhoff::design_current_transformer(spec);
+    CHECK(in.get_design_requirements().get_turns_ratios()[0].get_nominal()
+          == Approx(0.004).epsilon(1e-9));
 }
 
 TEST_CASE("design_current_transformer rejects bad spec", "[ct][design]") {
@@ -210,12 +261,15 @@ TEST_CASE("api::simulate_dmc_waveforms + verify_dmc_attenuation run the LC decks
         CHECK(cw["time"].is_array());
         CHECK(std::isfinite(cw["dmAttenuation"].get<double>()));
     }
-    // verify returns one row per test point, with a pass/fail and a message.
+    // verify returns one row per test point; with ngspice available every row must be a REAL
+    // measurement (simulated:true) of the SAME filter, and this spec comfortably passes both points
+    // (theoretical 47/68 dB vs required 28.9/34.3 dB).
     REQUIRE(ver.is_array());
     CHECK(ver.size() == 2);
     for (const auto& r : ver) {
-        CHECK(r.contains("passed"));
+        CHECK(r["simulated"].get<bool>());
         CHECK(std::isfinite(r["measuredAttenuation"].get<double>()));
+        CHECK(r["passed"].get<bool>());
         CHECK(r["message"].get<std::string>().find("kHz") != std::string::npos);
     }
 }

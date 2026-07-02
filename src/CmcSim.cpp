@@ -113,10 +113,13 @@ std::string lisn_cmc_deck(int numWindings, double inductance, double frequency,
     c << "* CM noise coupling caps\n";
     for (int w = 0; w < numWindings; ++w)
         c << "Ccm" << w << " cm_src cmc_in" << w << " 100p\n";
-    c << "* Common-mode choke (coupled)\n";
-    for (int w = 0; w < numWindings; ++w)
-        c << "Lcmc" << w << " cmc_in" << w << " cmc_out" << w << " " << std::scientific << inductance
+    c << "* Common-mode choke (coupled); Vsense sits IN SERIES with each winding, so i(Vsense) IS the\n";
+    c << "* winding CM current (a sense in the load branch would read the ~zero differential current).\n";
+    for (int w = 0; w < numWindings; ++w) {
+        c << "Vsense" << w << " cmc_in" << w << " cmc_w" << w << " 0\n";
+        c << "Lcmc" << w << " cmc_w" << w << " cmc_out" << w << " " << std::scientific << inductance
           << std::defaultfloat << "\n";
+    }
     for (int i = 0; i < numWindings; ++i)
         for (int j = i + 1; j < numWindings; ++j)
             c << "K" << i << "_" << j << " Lcmc" << i << " Lcmc" << j << " 0.99\n";
@@ -126,15 +129,14 @@ std::string lisn_cmc_deck(int numWindings, double inductance, double frequency,
         c << "Clisn" << w << " lisn_mid" << w << " 0 1u\n";
         c << "Rlisn" << w << " lisn_mid" << w << " lisn_out" << w << " 5\n";
         c << "Rmeas" << w << " lisn_out" << w << " 0 50\n";
-        c << "Vsense" << w << " cmc_in" << w << " cmc_in" << w << "_sense 0\n";
     }
-    c << "* AC load (EUT)\n";
+    c << "* AC load (EUT) across the input lines (line-to-line; the neutral carries no load)\n";
     if (numWindings == 2) {
-        c << "Rload cmc_in0_sense cmc_in1_sense " << loadResistance << "\n";
+        c << "Rload cmc_in0 cmc_in1 " << loadResistance << "\n";
     } else {
         for (int w = 0; w < 3; ++w)
-            c << "Rload" << w << " cmc_in" << w << "_sense cmc_in" << ((w + 1) % 3)
-              << "_sense " << (loadResistance * 3) << "\n";
+            c << "Rload" << w << " cmc_in" << w << " cmc_in" << ((w + 1) % 3)
+              << " " << (loadResistance * 3) << "\n";
     }
     c << ".tran " << std::scientific << stepTime << " " << simTime << std::defaultfloat << "\n";
     c << ".save v(cm_src)";
@@ -169,7 +171,9 @@ json simulate_cmc_ideal_waveforms(const CmcDesign& d, double inductance, double 
                                   double dvdtVPerNs, int numberOfPeriods, int numberOfSteadyStatePeriods) {
     if (!ngspice_in_process_available())
         return json{{"success", false}, {"error", "Kirchhoff built without libngspice"}};
-    const double excFreq = d.dominantFrequency > 0 ? d.dominantFrequency : 150e3;
+    // Same rule as build_cmc_inputs (Cmc.hpp) — the simulated operating point must excite at the
+    // frequency the analytical design was made for, or the two contradict each other.
+    const double excFreq = cmc_excitation_frequency(d);
     const std::string deck = ideal_cmc_deck(d.numberOfWindings, inductance, d.operatingCurrent,
                                             d.operatingVoltage, excFreq, parasiticCapPf, dvdtVPerNs,
                                             numberOfPeriods, numberOfSteadyStatePeriods);
@@ -222,11 +226,15 @@ json simulate_cmc_lisn_waveforms(const CmcDesign& d, double inductance) {
     if (frequencies.empty()) frequencies = {150000.0};
 
     json converterWaveforms = json::array();
+    json failedFrequencies = json::array();   // every failed run is SURFACED, never silently skipped
     for (double frequency : frequencies) {
         const std::string deck = lisn_cmc_deck(d.numberOfWindings, inductance, frequency,
                                                d.operatingVoltage, d.operatingCurrent);
         NgspiceRunResult r = run_ngspice_in_process(deck);
-        if (!r.success) continue;   // skip a failed frequency (MKF did the same), not a hard error
+        if (!r.success) {
+            failedFrequencies.push_back(json{{"frequency", frequency}, {"error", r.error}});
+            continue;
+        }
 
         std::vector<double> inputVoltage = vec_of(r, "cm_src");
         std::vector<std::vector<double>> windingCurrents;
@@ -257,7 +265,14 @@ json simulate_cmc_lisn_waveforms(const CmcDesign& d, double inductance) {
             {"theoreticalImpedance", theoreticalImpedance},
         });
     }
-    return json{{"success", true}, {"converterWaveforms", std::move(converterWaveforms)}};
+    if (converterWaveforms.empty() && !failedFrequencies.empty())
+        return json{{"success", false},
+                    {"error", "CMC LISN simulation failed at every test frequency: "
+                              + failedFrequencies[0].at("error").get<std::string>()},
+                    {"failedFrequencies", std::move(failedFrequencies)}};
+    json out{{"success", true}, {"converterWaveforms", std::move(converterWaveforms)}};
+    if (!failedFrequencies.empty()) out["failedFrequencies"] = std::move(failedFrequencies);
+    return out;
 }
 
 } // namespace Kirchhoff

@@ -101,6 +101,20 @@ TEST_CASE("design_cmc throws on missing/invalid required data", "[cmc][design]")
     CHECK_THROWS(Kirchhoff::design_cmc(badPoint));
 }
 
+TEST_CASE("design_cmc rejects a partial or non-positive noise spec (no silent 10 mA fallback)",
+          "[cmc][design]") {
+    // Half a noise spec would silently zero I_cm = C·dV/dt and undersize the excitation 50× —
+    // it must throw EVEN when another spec mode (minimumImpedance) makes the design viable.
+    json half = wizard_spec();
+    half["minimumImpedance"] = json::array({{{"frequency", 150e3}, {"impedance", 1000.0}}});
+    half.erase("dvdt_V_ns");
+    CHECK_THROWS(Kirchhoff::design_cmc(half));
+    json negative = wizard_spec();
+    negative["minimumImpedance"] = json::array({{{"frequency", 150e3}, {"impedance", 1000.0}}});
+    negative["dvdt_V_ns"] = -5.0;
+    CHECK_THROWS(Kirchhoff::design_cmc(negative));
+}
+
 TEST_CASE("build_cmc_inputs: designRequirements carry the full CMC contract", "[cmc][inputs]") {
     json spec = wizard_spec();
     spec["numberOfWindings"] = 3;

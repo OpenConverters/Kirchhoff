@@ -36,6 +36,7 @@ struct DmcDesign {
     std::optional<double> peakCurrent; // explicit winding peak; else derived from operatingCurrent
     std::vector<MAS::ImpedanceAtFrequency> impedancePoints;  // resolved Z(f) requirements (may be empty)
     std::optional<double> minimumInductance;  // direct L bound (advanced mode)
+    std::optional<double> filterCapacitance;  // the LC filter cap the design pairs with (from propose)
     // Diagnostics (the calculate_dmc_inputs `dmcDiagnostics` block).
     double computedInductance = 0.0;
     double computedMinFrequency = 0.0;
@@ -49,9 +50,11 @@ double dmc_required_inductance(double targetAttenuationDb, double frequencyHz, d
 
 // Parse the wizard spec (flat DmcWizard payload: configuration, inputVoltage, operatingCurrent,
 // lineFrequency, switchingFrequency?, ambientTemperature, minimumImpedance[]? | minimumInductance?,
-// peakCurrent?, filterCapacitance?). Throws on missing required fields, non-positive operating current /
-// line frequency / impedance points, and when NEITHER an impedance spec NOR a minimumInductance is given
-// (there would be no inductance target for the MagneticAdviser).
+// peakCurrent?, filterCapacitance?). The two inductance modes may coexist (an EMPTY minimumImpedance
+// array never shadows a supplied minimumInductance; when both yield a value the stricter — larger —
+// bound wins). Throws on missing required fields, non-positive operating current / line frequency /
+// switching frequency / filter capacitance / impedance points / minimum inductance, and when NEITHER
+// an impedance spec NOR a minimumInductance is given (no inductance target for the MagneticAdviser).
 DmcDesign design_dmc(const nlohmann::json& spec);
 
 // The MAS::Inputs the choke is designed around — the shared filter-choke designRequirements with
@@ -66,14 +69,17 @@ MAS::Inputs build_dmc_inputs(const DmcDesign& d);
 nlohmann::json propose_dmc_design(const nlohmann::json& spec);
 
 // ── ngspice DMC simulations (the wizard's EMI-spectrum + attenuation-check views; ngspice-gated) ──────
-// Ported from MKF simulate_and_extract_waveforms + verify_attenuation (DmcSim.cpp). Both return
-// {"success": false, ...} when built without libngspice (simulate) / fall back to the theoretical LC
-// attenuation (verify) — surfaced, never silently wrong.
+// Ported from MKF simulate_and_extract_waveforms + verify_attenuation (DmcSim.cpp).
+// BOTH simulate the SAME LC filter: the caller's capacitance argument, else the spec's
+// filterCapacitance, else the fc = fsw/10 auto-sizing (which THROWS without a switchingFrequency —
+// no silent line-frequency substitute). Failed ngspice runs are surfaced, never papered over:
+// simulate collects them in "failedFrequencies" (success:false when ALL fail); verify marks the row
+// simulated:false with a null measuredAttenuation and judges on the theoretical value, saying so.
 // simulate_dmc_waveforms: LC low-pass sim over the test frequencies → {success, converterWaveforms:
-// [{frequency, time, inputVoltage, outputVoltage, inductorCurrent, dmAttenuation}]}.
-// verify_dmc_attenuation: per-point {frequency, requiredAttenuation, measuredAttenuation,
-// theoreticalAttenuation, passed, message} (required = 20·log10(Z/Rload); pass if measured ≥ 0.9·required).
-nlohmann::json simulate_dmc_waveforms(const DmcDesign& d, double inductance);
+// [{frequency, time, inputVoltage, outputVoltage, inductorCurrent, dmAttenuation}], failedFrequencies?}.
+// verify_dmc_attenuation: per-point {frequency, requiredAttenuation, measuredAttenuation|null,
+// theoreticalAttenuation, simulated, passed, message} (required = 20·log10(Z/Rload); pass ≥ 0.9·required).
+nlohmann::json simulate_dmc_waveforms(const DmcDesign& d, double inductance, double capacitance = 0.0);
 nlohmann::json verify_dmc_attenuation(const DmcDesign& d, double inductance, double capacitance = 0.0);
 
 } // namespace Kirchhoff

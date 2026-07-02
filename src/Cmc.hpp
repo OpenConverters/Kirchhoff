@@ -61,12 +61,23 @@ struct CmcDesign {
     double designFrequency = 150e3;    // advanced mode: excitation frequency [Hz]
 };
 
+// The ONE excitation-frequency rule every CMC consumer agrees on (build_cmc_inputs and the ngspice
+// sims must excite at the same frequency, or the "Simulated" operating point contradicts the
+// analytical one): advanced mode pins designFrequency (MKF AdvancedCMC ctor); otherwise the hardest
+// impedance point, falling back to the line frequency (MKF process_operating_points :332).
+inline double cmc_excitation_frequency(const CmcDesign& d) {
+    if (d.desiredInductance) return d.designFrequency;
+    return d.dominantFrequency > 0 ? d.dominantFrequency : d.lineFrequency;
+}
+
 // Parse + resolve the wizard spec (the flat CmcWizard payload: operatingVoltage, operatingCurrent,
 // lineFrequency, ambientTemperature, lineImpedance?, numberOfWindings?, minimumImpedance[]?,
 // targetInsertionLoss[]?, parasiticCap_pF?, dvdt_V_ns?, safetyMargin_dB?, regulatoryStandard?,
 // desiredInductance?, designFrequency?). Throws on missing required fields, numberOfWindings ∉
-// [2,4], non-positive operating current / line frequency / impedance points, and when NO spec mode
-// yields an inductance (no impedance point and no desiredInductance).
+// [2,4], non-positive operating current / line frequency / impedance points, a partial or
+// non-positive noise spec (parasiticCap_pF and dvdt_V_ns must come together, both > 0 — a half spec
+// would silently drop the intended I_cm = C·dV/dt excitation), and when NO spec mode yields an
+// inductance (no impedance point and no desiredInductance).
 CmcDesign design_cmc(const nlohmann::json& spec);
 
 // The MAS::Inputs the choke is designed around — the shared filter-choke designRequirements (see
@@ -82,7 +93,8 @@ MAS::Inputs build_cmc_inputs(const CmcDesign& d);
 // [<simulated OperatingPoint>]}, converterWaveforms:[], cmcDiagnostics:{computedInductance}}.
 // simulate_cmc_lisn_waveforms: CISPR LISN test over the impedance-spec frequencies → {success,
 // converterWaveforms:[{frequency, time, inputVoltage, windingCurrents, lisnVoltage,
-// commonModeAttenuation, commonModeImpedance, theoreticalImpedance}]}.
+// commonModeAttenuation, commonModeImpedance, theoreticalImpedance}], failedFrequencies?}. Failed
+// per-frequency runs are surfaced in failedFrequencies (success:false when ALL fail), never skipped.
 nlohmann::json simulate_cmc_ideal_waveforms(const CmcDesign& d, double inductance, double parasiticCapPf,
                                             double dvdtVPerNs, int numberOfPeriods = 2,
                                             int numberOfSteadyStatePeriods = 10);

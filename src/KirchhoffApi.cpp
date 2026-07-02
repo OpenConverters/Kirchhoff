@@ -4,6 +4,7 @@
 #include "ConverterExtract.hpp"   // extract_operating_point / topology_waveforms / diagnostics / main_magnetic_inputs
 #include "ConverterAnalytical.hpp" // captured_operating_points — full-waveform registry filled during builds
 #include "ComponentWaveforms.hpp" // component_waveforms — per-component V/I from one ngspice run
+#include "DatasheetModels.hpp"    // derive_datasheet_models — realize real-conduction semiconductors
 #include "FidelityJson.hpp"       // PEAS::fidelity_from_json
 #include "Clllc.hpp"              // topologies not in the Kirchhoff.hpp umbrella
 #include "Pfc.hpp"
@@ -178,6 +179,10 @@ std::string component_waveforms(const std::string& tas, const std::string& fidel
     });
 }
 
+std::string realize_tas(const std::string& tas) {
+    return guarded([&] { return Kirchhoff::derive_datasheet_models(json::parse(tas)).dump(); });
+}
+
 std::string diagnostics(const std::string& tas) {
     return guarded([&] { return Kirchhoff::diagnostics(json::parse(tas)).dump(); });
 }
@@ -258,10 +263,10 @@ std::string simulate_cmc_lisn_waveforms(const std::string& spec, double inductan
     });
 }
 
-std::string simulate_dmc_waveforms(const std::string& spec, double inductance) {
+std::string simulate_dmc_waveforms(const std::string& spec, double inductance, double capacitance) {
     return guarded([&] {
         Kirchhoff::DmcDesign d = Kirchhoff::design_dmc(json::parse(spec));
-        return Kirchhoff::simulate_dmc_waveforms(d, inductance).dump();
+        return Kirchhoff::simulate_dmc_waveforms(d, inductance, capacitance).dump();
     });
 }
 

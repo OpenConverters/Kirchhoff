@@ -67,6 +67,12 @@ KH_API std::string topology_waveforms(const std::string& tasJson);   // [{name,i
 // current, cap ripple…). Returns {"success":false,...} when built without libngspice, so callers branch.
 KH_API std::string component_waveforms(const std::string& tasJson, const std::string& fidelityJson);
 
+// Add a requirements-derived datasheet model (real Rds(on) / forward drop / ratings, NO fabricated
+// parasitics) to every MOSFET/diode that isn't already bound, so a subsequent DATASHEET-fidelity
+// simulate/deck/component_waveforms renders real-conduction devices instead of ideal switches. Returns
+// the realized TAS. Idempotent; magnetics untouched (their real path is the MKF core export).
+KH_API std::string realize_tas(const std::string& tasJson);
+
 KH_API std::string diagnostics(const std::string& tasJson);
 KH_API std::string main_magnetic_inputs(const std::string& tasJson); // the adviser's MAS::Inputs (as JSON)
 
@@ -113,10 +119,13 @@ KH_API std::string simulate_cmc_ideal_waveforms(const std::string& specJson, dou
                                                 double parasiticCapPf, double dvdtVPerNs);
 KH_API std::string simulate_cmc_lisn_waveforms(const std::string& specJson, double inductance);
 
-// DMC ngspice simulations (require an ngspice-enabled build). simulate_dmc_waveforms(spec, L): LC
-// low-pass sim → {success, converterWaveforms:[...]}. verify_dmc_attenuation(spec, L, capacitance):
-// per-point required/measured/theoretical attenuation + pass/fail (capacitance 0 = auto-size).
-KH_API std::string simulate_dmc_waveforms(const std::string& specJson, double inductance);
+// DMC ngspice simulations (require an ngspice-enabled build). Both simulate the SAME LC filter — the
+// capacitance argument, else the spec's filterCapacitance, else fc = fsw/10 auto-sizing (which needs
+// switchingFrequency; capacitance 0 = auto-size). simulate_dmc_waveforms(spec, L, capacitance): LC
+// low-pass sim → {success, converterWaveforms:[...], failedFrequencies?}. verify_dmc_attenuation(spec,
+// L, capacitance): per-point required/measured/theoretical attenuation + simulated flag + pass/fail.
+KH_API std::string simulate_dmc_waveforms(const std::string& specJson, double inductance,
+                                          double capacitance = 0.0);
 KH_API std::string verify_dmc_attenuation(const std::string& specJson, double inductance,
                                           double capacitance);
 

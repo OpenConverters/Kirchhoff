@@ -5,7 +5,9 @@
 #include <cctype>
 #include <cmath>
 #include <numeric>
+#include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -39,16 +41,20 @@ std::vector<double> vec_of(const NgspiceRunResult& r, const std::string& name) {
 }
 
 // LC low-pass filter test deck (MKF DifferentialModeChoke::generate_ngspice_circuit). DC bus + DM noise
-// sine → DMC L → filter cap → load. filterCapacitance sized for fc = frequency/10, clamped [1nF, 100µF].
-std::string dmc_deck(double inductance, double frequency, double operatingVoltage, double operatingCurrent) {
+// sine → DMC L → filter cap → load. filterCap is the CALLER'S capacitance — the deck must simulate the
+// exact filter the caller designed/reports on, never re-size its own per test frequency.
+std::string dmc_deck(double inductance, double filterCap, double frequency,
+                     double operatingVoltage, double operatingCurrent) {
     const double period = 1.0 / frequency;
     const int numPeriods = 20;
-    const double simTime = numPeriods * period;
     const double stepTime = period / 100.0;
-    const double cutoff = frequency / 10.0;
-    double filterCap = 1.0 / (4.0 * M_PI * M_PI * cutoff * cutoff * inductance);
-    filterCap = std::min(std::max(filterCap, 1e-9), 100e-6);
     const double loadResistance = operatingVoltage / operatingCurrent;
+    // Let the LC natural mode (at the CUTOFF, far below the test frequency) ring down before the
+    // measurement window opens — without tstart the sine turn-on transient dominates v(filter_out)
+    // and the "measured" attenuation reads tens of dB low.
+    const double cutoff = 1.0 / (2.0 * M_PI * std::sqrt(inductance * filterCap));
+    const double settleTime = 10.0 / cutoff;
+    const double simTime = settleTime + numPeriods * period;
 
     std::ostringstream c;
     c << "* DMC LC low-pass filter test @ " << (frequency / 1e3) << " kHz\n";
@@ -77,29 +83,55 @@ double dm_attenuation(const std::vector<double>& vin, const std::vector<double>&
 }
 
 // The frequencies to test: the spec impedance points, else the switching-frequency harmonics.
+// THROWS when neither exists — testing at 50/60 Hz instead would "verify" a spectrum with no
+// switching content (the silent lineFrequency substitute MKF's require_input existed to prevent).
 std::vector<double> test_frequencies(const DmcDesign& d) {
     std::vector<double> f;
     for (const auto& pt : d.impedancePoints) f.push_back(pt.get_frequency());
     if (f.empty()) {
-        const double fsw = d.switchingFrequency > 0 ? d.switchingFrequency : d.lineFrequency;
-        f = {fsw, fsw * 2, fsw * 5};
+        if (d.switchingFrequency <= 0)
+            throw std::invalid_argument(
+                "dmc simulation: no impedance points and no switchingFrequency — nothing defines "
+                "the test frequencies");
+        f = {d.switchingFrequency, d.switchingFrequency * 2, d.switchingFrequency * 5};
     }
     return f;
 }
 
+// The ONE filter capacitance every sim/verify row uses: the explicit argument, else the spec's
+// filterCapacitance, else the fc = fsw/10 sizing clamped to [1nF, 100µF] (MKF's rule) — which needs
+// the real switching frequency, so it THROWS when that is absent too.
+double resolve_filter_capacitance(const DmcDesign& d, double inductance, double explicitCap) {
+    if (explicitCap > 0) return explicitCap;
+    if (d.filterCapacitance) return *d.filterCapacitance;
+    if (d.switchingFrequency <= 0)
+        throw std::invalid_argument(
+            "dmc simulation: filter capacitance cannot be auto-sized — supply filterCapacitance "
+            "(or the capacitance argument), or switchingFrequency for the fc = fsw/10 rule");
+    const double cutoff = d.switchingFrequency / 10.0;
+    const double filterCap = 1.0 / (4.0 * M_PI * M_PI * cutoff * cutoff * inductance);
+    return std::min(std::max(filterCap, 1e-9), 100e-6);
+}
+
 }  // namespace
 
-// ═══ simulate_dmc_waveforms — MKF simulate_and_extract_waveforms (:423) over the test frequencies. ═══
+// ═══ simulate_dmc_waveforms — MKF simulate_and_extract_waveforms (:423) over the test frequencies.
+// Every frequency simulates the SAME resolved LC filter; failed runs are surfaced. ═══════════════════
 
-json simulate_dmc_waveforms(const DmcDesign& d, double inductance) {
+json simulate_dmc_waveforms(const DmcDesign& d, double inductance, double capacitance) {
     if (!ngspice_in_process_available())
         return json{{"success", false}, {"error", "Kirchhoff built without libngspice"}};
+    const double filterCap = resolve_filter_capacitance(d, inductance, capacitance);
 
     json converterWaveforms = json::array();
+    json failedFrequencies = json::array();
     for (double frequency : test_frequencies(d)) {
         NgspiceRunResult r = run_ngspice_in_process(
-            dmc_deck(inductance, frequency, d.inputVoltage, d.operatingCurrent));
-        if (!r.success) continue;
+            dmc_deck(inductance, filterCap, frequency, d.inputVoltage, d.operatingCurrent));
+        if (!r.success) {
+            failedFrequencies.push_back(json{{"frequency", frequency}, {"error", r.error}});
+            continue;
+        }
         std::vector<double> inputVoltage = vec_of(r, "noise_src");
         std::vector<double> outputVoltage = vec_of(r, "filter_out");
         std::vector<double> inductorCurrent = vec_of(r, "vsense");
@@ -113,33 +145,36 @@ json simulate_dmc_waveforms(const DmcDesign& d, double inductance) {
             {"dmAttenuation", dm_attenuation(inputVoltage, outputVoltage)},
         });
     }
-    return json{{"success", true}, {"converterWaveforms", std::move(converterWaveforms)}};
+    if (converterWaveforms.empty() && !failedFrequencies.empty())
+        return json{{"success", false},
+                    {"error", "DMC simulation failed at every test frequency: "
+                              + failedFrequencies[0].at("error").get<std::string>()},
+                    {"failedFrequencies", std::move(failedFrequencies)}};
+    json out{{"success", true}, {"converterWaveforms", std::move(converterWaveforms)}};
+    if (!failedFrequencies.empty()) out["failedFrequencies"] = std::move(failedFrequencies);
+    return out;
 }
 
 // ═══ verify_dmc_attenuation — MKF verify_attenuation (:572). Required attenuation per impedance point
-// (20·log10(Z/Rload)); theoretical LC attenuation (40·log10(f/fc)); measured from ngspice (falls back to
-// theoretical when unavailable); pass if measured ≥ 0.9·required. ════════════════════════════════════
+// (20·log10(Z/Rload)); theoretical LC attenuation (40·log10(f/fc)); measured from ngspice ON THE SAME
+// FILTER (resolved L + C); pass if ≥ 0.9·required. A row whose ngspice run failed (or a build without
+// libngspice) judges on the theoretical value but SAYS so: simulated:false, measuredAttenuation:null,
+// and a message that never claims "Measured" for a number that wasn't. ═══════════════════════════════
 
 json verify_dmc_attenuation(const DmcDesign& d, double inductance, double capacitance) {
-    // Filter capacitance: explicit, else fc = fsw/10 sizing clamped to [1nF, 100µF].
-    double filterCap = capacitance;
-    if (filterCap <= 0) {
-        const double fsw = d.switchingFrequency > 0 ? d.switchingFrequency : d.lineFrequency;
-        const double cutoff = fsw / 10.0;
-        filterCap = 1.0 / (4.0 * M_PI * M_PI * cutoff * cutoff * inductance);
-        filterCap = std::min(std::max(filterCap, 1e-9), 100e-6);
-    }
+    const double filterCap = resolve_filter_capacitance(d, inductance, capacitance);
     const double loadImpedance = d.inputVoltage / d.operatingCurrent;
 
-    // Test points: (frequency, required attenuation). From impedance points, else fsw harmonics.
+    // Test points: (frequency, required attenuation). From impedance points, else fsw harmonics
+    // (test_frequencies already threw if neither exists).
     std::vector<std::pair<double, double>> testPoints;
     for (const auto& pt : d.impedancePoints) {
         const double z = pt.get_impedance().get_magnitude();
         testPoints.push_back({pt.get_frequency(), std::max(0.0, 20.0 * std::log10(z / loadImpedance))});
     }
     if (testPoints.empty()) {
-        const double fsw = d.switchingFrequency > 0 ? d.switchingFrequency : d.lineFrequency;
-        testPoints = {{fsw, 20.0}, {fsw * 2, 30.0}, {fsw * 5, 40.0}};
+        const std::vector<double> f = test_frequencies(d);
+        testPoints = {{f[0], 20.0}, {f[1], 30.0}, {f[2], 40.0}};
     }
 
     const double cutoffFrequency = 1.0 / (2.0 * M_PI * std::sqrt(inductance * filterCap));
@@ -149,24 +184,34 @@ json verify_dmc_attenuation(const DmcDesign& d, double inductance, double capaci
     for (const auto& [frequency, requiredAttenuation] : testPoints) {
         const double theoretical = (frequency > cutoffFrequency)
             ? 40.0 * std::log10(frequency / cutoffFrequency) : 0.0;
-        double measured = theoretical;
+        std::optional<double> measured;
+        std::string simFailure;
         if (ngspiceAvailable) {
             NgspiceRunResult r = run_ngspice_in_process(
-                dmc_deck(inductance, frequency, d.inputVoltage, d.operatingCurrent));
+                dmc_deck(inductance, filterCap, frequency, d.inputVoltage, d.operatingCurrent));
             if (r.success)
                 measured = dm_attenuation(vec_of(r, "noise_src"), vec_of(r, "filter_out"));
+            else
+                simFailure = "ngspice run failed: " + r.error;
+        } else {
+            simFailure = "built without libngspice";
         }
-        const bool passed = measured >= requiredAttenuation * 0.9;   // 10% margin
+        const double effective = measured ? *measured : theoretical;
+        const bool passed = effective >= requiredAttenuation * 0.9;   // 10% margin
         std::ostringstream msg;
         msg.setf(std::ios::fixed); msg.precision(1);
-        msg << "At " << (frequency / 1e3) << " kHz: Required " << requiredAttenuation
-            << " dB, Measured " << measured << " dB (Theoretical: " << theoretical << " dB) - "
-            << (passed ? "PASS" : "FAIL");
+        msg << "At " << (frequency / 1e3) << " kHz: Required " << requiredAttenuation << " dB, ";
+        if (measured)
+            msg << "Measured " << *measured << " dB (Theoretical: " << theoretical << " dB)";
+        else
+            msg << "Theoretical " << theoretical << " dB (NOT simulated — " << simFailure << ")";
+        msg << " - " << (passed ? "PASS" : "FAIL");
         results.push_back(json{
             {"frequency", frequency},
             {"requiredAttenuation", requiredAttenuation},
-            {"measuredAttenuation", measured},
+            {"measuredAttenuation", measured ? json(*measured) : json(nullptr)},
             {"theoreticalAttenuation", theoretical},
+            {"simulated", measured.has_value()},
             {"passed", passed},
             {"message", msg.str()},
         });

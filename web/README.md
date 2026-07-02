@@ -85,8 +85,32 @@ may need 400+ settle periods to fully converge.
   The ngspice extraction rebuilds winding *currents* from the transient;
   voltages remain analytical.
 
+## Component models (ideal vs datasheet-derived)
+
+The **Component models** control (Simulation row) chooses how the ngspice
+re-sims (component waveforms, per-magnetic, netlist) model each part:
+
+- **ideal switches** — the default; ideal switch (Ron 0.01 Ω) + ideal diode.
+- **datasheet-derived (real conduction)** — `realize_tas` adds a
+  requirements-derived model to every MOSFET/diode: real Rds(on) / forward
+  drop / ratings taken from the design's own requirements. No fabricated
+  parasitics (Coss/Cj/body-diode aren't known without a sourced part, so
+  they're omitted per the no-fallback rule) — it's an honest real-*conduction*
+  model, a strict improvement over ideal for loss/stress, not a claim of a
+  specific catalog part. A realized MOSFET shows its true ~Rds(on)·I on-state
+  V_DS drop instead of the near-zero ideal one.
+- **MKF magnetic models** — shown but disabled: real cores need the MKF
+  MagneticAdviser core export (a separate integration).
+
+`component_waveforms` handles both single-atom (ideal) and multi-atom real
+device leaves (switch + Coss + body diode, cap + ESR) by matching the device's
+own conduction branch in the `savecurrents` vectors.
+
 ## Known gaps / next steps
 
+- **Real sourced parts / parasitics (Coss, Cj)**: need the TAS DB — the
+  datasheet-derived models cover conduction only, not switching parasitics.
+- **MKF magnetic models**: need the MagneticAdviser core export wired into KH.
 - **TAS DB part suggestions**: the part drawer has the placeholder; the
   requirement JSON shown there is the intended query payload.
 - Schematic sketches for the remaining topologies (acf, weinberg, psfb,

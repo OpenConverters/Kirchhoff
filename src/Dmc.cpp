@@ -81,8 +81,17 @@ DmcDesign design_dmc(const json& spec) {
         throw std::invalid_argument("design_dmc: operatingCurrent must be > 0");
     if (d.lineFrequency <= 0)
         throw std::invalid_argument("design_dmc: lineFrequency must be > 0");
+    if (spec.contains("switchingFrequency") && d.switchingFrequency <= 0)
+        throw std::invalid_argument("design_dmc: switchingFrequency must be > 0 when supplied");
+    if (spec.contains("filterCapacitance")) {
+        d.filterCapacitance = spec.at("filterCapacitance").get<double>();
+        if (*d.filterCapacitance <= 0)
+            throw std::invalid_argument("design_dmc: filterCapacitance must be > 0 when supplied");
+    }
 
-    // Impedance spec → points + L_min at the LOWEST spec frequency (MKF :78-95, :108-123).
+    // Impedance spec → points + L_min at the LOWEST spec frequency (MKF :78-95, :108-123). NOT an
+    // else-if against minimumInductance: an EMPTY minimumImpedance array (a UI serializing its blank
+    // impedance table) must never shadow a supplied minimumInductance.
     if (spec.contains("minimumImpedance")) {
         double lowestFreq = std::numeric_limits<double>::max();
         double highestFreq = 0.0;
@@ -100,9 +109,13 @@ DmcDesign design_dmc(const json& spec) {
             d.computedMaxFrequency = highestFreq;
             d.computedImpedanceAtMinFreq = zAtLowest;
         }
-    } else if (spec.contains("minimumInductance")) {
+    }
+    if (spec.contains("minimumInductance")) {
         d.minimumInductance = spec.at("minimumInductance").get<double>();
-        d.computedInductance = *d.minimumInductance;
+        if (*d.minimumInductance <= 0)
+            throw std::invalid_argument("design_dmc: minimumInductance must be > 0");
+        // Both modes given → the stricter (larger) bound wins.
+        d.computedInductance = std::max(d.computedInductance, *d.minimumInductance);
     }
 
     if (d.impedancePoints.empty() && !d.minimumInductance)
@@ -128,10 +141,16 @@ MAS::Inputs build_dmc_inputs(const DmcDesign& d) {
         "differentialModeNoiseFiltering", MAS::Topology::DIFFERENTIAL_MODE_CHOKE,
         d.numberOfWindings, lmSpec, d.impedancePoints);
 
+    // MKF require_input parity: the ripple spectrum is meaningless without the real switching
+    // frequency — modelling it at 50/60 Hz would silently hand the adviser a wrong excitation.
+    if (d.switchingFrequency <= 0)
+        throw std::invalid_argument(
+            "build_dmc_inputs: switchingFrequency is required (it sets the ripple spectrum the "
+            "MagneticAdviser sizes core loss on)");
+
     const double peak = d.peakCurrent.value_or(std::numeric_limits<double>::quiet_NaN());
     MAS::OperatingPoint op = analytical::analytical_differential_mode_choke(
-        d.operatingCurrent, d.inputVoltage, d.lineFrequency,
-        d.switchingFrequency > 0 ? d.switchingFrequency : d.lineFrequency,
+        d.operatingCurrent, d.inputVoltage, d.lineFrequency, d.switchingFrequency,
         analytical_config(d.configuration), peak, d.ambientTemperature);
 
     return make_inputs(std::move(dr), std::move(op));
@@ -157,15 +176,10 @@ json propose_dmc_design(const json& spec) {
             ? spec.at("configuration").get<MAS::Configuration>() : MAS::Configuration::SINGLE_PHASE;
         r.numberOfWindings = windings_for(r.configuration);
         if (spec.contains("peakCurrent")) r.peakCurrent = spec.at("peakCurrent").get<double>();
-        if (spec.contains("minimumImpedance")) {
-            double lowestFreq = std::numeric_limits<double>::max(), zAtLowest = 0.0;
-            for (const auto& item : spec.at("minimumImpedance")) {
-                const double f = item.at("frequency").get<double>();
-                if (f < lowestFreq) { lowestFreq = f; zAtLowest = item.at("impedance").get<double>(); }
-            }
-            r.computedMinFrequency = lowestFreq;
-            r.computedImpedanceAtMinFreq = zAtLowest;
-        }
+        if (spec.contains("minimumImpedance"))
+            for (const auto& item : spec.at("minimumImpedance"))
+                r.impedancePoints.push_back(impedance_point(
+                    item.at("frequency").get<double>(), item.at("impedance").get<double>()));
         return r;
     })();
     if (d.operatingCurrent <= 0)
@@ -173,14 +187,23 @@ json propose_dmc_design(const json& spec) {
 
     const double loadImpedance = d.inputVoltage / d.operatingCurrent;
 
-    // Target frequency + attenuation: the first impedance requirement, else the switching frequency at
-    // a default 40 dB (MKF :683-694).
+    // Target frequency + attenuation: the MOST DEMANDING impedance requirement — the point whose
+    // required attenuation A = 20·log10(Z/Rload) forces the lowest LC cutoff fc = f/10^(A/40).
+    // Satisfying it satisfies every other point on the 40 dB/dec slope. (Deviates from MKF, which
+    // took minImpedance->front() — an order-dependent pick that could propose a filter missing the
+    // user's harder requirement.) Falls back to the switching frequency at a default 40 dB.
     double targetFrequency = d.switchingFrequency;
     double targetAttenuation = 40.0;
-    if (d.computedImpedanceAtMinFreq > 0 && d.computedMinFrequency > 0
-        && d.computedMinFrequency != std::numeric_limits<double>::max()) {
-        targetFrequency = d.computedMinFrequency;
-        targetAttenuation = 20.0 * std::log10(d.computedImpedanceAtMinFreq / loadImpedance);
+    double lowestRequiredCutoff = std::numeric_limits<double>::max();
+    for (const auto& pt : d.impedancePoints) {
+        const double f = pt.get_frequency();
+        const double atten = 20.0 * std::log10(pt.get_impedance().get_magnitude() / loadImpedance);
+        const double requiredCutoff = f / std::pow(10.0, atten / 40.0);
+        if (requiredCutoff < lowestRequiredCutoff) {
+            lowestRequiredCutoff = requiredCutoff;
+            targetFrequency = f;
+            targetAttenuation = atten;
+        }
     }
     if (!(targetFrequency > 0))
         throw std::invalid_argument(

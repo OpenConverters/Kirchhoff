@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { FAMILIES, PLANNED, TOPOLOGIES, buildSpec, topologyById } from './topologies.js'
-import { loadEngine, processConverter, topologyWaveforms, extractOperatingPoint, componentWaveforms, generateNetlist } from './kh.js'
+import { loadEngine, processConverter, topologyWaveforms, extractOperatingPoint, componentWaveforms, realizeTas, generateNetlist } from './kh.js'
 import { extractBom } from './bom.js'
 import { hasSchematic, renderSchematic } from './schematics.js'
 import { si, pct } from './units.js'
@@ -24,7 +24,9 @@ onMounted(async () => {
 const topoId = ref('flyback')
 // ngspice by default: the real transient is the reference; analytical stays one
 // click away for instant iteration. 100 periods settle the converter, 2 shown.
-const form = reactive({ engine: 'ngspice', settlePeriods: 100, showPeriods: 2 })
+// models: 'ideal' switches, or 'datasheet' — real-conduction semiconductor models
+// derived from the design requirements (real Rds(on) / forward drop).
+const form = reactive({ engine: 'ngspice', settlePeriods: 100, showPeriods: 2, models: 'ideal' })
 
 function selectTopology(id) {
   topoId.value = id
@@ -44,6 +46,7 @@ function selectTopology(id) {
   waveMagnetics.value = []
   ngspiceOps.value = {}
   componentWaves.value = null
+  realizedTas.value = null
   selectedPart.value = null
 }
 const topo = computed(() => topologyById(topoId.value))
@@ -85,6 +88,11 @@ const ngspiceOps = ref({})        // magnetic name -> simulated MAS::OperatingPo
 const ngspiceBusy = ref(false)
 const componentWaves = ref(null)  // { referencePeriod, components:[{ref,kind,voltage,current}] } | null
 const componentBusy = ref(false)
+const realizedTas = ref(null)     // datasheet-realized TAS (real-conduction models), when models==='datasheet'
+// Every ngspice re-sim (components, per-magnetic, netlist) runs against this: the realized TAS when the
+// user picked datasheet models, else the plain design. A realized part renders real regardless of the
+// deck fidelity (infer_fidelity keys off the per-component binding), so the fidelity arg stays default.
+const simTas = computed(() => realizedTas.value ?? result.value?.tas ?? null)
 
 async function solve() {
   running.value = true
@@ -93,10 +101,13 @@ async function solve() {
   deck.value = ''
   ngspiceOps.value = {}
   componentWaves.value = null
+  realizedTas.value = null
   try {
     const spec = buildSpec(form)
     const res = await processConverter(topoId.value, spec, form.engine)
     result.value = res
+    // datasheet models: realize the design once so every ngspice re-sim uses real-conduction parts
+    if (form.models === 'datasheet') realizedTas.value = await realizeTas(res.tas)
     waveMagnetics.value = await topologyWaveforms(res.tas)
     waveMagIdx.value = Math.max(0, waveMagnetics.value.findIndex((m) => m.isMain))
     waveOpIdx.value = 0
@@ -126,7 +137,7 @@ async function fetchComponentWaves() {
   const gen = ++cwGen
   componentBusy.value = true
   try {
-    const cw = await componentWaveforms(result.value.tas)
+    const cw = await componentWaveforms(simTas.value)
     if (gen !== cwGen) return                // superseded by a newer solve — discard
     componentWaves.value = cw?.success === false ? null : cw
   } catch (e) {
@@ -135,6 +146,16 @@ async function fetchComponentWaves() {
     if (gen === cwGen) componentBusy.value = false
   }
 }
+
+// Switching component models between ideal/datasheet after a solve: re-realize (or drop) and re-run the
+// component sim + any per-magnetic sims so every ngspice view reflects the chosen model set.
+watch(() => form.models, async (m) => {
+  if (!result.value) return
+  realizedTas.value = m === 'datasheet' ? await realizeTas(result.value.tas) : null
+  ngspiceOps.value = {}          // per-magnetic sims were run against the other model set
+  componentWaves.value = null
+  fetchComponentWaves()
+})
 
 // Magnetics rows get the FULL analytical operating point (waveforms incl. resonant/custom labels)
 // captured by the engine during the build — richer than the stripped excitations baked in the TAS.
@@ -328,7 +349,7 @@ async function simulateMagnetic() {
   ngspiceBusy.value = true
   runError.value = null
   try {
-    const op = await extractOperatingPoint(result.value.tas, 'ngspice', waveMag.value.name)
+    const op = await extractOperatingPoint(simTas.value, 'ngspice', waveMag.value.name)
     ngspiceOps.value = { ...ngspiceOps.value, [waveMag.value.name]: op }
   } catch (e) {
     runError.value = e.message
@@ -362,7 +383,7 @@ async function makeDeck() {
   if (!result.value) return
   deckBusy.value = true
   try {
-    const tas = JSON.parse(JSON.stringify(result.value.tas))
+    const tas = JSON.parse(JSON.stringify(simTas.value))
     const an = tas.simulation?.analyses?.[0]
     if (an) {
       if (simStop.value) an.stopTime = simStop.value
@@ -531,17 +552,28 @@ const TABS = [
         </span>
       </div>
 
-      <!-- simulation controls: always visible (engine + how long to run / how much to show) -->
+      <!-- simulation controls: always visible (engine + models + how long to run / how much to show) -->
       <div class="section-label" style="margin-top: 1.1rem">
         Simulation
-        <span class="hint">engine · transient length · window</span>
+        <span class="hint">engine · component models · window</span>
       </div>
-      <div class="grid3">
+      <div class="grid4">
         <label class="fld">
           <span class="fld-label">Solve engine</span>
           <select class="fld-in" v-model="form.engine">
             <option value="ngspice">ngspice — full transient (seconds)</option>
             <option value="analytical">analytical — instant</option>
+          </select>
+        </label>
+        <label class="fld">
+          <span class="fld-label">Component models</span>
+          <select
+            class="fld-in" v-model="form.models"
+            title="ideal switches, or datasheet-derived real-conduction models (real Rds(on) / forward drop) built from the design requirements"
+          >
+            <option value="ideal">ideal switches</option>
+            <option value="datasheet">datasheet-derived (real conduction)</option>
+            <option value="mkf" disabled>MKF magnetic models (needs adviser)</option>
           </select>
         </label>
         <label class="fld" v-if="form.inputType === 'dc'">

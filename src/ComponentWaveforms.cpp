@@ -239,17 +239,30 @@ nlohmann::json component_waveforms(const json& tas, const PEAS::Fidelity& fideli
             const std::string ref = comp.value("name", std::string{});
             const std::string kind = kind_of(data);
 
-            // reconstructed savecurrents token: @<L>.x<stage>.<L><ref>[<key>]
-            const std::string dev = std::string(1, dt.letter) + lower(sanitize(ref));
-            const std::string curVec = std::string("@") + dt.letter + "." + inst + "." + dev + "[" + dt.key + "]";
-            auto cit = r.vectors.find(curVec);
-            if (cit == r.vectors.end()) continue;   // stripped / real-model / not simulated -> omit (honest)
+            // savecurrents token for this device's main atom. A single-atom (ideal) leaf is
+            // "@<L>.<inst>.<L><ref>[<key>]"; a real multi-atom leaf suffixes the atom name
+            // ("<L><ref>_q" for the switch of a mosfet = Q + Coss + body-diode). The parasitic atoms
+            // sit under OTHER device letters (Coss->c, body diode->d), so within letter <L> the
+            // "<L><ref>" / "<L><ref>_…" match uniquely picks the device's own conduction branch.
+            const std::string base = std::string("@") + dt.letter + "." + inst + "." + dt.letter + lower(sanitize(ref));
+            const std::vector<double>* cur = nullptr;
+            auto exact = r.vectors.find(base + "[" + dt.key + "]");
+            if (exact != r.vectors.end()) cur = &exact->second;
+            else {
+                const std::string pre = base + "_", suf = std::string("[") + dt.key + "]";
+                for (const auto& kv : r.vectors)
+                    if (kv.first.rfind(pre, 0) == 0 && kv.first.size() >= suf.size()
+                        && kv.first.compare(kv.first.size() - suf.size(), suf.size(), suf) == 0) {
+                        cur = &kv.second; break;
+                    }
+            }
+            if (!cur) continue;   // stripped / not simulated -> omit (honest)
 
             json cj;
             cj["ref"] = ref;
             cj["stage"] = sname;
             cj["kind"] = kind;
-            cj["current"] = signal_json(resample_last_period(r.time, cit->second, period), fsw);
+            cj["current"] = signal_json(resample_last_period(r.time, *cur, period), fsw);
 
             // voltage across the headline terminals, when both nodes are resolvable
             VoltagePins vp;

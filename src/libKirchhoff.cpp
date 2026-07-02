@@ -25,6 +25,8 @@ EMSCRIPTEN_BINDINGS(kirchhoff) {
     em::function("topology_waveforms", &api::topology_waveforms);
     // per-component V/I (switches, diodes, caps, resistors) from one ngspice run
     em::function("component_waveforms", &api::component_waveforms);
+    // realize requirements-derived datasheet models (real conduction) onto a spec-designed TAS
+    em::function("realize_tas", &api::realize_tas);
     em::function("diagnostics", &api::diagnostics);
     em::function("main_magnetic_inputs", &api::main_magnetic_inputs);
     // the one-shot Wizard entry point

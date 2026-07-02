@@ -82,10 +82,17 @@ CmcDesign design_cmc(const json& spec) {
     //       in EVERY spec mode;
     //   (B) only when the user gave no explicit impedance/insertion-loss spec, they synthesise the
     //       required-impedance point from the noise level vs the regulatory limit at 150 kHz.
-    if (spec.contains("parasiticCap_pF") && spec.contains("dvdt_V_ns") &&
-        spec.at("parasiticCap_pF").get<double>() > 0 && spec.at("dvdt_V_ns").get<double>() > 0) {
+    const bool hasParasiticCap = spec.contains("parasiticCap_pF");
+    const bool hasDvdt = spec.contains("dvdt_V_ns");
+    if (hasParasiticCap != hasDvdt)
+        throw std::invalid_argument(
+            "design_cmc: parasiticCap_pF and dvdt_V_ns must be supplied together — "
+            "I_cm = C·dV/dt needs both");
+    if (hasParasiticCap) {
         d.parasiticCapPf = spec.at("parasiticCap_pF").get<double>();
         d.dvdtVPerNs = spec.at("dvdt_V_ns").get<double>();
+        if (d.parasiticCapPf <= 0 || d.dvdtVPerNs <= 0)
+            throw std::invalid_argument("design_cmc: parasiticCap_pF and dvdt_V_ns must be > 0");
         if (d.impedancePoints.empty()) {
             const double safetyMarginDb = spec.value("safetyMargin_dB", 6.0);
             const double limitDbuv = cmc_emissions_limit_dbuv(
@@ -150,12 +157,9 @@ MAS::Inputs build_cmc_inputs(const CmcDesign& d) {
         "commonModeNoiseFiltering", std::nullopt,
         d.numberOfWindings, lmSpec, d.impedancePoints);
 
-    // The excitation frequency: advanced mode pins it to designFrequency (MKF AdvancedCMC ctor
-    // overrides the dominant frequency); otherwise the hardest impedance point, falling back to the
-    // line frequency exactly as MKF process_operating_points (:332).
-    const double excitationFrequency =
-        advanced ? d.designFrequency
-                 : (d.dominantFrequency > 0 ? d.dominantFrequency : d.lineFrequency);
+    // The excitation frequency: the shared cmc_excitation_frequency rule (Cmc.hpp) — the ngspice
+    // ideal sim uses the SAME rule, so simulated and analytical operating points always agree.
+    const double excitationFrequency = cmc_excitation_frequency(d);
 
     MAS::OperatingPoint op = analytical::analytical_common_mode_choke(
         lm, d.operatingCurrent, d.operatingVoltage, excitationFrequency, d.numberOfWindings,

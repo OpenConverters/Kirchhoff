@@ -160,19 +160,21 @@ assembly/simulate steps (tas_to_ngspice / tas_to_ltspice) are topology-agnostic.
           "time, inputVoltage, windingCurrents, lisnVoltage, commonModeAttenuation, commonModeImpedance,\n"
           "theoreticalImpedance}]}.");
     m.def("simulate_dmc_waveforms",
-          [](const json& spec, double inductance) {
-              return Kirchhoff::simulate_dmc_waveforms(Kirchhoff::design_dmc(spec), inductance);
+          [](const json& spec, double inductance, double capacitance) {
+              return Kirchhoff::simulate_dmc_waveforms(Kirchhoff::design_dmc(spec), inductance, capacitance);
           },
-          py::arg("spec"), py::arg("inductance"),
-          "DMC LC low-pass sim over the test frequencies → {success, converterWaveforms:[{frequency, time,\n"
-          "inputVoltage, outputVoltage, inductorCurrent, dmAttenuation}]}.");
+          py::arg("spec"), py::arg("inductance"), py::arg("capacitance") = 0.0,
+          "DMC LC low-pass sim over the test frequencies (one SHARED filter cap: capacitance arg, else\n"
+          "spec filterCapacitance, else fc = fsw/10 auto-size) → {success, converterWaveforms:[{frequency,\n"
+          "time, inputVoltage, outputVoltage, inductorCurrent, dmAttenuation}], failedFrequencies?}.");
     m.def("verify_dmc_attenuation",
           [](const json& spec, double inductance, double capacitance) {
               return Kirchhoff::verify_dmc_attenuation(Kirchhoff::design_dmc(spec), inductance, capacitance);
           },
           py::arg("spec"), py::arg("inductance"), py::arg("capacitance") = 0.0,
-          "Verify a DMC + filter cap meets the required attenuation → [{frequency, requiredAttenuation,\n"
-          "measuredAttenuation, theoreticalAttenuation, passed, message}]. capacitance 0 = auto-size.");
+          "Verify a DMC + filter cap meets the required attenuation (same filter as the sim) →\n"
+          "[{frequency, requiredAttenuation, measuredAttenuation|None, theoreticalAttenuation, simulated,\n"
+          "passed, message}]. capacitance 0 = auto-size from spec filterCapacitance / fsw.");
 
     m.def("tas_to_ltspice",
           [](const json& tas, const json& fidelity) {
