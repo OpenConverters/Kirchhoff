@@ -930,18 +930,20 @@ TEST_CASE("analytical_common_mode_choke: N windings, DC bias = line current, sma
     MAS::OperatingPoint op = analytical_common_mode_choke(Lm, iop, vop, fexc);
 
     REQUIRE(op.get_excitations_per_winding().size() == 2);   // Line + Neutral
-    // Default (no parasitics): I_cm = 0.1 A × (230/230). Every winding = CM ripple (pp = 2·I_cm) on the
-    // line-current DC bias → average = line current, small ripple.
-    const double iCmPeak = 0.1;
+    // Default (no parasitics): I_cm = 0.01 A × (230/230) — the post-Y-cap RESIDUAL CM current
+    // (fd8d56f lowered the fallback from 100 mA raw injection, which false-saturated
+    // high-permeability CM cores). Every winding = CM ripple (pp = 2·I_cm) on the line-current DC
+    // bias → average = line current, small ripple.
+    const double iCmPeak = 0.01;
     CHECK(*processed_current(op, 0).get_average() == Catch::Approx(iop).margin(0.05));           // DC = line I
-    CHECK(*processed_current(op, 0).get_peak_to_peak() == Catch::Approx(2.0 * iCmPeak).margin(0.05));
+    CHECK(*processed_current(op, 0).get_peak_to_peak() == Catch::Approx(2.0 * iCmPeak).margin(0.005));
     // Both windings carry the identical CM waveform (precondition for the CM-choke magnetizing-current path).
     CHECK(*processed_current(op, 1).get_average() == Catch::Approx(*processed_current(op, 0).get_average()).margin(0.01));
     CHECK(*processed_current(op, 1).get_rms() == Catch::Approx(*processed_current(op, 0).get_rms()).margin(0.01));
     // CM voltage present, peak = L·ω·I_cm.
     REQUIRE(op.get_excitations_per_winding()[0].get_voltage().has_value());
-    const double vCmPeak = Lm * 2.0 * M_PI * fexc * iCmPeak;                                      // ≈ 94.25 V
-    CHECK(*processed_voltage(op, 0).get_peak() == Catch::Approx(vCmPeak).margin(1.0));
+    const double vCmPeak = Lm * 2.0 * M_PI * fexc * iCmPeak;                                      // ≈ 9.42 V
+    CHECK(*processed_voltage(op, 0).get_peak() == Catch::Approx(vCmPeak).margin(0.2));
 }
 
 TEST_CASE("analytical_common_mode_choke honors winding count and C·dV/dt CM current",

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect x="2" y="2" width="60" height="60" rx="9" fill="#0e0b07" stroke="#3a2c14" stroke-width="2"/>
+  <g stroke="#221a0e" stroke-width="1">
+    <path d="M2 22h60M2 42h60M22 2v60M42 2v60"/>
+  </g>
+  <!-- Kirchhoff current-law node: three branch currents into a junction -->
+  <g stroke="#ffb347" stroke-width="3.5" stroke-linecap="round" fill="none">
+    <path d="M10 32h20"/>
+    <path d="M32 34v18"/>
+    <path d="M34 30 52 14"/>
+  </g>
+  <g fill="#ffb347">
+    <path d="M24 27.5 31 32l-7 4.5z"/>
+    <path d="M27.5 45 32 52l4.5-7z" transform="rotate(180 32 47.2)"/>
+    <path d="M43 24.5 50.5 15.5 46 25.8z" transform="rotate(8 46 21)"/>
+  </g>
+  <circle cx="32" cy="32" r="5" fill="#ffb347">
+    <animate attributeName="opacity" values="1;.75;1" dur="2.4s" repeatCount="indefinite"/>
+  </circle>
+</svg>

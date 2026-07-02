@@ -13,8 +13,10 @@
 #include <catch2/catch_approx.hpp>
 
 #include "Kirchhoff.hpp"
+#include "KirchhoffApi.hpp"
 
 #include <cmath>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -136,6 +138,52 @@ TEST_CASE("extract: bad TAS throws (no silent fallback)", "[extract][errors]") {
     // named magnetic that doesn't exist
     json tas = Kirchhoff::build_buck_tas(Kirchhoff::design_buck(spec_for(24, 12, 60, 100000)));
     CHECK_THROWS(Kirchhoff::extract_operating_point(tas, Kirchhoff::ExtractEngine::ANALYTICAL, "no_such_magnetic"));
+}
+
+TEST_CASE("api: full analytical waveforms captured out-of-band", "[extract][api][waveforms]") {
+    // The builders strip waveforms when baking the TAS (excitations_processed); the named variant
+    // captures the FULL operating point per magnetic, exposed via api::design_tas_full /
+    // api::process_converter. LLC is the acid test: its labels are `custom`, so WITHOUT this capture
+    // no time-domain data exists anywhere for it analytically.
+    const std::string spec = spec_for(400, 12, 120, 100000).dump();
+    const std::string out = Kirchhoff::api::design_tas_full("llc", spec);
+    REQUIRE(out.rfind("Exception:", 0) != 0);
+    const json j = json::parse(out);
+    REQUIRE(j.contains("tas"));
+    REQUIRE(j.contains("analyticalWaveforms"));
+    REQUIRE(j.at("analyticalWaveforms").contains("T1"));
+
+    const json& op = j.at("analyticalWaveforms").at("T1");
+    const auto& excs = op.at("excitationsPerWinding");
+    REQUIRE(excs.size() == 3);   // LLC: primary + 2 center-tapped secondary halves
+    for (const auto& e : excs) {
+        // full waveform arrays present — the whole point of the capture
+        REQUIRE(e.at("current").contains("waveform"));
+        const auto& wf = e.at("current").at("waveform");
+        REQUIRE(wf.at("data").size() >= 3);
+        REQUIRE(wf.at("data").size() == wf.at("time").size());
+    }
+
+    // the TAS itself stays stripped (minimal, schema-valid): no waveform key inside baked excitations
+    // (tas.simulation.stimulus[].waveform — the PWM gate drive — is a different, legitimate key)
+    std::function<void(const json&)> checkStripped = [&](const json& node) {
+        if (node.is_object()) {
+            if (node.contains("excitationsPerWinding"))
+                for (const auto& e : node.at("excitationsPerWinding")) {
+                    if (e.contains("current")) CHECK_FALSE(e.at("current").contains("waveform"));
+                    if (e.contains("voltage")) CHECK_FALSE(e.at("voltage").contains("waveform"));
+                }
+            for (const auto& [k, v] : node.items()) checkStripped(v);
+        } else if (node.is_array()) {
+            for (const auto& v : node) checkStripped(v);
+        }
+    };
+    checkStripped(j.at("tas"));
+
+    // a second build must not leak the first build's captures (registry cleared per build)
+    const json j2 = json::parse(Kirchhoff::api::design_tas_full("buck", spec_for(24, 12, 60, 100000).dump()));
+    REQUIRE(j2.at("analyticalWaveforms").contains("L1"));
+    CHECK_FALSE(j2.at("analyticalWaveforms").contains("T1"));
 }
 
 TEST_CASE("extract: main_magnetic_inputs = the adviser's MAS::Inputs", "[extract][legacy]") {

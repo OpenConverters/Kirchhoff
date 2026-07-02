@@ -201,7 +201,7 @@ json build_src_tas(const SrcDesign& d) {
     }
     const MAS::OperatingPoint aopT1 = AN::analytical_src(d.inputVoltage, {vEmbed}, {iEmbed}, {n}, fr,
                                                          d.resonantInductance, d.resonantCapacitance, 0.5, rect);
-    const std::vector<json> windings = AN::excitations_processed(aopT1);
+    const std::vector<json> windings = AN::excitations_processed(aopT1, "T1");
     json t1; t1["magnetic"] = json::object();
     t1["inputs"] = req::magnetic_inputs(d.magnetizingInductance, 0.1, turnsRatios, isoSides,
         std::nullopt, 25.0, windings);
@@ -357,7 +357,7 @@ json build_src_tas(const SrcDesign& d) {
         isc("GND", "externalPort", "input", {sp("srcCell", "gnd")}),
         isc("Vout", "externalPort", "output", {sp("srcCell", "vout")})});
 
-    json an; an["type"] = "transient"; an["stopTime"] = 0.004; an["maximumTimeStep"] = 5e-8;
+    json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
     tas["simulation"]["analyses"] = json::array({an});
     auto stim = [&](const char* sw, double phaseDeg) {
         json st; st["stage"] = "srcCell"; st["component"] = sw; st["signal"] = "gate";

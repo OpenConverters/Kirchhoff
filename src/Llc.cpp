@@ -228,7 +228,7 @@ json build_llc_tas(const LlcDesign& d) {
     const MAS::OperatingPoint aopT1 = AN::analytical_llc(d.inputVoltage, {vEmbed}, {iEmbed}, trs, fr,
                                                          d.magnetizingInductance, d.resonantInductance,
                                                          d.resonantCapacitance, 0.5, rect);
-    const std::vector<json> windings = AN::excitations_processed(aopT1);
+    const std::vector<json> windings = AN::excitations_processed(aopT1, "T1");
     json t1; t1["magnetic"] = json::object();
     t1["inputs"] = req::magnetic_inputs(d.magnetizingInductance, 0.1, turnsRatios, isoSides,
         std::nullopt, 25.0, windings);
@@ -433,7 +433,7 @@ json build_llc_tas(const LlcDesign& d) {
         isc("GND", "externalPort", "input", {sp("llcCell", "gnd")}),
         isc("Vout", "externalPort", "output", {sp("llcCell", "vout")})});
 
-    json an; an["type"] = "transient"; an["stopTime"] = 0.004; an["maximumTimeStep"] = 5e-8;
+    json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
     tas["simulation"]["analyses"] = json::array({an});
     // Half-bridge: Q1 phase 0, Q2 phase 180, each at ~45% duty (complementary with dead time for ZVS).
     auto stim = [&](const char* sw, double phaseDeg) {

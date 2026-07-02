@@ -179,7 +179,7 @@ json build_clllc_tas(const ClllcDesign& d) {
     std::vector<std::string> isoSides{"primary", "secondary"};
     json t1; t1["magnetic"] = json::object();
     t1["inputs"] = req::magnetic_inputs(d.magnetizingInductance, 0.1, {n}, isoSides,
-        std::nullopt, 25.0, AN::excitations_processed(aopT1));
+        std::nullopt, 25.0, AN::excitations_processed(aopT1, "T1"));
 
     // ───────────────────────── POWER stage ─────────────────────────
     // A small in-line sense resistor in the secondary tank exposes the tank-current sign (senseP/senseM)
@@ -278,7 +278,7 @@ json build_clllc_tas(const ClllcDesign& d) {
         isc("senseP", "wire", "", {sp("clllcPower", "senseP"), sp("srControl", "senseP")}),
         isc("senseM", "wire", "", {sp("clllcPower", "senseM"), sp("srControl", "senseM")})});
 
-    json an; an["type"] = "transient"; an["stopTime"] = 0.004; an["maximumTimeStep"] = 5e-8;
+    json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
     tas["simulation"]["analyses"] = json::array({an});
     // ONLY the primary bridge is open-loop driven; the SR is closed-loop via the control stage.
     auto stim = [&](const char* sw, double phaseDeg) {

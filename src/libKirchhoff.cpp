@@ -14,6 +14,8 @@ EMSCRIPTEN_BINDINGS(kirchhoff) {
     namespace api = Kirchhoff::api;
     // per-topology design entry point (topology passed as an arg — the whole 24-row table in one binding)
     em::function("design_tas", &api::design_tas);
+    // design + the FULL analytical waveforms (per-magnetic MAS::OperatingPoint, out-of-band from the TAS)
+    em::function("design_tas_full", &api::design_tas_full);
     // generic assemble -> deck, and run the deck (ngspice-in-wasm)
     em::function("generate_ngspice_circuit", &api::generate_ngspice_circuit);
     em::function("generate_ltspice_circuit", &api::generate_ltspice_circuit);
@@ -21,8 +23,25 @@ EMSCRIPTEN_BINDINGS(kirchhoff) {
     // the extract surface (MKF simulate_and_extract trio replacement) + diagnostics + the adviser's Inputs
     em::function("extract_operating_point", &api::extract_operating_point);
     em::function("topology_waveforms", &api::topology_waveforms);
+    // per-component V/I (switches, diodes, caps, resistors) from one ngspice run
+    em::function("component_waveforms", &api::component_waveforms);
     em::function("diagnostics", &api::diagnostics);
     em::function("main_magnetic_inputs", &api::main_magnetic_inputs);
     // the one-shot Wizard entry point
     em::function("process_converter", &api::process_converter);
+    // spec -> magnetic MAS::Inputs for any topology (incl. "common_mode_choke"), no TAS round-trip
+    em::function("design_magnetic_inputs", &api::design_magnetic_inputs);
+    // the CMC one-shot (calculate_cmc_inputs replacement): {"inputs", "cmcDiagnostics"}
+    em::function("design_cmc", &api::design_cmc);
+    // the DMC one-shot (calculate_dmc_inputs) + its "help me" LC sizing (propose_dmc_design)
+    em::function("design_dmc", &api::design_dmc);
+    em::function("propose_dmc_design", &api::propose_dmc_design);
+    // the current-transformer one-shot (process_current_transformer replacement)
+    em::function("design_current_transformer", &api::design_current_transformer);
+    // CMC EMI/waveform sims (simulate_cmc_ideal_waveforms + simulate_cmc_lisn_waveforms)
+    em::function("simulate_cmc_ideal_waveforms", &api::simulate_cmc_ideal_waveforms);
+    em::function("simulate_cmc_lisn_waveforms", &api::simulate_cmc_lisn_waveforms);
+    // DMC EMI/attenuation sims (simulate_dmc_waveforms + verify_dmc_attenuation)
+    em::function("simulate_dmc_waveforms", &api::simulate_dmc_waveforms);
+    em::function("verify_dmc_attenuation", &api::verify_dmc_attenuation);
 }

@@ -131,7 +131,7 @@ json build_pfc_tas(const PfcDesign& d) {
     const double IpkL  = AN::winding_current(aopPfc, 0, "peak");
     const double IrmsL = AN::winding_current(aopPfc, 0, "rms");
     const double IavgL = AN::winding_current(aopPfc, 0, "offset");
-    const json indExc = AN::excitations_processed(aopPfc).at(0);
+    const json indExc = AN::excitations_processed(aopPfc, "L").at(0);
 
     // ── semiconductor requirements (worst-case corner) ──
     // The boost MOSFET SW and the boost diode D5 both block the DC bus Vout. The four bridge
@@ -236,7 +236,7 @@ json build_pfc_tas(const PfcDesign& d) {
         isc("nL", "wire", "", {sp("pfcPower", "nL"), sp("pfcControl", "nL")}),
         isc("drive", "wire", "", {sp("pfcControl", "g"), sp("pfcPower", "g")})});
 
-    json an; an["type"] = "transient"; an["stopTime"] = 0.06; an["maximumTimeStep"] = 2e-7;
+    json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.06); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 2e-7);
     tas["simulation"]["analyses"] = json::array({an});
     // The controller drives the switch (closed loop) — no open-loop stimulus. Precharge the bus so steady
     // state is reached in a few line cycles (the bus-cap RC is far longer than the sim window).

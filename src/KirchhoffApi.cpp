@@ -2,10 +2,16 @@
 
 #include "Kirchhoff.hpp"          // design_<topo>/build_<topo>_tas + tas_to_ngspice/ltspice + extract surface
 #include "ConverterExtract.hpp"   // extract_operating_point / topology_waveforms / diagnostics / main_magnetic_inputs
+#include "ConverterAnalytical.hpp" // captured_operating_points — full-waveform registry filled during builds
+#include "ComponentWaveforms.hpp" // component_waveforms — per-component V/I from one ngspice run
 #include "FidelityJson.hpp"       // PEAS::fidelity_from_json
 #include "Clllc.hpp"              // topologies not in the Kirchhoff.hpp umbrella
 #include "Pfc.hpp"
 #include "Vienna.hpp"
+#include "Cmc.hpp"                // common-mode choke — a component designer (no TAS), not a topology row
+#include "Dmc.hpp"                // differential-mode choke — component designer + LC propose
+#include "CurrentTransformer.hpp" // current transformer — component designer (burden-resistor sensing)
+#include "JsonUtil.hpp"           // strip_nulls — schema-valid serialization of typed MAS objects
 
 #include <algorithm>
 #include <functional>
@@ -54,7 +60,19 @@ json build_tas_for(const std::string& topology, const json& spec) {
     auto it = tas_builders().find(topology);
     if (it == tas_builders().end())
         throw std::runtime_error("Kirchhoff::api: unknown topology '" + topology + "'");
+    // Every build starts with an empty full-waveform registry; the builders' named
+    // excitations_processed(op, component) calls fill it as they bake the TAS.
+    Kirchhoff::analytical::clear_captured_operating_points();
     return it->second(spec);
+}
+
+// The registry as a json object {"<component>": <full MAS::OperatingPoint>}. Read it immediately after
+// build_tas_for — the next build clears it.
+json captured_waveforms_json() {
+    json out = json::object();
+    for (const auto& [component, opJson] : Kirchhoff::analytical::captured_operating_points())
+        out[component] = opJson;
+    return out;
 }
 
 Kirchhoff::ExtractEngine engine_from(const std::string& e) {
@@ -63,10 +81,30 @@ Kirchhoff::ExtractEngine engine_from(const std::string& e) {
     throw std::runtime_error("extract engine must be 'analytical' or 'ngspice', got '" + e + "'");
 }
 
+// Envelope a designed magnetic COMPONENT (CMC / DMC): the schema-clean Inputs under "inputs" + its
+// diagnostics under the component's documented key ("cmcDiagnostics" / "dmcDiagnostics"). The Inputs is
+// stripped of the quicktype null members so every emitted object stays schema-valid; the diagnostics
+// live OUTSIDE it (never polluting the schema type). Legacy shims spread `inputs` at the root and attach
+// the diagnostics sibling themselves — one shape for every component designer.
+std::string component_result(const MAS::Inputs& inputs, const char* diagKey, json diagnostics) {
+    json inputsJson = Kirchhoff::strip_nulls(json(inputs));
+    return json{{"inputs", std::move(inputsJson)}, {diagKey, std::move(diagnostics)}}.dump();
+}
+
 }  // namespace
 
 std::string design_tas(const std::string& topology, const std::string& spec) {
     return guarded([&] { return build_tas_for(topology, json::parse(spec)).dump(); });
+}
+
+std::string design_tas_full(const std::string& topology, const std::string& spec) {
+    return guarded([&] {
+        json tas = build_tas_for(topology, json::parse(spec));
+        return json{
+            {"tas", std::move(tas)},
+            {"analyticalWaveforms", captured_waveforms_json()},
+        }.dump();
+    });
 }
 
 std::string generate_ngspice_circuit(const std::string& tas, const std::string& fidelity) {
@@ -129,6 +167,17 @@ std::string topology_waveforms(const std::string& tas) {
     });
 }
 
+std::string component_waveforms(const std::string& tas, const std::string& fidelity) {
+    return guarded([&] {
+        // Like simulate_ngspice, report the no-libngspice case as data (success:false), not an Exception
+        // string, so the frontend can branch to "run analytical / rebuild" instead of erroring.
+        if (!Kirchhoff::ngspice_in_process_available())
+            return json{{"success", false}, {"error", "Kirchhoff built without libngspice"}}.dump();
+        return Kirchhoff::component_waveforms(json::parse(tas),
+                                              PEAS::fidelity_from_json(json::parse(fidelity))).dump();
+    });
+}
+
 std::string diagnostics(const std::string& tas) {
     return guarded([&] { return Kirchhoff::diagnostics(json::parse(tas)).dump(); });
 }
@@ -140,9 +189,93 @@ std::string main_magnetic_inputs(const std::string& tas) {
     });
 }
 
+std::string design_magnetic_inputs(const std::string& topology, const std::string& spec) {
+    return guarded([&] {
+        // The COMPONENT particular cases: a CMC / DMC / current transformer is not a converter — there is
+        // no TAS to build; the Inputs come straight from the component designer. Everything else is a
+        // switching topology (design_tas + main_magnetic_inputs).
+        MAS::Inputs in = [&]() -> MAS::Inputs {
+            if (topology == "common_mode_choke" || topology == "cmc" || topology == "commonModeChoke")
+                return Kirchhoff::build_cmc_inputs(Kirchhoff::design_cmc(json::parse(spec)));
+            if (topology == "differential_mode_choke" || topology == "dmc" || topology == "differentialModeChoke")
+                return Kirchhoff::build_dmc_inputs(Kirchhoff::design_dmc(json::parse(spec)));
+            if (topology == "current_transformer" || topology == "currentTransformer")
+                return Kirchhoff::design_current_transformer(json::parse(spec));
+            return Kirchhoff::main_magnetic_inputs(build_tas_for(topology, json::parse(spec)));
+        }();
+        return Kirchhoff::strip_nulls(json(in)).dump();
+    });
+}
+
+std::string design_cmc(const std::string& spec) {
+    return guarded([&] {
+        Kirchhoff::CmcDesign d = Kirchhoff::design_cmc(json::parse(spec));
+        json diag{
+            {"computedInductance", d.computedInductance},
+            {"dominantFrequency", d.dominantFrequency},
+            {"dominantImpedance", d.dominantImpedance},
+        };
+        return component_result(Kirchhoff::build_cmc_inputs(d), "cmcDiagnostics", std::move(diag));
+    });
+}
+
+std::string design_dmc(const std::string& spec) {
+    return guarded([&] {
+        Kirchhoff::DmcDesign d = Kirchhoff::design_dmc(json::parse(spec));
+        json diag{
+            {"computedInductance", d.computedInductance},
+            {"computedMinFrequency", d.computedMinFrequency},
+            {"computedMaxFrequency", d.computedMaxFrequency},
+            {"impedanceAtMinFrequency", d.computedImpedanceAtMinFreq},
+            {"numberWindings", d.numberOfWindings},
+        };
+        return component_result(Kirchhoff::build_dmc_inputs(d), "dmcDiagnostics", std::move(diag));
+    });
+}
+
+std::string propose_dmc_design(const std::string& spec) {
+    return guarded([&] { return Kirchhoff::propose_dmc_design(json::parse(spec)).dump(); });
+}
+
+std::string design_current_transformer(const std::string& spec) {
+    return guarded([&] {
+        return Kirchhoff::strip_nulls(json(Kirchhoff::design_current_transformer(json::parse(spec)))).dump();
+    });
+}
+
+std::string simulate_cmc_ideal_waveforms(const std::string& spec, double inductance,
+                                         double parasiticCapPf, double dvdtVPerNs) {
+    return guarded([&] {
+        Kirchhoff::CmcDesign d = Kirchhoff::design_cmc(json::parse(spec));
+        return Kirchhoff::simulate_cmc_ideal_waveforms(d, inductance, parasiticCapPf, dvdtVPerNs).dump();
+    });
+}
+
+std::string simulate_cmc_lisn_waveforms(const std::string& spec, double inductance) {
+    return guarded([&] {
+        Kirchhoff::CmcDesign d = Kirchhoff::design_cmc(json::parse(spec));
+        return Kirchhoff::simulate_cmc_lisn_waveforms(d, inductance).dump();
+    });
+}
+
+std::string simulate_dmc_waveforms(const std::string& spec, double inductance) {
+    return guarded([&] {
+        Kirchhoff::DmcDesign d = Kirchhoff::design_dmc(json::parse(spec));
+        return Kirchhoff::simulate_dmc_waveforms(d, inductance).dump();
+    });
+}
+
+std::string verify_dmc_attenuation(const std::string& spec, double inductance, double capacitance) {
+    return guarded([&] {
+        Kirchhoff::DmcDesign d = Kirchhoff::design_dmc(json::parse(spec));
+        return Kirchhoff::verify_dmc_attenuation(d, inductance, capacitance).dump();
+    });
+}
+
 std::string process_converter(const std::string& topology, const std::string& spec, const std::string& engine) {
     return guarded([&] {
         json tas = build_tas_for(topology, json::parse(spec));
+        json analyticalWaveforms = captured_waveforms_json();
         MAS::Inputs mainInputs = Kirchhoff::main_magnetic_inputs(tas);
         MAS::OperatingPoint op = Kirchhoff::extract_operating_point(tas, engine_from(engine));
         json inputsJson = mainInputs;
@@ -154,6 +287,8 @@ std::string process_converter(const std::string& topology, const std::string& sp
             {"inputs", std::move(inputsJson)},
             {"operatingPoint", std::move(opJson)},
             {"diagnostics", Kirchhoff::diagnostics(tas)},
+            // Full analytical waveforms per magnetic (see design_tas_full) — out-of-band from the TAS.
+            {"analyticalWaveforms", std::move(analyticalWaveforms)},
             {"tas", std::move(tas)},
         }.dump();
     });

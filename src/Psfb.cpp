@@ -211,7 +211,7 @@ json build_psfb_tas(const PsfbDesign& d) {
         const MAS::OperatingPoint aopT1 = AN::analytical_psfb(Vin, {Vo}, {Io}, {N}, fsw, Lm,
                                                               d.seriesInductance, d.outputInductance,
                                                               d.phaseDeg, 0.0, rect);
-        xwindings = AN::excitations_processed(aopT1);
+        xwindings = AN::excitations_processed(aopT1, "T1");
     } else {
         xwindings.push_back(req::winding_excitation("psfbPrimary", fsw, IpriPk, IpriRms, 0.0, dILm, Deff,
                                 vPriPk, vPriRms, 0.0, vPriPkPk));
@@ -371,7 +371,7 @@ json build_psfb_tas(const PsfbDesign& d) {
         isc("GND", "externalPort", "input", {sp("psfbCell", "gnd"), sp("filter", "rtn")}),
         isc("Vout", "externalPort", "output", {sp("psfbCell", "vout"), sp("filter", "in")})});
 
-    json an; an["type"] = "transient"; an["stopTime"] = 0.004; an["maximumTimeStep"] = 5e-8;
+    json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
     tas["simulation"]["analyses"] = json::array({an});
     // Four PWM drives: leading leg QA(0 deg)/QB(180 deg), lagging leg QC(phi)/QD(180+phi). The
     // leg-to-leg phase phi sets the effective duty (power transfer); both legs run at ~50% duty.

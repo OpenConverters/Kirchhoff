@@ -33,3 +33,6 @@ __pycache__/
 # out-of-source build dirs (wasm/ngspice/topology variants) + MCP browser artifacts
 build-*/
 .playwright-mcp/
+
+# local Claude Code session state (worktrees, settings, scheduled-task locks)
+.claude/

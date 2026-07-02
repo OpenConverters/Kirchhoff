@@ -145,6 +145,8 @@ json build_weinberg_tas(const WeinbergDesign& d) {
     // input-inductor and push-pull-primary windings measure identical DC-biased current, and the
     // secondary windings carry a real DC bias, none of which the inline zero-offset model captured).
     namespace AN = Kirchhoff::analytical;
+    // Unnamed (no full-waveform capture): this single operating point spans BOTH magnetics (6 windings
+    // sliced into L1 + T1 below), so a per-component key would lie about the winding layout.
     const std::vector<json> wAll = AN::excitations_processed(AN::analytical_weinberg(
         Vin, Vout, Iout, fsw, d.inputInductance, n, 0.0, d.efficiency));
     if (wAll.size() != 6)
@@ -246,7 +248,7 @@ json build_weinberg_tas(const WeinbergDesign& d) {
         isc("GND", "externalPort", "input", {sp("weinbergCell", "gnd")}),
         isc("Vout", "externalPort", "output", {sp("weinbergCell", "vout")})});
 
-    json an; an["type"] = "transient"; an["stopTime"] = 0.004; an["maximumTimeStep"] = 5e-8;
+    json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
     tas["simulation"]["analyses"] = json::array({an});
     // Push-pull drive: Q1 phase 0, Q2 phase 180; each ON for D·Tsw within its half-period (the pulses
     // overlap by (2D−1)·Tsw when D>0.5 — the boost regime).

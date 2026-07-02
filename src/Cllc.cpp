@@ -188,7 +188,7 @@ json build_cllc_tas(const CllcDesign& d) {
     std::vector<std::string> isoSides{"primary", "secondary"};
     json t1; t1["magnetic"] = json::object();
     t1["inputs"] = req::magnetic_inputs(d.magnetizingInductance, 0.1, {n}, isoSides,
-        std::nullopt, 25.0, AN::excitations_processed(aopT1));
+        std::nullopt, 25.0, AN::excitations_processed(aopT1, "T1"));
 
     json cell; cell["name"] = "cllc-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"),
@@ -256,7 +256,7 @@ json build_cllc_tas(const CllcDesign& d) {
         isc("GND", "externalPort", "input", {sp("cllcCell", "gnd")}),
         isc("Vout", "externalPort", "output", {sp("cllcCell", "vout")})});
 
-    json an; an["type"] = "transient"; an["stopTime"] = 0.004; an["maximumTimeStep"] = 5e-8;
+    json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
     tas["simulation"]["analyses"] = json::array({an});
     // Both bridges are square waves: g1 (Q1,Q4,Qa,Qd) phase 0, g2 (Q2,Q3,Qb,Qc) phase 180. The
     // secondary is gated synchronously with the primary (forward power flow).

@@ -160,7 +160,7 @@ json build_acf_tas(const AcfDesign& d) {
     std::vector<std::string> xfmrIso{"primary", "secondary"};
     json xfmr; xfmr["magnetic"] = json::object();
     xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, {n}, xfmrIso, std::nullopt, 25.0,
-        AN::excitations_processed(aopNom));
+        AN::excitations_processed(aopNom, "T1"));
     // Output filter inductor: single winding (turnsRatios = []) -> 1 excitation, DC-biased at Iout.
     json lout; lout["magnetic"] = json::object();
     lout["inputs"] = req::magnetic_inputs(d.outputInductance, 0.2, {}, {"primary"}, std::nullopt, 25.0, {
@@ -244,7 +244,7 @@ json build_acf_tas(const AcfDesign& d) {
         isc("GND", "externalPort", "input", {sp("acfCell", "gnd"), sp("filter", "rtn")}),
         isc("Vout", "externalPort", "output", {sp("acfCell", "vout"), sp("filter", "in")})});
 
-    json an; an["type"] = "transient"; an["stopTime"] = 0.004; an["maximumTimeStep"] = 5e-8;
+    json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
     tas["simulation"]["analyses"] = json::array({an});
     // Main switch Q1 (duty D, phase 0); clamp switch Sc complementary (on during the reset interval),
     // a dead-band after Q1 turns off and trimmed not to wrap past the period.

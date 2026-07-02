@@ -110,7 +110,7 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
     std::vector<std::string> isoSides{"primary", "secondary"};
     json xfmr; xfmr["magnetic"] = json::object();
     xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, {N}, isoSides, std::nullopt, 25.0,
-        AN::excitations_processed(aopNom));
+        AN::excitations_processed(aopNom, "T1"));
 
     json cpri; cpri["capacitor"] = json::object();
     cpri["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;
@@ -179,7 +179,7 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
         isc("GND", "externalPort", "input", {sp("flybuckCell", "gnd")}),
         isc("Vout", "externalPort", "output", {sp("flybuckCell", "vout")})});
 
-    json an; an["type"] = "transient"; an["stopTime"] = 0.004; an["maximumTimeStep"] = 5e-8;
+    json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
     tas["simulation"]["analyses"] = json::array({an});
     // QS1 buck switch at duty D (phase 0) — D alone sets V_pri = D·Vin, so it keeps the full duty. QS2
     // synchronous rectifier conducts the rest of the period MINUS a small dead time on each edge

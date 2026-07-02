@@ -77,7 +77,7 @@ if (NOT EXISTS "${MKF_WAVEFORM_PROCESSOR}")
         "-DMKF_DIR=<path-to-MKF-checkout> at a local MKF clone.")
 endif()
 
-add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/Dab.cpp src/IsolatedBuck.cpp src/IsolatedBuckBoost.cpp src/Weinberg.cpp src/Llc.cpp src/Src.cpp src/Cllc.cpp src/Clllc.cpp src/Pfc.cpp src/Vienna.cpp src/TasAssembler.cpp src/NgspiceRunner.cpp src/Analytical.cpp src/ConverterAnalytical.cpp src/ConverterExtract.cpp "${MKF_WAVEFORM_PROCESSOR}")
+add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/Dab.cpp src/IsolatedBuck.cpp src/IsolatedBuckBoost.cpp src/Weinberg.cpp src/Llc.cpp src/Src.cpp src/Cllc.cpp src/Clllc.cpp src/Pfc.cpp src/Vienna.cpp src/Cmc.cpp src/CmcSim.cpp src/Dmc.cpp src/DmcSim.cpp src/CurrentTransformer.cpp src/TasAssembler.cpp src/NgspiceRunner.cpp src/Analytical.cpp src/ConverterAnalytical.cpp src/ConverterExtract.cpp src/ComponentWaveforms.cpp "${MKF_WAVEFORM_PROCESSOR}")
 target_include_directories(kirchhoff PUBLIC src)
 # The PSMA/MAS/json dependency headers are marked SYSTEM so the -Wall/-Wextra enabled below reports only
 # Kirchhoff's OWN code, not warnings inside generated/vendored dependency headers (e.g. MAS.hpp).
@@ -255,8 +255,17 @@ target_link_libraries(test_nrmse_gate PRIVATE kirchhoff Catch2::Catch2WithMain)
 add_executable(test_resonant_validation tests/test_resonant_validation.cpp)
 target_link_libraries(test_resonant_validation PRIVATE kirchhoff Catch2::Catch2WithMain)
 
-add_executable(test_extract tests/test_extract.cpp)
+add_executable(test_extract tests/test_extract.cpp src/KirchhoffApi.cpp)
 target_link_libraries(test_extract PRIVATE kirchhoff Catch2::Catch2WithMain)
+
+add_executable(test_cmc tests/test_cmc.cpp src/KirchhoffApi.cpp)
+target_link_libraries(test_cmc PRIVATE kirchhoff Catch2::Catch2WithMain)
+
+add_executable(test_dmc_ct tests/test_dmc_ct.cpp src/KirchhoffApi.cpp)
+target_link_libraries(test_dmc_ct PRIVATE kirchhoff Catch2::Catch2WithMain)
+
+add_executable(test_component_waveforms tests/test_component_waveforms.cpp src/KirchhoffApi.cpp)
+target_link_libraries(test_component_waveforms PRIVATE kirchhoff Catch2::Catch2WithMain)
 
 add_executable(test_advanced tests/test_advanced.cpp)
 target_link_libraries(test_advanced PRIVATE kirchhoff Catch2::Catch2WithMain)

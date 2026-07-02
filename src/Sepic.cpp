@@ -105,7 +105,7 @@ json build_sepic_tas(const SepicDesign& d) {
     };
     json L1; L1["magnetic"] = json::object();
     L1["inputs"] = req::magnetic_inputs(d.inductanceL1, 0.2, /*single winding*/ {}, {"primary"},
-        std::nullopt, 25.0, AN::excitations_processed(aopNom));
+        std::nullopt, 25.0, AN::excitations_processed(aopNom, "L1"));
     json L2 = inductor(d.inductanceL2, iout, dIL2);
     json cs; cs["capacitor"] = json::object();
     cs["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.couplingCapacitance;
@@ -166,7 +166,7 @@ json build_sepic_tas(const SepicDesign& d) {
         isc("GND", "externalPort", "input", {sp("sepicCell", "gnd"), sp("filter", "rtn")}),
         isc("Vout", "externalPort", "output", {sp("sepicCell", "vout"), sp("filter", "in")})});
 
-    json an; an["type"] = "transient"; an["stopTime"] = 0.004; an["maximumTimeStep"] = 5e-8;
+    json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
     tas["simulation"]["analyses"] = json::array({an});
     json st; st["stage"] = "sepicCell"; st["component"] = "Q1"; st["signal"] = "gate";
     st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;

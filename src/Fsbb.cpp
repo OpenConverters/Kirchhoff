@@ -101,7 +101,7 @@ json build_fsbb_tas(const FsbbDesign& d) {
     const double IrmsL = AN::winding_current(aopWorst, 0, "rms");
     json lind; lind["magnetic"] = json::object();
     lind["inputs"] = req::magnetic_inputs(d.inductance, 0.2, /*single winding*/ {}, {"primary"},
-        std::nullopt, 25.0, AN::excitations_processed(aopNom));
+        std::nullopt, 25.0, AN::excitations_processed(aopNom, "L"));
 
     // --- semiconductor stresses: all four H-bridge switches share one rating ---
     // Buck leg Q1/Q2 nodes swing 0..Vin_max; boost leg Q3/Q4 nodes swing 0..Vout. Worst-case block
@@ -179,7 +179,7 @@ json build_fsbb_tas(const FsbbDesign& d) {
         isc("GND", "externalPort", "input", {sp("fsbbCell", "gnd"), sp("filter", "rtn")}),
         isc("Vout", "externalPort", "output", {sp("fsbbCell", "vout"), sp("filter", "in")})});
 
-    json an; an["type"] = "transient"; an["stopTime"] = 0.004; an["maximumTimeStep"] = 5e-8;
+    json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
     tas["simulation"]["analyses"] = json::array({an});
     // Q1+Q4 ON during D (charge); Q2+Q3 ON during (1-D) (discharge). Each leg has a dead band: the
     // low-going switch (Q2 in leg1, Q3 in leg2) starts a dead-band after its partner turns off and is

@@ -151,7 +151,7 @@ json build_dab_tas(const DabDesign& d) {
     const double IoutDab = d.outputPower / d.outputVoltage;
     const MAS::OperatingPoint aopT1 = AN::analytical_dab(d.inputVoltage, {d.outputVoltage}, {IoutDab}, {N},
                                                          fsw, Lm, Lr_H, 0.0, 0.0, d.phaseShiftDeg);
-    const std::vector<json> windings = AN::excitations_processed(aopT1);
+    const std::vector<json> windings = AN::excitations_processed(aopT1, "T1");
     std::vector<std::string> isoSides{"primary", "secondary"};
     json xfmr; xfmr["magnetic"] = json::object();
     // NB: DAB keeps its DESIGNED (nominal) Lm — unlike the other transformers it ties Lm to the series
@@ -274,7 +274,7 @@ json build_dab_tas(const DabDesign& d) {
         isc("GND", "externalPort", "input", {sp("dabCell", "gnd")}),
         isc("Vout", "externalPort", "output", {sp("dabCell", "vout")})});
 
-    json an; an["type"] = "transient"; an["stopTime"] = 0.004; an["maximumTimeStep"] = 5e-8;
+    json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
     tas["simulation"]["analyses"] = json::array({an});
     // Eight PWM drives. Primary: diagonal pairs (QA,QD) at 0° and (QB,QC) at 180° -> ±Vin square wave.
     // Secondary: the same square wave phase-shifted by D3 — diagonal pairs (QE,QH) at D3 and (QF,QG)

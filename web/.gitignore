@@ -1,0 +1,4 @@
+node_modules/
+dist/
+# synced from ../build-wasm-ng by `npm run sync-wasm`
+public/kirchhoff.js

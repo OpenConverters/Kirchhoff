@@ -191,7 +191,7 @@ json build_ahb_tas(const AhbDesign& d) {
         const double rippleRatio = dILo / Io;   // makes the solver's compute_lo_min Lo == d.outputInductance
         const MAS::OperatingPoint aopT1 = AN::analytical_asymmetric_half_bridge(
             d.inputVoltage, {Vo}, {Io}, {N}, fsw, Lm, Dn, rippleRatio, 0.0, rect);
-        xwindings = AN::excitations_processed(aopT1);
+        xwindings = AN::excitations_processed(aopT1, "T1");
     } else {
         xwindings.push_back(req::winding_excitation("ahbPrimary", fsw, IpriPk, IpriRms, 0.0, dILm, Dn,
                                 vPriPk, vPriRms, 0.0, vPriPkPk));
@@ -344,7 +344,7 @@ json build_ahb_tas(const AhbDesign& d) {
         isc("GND", "externalPort", "input", {sp("ahbCell", "gnd"), sp("filter", "rtn")}),
         isc("Vout", "externalPort", "output", {sp("ahbCell", "vout"), sp("filter", "in")})});
 
-    json an; an["type"] = "transient"; an["stopTime"] = 0.004; an["maximumTimeStep"] = 5e-8;
+    json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
     tas["simulation"]["analyses"] = json::array({an});
     // Complementary drive: Q1 on for D, Q2 on for (1-D), with a dead time between them. Q1 leads at
     // phase 0; Q2 starts a dead-band after Q1 turns off (phase = (D + deadFrac)*360) and is trimmed to

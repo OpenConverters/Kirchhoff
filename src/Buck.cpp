@@ -104,7 +104,7 @@ json build_buck_tas(const BuckDesign& d) {
     // --- component PEAS docs (seed + detailed requirements) ---
     json ind; ind["magnetic"] = json::object();
     ind["inputs"] = req::magnetic_inputs(L, 0.2, /*single winding*/ {}, {"primary"}, std::nullopt, 25.0,
-                                         AN::excitations_processed(aopNom));
+                                         AN::excitations_processed(aopNom, "L1"));
     json mosfet; mosfet["semiconductor"]["mosfet"] = json::object();
     mosfet["inputs"]["designRequirements"] = req::mosfet("mainSwitch", ratedVds, IpkL, maxRdsOn, 125.0);
     json diode; diode["semiconductor"]["diode"] = json::object();
@@ -176,7 +176,7 @@ json build_buck_tas(const BuckDesign& d) {
         isc("GND", "externalPort", "input", {sp("switchingCell", "gnd"), sp("filter", "rtn")}),
         isc("Vout", "externalPort", "output", {sp("switchingCell", "vout"), sp("filter", "in")})});
 
-    json an; an["type"] = "transient"; an["stopTime"] = 0.004; an["maximumTimeStep"] = 5e-8;
+    json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
     tas["simulation"]["analyses"] = json::array({an});
     json st; st["stage"] = "switchingCell"; st["component"] = "Q1"; st["signal"] = "gate";
     st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;

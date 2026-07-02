@@ -240,7 +240,7 @@ json build_flyback_tas(const FlybackDesign& d) {
     std::optional<double> isoV = d.isolationVoltage > 0 ? std::optional<double>(d.isolationVoltage) : std::nullopt;
 
     json mag; mag["magnetic"] = json::object();
-    mag["inputs"] = req::magnetic_inputs(Lm, 0.1, {n}, isoSides, isoV, 25.0, AN::excitations_processed(aopNom));
+    mag["inputs"] = req::magnetic_inputs(Lm, 0.1, {n}, isoSides, isoV, 25.0, AN::excitations_processed(aopNom, "T1"));
 
     json capCin; capCin["capacitor"] = json::object();
     capCin["inputs"]["designRequirements"] = req::capacitor(
@@ -327,7 +327,7 @@ json build_flyback_tas(const FlybackDesign& d) {
         isc("sec", "wire", "", {sp("transformer", "sec"), sp("rectifier", "ac_in")}),
         isc("Vout", "externalPort", "output", {sp("rectifier", "dc_out"), sp("filter", "in")})});
 
-    json an; an["type"] = "transient"; an["stopTime"] = 0.006; an["maximumTimeStep"] = 5e-8;
+    json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.006); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
     tas["simulation"]["analyses"] = json::array({an});
     json st; st["stage"] = "inverter"; st["component"] = "Q1"; st["signal"] = "gate";
     st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;

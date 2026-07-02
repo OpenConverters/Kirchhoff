@@ -128,6 +128,9 @@ json build_vienna_tas(const ViennaDesign& d) {
     const double IpkLV  = AN::winding_current(aopVienna, 0, "peak");
     const double IrmsLV = AN::winding_current(aopVienna, 0, "rms");
     const double IavgLV = AN::winding_current(aopVienna, 0, "offset");
+    // Unnamed (no full-waveform capture): this one excitation is shared by all three phase inductors
+    // (La/Lb/Lc), so a single-component key would misattribute it; the labels are sinusoidal and the
+    // frontend re-synthesizes them from processed data.
     const json indExcV = AN::excitations_processed(aopVienna).at(0);
     auto resBrick = [&](double r) { json j; j["resistor"] = json::object();
         auto& dr = j["inputs"]["designRequirements"];
@@ -323,7 +326,7 @@ json build_vienna_tas(const ViennaDesign& d) {
     }
     tas["topology"]["interStageConnections"] = interStage;
 
-    json an; an["type"]="transient"; an["stopTime"]=0.04; an["maximumTimeStep"]=5e-7;
+    json an; an["type"]="transient"; an["stopTime"]=cfg::tran_stop_time(d.config, 0.04); an["maximumTimeStep"]=cfg::tran_max_timestep(d.config, 5e-7);
     tas["simulation"]["analyses"] = json::array({an});
     // Closed loop — the control stage drives the switches (no open-loop stimulus). Precharge each
     // half-bus to ±Vdc/2 about the grounded midpoint.

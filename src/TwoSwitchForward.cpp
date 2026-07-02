@@ -125,7 +125,7 @@ json build_two_switch_forward_tas(const TwoSwitchForwardDesign& d) {
     std::vector<std::string> xfmrIso{"primary", "secondary"};
     json xfmr; xfmr["magnetic"] = json::object();
     xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, {n}, xfmrIso, std::nullopt, 25.0,
-        AN::excitations_processed(aopNom));
+        AN::excitations_processed(aopNom, "T1"));
     // Output filter inductor: single winding (turnsRatios = []) -> 1 excitation, DC-biased at Iout.
     json lout; lout["magnetic"] = json::object();
     lout["inputs"] = req::magnetic_inputs(d.outputInductance, 0.2, {}, {"primary"}, std::nullopt, 25.0, {
@@ -182,7 +182,7 @@ json build_two_switch_forward_tas(const TwoSwitchForwardDesign& d) {
         isc("GND", "externalPort", "input", {sp("forwardCell", "gnd"), sp("filter", "rtn")}),
         isc("Vout", "externalPort", "output", {sp("forwardCell", "vout"), sp("filter", "in")})});
 
-    json an; an["type"] = "transient"; an["stopTime"] = 0.004; an["maximumTimeStep"] = 5e-8;
+    json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
     tas["simulation"]["analyses"] = json::array({an});
     json st; st["stage"] = "forwardCell"; st["component"] = "Q1"; st["signal"] = "gate";
     st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;

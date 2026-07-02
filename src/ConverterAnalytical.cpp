@@ -50,6 +50,25 @@ std::vector<nlohmann::json> excitations_processed(const MAS::OperatingPoint& op)
 }
 
 namespace {
+std::vector<std::pair<std::string, nlohmann::json>>& captured_registry() {
+    static thread_local std::vector<std::pair<std::string, nlohmann::json>> reg;
+    return reg;
+}
+}  // namespace
+
+void clear_captured_operating_points() { captured_registry().clear(); }
+
+const std::vector<std::pair<std::string, nlohmann::json>>& captured_operating_points() {
+    return captured_registry();
+}
+
+std::vector<nlohmann::json> excitations_processed(const MAS::OperatingPoint& op, const std::string& component) {
+    nlohmann::json full = op;   // MAS-typed serialization: waveforms + harmonics + processed, schema-shaped
+    captured_registry().emplace_back(component, std::move(full));
+    return excitations_processed(op);
+}
+
+namespace {
 double processed_of(const MAS::SignalDescriptor* sig, const std::string& field, const char* side,
                     std::size_t w) {
     if (!sig) throw std::runtime_error("winding stress: winding " + std::to_string(w) + " has no " + side);

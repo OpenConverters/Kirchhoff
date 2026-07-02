@@ -31,6 +31,19 @@ namespace analytical {
 // anyway; the browser gets waveforms from extract_operating_point instead.
 std::vector<nlohmann::json> excitations_processed(const MAS::OperatingPoint& op);
 
+// Named variant: identical strip for the TAS, but ALSO records the FULL operating point (waveforms +
+// harmonics + processed, MAS-typed serialization) under the TAS component name `component` (e.g. "T1")
+// in a per-build registry. Kirchhoff::api reads the registry after a build to hand time-domain waveforms
+// to callers OUT-OF-BAND — the TAS document itself stays minimal and schema-valid. Builders should use
+// THIS variant for every magnetic they bake, so custom-label (resonant/phase-shift) waveforms reach the
+// frontend without an ngspice run.
+std::vector<nlohmann::json> excitations_processed(const MAS::OperatingPoint& op, const std::string& component);
+
+// The per-build full-waveform registry (thread_local; api clears it before each build). Pairs of
+// (TAS component name, MAS::OperatingPoint as json).
+void clear_captured_operating_points();
+const std::vector<std::pair<std::string, nlohmann::json>>& captured_operating_points();
+
 // Read a processed current/voltage stress of winding `w` from an operating point (for component ratings).
 // `field` ∈ {peak,rms,offset,peakToPeak,dutyCycle}. Throws if the field is absent (no silent 0).
 double winding_current(const MAS::OperatingPoint& op, std::size_t w, const std::string& field);

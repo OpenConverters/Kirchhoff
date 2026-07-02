@@ -7,6 +7,10 @@
 #include "Clllc.hpp"
 #include "Pfc.hpp"
 #include "Vienna.hpp"
+#include "Cmc.hpp"           // common-mode choke — component designer (MAS::Inputs, no TAS)
+#include "Dmc.hpp"           // differential-mode choke — component designer + LC propose
+#include "CurrentTransformer.hpp"  // current transformer — component designer
+#include "JsonUtil.hpp"      // strip_nulls — schema-valid serialization of typed MAS objects
 
 namespace py = pybind11;
 using json = nlohmann::json;
@@ -84,6 +88,91 @@ assembly/simulate steps (tas_to_ngspice / tas_to_ltspice) are topology-agnostic.
           "Assemble any TAS topology document into a runnable ngspice deck (string).\n"
           "fidelity selects the component models, e.g. {\"origin\": \"REQUIREMENTS\"} for an\n"
           "ideal-component deck (other origins: \"DATASHEET\", \"MKF_MODEL\").");
+
+    // --- common-mode choke: a COMPONENT designer, not a topology (no TAS document) ---
+    m.def("design_cmc_inputs",
+          [](const json& spec) {
+              Kirchhoff::CmcDesign d = Kirchhoff::design_cmc(spec);
+              json inputs = Kirchhoff::strip_nulls(json(Kirchhoff::build_cmc_inputs(d)));
+              json diag;
+              diag["computedInductance"] = d.computedInductance;
+              diag["dominantFrequency"] = d.dominantFrequency;
+              diag["dominantImpedance"] = d.dominantImpedance;
+              return json{{"inputs", std::move(inputs)}, {"cmcDiagnostics", std::move(diag)}};
+          },
+          py::arg("spec"),
+          "Design a common-mode choke from the wizard spec (operatingVoltage, operatingCurrent,\n"
+          "lineFrequency, ambientTemperature, and one of: minimumImpedance[], targetInsertionLoss[],\n"
+          "parasiticCap_pF+dvdt_V_ns, or desiredInductance). Returns {'inputs': <MAS Inputs dict\n"
+          "(designRequirements + CM operating point) for the MagneticAdviser>, 'cmcDiagnostics':\n"
+          "{computedInductance, dominantFrequency, dominantImpedance}}.");
+
+    // --- differential-mode choke: component designer + LC "help me" sizing ---
+    m.def("design_dmc_inputs",
+          [](const json& spec) {
+              Kirchhoff::DmcDesign d = Kirchhoff::design_dmc(spec);
+              json inputs = Kirchhoff::strip_nulls(json(Kirchhoff::build_dmc_inputs(d)));
+              json diag;
+              diag["computedInductance"] = d.computedInductance;
+              diag["computedMinFrequency"] = d.computedMinFrequency;
+              diag["computedMaxFrequency"] = d.computedMaxFrequency;
+              diag["impedanceAtMinFrequency"] = d.computedImpedanceAtMinFreq;
+              diag["numberWindings"] = d.numberOfWindings;
+              return json{{"inputs", std::move(inputs)}, {"dmcDiagnostics", std::move(diag)}};
+          },
+          py::arg("spec"),
+          "Design a differential-mode choke from the wizard spec (configuration, inputVoltage,\n"
+          "operatingCurrent, lineFrequency, switchingFrequency?, ambientTemperature, and one of\n"
+          "minimumImpedance[] / minimumInductance). Returns {'inputs': <MAS Inputs dict>,\n"
+          "'dmcDiagnostics': {computedInductance, computedMin/MaxFrequency, impedanceAtMinFrequency,\n"
+          "numberWindings}}.");
+    m.def("propose_dmc_design", &Kirchhoff::propose_dmc_design, py::arg("spec"),
+          "DMC 'help me with the design' LC sizing → {inductance, capacitance, cutoffFrequency,\n"
+          "targetAttenuation_dB, peakCurrent, ...}. Re-call design_dmc_inputs with the proposed\n"
+          "inductance as minimumInductance.");
+
+    // --- current transformer: burden-resistor sensing 2-winding transformer ---
+    m.def("design_current_transformer_inputs",
+          [](const json& spec) {
+              return Kirchhoff::strip_nulls(json(Kirchhoff::design_current_transformer(spec)));
+          },
+          py::arg("spec"),
+          "Design a current transformer from the spec (waveformLabel, maximumPrimaryCurrentPeak,\n"
+          "frequency, turnsRatio, burdenResistor, ambientTemperature, +optional secondaryDcResistance/\n"
+          "dutyCycle/diodeVoltageDrop). Returns the MAS Inputs dict (2-winding transformer + sensing op).");
+
+    // --- CMC EMI/waveform ngspice sims (require an ngspice-enabled build) ---
+    m.def("simulate_cmc_ideal_waveforms",
+          [](const json& spec, double inductance, double parasiticCap_pF, double dvdt_V_ns) {
+              return Kirchhoff::simulate_cmc_ideal_waveforms(
+                  Kirchhoff::design_cmc(spec), inductance, parasiticCap_pF, dvdt_V_ns);
+          },
+          py::arg("spec"), py::arg("inductance"), py::arg("parasitic_capacitance_pF") = 10.0,
+          py::arg("dvdt_V_per_ns") = 50.0,
+          "Per-winding CM ideal-waveform sim → {success, inputs:{operatingPoints}, converterWaveforms:[],\n"
+          "cmcDiagnostics}. success:false (not a throw) when built without libngspice.");
+    m.def("simulate_cmc_lisn_waveforms",
+          [](const json& spec, double inductance) {
+              return Kirchhoff::simulate_cmc_lisn_waveforms(Kirchhoff::design_cmc(spec), inductance);
+          },
+          py::arg("spec"), py::arg("inductance"),
+          "CISPR LISN sweep over the spec impedance frequencies → {success, converterWaveforms:[{frequency,\n"
+          "time, inputVoltage, windingCurrents, lisnVoltage, commonModeAttenuation, commonModeImpedance,\n"
+          "theoreticalImpedance}]}.");
+    m.def("simulate_dmc_waveforms",
+          [](const json& spec, double inductance) {
+              return Kirchhoff::simulate_dmc_waveforms(Kirchhoff::design_dmc(spec), inductance);
+          },
+          py::arg("spec"), py::arg("inductance"),
+          "DMC LC low-pass sim over the test frequencies → {success, converterWaveforms:[{frequency, time,\n"
+          "inputVoltage, outputVoltage, inductorCurrent, dmAttenuation}]}.");
+    m.def("verify_dmc_attenuation",
+          [](const json& spec, double inductance, double capacitance) {
+              return Kirchhoff::verify_dmc_attenuation(Kirchhoff::design_dmc(spec), inductance, capacitance);
+          },
+          py::arg("spec"), py::arg("inductance"), py::arg("capacitance") = 0.0,
+          "Verify a DMC + filter cap meets the required attenuation → [{frequency, requiredAttenuation,\n"
+          "measuredAttenuation, theoreticalAttenuation, passed, message}]. capacitance 0 = auto-size.");
 
     m.def("tas_to_ltspice",
           [](const json& tas, const json& fidelity) {

@@ -562,6 +562,10 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
     // a tiny node-to-ground cap that keeps a stiff stripped-body-diode resonant tank (llc/src) from going
     // singular. Gated on real semiconductors — it would detune the pinned ideal decks (see KirchhoffConfig).
     os << ".options reltol=1e-3 abstol=1e-9 vntol=1e-6 method=gear";
+    // savecurrents makes ngspice record every device's terminal current as an @dev[key] vector
+    // (@s.<inst>.<sw>[i], @d...[id], @c...[i], @r...[i], @l...[i]) — the data the per-component
+    // waveform extraction reads. ngspice-only (LTspice has no such option and would reject it).
+    if (!lt) os << " savecurrents";
     if (deckHasRealComponent) {
         // Real-deck convergence aids (ABT #33): cshunt = node-to-ground dV/dt; rshunt = node-to-ground DC
         // reference that breaks a stiff MKF_MODEL core's near-singular branch (cshunt alone can't); itl4 lets

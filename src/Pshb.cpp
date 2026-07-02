@@ -191,7 +191,7 @@ json build_pshb_tas(const PshbDesign& d) {
         const MAS::OperatingPoint aopT1 = AN::analytical_pshb(d.inputVoltage, {Vo}, {Io}, {N}, fsw, Lm,
                                                               d.seriesInductance, d.outputInductance,
                                                               d.phaseDeg, 0.0, rect);
-        xwindings = AN::excitations_processed(aopT1);
+        xwindings = AN::excitations_processed(aopT1, "T1");
     } else {
         xwindings.push_back(req::winding_excitation("pshbPrimary", fsw, IpriPk, IpriRms, 0.0, dILm, Deff,
                                 vPriPk, vPriRms, 0.0, vPriPkPk));
@@ -325,7 +325,7 @@ json build_pshb_tas(const PshbDesign& d) {
         isc("Vin","externalPort","input",{sp("pshbCell","vin")}),
         isc("GND","externalPort","input",{sp("pshbCell","gnd"),sp("filter","rtn")}),
         isc("Vout","externalPort","output",{sp("pshbCell","vout"),sp("filter","in")})});
-    json an; an["type"]="transient"; an["stopTime"]=0.004; an["maximumTimeStep"]=5e-8;
+    json an; an["type"]="transient"; an["stopTime"]=cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"]=cfg::tran_max_timestep(d.config, 5e-8);
     tas["simulation"]["analyses"]=json::array({an});
     // 3-level NPC drive: inner pair S2/S3 ~50% complementary (S3 phase 180); outer pair S1/S4 narrower
     // (D_cmd/2 of the period) and in phase with S2/S4-leg, setting the +/-Vin/2 power-transfer width
