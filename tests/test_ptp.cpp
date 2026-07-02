@@ -88,6 +88,7 @@ struct Ref {
     double vin, vout, power, fsw;
     double voutTol;              // G1/G2 tolerance
     double expectedRatio;        // ngspice/analytical Vout ratio expected by design (1.0 except SRC headroom)
+    double lossMax;              // G3 loss ceiling (0.35 default; higher for low-Vout/high-current rails)
 };
 
 // Reference designs = real datasheet / app-note operating points, transcribed from MKF's
@@ -102,9 +103,9 @@ std::vector<Ref> refs() {
     // an explicit per-design exception with a cited root-cause investigation (see header).
     auto add = [&](const char* topo, const char* design, auto designFn, auto buildFn,
                    double vin, double vout, double iout, double fs, double tol = 0.05, double ratio = 1.0,
-                   double eta = 1.0) {
+                   double eta = 1.0, double lossMax = 0.35) {
         json spec = spec_for(vin, vout, vout * iout, fs, eta);
-        v.push_back({topo, design, [=]{ return buildFn(designFn(spec)); }, vin, vout, vout * iout, fs, tol, ratio});
+        v.push_back({topo, design, [=]{ return buildFn(designFn(spec)); }, vin, vout, vout * iout, fs, tol, ratio, lossMax});
     };
     // ── non-isolated ──
     add("buck","TPS54202EVM", design_buck, build_buck_tas, 12,5,2,500000);
@@ -132,7 +133,11 @@ std::vector<Ref> refs() {
     add("push_pull","SN6501", design_push_pull, build_push_pull_tas, 5,3.3,0.35,410000);
     add("push_pull","SN6505B",design_push_pull, build_push_pull_tas, 5,3.3,1,420000);
     add("push_pull","SN6507", design_push_pull, build_push_pull_tas, 12,5,1,200000);
-    add("acf","UCC2897A",     design_acf, build_acf_tas, 48,3.3,30,250000);
+    // acf UCC2897A is a 3.3 V / 30 A rail: the ideal-diode Vf (~0.92 V at 30 A, SAS DIDEAL model) is ~28% of
+    // the 3.3 V output on the rectifier alone (vs ~7% at a 12 V rail — see the G3 note), so a CORRECT ideal
+    // deck dissipates ~0.39 here. Raise only THIS design's loss ceiling to 0.45 (still well below a gross-bug
+    // level); Erickson (5 V) / AN1023 (12 V) stay at the 0.35 default. [Vout regulates on target — G1/G2 pass.]
+    add("acf","UCC2897A",     design_acf, build_acf_tas, 48,3.3,30,250000, 0.05, 1.0, 1.0, 0.45);
     add("acf","Erickson-50W", design_acf, build_acf_tas, 28,5,10,200000);
     add("acf","AN1023-200W",  design_acf, build_acf_tas, 48,12,16,250000);
     // ── isolated bridge / phase-shift ──
@@ -206,6 +211,6 @@ TEST_CASE("PtP: ngspice and analytical engines agree per topology", "[ptp]") {
         REQUIRE(pin > 0.0);
         const double loss = (pin - pout) / pin;
         CHECK(loss >= -0.02);          // no manufactured energy
-        CHECK(loss <= 0.35);           // sane ceiling for an ideal-device deck (catches gross bugs)
+        CHECK(loss <= d.lossMax);      // sane ceiling for an ideal-device deck (catches gross bugs)
     }
 }

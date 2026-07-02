@@ -504,7 +504,7 @@ TEST_CASE("analytical_llc center-tapped: antisymmetric tank current, 3 windings"
                                             0.5, SrcRectifier::CENTER_TAPPED);
     REQUIRE(op.get_excitations_per_winding().size() == 3);   // Primary + Secondary 0 Half 1/2
     // Symmetric bridge -> half-wave-antisymmetric tank current -> zero mean (small vs the RMS).
-    const auto& cur = *processed_current(op, 0).get_average();
+    const double cur = *processed_current(op, 0).get_average();   // copy: processed_current returns a temporary
     const double rms = *processed_current(op, 0).get_rms();
     CHECK(rms > 0.0);
     CHECK(std::abs(cur) < 0.15 * rms + 0.05);

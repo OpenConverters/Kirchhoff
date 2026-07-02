@@ -72,10 +72,8 @@ double cli_average(const std::string& circuit, const std::string& node, double f
 } // namespace
 
 TEST_CASE("in-process libngspice runner reads back a simple RC deck", "[ngspice][runner]") {
-    if (!Kirchhoff::ngspice_in_process_available()) {
-        WARN("Kirchhoff built without libngspice (ENABLE_NGSPICE off) — skipping in-process runner test");
-        return;
-    }
+    if (!Kirchhoff::ngspice_in_process_available())
+        SKIP("Kirchhoff built without libngspice (ENABLE_NGSPICE off) — in-process runner not exercised");
     Kirchhoff::NgspiceRunResult r = Kirchhoff::run_ngspice_in_process(rc_deck());
     REQUIRE(r.success);
     REQUIRE_FALSE(r.time.empty());
@@ -85,10 +83,8 @@ TEST_CASE("in-process libngspice runner reads back a simple RC deck", "[ngspice]
 }
 
 TEST_CASE("in-process runner matches the ngspice CLI on a converter deck", "[ngspice][runner]") {
-    if (!Kirchhoff::ngspice_in_process_available()) {
-        WARN("Kirchhoff built without libngspice — skipping in-process vs CLI equivalence");
-        return;
-    }
+    if (!Kirchhoff::ngspice_in_process_available())
+        SKIP("Kirchhoff built without libngspice — in-process vs CLI equivalence not exercised");
     // Design a boost converter, emit its ideal deck, and run it both ways over the same window.
     json spec;
     spec["designRequirements"]["efficiency"] = 1.0;

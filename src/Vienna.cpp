@@ -83,8 +83,9 @@ ViennaDesign design_vienna(const json& tasInputs) {
                        / (d.senseResistance * Ceff * d.outputVoltage);
     const double wpv = 2.0 / (d.loadResistance * Ceff);                    // load pole
     // Crossover: a 3-phase bus has only a tiny 6·fline ripple (no 2·fline term to fight, unlike single-phase
-    // PFC), so the bus loop can run a few times FASTER than fline without distorting the per-phase shaping —
-    // and it must, to settle the precharged bus within the few-line-cycle sim window.
+    // PFC), so the bus loop crossover (wcv = 2π·fline/3, i.e. a crossover of fline/3 Hz) can sit near the line
+    // rate without distorting the per-phase shaping — fast enough to settle the precharged bus within the
+    // few-line-cycle sim window.
     const double wcv = 2.0 * kPi * d.lineFrequency / 3.0;
     d.proportionalGain = wcv / (kv * K0v);
     d.integralGain     = d.proportionalGain * wpv;

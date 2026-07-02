@@ -41,12 +41,20 @@ add_subdirectory("${PSMA_ROOT}/CIAS"     "${CMAKE_BINARY_DIR}/CIAS")
 # libngspice + <ngspice/sharedspice.h> and src/NgspiceRunner.cpp is compiled with ENABLE_NGSPICE; when
 # OFF (or the lib is absent) the runner stub throws and callers use the ngspice CLI. Default: auto —
 # ON if the library is found. The same libngspice path feeds the future WASM in-browser run (P5).
+# Honour an explicit -DENABLE_NGSPICE=ON/OFF; only AUTO-enable (when libngspice is found) if the user did
+# NOT specify it. A command-line -D populates the cache BEFORE this script runs, so DEFINED distinguishes an
+# explicit choice from option()'s default — this is what keeps a fresh `-DENABLE_NGSPICE=OFF` from being
+# silently forced back ON (no silent override of an explicit user choice).
+if (DEFINED ENABLE_NGSPICE)
+    set(_ngspice_user_set TRUE)
+else()
+    set(_ngspice_user_set FALSE)
+endif()
 option(ENABLE_NGSPICE "Build the in-process libngspice runner (src/NgspiceRunner.cpp)" OFF)
 find_library(NGSPICE_LIB ngspice)
 find_path(NGSPICE_INCLUDE_DIR ngspice/sharedspice.h)
-if (NGSPICE_LIB AND NGSPICE_INCLUDE_DIR AND NOT DEFINED CACHE{ENABLE_NGSPICE_SET})
-    set(ENABLE_NGSPICE ON CACHE BOOL "" FORCE)   # auto-enable when libngspice is present
-    set(ENABLE_NGSPICE_SET ON CACHE INTERNAL "")
+if (NGSPICE_LIB AND NGSPICE_INCLUDE_DIR AND NOT _ngspice_user_set)
+    set(ENABLE_NGSPICE ON CACHE BOOL "" FORCE)   # auto-enable only when unspecified and libngspice is present
 endif()
 
 # The converter-waveform DSP (FFT, create_waveform, sampled/processed/harmonics, complete_excitation)
@@ -55,6 +63,16 @@ endif()
 # single file directly (no dependency on the rest of MKF). MKF_DIR points at the MKF checkout.
 set(MKF_DIR "/home/alf/OpenMagnetics/MKF" CACHE PATH "Path to the MKF checkout (for the shared WaveformProcessor)")
 set(MKF_WAVEFORM_PROCESSOR "${MKF_DIR}/src/processors/WaveformProcessor.cpp")
+# Fail configure with a clear message instead of a cryptic mid-compile "file not found" when MKF_DIR does
+# not point at a real checkout. NOTE: MKF is currently an UNPINNED local path (unlike the pinned deps/
+# submodules), so the build is only reproducible where that checkout exists — vendoring or submodule-pinning
+# this single self-contained file is a follow-up (see review notes).
+if (NOT EXISTS "${MKF_WAVEFORM_PROCESSOR}")
+    message(FATAL_ERROR
+        "MKF WaveformProcessor not found:\n  ${MKF_WAVEFORM_PROCESSOR}\n"
+        "Kirchhoff compiles this one self-contained MKF file for its converter-waveform DSP. "
+        "Point -DMKF_DIR=<path-to-MKF-checkout> at your MKF clone (default /home/alf/OpenMagnetics/MKF).")
+endif()
 
 add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/Dab.cpp src/IsolatedBuck.cpp src/IsolatedBuckBoost.cpp src/Weinberg.cpp src/Llc.cpp src/Src.cpp src/Cllc.cpp src/Clllc.cpp src/Pfc.cpp src/Vienna.cpp src/TasAssembler.cpp src/NgspiceRunner.cpp src/Analytical.cpp src/ConverterAnalytical.cpp src/ConverterExtract.cpp "${MKF_WAVEFORM_PROCESSOR}")
 target_include_directories(kirchhoff PUBLIC

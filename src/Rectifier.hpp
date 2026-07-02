@@ -17,23 +17,26 @@
 
 #include <string>
 #include <cctype>
+#include <stdexcept>
 
 namespace Kirchhoff {
 
 enum class RectifierType { CenterTapped, FullBridge, CurrentDoubler, VoltageDoubler };
 
-// Case/space/underscore/hyphen-insensitive parse; falls back to `dflt` for an unknown/absent string so
-// each topology keeps its own principled default (LLC/SRC → CT, PSFB/PSHB/AHB → FB).
+// Case/space/underscore/hyphen-insensitive parse. An ABSENT (empty) value keeps the topology's principled
+// default (LLC/SRC → CT, PSFB/PSHB/AHB → FB); a PRESENT but unrecognized string is malformed input and
+// THROWS (no silent default — that would build a different rectifier than the user asked for).
 inline RectifierType parse_rectifier_type(const std::string& s, RectifierType dflt) {
     std::string t;
     for (char c : s)
         if (!std::isspace(static_cast<unsigned char>(c)) && c != '_' && c != '-')
             t += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (t.empty()) return dflt;
     if (t == "centertapped"   || t == "ct") return RectifierType::CenterTapped;
     if (t == "fullbridge"     || t == "fb") return RectifierType::FullBridge;
     if (t == "currentdoubler" || t == "cd") return RectifierType::CurrentDoubler;
     if (t == "voltagedoubler" || t == "vd") return RectifierType::VoltageDoubler;
-    return dflt;
+    throw std::invalid_argument("Kirchhoff: unknown rectifierType '" + s + "'");
 }
 
 inline const char* rectifier_name(RectifierType r) {

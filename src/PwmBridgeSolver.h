@@ -7,6 +7,8 @@
 #include <cmath>
 #include <vector>
 #include <algorithm>
+#include <stdexcept>   // std::invalid_argument (used below; was relying on a transitive include)
+#include <string>      // std::to_string
 
 namespace OpenMagnetics {
 

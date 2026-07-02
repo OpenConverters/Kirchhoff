@@ -39,8 +39,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import PyKirchhoff  # noqa: E402
 try:
     import PyOpenMagnetics as _PYOM  # authoritative magnetics models (calculate_saturation_current); optional
-except Exception:  # pragma: no cover - PyOM not installed -> verdict falls back to the subcircuit's Isat
-    _PYOM = None
+except ImportError:  # pragma: no cover - PyOM not installed -> verdict falls back to the subcircuit's Isat
+    _PYOM = None   # narrow to ImportError: an ABI/other error must surface, not silently downgrade authority
 
 # control variable per topology: (stimulus waveform field, search bracket). The Vout-vs-control direction is
 # auto-detected (sampling the bracket ends), so we never hardcode a possibly-wrong monotonicity.
@@ -253,10 +253,10 @@ def _parse_deck(deck):
                 loads.append((resolve(n1, sub), resolve(n2, sub), "R", rv))
             elif re.search("out", n2, re.I) and n1 in _GND:
                 loads.append((resolve(n2, sub), resolve(n1, sub), "R", rv))
-        m = re.match(r"^Iload\s+(\S+)\s+(\S+)\s+DC\s+([-\d.eE+]+)", ln)
+        m = re.match(r"^Iload\d*\s+(\S+)\s+(\S+)\s+DC\s+([-\d.eE+]+)", ln)   # \d*: multi-output suffix
         if m:
             loads.append((resolve(m.group(1), sub), resolve(m.group(2), sub), "I", abs(float(m.group(3)))))
-        m = re.match(r"^Bload\s+(\S+)\s+(\S+)\b.*?=\s*([-\d.eE+]+)\s*/", ln)   # constant-power
+        m = re.match(r"^Bload\d*\s+(\S+)\s+(\S+)\b.*?=\s*([-\d.eE+]+)\s*/", ln)   # constant-power, \d*: suffix
         if m:
             loads.append((resolve(m.group(1), sub), resolve(m.group(2), sub), "P", float(m.group(3))))
         m = re.match(r"^(C\w+)\s+\S+\s+\S+\s+([-\d.eE+]+)", ln)
@@ -577,10 +577,10 @@ def _authoritative_isat(magnetic, temperature):
     if not isinstance(magnetic, dict):
         return None, None
     if magnetic.get("core") and magnetic.get("coil") and _PYOM is not None:
-        try:
-            return abs(float(_PYOM.calculate_saturation_current(magnetic, temperature))), "model"
-        except Exception:
-            pass
+        # Architecture present + model available: the MODEL is authoritative. A failure here is a real error
+        # (malformed architecture / ABI break) to SURFACE — not something to silently downgrade to the
+        # datasheet rating (that would mask exactly the bug the house rule says to throw on).
+        return abs(float(_PYOM.calculate_saturation_current(magnetic, temperature))), "model"
     ds = _datasheet_isat(magnetic)
     return (ds, "datasheet") if ds is not None else (None, None)
 

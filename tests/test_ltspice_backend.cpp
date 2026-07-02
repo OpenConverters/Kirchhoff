@@ -129,11 +129,9 @@ TEST_CASE("LTspice backend: STRUCTURAL — every CIAS primitive maps, topology i
 
 TEST_CASE("LTspice backend: EXECUTION equivalence vs ngspice (needs Wine + LTspice)", "[ltspice][backend][run]") {
     const std::string exe = find_ltspice();
-    if (exe.empty() || run_shell("which wine 2>/dev/null").empty()) {
-        WARN("LTspice/Wine not found — EXECUTION cross-check SKIPPED (structural mapping still verified). "
+    if (exe.empty() || run_shell("which wine 2>/dev/null").empty())
+        SKIP("LTspice/Wine not found — EXECUTION cross-check not exercised (structural mapping still verified). "
              "Install LTspice under Wine or set KIRCHHOFF_LTSPICE to enable the real cross-simulator run.");
-        return;
-    }
 
     Kirchhoff::PfcDesign d = Kirchhoff::design_pfc(pfc_inputs());
     json tas = Kirchhoff::build_pfc_tas(d);
@@ -159,11 +157,9 @@ TEST_CASE("LTspice backend: EXECUTION equivalence vs ngspice (needs Wine + LTspi
     std::stringstream ss; ss << logf.rdbuf();
     const std::string ltLog = ss.str();
     double ltVout = 0;
-    if (ltLog.empty() || !meas(ltLog, "vout", ltVout)) {
-        WARN("LTspice found at '" << exe << "' but produced no batch result headlessly (GUI/display init) "
-             "— EXECUTION cross-check SKIPPED. Structural mapping is still verified.");
-        return;
-    }
+    if (ltLog.empty() || !meas(ltLog, "vout", ltVout))
+        SKIP("LTspice found at '" << exe << "' but produced no batch result headlessly (GUI/display init) "
+             "— EXECUTION cross-check not exercised. Structural mapping is still verified.");
 
     INFO("PFC bus voltage: ngspice=" << ngVout << " V, LTspice=" << ltVout << " V");
     // The two independent simulators agree on the regulated bus.

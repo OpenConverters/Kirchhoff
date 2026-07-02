@@ -406,7 +406,16 @@ void check_real_deck(const std::string& name, double coss = 1e-9, bool probe = f
 
     double vout = 0; bool converged = true; std::string err;
     try { vout = std::fabs(simulate_vout(di, b.tas, b.loadR, b.settleCap, name + "_real")); }
-    catch (const std::exception& e) { converged = false; err = e.what(); }
+    catch (const std::exception& e) {
+        // ONLY ngspice non-convergence is the tolerated (non-gating) outcome below. A build/assembler error
+        // (malformed deck, schema violation, missing branch) is a real regression that this diagnostic must
+        // NOT swallow — rethrow it so the test fails instead of masquerading as "did not converge".
+        const std::string what = e.what();
+        if (what.find("did not converge") == std::string::npos &&
+            what.find("could not parse Vout") == std::string::npos)
+            throw;
+        converged = false; err = what;
+    }
 
     // NON-GATING DIAGNOSTIC. Real-deck full-converter convergence after stripping the ideal numerical aids
     // (snubber + topology body diode) is TOPOLOGY-SPECIFIC and provably not statically solvable: the
