@@ -224,8 +224,18 @@ json build_llc_tas(const LlcDesign& d) {
                                   ? AN::SrcRectifier::CENTER_TAPPED : AN::SrcRectifier::FULL_BRIDGE;
     // analytical_llc's turnsRatios is PER OUTPUT (one here); the CENTER_TAPPED rectifier splits it into the
     // 3 physical windings (primary + two secondary half-windings) internally.
+    // CD/VD reflect the winding through an output doubler, so n was sized against the WINDING terminal, not
+    // the output terminal (VD doubles n, CD ~halves it). The solver reflects n·Vout_arg, so it must be fed
+    // the winding-terminal V/I (VD: Vo/2 & 2·Iout; CD: Vo/cdF & cdF·Iout) — passing the raw output V/I would
+    // solve the embedded tank/windings at 2×/~0.47× the real reflected operating point. FB/CT feed directly.
+    double vEmbed = d.outputVoltage, iEmbed = Iout;
+    if (d.rectifierType == RectifierType::VoltageDoubler) { vEmbed = d.outputVoltage / 2.0; iEmbed = 2.0 * Iout; }
+    else if (d.rectifierType == RectifierType::CurrentDoubler) {
+        const double cdF = cfg::get(d.config, "cdOutputFactor", 0.465);
+        vEmbed = d.outputVoltage / cdF; iEmbed = cdF * Iout;
+    }
     const std::vector<double> trs{n};
-    const MAS::OperatingPoint aopT1 = AN::analytical_llc(d.inputVoltage, {d.outputVoltage}, {Iout}, trs, fr,
+    const MAS::OperatingPoint aopT1 = AN::analytical_llc(d.inputVoltage, {vEmbed}, {iEmbed}, trs, fr,
                                                          d.magnetizingInductance, d.resonantInductance,
                                                          d.resonantCapacitance, 0.5, rect);
     const std::vector<json> windings = AN::excitations_processed(aopT1);

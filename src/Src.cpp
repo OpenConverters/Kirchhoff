@@ -198,7 +198,17 @@ json build_src_tas(const SrcDesign& d) {
     namespace AN = Kirchhoff::analytical;
     const AN::SrcRectifier rect = (d.rectifierType == RectifierType::CenterTapped)
                                   ? AN::SrcRectifier::CENTER_TAPPED : AN::SrcRectifier::FULL_BRIDGE;
-    const MAS::OperatingPoint aopT1 = AN::analytical_src(d.inputVoltage, {d.outputVoltage}, {Iout}, {n}, fr,
+    // CD/VD reflect the winding through an output doubler, so n was sized against the WINDING terminal, not
+    // the output terminal. The solver reflects n·Vout_arg, so it must be fed the winding-terminal V/I
+    // (VD: Vo/2 & 2·Iout; CD: Vo/cdF & cdF·Iout); the raw output V/I would solve the embedded tank/windings
+    // at 2×/~0.47× the real reflected operating point. FB/CT feed the winding directly.
+    double vEmbed = d.outputVoltage, iEmbed = Iout;
+    if (d.rectifierType == RectifierType::VoltageDoubler) { vEmbed = d.outputVoltage / 2.0; iEmbed = 2.0 * Iout; }
+    else if (d.rectifierType == RectifierType::CurrentDoubler) {
+        const double cdF = cfg::get(d.config, "cdOutputFactor", 0.465);
+        vEmbed = d.outputVoltage / cdF; iEmbed = cdF * Iout;
+    }
+    const MAS::OperatingPoint aopT1 = AN::analytical_src(d.inputVoltage, {vEmbed}, {iEmbed}, {n}, fr,
                                                          d.resonantInductance, d.resonantCapacitance, 0.5, rect);
     const std::vector<json> windings = AN::excitations_processed(aopT1);
     json t1; t1["magnetic"] = json::object();

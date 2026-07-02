@@ -733,7 +733,6 @@ MAS::OperatingPoint analytical_weinberg(double inputVoltage, double outputVoltag
     std::vector<double> iPriBneg(N + 1), iSecBneg(N + 1);   // opposite-wound T1 halves
     for (int k = 0; k <= N; ++k) { iPriBneg[k] = -iPriB[k]; iSecBneg[k] = -iSecB[k]; }
 
-    const double nInv = (turnsRatio > 1e-9) ? (1.0 / turnsRatio) : 0.0;
     // L1 input inductor voltage: charges at +Vin for the effective fraction dEff, resets at −vL1Reset
     // (volt-second balanced). dEff = max(2D−1, D) (the boost-overlap charge fraction).
     const double dEff = std::max(2.0 * dutyCycle - 1.0, dutyCycle);
@@ -747,8 +746,9 @@ MAS::OperatingPoint analytical_weinberg(double inputVoltage, double outputVoltag
     MAS::Waveform vL1 = WP::create_waveform(Lbl::RECTANGULAR, inputVoltage + vL1Reset, switchingFrequency, dEff, 0.0, 0);
     exc.push_back(WP::complete_excitation(customCurrent(iPriA), vL1, switchingFrequency, "L1 primary a"));
     exc.push_back(WP::complete_excitation(customCurrent(iPriB), vL1, switchingFrequency, "L1 primary b"));
-    // [2,3] T1 push-pull primary halves (opposite-wound → opposite DC sign), voltage ±Vout/n.
-    MAS::Waveform vPri = WP::create_waveform(Lbl::BIPOLAR_RECTANGULAR, 2.0 * outputVoltage * nInv, switchingFrequency, 0.5, 0.0, 0);
+    // [2,3] T1 push-pull primary halves (opposite-wound → opposite DC sign), voltage ±n·Vout
+    // (n = Np/Ns; the secondary is diode-clamped to ±Vout, so the primary reflects to n·Vout).
+    MAS::Waveform vPri = WP::create_waveform(Lbl::BIPOLAR_RECTANGULAR, 2.0 * outputVoltage * turnsRatio, switchingFrequency, 0.5, 0.0, 0);
     exc.push_back(WP::complete_excitation(customCurrent(iPriA),    vPri, switchingFrequency, "T1 primary a"));
     exc.push_back(WP::complete_excitation(customCurrent(iPriBneg), vPri, switchingFrequency, "T1 primary b"));
     // [4,5] T1 push-pull secondary halves (opposite-wound), voltage ±Vout.

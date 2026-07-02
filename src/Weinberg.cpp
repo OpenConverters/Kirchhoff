@@ -59,10 +59,11 @@ d.dutyCycle = duty_boost(Vin, Vo + Vd, d.turnsRatio, eta);
     d.switchDuty = d.dutyCycle;
 
     // L1 sized at MIN Vin (worst case): ΔI_L1 = ripple·I_L1perWinding, I_L1perWinding = Iin/2,
-    // Iin = Iout/(η·M_boost). L1 = Vin_min·D_eff/(ΔI_L1·Fs), D_eff = max(2D−1, D).
+    // Iin = Iout·M_boost/η (power balance Vin·Iin·η = Vo·Iout, M = Vo/Vin). L1 = Vin_min·D_eff/(ΔI_L1·Fs),
+    // D_eff = max(2D−1, D).
     const double Dmin = duty_boost(vinMin, Vo, d.turnsRatio, eta);
     const double Mboost = 1.0 / (2.0 * d.turnsRatio * (1.0 - Dmin));
-    const double Iin = Iout / (eta * Mboost);
+    const double Iin = Iout * Mboost / eta;
     const double dIL1 = cfg::get(d.config, "l1RippleRatio", kRippleRatio) * (Iin / 2.0);
     const double dEff = std::max(2.0 * Dmin - 1.0, Dmin);
     d.inputInductance = vinMin * dEff / (dIL1 * Fs);
@@ -109,24 +110,24 @@ json build_weinberg_tas(const WeinbergDesign& d) {
     // The transformer/inductor WINDING excitations come from the analytical solver below (the single FHA
     // source); only the values the switch/diode ratings need are computed inline here. The current-fed
     // front end draws Iin = Pin/Vin; each push-pull primary half carries the full input current during its
-    // ON-fraction D. Primary halves reflect ±Vout/n, secondaries ±Vout.
+    // ON-fraction D. Primary halves reflect ±n·Vout (n = Np/Ns), secondaries ±Vout.
     const double Iin  = d.outputPower / (d.efficiency * Vin);
     const double Iout = d.outputPower / Vout;
     const double IL1avg = Iin / 2.0;
     const double dIL1 = cfg::get(d.config, "l1RippleRatio", kRippleRatio) * IL1avg;
     const double IpkPri  = Iin + dIL1 / 2.0;
     const double IrmsPri = std::sqrt(D) * Iin;
-    const double vPriPkPk = 2.0 * Vout / n;   // S1/S2 reflected blocking voltage
+    const double vPriPkPk = 2.0 * n * Vout;   // S1/S2 reflected blocking voltage (n = Np/Ns ⇒ ≡ Vin/(1−D))
     const double vSecPkPk = 2.0 * Vout;       // Dpos/Dneg blocking voltage
 
     // ── semiconductor requirements (boost regime, nominal operating corner) ──
     // Push-pull primary switches S1/S2: in a current-fed push-pull each off-switch drain is clamped by
-    // the conducting half + the reflected secondary to ~2·Vout/n (the full primary pk-pk reflected
-    // voltage); it carries the full input current during its conduction (duty D). Secondary CT-FW
+    // the conducting half + the reflected secondary to ~2·n·Vout (the full primary pk-pk reflected
+    // voltage, ≡ Vin/(1−D)); it carries the full input current during its conduction (duty D). Secondary CT-FW
     // rectifiers Dpos/Dneg are REAL output rectifiers: each blocks the full secondary pk-pk (2·Vout)
     // when its partner conducts, and supplies Iout on alternate half-cycles. (No anti-parallel FET;
     // the energy-recovery path is the series-RC snubber, so no separate recovery diode here.)
-    const double ratedVdsW = vPriPkPk / cfg::v_derate_mosfet(d.config);   // S1/S2 block ~2*Vout/n reflected
+    const double ratedVdsW = vPriPkPk / cfg::v_derate_mosfet(d.config);   // S1/S2 block ~2*n*Vout reflected
     const double ratedVrW  = vSecPkPk / cfg::v_derate_diode(d.config);   // Dpos/Dneg block ~2*Vout
     const double maxRdsOnW = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IrmsPri * IrmsPri);
     const double maxVfW    = (ratedVrW < 100.0) ? 0.6 : 1.2;

@@ -87,7 +87,8 @@ json build_cuk_tas(const CukDesign& d) {
     namespace AN = Kirchhoff::analytical;
     const double fsw = d.switchingFrequency, iout = d.outputPower / d.outputVoltageMag;
     const double dIL2 = cfg::get(d.config, "l2RippleRatio", kL2RipplePct) * iout;
-    const double vSwing = d.inputVoltage + d.outputVoltageMag;   // C1 holds ~Vin+|Vo|; switch/diode block it
+    const double vSwing = d.inputVoltage + d.outputVoltageMag;   // nominal operating swing (L2 excitation embed)
+    const double vSwingRating = d.inputVoltageMax + d.outputVoltageMag;   // worst-case corner for VOLTAGE ratings
     const MAS::OperatingPoint aopWorst = AN::analytical_cuk(d.inputVoltageMin, d.outputVoltageMag, iout, fsw,
                                                            d.inductanceL1, d.diodeDrop, d.efficiency);
     const MAS::OperatingPoint aopNom   = AN::analytical_cuk(d.inputVoltage,    d.outputVoltageMag, iout, fsw,
@@ -109,17 +110,20 @@ json build_cuk_tas(const CukDesign& d) {
     json L2 = inductor(d.inductanceL2, iout, dIL2);
     json c1; c1["capacitor"] = json::object();
     c1["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.couplingCapacitance;
-    c1["inputs"]["designRequirements"]["ratedVoltage"] = vSwing / cfg::v_derate_capacitor(d.config);
+    c1["inputs"]["designRequirements"]["ratedVoltage"] = vSwingRating / cfg::v_derate_capacitor(d.config);
     json capd; capd["capacitor"] = json::object();
     capd["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;
     capd["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltageMag / cfg::v_derate_capacitor(d.config);
+    // Switch RMS: during the on-time (duty D) the main switch carries IL1 + IL2 (≈ IL1avg + iout);
+    // maxRdsOn = loss_fraction·Pout / Isw_rms² (OHMS — sibling topologies all divide by Isw_rms²).
+    const double IswRms = std::sqrt(d.dutyCycle) * (IL1avg + iout);
     json mq = mosfet();
-    mq["inputs"]["designRequirements"] = req::mosfet("mainSwitch", vSwing / cfg::v_derate_mosfet(d.config),
+    mq["inputs"]["designRequirements"] = req::mosfet("mainSwitch", vSwingRating / cfg::v_derate_mosfet(d.config),
                                                      iout + IL1avg,
-                                                     0.01 * d.outputPower, 125.0);
+                                                     cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IswRms * IswRms), 125.0);
     json md = diode();
-    md["inputs"]["designRequirements"] = req::diode(vSwing / cfg::v_derate_diode(d.config), iout / 0.7,
-                                                    (vSwing < 100.0) ? 0.6 : 1.2, 0.05 / fsw);
+    md["inputs"]["designRequirements"] = req::diode(vSwingRating / cfg::v_derate_diode(d.config), iout / 0.7,
+                                                    (vSwingRating < 100.0) ? 0.6 : 1.2, 0.05 / fsw);
 
     // RC snubber across the freewheel diode — a REAL component (the DAB cell snubs its switches the same
     // way). It damps the ideal-diode commutation dV/dt so the Cuk's resonant coupling loop converges in

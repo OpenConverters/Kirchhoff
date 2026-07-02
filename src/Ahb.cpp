@@ -154,9 +154,12 @@ json build_ahb_tas(const AhbDesign& d) {
     const double maxRdsOn  = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IpriRms * IpriRms);
     json mosfetReq; mosfetReq["semiconductor"]["mosfet"] = json::object();
     mosfetReq["inputs"]["designRequirements"] = req::mosfet("mainSwitch", ratedVds, IpriPk, maxRdsOn, 125.0);
-    // Secondary full-bridge rectifier Dr1..Dr4: each off diode blocks the secondary winding voltage
-    // (peak Vs); each carries the output current while conducting. REAL rectifiers -> req::diode.
-    const double ratedVr  = vSecPk / cfg::v_derate_diode(d.config);
+    // Secondary rectifier diodes: FULL_BRIDGE / CURRENT_DOUBLER off diodes block ONE winding voltage
+    // (peak Vs); CENTER_TAPPED blocks 2·Vs (both half-windings in series) and VOLTAGE_DOUBLER blocks 2·Vs.
+    // Each carries the output current while conducting. REAL rectifiers -> req::diode.
+    const double vrStress = (d.rectifierType == RectifierType::CenterTapped ||
+                             d.rectifierType == RectifierType::VoltageDoubler) ? 2.0 * vSecPk : vSecPk;
+    const double ratedVr  = vrStress / cfg::v_derate_diode(d.config);
     const double maxVf    = (ratedVr < 100.0) ? 0.6 : 1.2;
     json diodeReq; diodeReq["semiconductor"]["diode"] = json::object();
     diodeReq["inputs"]["designRequirements"] = req::diode(ratedVr, Io / 0.7, maxVf, 0.05 * Tsw);

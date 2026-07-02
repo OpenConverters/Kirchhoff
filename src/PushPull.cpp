@@ -123,9 +123,9 @@ json build_push_pull_tas(const PushPullDesign& d) {
         ? cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IrmsPri * IrmsPri)
         : cfg::rds_on_loss_fraction(d.config) * d.outputPower;
     // Center-tapped full-wave output rectifiers Dtop/Dbot are REAL rectifiers (not FET body diodes):
-    // each reverse-blocks the FULL secondary swing 2*N*Vin (the non-conducting diode sees both half
-    // windings in series) and carries the inductor current during its half-cycle (~Iout).
-    const double ratedVr  = (2.0 * N * d.inputVoltageMax) / cfg::v_derate_diode(d.config);
+    // each reverse-blocks the FULL secondary swing 2*Vin/N (N = Np/Ns; the non-conducting diode sees both
+    // half windings in series, each at Vin/N) and carries the inductor current during its half-cycle (~Iout).
+    const double ratedVr  = (2.0 * d.inputVoltageMax / N) / cfg::v_derate_diode(d.config);
     const double maxVf    = (ratedVr < 100.0) ? 0.6 : 1.2;
     const double Tsw      = 1.0 / fsw;
     const double maxTrr   = 0.05 * Tsw;

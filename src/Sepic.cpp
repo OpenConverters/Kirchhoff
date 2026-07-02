@@ -87,7 +87,8 @@ json build_sepic_tas(const SepicDesign& d) {
     namespace AN = Kirchhoff::analytical;
     const double fsw = d.switchingFrequency, iout = d.outputPower / d.outputVoltage;
     const double dIL2 = cfg::get(d.config, "l2RippleRatio", kL2RipplePct) * iout;
-    const double vSwing = d.inputVoltage + d.outputVoltage;
+    const double vSwing = d.inputVoltage + d.outputVoltage;   // nominal operating swing (L2 excitation embed)
+    const double vSwingRating = d.inputVoltageMax + d.outputVoltage;   // worst-case corner for VOLTAGE ratings
     const MAS::OperatingPoint aopWorst = AN::analytical_sepic(d.inputVoltageMin, d.outputVoltage, iout, fsw,
                                                              d.inductanceL1, d.diodeDrop, d.efficiency);
     const MAS::OperatingPoint aopNom   = AN::analytical_sepic(d.inputVoltage,    d.outputVoltage, iout, fsw,
@@ -109,17 +110,20 @@ json build_sepic_tas(const SepicDesign& d) {
     json L2 = inductor(d.inductanceL2, iout, dIL2);
     json cs; cs["capacitor"] = json::object();
     cs["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.couplingCapacitance;
-    cs["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) / cfg::v_derate_capacitor(d.config);
+    cs["inputs"]["designRequirements"]["ratedVoltage"] = vSwingRating / cfg::v_derate_capacitor(d.config);
     json capd; capd["capacitor"] = json::object();
     capd["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;
     capd["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage / cfg::v_derate_capacitor(d.config);
+    // Switch RMS: during the on-time (duty D) the main switch carries IL1 + IL2 (≈ IL1avg + iout);
+    // maxRdsOn = loss_fraction·Pout / Isw_rms² (OHMS — sibling topologies all divide by Isw_rms²).
+    const double IswRms = std::sqrt(d.dutyCycle) * (IL1avg + iout);
     json mq = mosfet();
-    mq["inputs"]["designRequirements"] = req::mosfet("mainSwitch", vSwing / cfg::v_derate_mosfet(d.config),
+    mq["inputs"]["designRequirements"] = req::mosfet("mainSwitch", vSwingRating / cfg::v_derate_mosfet(d.config),
                                                      iout + IL1avg,
-                                                     0.01 * d.outputPower, 125.0);
+                                                     cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IswRms * IswRms), 125.0);
     json md = diode();
-    md["inputs"]["designRequirements"] = req::diode(vSwing / cfg::v_derate_diode(d.config), iout / 0.7,
-                                                    (vSwing < 100.0) ? 0.6 : 1.2, 0.05 / fsw);
+    md["inputs"]["designRequirements"] = req::diode(vSwingRating / cfg::v_derate_diode(d.config), iout / 0.7,
+                                                    (vSwingRating < 100.0) ? 0.6 : 1.2, 0.05 / fsw);
 
     json cell; cell["name"] = "sepic-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate")});

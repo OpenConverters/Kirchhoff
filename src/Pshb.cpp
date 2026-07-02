@@ -115,6 +115,7 @@ json build_pshb_tas(const PshbDesign& d) {
     const double fsw = d.switchingFrequency, Tsw = 1.0 / fsw;
     const double Vo = d.outputVoltage, Io = d.outputPower / Vo;
     const double Vhb = 0.5 * d.inputVoltage, Deff = d.effectiveDuty;   // split-cap half bus (sizing basis)
+    const double VhbMax = 0.5 * d.inputVoltageMax;   // worst-case half bus for device VOLTAGE ratings
 
     // --- stresses ---
     // Output inductor (CCM): avg=Io, ripple from the Lo sizing volt-seconds.
@@ -137,22 +138,26 @@ json build_pshb_tas(const PshbDesign& d) {
     const double vSecPk = Vs,  vSecPkPk = 2.0 * Vs,  vSecRms = std::sqrt(Deff) * Vs;
 
     // --- semiconductor ratings (sourceable requirements) ---
-    // 3-level NPC stack switches S1..S4: each device blocks the split-cap half bus (Vhb = Vin/2) when
+    // 3-level NPC stack switches S1..S4: each device blocks the split-cap half bus (Vin_max/2) when
     // off; they carry the primary current (reflected load + magnetizing), peak = IpriPk, rms = IpriRms.
-    // Anti-parallel Db1..Db4 are the FETs' body diodes (left requirement-less).
-    const double ratedVds = Vhb / cfg::v_derate_mosfet(d.config);
+    // Anti-parallel Db1..Db4 are the FETs' body diodes (left requirement-less). Rated at the MAX-Vin corner.
+    const double ratedVds = VhbMax / cfg::v_derate_mosfet(d.config);
     const double maxRdsOn  = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IpriRms * IpriRms);
     json mosfetReq; mosfetReq["semiconductor"]["mosfet"] = json::object();
     mosfetReq["inputs"]["designRequirements"] = req::mosfet("mainSwitch", ratedVds, IpriPk, maxRdsOn, 125.0);
     // NPC neutral-point clamp diodes DC1/DC2: REAL diodes (not anti-parallel to any single FET) that
-    // clamp the inner nodes to the cap midpoint and freewheel the primary current; each blocks Vhb.
-    const double ratedVrClamp = Vhb / cfg::v_derate_diode(d.config);
+    // clamp the inner nodes to the cap midpoint and freewheel the primary current; each blocks the half bus
+    // (rated at the MAX-Vin corner).
+    const double ratedVrClamp = VhbMax / cfg::v_derate_diode(d.config);
     const double maxVfClamp    = (ratedVrClamp < 100.0) ? 0.6 : 1.2;
     json clampDiodeReq; clampDiodeReq["semiconductor"]["diode"] = json::object();
     clampDiodeReq["inputs"]["designRequirements"] = req::diode(ratedVrClamp, IpriPk, maxVfClamp, 0.05 * Tsw);
-    // Secondary full-bridge rectifier Dr1..Dr4: each off diode blocks the secondary winding voltage
-    // (peak Vs); each carries the output current while conducting. REAL rectifiers -> req::diode.
-    const double ratedVr  = vSecPk / cfg::v_derate_diode(d.config);
+    // Secondary rectifier diodes: FULL_BRIDGE / CURRENT_DOUBLER off diodes block ONE winding voltage
+    // (peak Vs); CENTER_TAPPED blocks 2·Vs (both half-windings in series) and VOLTAGE_DOUBLER blocks 2·Vs.
+    // Each carries the output current while conducting. REAL rectifiers -> req::diode.
+    const double vrStress = (d.rectifierType == RectifierType::CenterTapped ||
+                             d.rectifierType == RectifierType::VoltageDoubler) ? 2.0 * vSecPk : vSecPk;
+    const double ratedVr  = vrStress / cfg::v_derate_diode(d.config);
     const double maxVf    = (ratedVr < 100.0) ? 0.6 : 1.2;
     json diodeReq; diodeReq["semiconductor"]["diode"] = json::object();
     diodeReq["inputs"]["designRequirements"] = req::diode(ratedVr, Io / 0.7, maxVf, 0.05 * Tsw);
