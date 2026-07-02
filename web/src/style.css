@@ -34,6 +34,18 @@
 
 html, body { margin: 0; padding: 0; }
 
+/* ── scrollbars: thin amber-on-carbon, in keeping with the instrument theme ── */
+* { scrollbar-width: thin; scrollbar-color: var(--amber-deep) transparent; }
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: rgba(0, 0, 0, 0.25); }
+::-webkit-scrollbar-thumb {
+  background: linear-gradient(var(--amber-deep), #7a5216);
+  border: 2px solid var(--bg);
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--amber); }
+::-webkit-scrollbar-corner { background: transparent; }
+
 body {
   font-family: var(--body);
   color: var(--ink);
@@ -70,8 +82,10 @@ body {
   font-family: var(--mono); font-size: 0.72rem; color: var(--ink-dim);
   padding: 0.1rem 0.2rem 0.55rem;
 }
+/* two panes stacked top/bottom — each full-width (landscape), which fits a schematic
+   and a waveform far better than two narrow columns */
 .pane-grid {
-  display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;
+  display: grid; grid-template-rows: 1fr 1fr; gap: 1rem;
   height: calc(100vh - 128px);
 }
 .workspace-empty {
@@ -87,7 +101,7 @@ body {
 @media (max-width: 1100px) {
   .workbench { flex-direction: column; }
   .controls { position: static; width: 100%; flex: none; max-height: none; }
-  .pane-grid { grid-template-columns: 1fr; height: auto; }
+  .pane-grid { grid-template-rows: none; height: auto; }
   .pane-grid > * { min-height: 420px; }
   .workspace-empty { min-height: 300px; }
 }

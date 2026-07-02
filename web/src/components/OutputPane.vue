@@ -2,7 +2,7 @@
 // One selectable output pane. The workbench shows two of these side by side (default Schematic +
 // Waveforms). All design state + methods come from the injected `kh` context App provides, so the pane
 // is a pure view: pick a view type from its header dropdown, render it.
-import { computed, inject } from 'vue'
+import { computed, inject, ref, watch } from 'vue'
 import WavePane from './WavePane.vue'
 
 const props = defineProps({ view: { type: String, required: true } })
@@ -27,6 +27,12 @@ const {
   deck, deckFlavor, deckFidelity, simStop, simStep, deckBusy, designStop, designStep, periodsShown,
   makeDeck, copyDeck, downloadDeck, si, pct,
 } = kh
+
+// A magnetic can carry several windings; show one at a time with a per-pane selector (kept local so the
+// two panes can look at different windings of the same magnetic). Reset when the magnetic changes.
+const windingIdx = ref(0)
+watch([waveTarget, waveOpIdx, () => waveExcitations.value.length], () => { windingIdx.value = 0 })
+const winding = computed(() => waveExcitations.value[windingIdx.value] ?? null)
 </script>
 
 <template>
@@ -84,6 +90,11 @@ const {
           <select v-if="targetIsMagnetic && waveOps.length > 1" class="fld-in" style="width: auto" v-model.number="waveOpIdx">
             <option v-for="(op, i) in waveOps" :key="i" :value="i">{{ op.name ?? `OP ${i + 1}` }}</option>
           </select>
+          <!-- winding selector: one winding at a time when the magnetic has several -->
+          <select v-if="targetIsMagnetic && waveExcitations.length > 1"
+                  class="fld-in" style="width: auto" v-model.number="windingIdx">
+            <option v-for="(exc, i) in waveExcitations" :key="i" :value="i">{{ exc.name ?? `winding ${i}` }}</option>
+          </select>
           <span v-if="targetIsMagnetic" class="chip" :class="waveSource.kind === 'ngspice' ? 'cyan' : 'amber'">{{ waveSource.kind }}</span>
           <span v-else class="chip cyan">ngspice</span>
           <div class="sep"></div>
@@ -94,12 +105,12 @@ const {
         </div>
 
         <template v-if="targetIsMagnetic">
-          <div v-for="(exc, i) in waveExcitations" :key="i" style="margin-bottom: 1rem">
-            <div class="mono wave-name">▸ {{ exc.name ?? `winding ${i}` }}
-              <span class="chip" style="margin-left: 0.4rem">{{ si(exc.frequency, 'Hz') }}</span>
+          <template v-if="winding">
+            <div class="mono wave-name">▸ {{ winding.name ?? `winding ${windingIdx}` }}
+              <span class="chip" style="margin-left: 0.4rem">{{ si(winding.frequency, 'Hz') }}</span>
             </div>
-            <WavePane :excitation="exc" :source-kind="waveSource.kind" :periods="form.showPeriods" />
-          </div>
+            <WavePane :excitation="winding" :source-kind="waveSource.kind" :periods="form.showPeriods" />
+          </template>
           <div class="wave-readout">
             <span class="i"><b>—</b> current{{ waveSource.kind === 'ngspice' ? ' · measured' : '' }}</span>
             <span class="v"><b>—</b> voltage{{ waveSource.voltageKind === 'analytical' ? ' · analytical' : '' }}</span>
