@@ -2817,13 +2817,22 @@ MAS::OperatingPoint analytical_common_mode_choke(double magnetizingInductance,
 
     const double excFreq = excitationFrequency;
 
-    // MKF :347-357 — CM current amplitude: I_cm = C·dV/dt when both are supplied, else a representative
-    // 0.1 A, then scaled by the mains voltage (see cmc_excitation_scaling).
+    // CM current amplitude: I_cm = C·dV/dt when both are supplied, else a representative
+    // fallback, then scaled by the mains voltage (see cmc_excitation_scaling).
+    //
+    // The fallback is the *residual* CM current flowing through the choke in normal
+    // operation — what the core actually sees after the input Y-caps shunt most of the
+    // switch-node injection — NOT the raw C·dV/dt source current. A raw-injection value
+    // (~100 mA ≈ 20 pF × 5 V/ns) through a high-permeability nanocrystalline CM core
+    // (µ_r ~1e5) drives B far past saturation (e.g. B_peak ≈ 2.7 T on a small WE
+    // nanocrystalline choke, B_sat ≈ 1.2 T), i.e. false saturation. 10 mA is a moderate
+    // post-Y-cap residual that keeps a typical mains CMC in its linear region; callers
+    // who want the raw-injection stress case supply parasiticCapacitancePf + dvdtVPerNs.
     double iCmPeak;
     if (parasiticCapacitancePf > 0.0 && dvdtVPerNs > 0.0)
         iCmPeak = parasiticCapacitancePf * dvdtVPerNs * 1e-3;
     else
-        iCmPeak = 0.1;
+        iCmPeak = 0.01;
     iCmPeak *= cmc_excitation_scaling(operatingVoltage);
 
     // MKF :359-361 — CM voltage across the CM inductance: V = L·ω·I_cm_peak.
