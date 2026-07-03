@@ -15,9 +15,20 @@
 // flyback-modulated (no synchronous low side).
 
 #include <nlohmann/json.hpp>
+#include <vector>
 #include "Fidelity.hpp"
 
 namespace Kirchhoff {
+
+// One isolated secondary rail (multi-output, ABT #86). Each maps to designRequirements.outputs[1+i]:
+// its own secondary winding (turnsRatio N_i = V_pri/(V_sec_i+Vd)), flyback rectifier, and output cap.
+// secondaries[0] reproduces the single-output secondary scalars below byte-for-byte.
+struct IsolatedBuckBoostSecondaryLeg {
+    double voltage, power;            // V_sec_i, P_sec_i
+    double turnsRatio;                // N_i = V_pri / (V_sec_i + Vd)
+    double loadResistance;            // V_sec_i^2 / P_sec_i
+    double capacitance;               // C_out_i
+};
 
 struct IsolatedBuckBoostDesign {
     double inputVoltage, inputVoltageMin, inputVoltageMax;
@@ -32,6 +43,9 @@ struct IsolatedBuckBoostDesign {
     double outputCapacitance;
     nlohmann::json config;         // primary Cpri (sets the settling RC)
     double secondaryCapacitance;      // secondary Cout
+    // >=1 entry; secondaries[0] duplicates the secondary* scalars above. Additional entries (ABT #86)
+    // are extra isolated rails exposed on external vout<i> ports.
+    std::vector<IsolatedBuckBoostSecondaryLeg> secondaries;
 };
 
 /**

@@ -1049,18 +1049,28 @@ MAS::OperatingPoint analytical_isolated_buck(double inputVoltage, double primary
 }
 
 // Ported from MKF converter_models/IsolatedBuckBoost.cpp:47 (fly-buck-boost; D = Vpri/(Vin+Vpri)·η, calculate_duty_cycle:16).
+// N-secondary form (ABT #86): the primary reflects the SUM of every isolated rail's referred current
+// (Σ Isec_i/n_i); each secondary i is an independent flyback rail with its own turns ratio n_i.
 MAS::OperatingPoint analytical_isolated_buck_boost(double inputVoltage, double primaryOutputVoltage,
-                                                   double primaryOutputCurrent, double secondaryOutputVoltage,
-                                                   double secondaryOutputCurrent, double switchingFrequency,
-                                                   double inductance, double turnsRatio,
+                                                   double primaryOutputCurrent,
+                                                   const std::vector<double>& secondaryOutputVoltages,
+                                                   const std::vector<double>& secondaryOutputCurrents,
+                                                   double switchingFrequency, double inductance,
+                                                   const std::vector<double>& turnsRatios,
                                                    double diodeVoltageDrop, double efficiency) {
     using Lbl = MAS::WaveformLabel;
-    (void)secondaryOutputVoltage;  // structural (2 outputs); the secondary winding voltage follows Vpri.
+    if (secondaryOutputVoltages.empty() ||
+        secondaryOutputVoltages.size() != secondaryOutputCurrents.size() ||
+        secondaryOutputVoltages.size() != turnsRatios.size())
+        throw std::invalid_argument("analytical_isolated_buck_boost: need one current and one turnsRatio per isolated secondary");
+    (void)secondaryOutputVoltages;  // structural (per-rail); the secondary winding voltage follows Vpri.
     double dutyCycle = primaryOutputVoltage / (inputVoltage + primaryOutputVoltage) * efficiency;
     if (dutyCycle >= 1) throw std::invalid_argument("analytical_isolated_buck_boost: duty cycle must be smaller than 1");
     double tOn = dutyCycle / switchingFrequency;
 
-    double totalReflectedSecondaryCurrent = secondaryOutputCurrent / turnsRatio;
+    double totalReflectedSecondaryCurrent = 0.0;
+    for (size_t i = 0; i < turnsRatios.size(); ++i)
+        totalReflectedSecondaryCurrent += secondaryOutputCurrents[i] / turnsRatios[i];
     double primaryCurrentPeakToPeak = (inputVoltage * primaryOutputVoltage) / (inputVoltage + primaryOutputVoltage) /
                                       (switchingFrequency * inductance);
     double primaryCurrentAverage = (primaryOutputCurrent + totalReflectedSecondaryCurrent) / (1.0 - dutyCycle);
@@ -1076,8 +1086,10 @@ MAS::OperatingPoint analytical_isolated_buck_boost(double inputVoltage, double p
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Primary"));
     }
-    // Secondary (single isolated output)
-    {
+    // Secondaries (one isolated flyback rail per output)
+    for (size_t i = 0; i < turnsRatios.size(); ++i) {
+        double secondaryOutputCurrent = secondaryOutputCurrents[i];
+        double turnsRatio = turnsRatios[i];
         double secondaryCurrentMaximum = (1 + dutyCycle) / (1 - dutyCycle) * secondaryOutputCurrent - secondaryOutputCurrent;
         double secondaryCurrentPeakToPeak = secondaryCurrentMaximum - 0;
         double secondaryVoltaveMaximum = (primaryOutputVoltage + diodeVoltageDrop) / turnsRatio - diodeVoltageDrop;
@@ -1087,9 +1099,22 @@ MAS::OperatingPoint analytical_isolated_buck_boost(double inputVoltage, double p
         MAS::Waveform currentWaveform = WP::create_waveform(Lbl::FLYBACK_PRIMARY, secondaryCurrentPeakToPeak, switchingFrequency, 1.0 - dutyCycle, secondaryOutputCurrent, 0, tOn);
         MAS::Waveform voltageWaveform = WP::create_waveform(Lbl::RECTANGULAR, secondaryVoltavePeaktoPeak, switchingFrequency, 1.0 - dutyCycle, 0, 0, tOn);
         operatingPoint.get_mutable_excitations_per_winding().push_back(
-            WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Secondary 0"));
+            WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Secondary " + std::to_string(i)));
     }
     return operatingPoint;
+}
+
+// Scalar (single isolated secondary) convenience overload — forwards a 1-element vector so the
+// single-output deck path is byte-identical.
+MAS::OperatingPoint analytical_isolated_buck_boost(double inputVoltage, double primaryOutputVoltage,
+                                                   double primaryOutputCurrent, double secondaryOutputVoltage,
+                                                   double secondaryOutputCurrent, double switchingFrequency,
+                                                   double inductance, double turnsRatio,
+                                                   double diodeVoltageDrop, double efficiency) {
+    return analytical_isolated_buck_boost(inputVoltage, primaryOutputVoltage, primaryOutputCurrent,
+                                          std::vector<double>{secondaryOutputVoltage},
+                                          std::vector<double>{secondaryOutputCurrent}, switchingFrequency,
+                                          inductance, std::vector<double>{turnsRatio}, diodeVoltageDrop, efficiency);
 }
 
 // Ported from MKF converter_models/ActiveClampForward.cpp:41 (process_operating_points_for_input_voltage).

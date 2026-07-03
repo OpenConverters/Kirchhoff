@@ -218,10 +218,20 @@ MAS::OperatingPoint analytical_isolated_buck(double inputVoltage, double primary
                                              double inductance, double turnsRatio,
                                              double diodeVoltageDrop = 0.0, double efficiency = 1.0);
 
-// Isolated buck-boost (fly-buck-boost). Two outputs (primary rail + isolated secondary).
-// `inductance` is primary/magnetizing, `turnsRatio` Np/Ns. Pushes Primary (TRIANGULAR current
-// around (Ipri + Isec/n)/(1−D)) + Secondary (FLYBACK_PRIMARY current). Ported from MKF
-// IsolatedBuckBoost.cpp:47. Throws if the duty ≥ 1.
+// Isolated buck-boost (fly-buck-boost). Non-isolated inverting primary rail + N isolated secondaries.
+// `inductance` is primary/magnetizing, `turnsRatios[i]` = Np/Ns_i. Pushes Primary (TRIANGULAR current
+// around (Ipri + Σ Isec_i/n_i)/(1−D)) + one Secondary i (FLYBACK_PRIMARY current) per isolated rail.
+// Ported from MKF IsolatedBuckBoost.cpp (N-secondary loop, ABT #86). Throws if the duty ≥ 1 or the
+// secondary vectors mismatch.
+MAS::OperatingPoint analytical_isolated_buck_boost(double inputVoltage, double primaryOutputVoltage,
+                                                   double primaryOutputCurrent,
+                                                   const std::vector<double>& secondaryOutputVoltages,
+                                                   const std::vector<double>& secondaryOutputCurrents,
+                                                   double switchingFrequency, double inductance,
+                                                   const std::vector<double>& turnsRatios,
+                                                   double diodeVoltageDrop = 0.0, double efficiency = 1.0);
+// Scalar (single isolated secondary) convenience overload — forwards a 1-element vector so the
+// single-output deck path is byte-identical.
 MAS::OperatingPoint analytical_isolated_buck_boost(double inputVoltage, double primaryOutputVoltage,
                                                    double primaryOutputCurrent, double secondaryOutputVoltage,
                                                    double secondaryOutputCurrent, double switchingFrequency,

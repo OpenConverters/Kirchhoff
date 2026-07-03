@@ -1578,4 +1578,32 @@ TEST_CASE("Flyback multi-output: two isolated secondaries each regulate (ABT #86
     check_dual_rails(measure_multi_output(tas, 100000.0, {"Vout", "Vout2"}, "flyback_multi"));
 }
 
+TEST_CASE("IsolatedBuckBoost multi-output: inverting primary rail + two isolated secondaries each regulate (ABT #86)",
+          "[equivalence][isolated_buck_boost][multi]") {
+    // Fly-buck-boost with N isolated secondaries: the inverting non-isolated primary buck-boost rail
+    // (output[0], node Vout, NEGATIVE — compared on magnitude) plus TWO isolated flyback secondaries
+    // (outputs[1..], nodes Vout2/Vout3, positive). Each isolated rail gets its own secondary winding +
+    // rectifier + output cap on an external port; the assembler auto-synthesizes each rail's load.
+    // Magnitudes mirror the single-output fixture (Vin 24, Vpri 12, Vsec 5) plus a third rail (8 V).
+    json di = json::parse(R"({ "designRequirements": { "efficiency": 1.0,
+        "inputVoltage": { "minimum": 22.8, "nominal": 24, "maximum": 25.2 },
+        "switchingFrequency": { "nominal": 100000 },
+        "outputs": [ { "name": "vpri",  "voltage": { "nominal": 12 } },
+                     { "name": "vsec1", "voltage": { "nominal": 5 } },
+                     { "name": "vsec2", "voltage": { "nominal": 8 } } ] },
+        "operatingPoints": [ { "inputVoltage": 24,
+            "outputs": [ { "power": 12 }, { "power": 2.5 }, { "power": 4 } ] } ] })");
+    Kirchhoff::IsolatedBuckBoostDesign d = Kirchhoff::design_isolated_buck_boost(di);
+    REQUIRE(d.secondaries.size() == 2);
+    json tas = Kirchhoff::build_isolated_buck_boost_tas(d);
+    // coupled inductor: primary + 2 secondaries -> 2 secondary-side windings.
+    CHECK(transformer_secondary_windings(tas, "flybuckboostCell", "T1") == 2);
+    std::vector<double> v = measure_multi_output(tas, 100000.0, {"Vout", "Vout2", "Vout3"}, "ibb_multi");
+    INFO("primary Vout=" << v.at(0) << " (target -12), sec1 Vout2=" << v.at(1)
+         << " (target 5), sec2 Vout3=" << v.at(2) << " (target 8)");
+    CHECK(v.at(0) < -0.85 * 12.0); CHECK(v.at(0) > -1.15 * 12.0);   // inverting primary rail (magnitude)
+    CHECK(v.at(1) > 0.85 * 5.0);   CHECK(v.at(1) < 1.15 * 5.0);     // isolated secondary 1
+    CHECK(v.at(2) > 0.85 * 8.0);   CHECK(v.at(2) < 1.15 * 8.0);     // isolated secondary 2
+}
+
 }  // namespace
