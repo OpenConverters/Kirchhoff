@@ -236,12 +236,22 @@ const svg = (w, h, inner) =>
 
 // ── topology layouts ───────────────────────────────────────────────────────
 
-function buck(bom) {
+// Freewheel rectifier: DEFAULT = diode D1 (gnd → sw_node); SYNCHRONOUS (abt #67/#81) = low-side MOSFET Q2
+// with its anti-parallel body diode D2, both wired into the power path (matching Buck.cpp's brick).
+function buck(bom, variant) {
+  const rect =
+    variant === 'synchronous'
+      ? [
+          mosfetV('Q2', bom, 240, 150), wire(240, 80, 240, 124), wire(240, 176, 240, 220),
+          diode('D2', bom, 290, 150, 'up', 'right'), wire(290, 80, 290, 130), wire(290, 170, 290, 220),
+          dot(290, 80), dot(290, 220),
+        ]
+      : [diode('D1', bom, 240, 150, 'up', 'right'), wire(240, 80, 240, 130), wire(240, 170, 240, 220)]
   return svg(720, 300, [
     srcDC(70, 150), wire(70, 135, 70, 80, 154, 80), wire(70, 165, 70, 220, 520, 220),
     mosfetH('Q1', bom, 180, 80),
     wire(206, 80, 320, 80), dot(240, 80),
-    diode('D1', bom, 240, 150, 'up', 'right'), wire(240, 80, 240, 130), wire(240, 170, 240, 220), dot(240, 220),
+    ...rect, dot(240, 220),
     indH('L1', bom, 348, 80), wire(376, 80, 560, 80), dot(430, 80),
     capV('Cout', bom, 430, 150), wire(430, 80, 430, 130), wire(430, 170, 430, 220), dot(430, 220),
     loadR(520, 150, 80, 220), dot(520, 80), dot(520, 220),
@@ -249,12 +259,21 @@ function buck(bom) {
   ].join(''))
 }
 
-function boost(bom) {
+// Output rectifier: DEFAULT = diode D1 (sw_node → vout); SYNCHRONOUS (abt #67/#81) = high-side MOSFET Q2
+// with its anti-parallel body diode D2 (drawn above the FET), both wired into the power path (Boost.cpp).
+function boost(bom, variant) {
+  const rect =
+    variant === 'synchronous'
+      ? [
+          wire(240, 80, 284, 80), mosfetH('Q2', bom, 310, 80), wire(336, 80, 560, 80),
+          diode('D2', bom, 310, 40, 'right'), wire(284, 80, 284, 40, 290, 40), wire(330, 40, 336, 40, 336, 80),
+        ]
+      : [diode('D1', bom, 310, 80, 'right'), wire(240, 80, 290, 80), wire(330, 80, 560, 80)]
   return svg(720, 300, [
     srcDC(70, 150), wire(70, 135, 70, 80, 122, 80), wire(70, 165, 70, 220, 520, 220),
     indH('L1', bom, 150, 80), wire(178, 80, 240, 80), dot(240, 80),
     mosfetV('Q1', bom, 240, 150), wire(240, 80, 240, 124), wire(240, 176, 240, 220), dot(240, 220),
-    diode('D1', bom, 310, 80, 'right'), wire(240, 80, 290, 80), wire(330, 80, 560, 80), dot(430, 80),
+    ...rect, dot(430, 80),
     capV('Cout', bom, 430, 150), wire(430, 80, 430, 130), wire(430, 170, 430, 220), dot(430, 220),
     loadR(520, 150, 80, 220), dot(520, 80), dot(520, 220),
     gnd(300, 220), port(600, 80, 'VOUT'), wire(560, 80, 600, 80),
