@@ -277,8 +277,9 @@ to `differentialModeChoke` (MKF DMC did set it, unlike CMC).
 
 **Help-mode flow:** `propose_dmc_design(spec)` (no inductance target) → `{inductance, capacitance,
 cutoffFrequency, targetAttenuation_dB, peakCurrent, energyStorage_mJ, configuration, numberOfWindings}` →
-re-call `design_dmc` with the returned `inductance` as `minimumInductance`. (`propose` is analytical only —
-the ngspice attenuation-verify is not yet ported.)
+re-call `design_dmc` with the returned `inductance` as `minimumInductance`. The ngspice
+attenuation-verify **is** ported — `verify_dmc_attenuation` (`DmcSim.cpp`) runs the LC deck and compares
+required vs theoretical vs measured attenuation (honestly reports `simulated:false` when libngspice is absent).
 
 ### 6.3 Current transformer — `design_current_transformer(spec)` → MAS `Inputs` (no diagnostics)
 
@@ -376,7 +377,10 @@ shares one time grid and one node-naming rule.
   the per-*magnetic* waveforms are available via `process_converter().analyticalWaveforms` and
   `topology_waveforms`; per-*node* switch/rectifier V/I are available from `component_waveforms(tas,
   fidelity)` (one ngspice run → every non-magnetic component's V/I). CMC/DMC LISN & ideal-waveform sims
-  are not yet ported (design path works; the EMI-spectrum view stays empty until then).
+  **are** ported (`CmcSim.cpp` `simulate_cmc_ideal_waveforms`/`simulate_cmc_lisn_waveforms`, `DmcSim.cpp`
+  `simulate_dmc_waveforms`/`verify_dmc_attenuation`) and wired through the API; the only unported piece is
+  wrapping the LISN/LC sim output as a full MAS `OperatingPoint` (the raw per-frequency waveform arrays are
+  returned today).
 - **Structured errors:** not yet — errors are the `"Exception: <message>"` string. A `{field, message}`
   form would let wizards highlight the offending input; schedule if needed.
 ```
