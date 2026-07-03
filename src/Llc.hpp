@@ -17,10 +17,20 @@
 // normal, so the resonant family is compared at a documented 3 % tolerance.
 
 #include <nlohmann/json.hpp>
+#include <vector>
 #include "Fidelity.hpp"
 #include "Rectifier.hpp"
 
 namespace Kirchhoff {
+
+// One isolated output rail (multi-output LLC, ABT #86). outputs[0] mirrors the top-level scalar fields
+// (the main/measured rail); outputs[1..] are additional isolated secondaries. Each carries its own turns
+// ratio n_i (sized so n_i·(Vout_i+…Vd_i) matches the shared bridge drive → every secondary reflects to the
+// same primary clamp and conducts together), rectifier diode drop, output cap, load, and (currentDoubler
+// only) output inductor. The shared Lr–Cr–Lm tank is sized against the SUM of reflected loads (parallel Rac).
+struct LlcOutputLeg {
+    double voltage, power, turnsRatio, diodeDrop, loadResistance, outputCapacitance, outputInductance;
+};
 
 struct LlcDesign {
     double inputVoltage, inputVoltageMin, inputVoltageMax;
@@ -37,6 +47,7 @@ struct LlcDesign {
     double outputInductance;          // CURRENT_DOUBLER only: each of the two output inductors Lo1/Lo2
     bool fullBridge = false;          // false = split-cap half-bridge (±Vin/2, MKF default); true = 4-MOSFET
                                       // full-bridge primary (±Vin, bridge factor 1.0) — config.bridgeType (ABT #91)
+    std::vector<LlcOutputLeg> outputs;   // >=1 entry; [0] duplicates the scalars above (ABT #86)
     nlohmann::json config;
 };
 

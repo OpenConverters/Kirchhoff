@@ -100,6 +100,66 @@ SrcDesign design_src(const json& tasInputs) {
     // the other variants. Lo = Vout/(4·fr·ΔI·Iout).
     d.outputInductance = d.outputVoltage /
         (4.0 * d.resonantFrequency * cfg::ripple_ratio(d.config, 0.30) * Iout);
+
+    // ── Per-output legs (multi-output: N isolated secondaries, ABT #86) ──
+    // Every rail hangs off the SAME series Lr–Cr tank + transformer primary. The per-rail turns ratio uses
+    // the identical rectifier-variant formula as the main rail (with that rail's Vout_i, Vd_i), so
+    // n_i·(Vout_i+…Vd_i) = Vbridge/Ghr is EQUAL across rails — i.e. every secondary reflects to the same
+    // primary clamp and conducts together (the coupled-winding condition that makes multi-output work).
+    // outputs[0] reproduces the scalars above byte-for-byte.
+    auto nForRail = [&](double Vo_i, double Vd_i) -> double {
+        switch (d.rectifierType) {
+            case RectifierType::CenterTapped:   return Vbridge / (Ghr * (Vo_i + Vd_i));
+            case RectifierType::FullBridge:     return Vbridge / (Ghr * (Vo_i + 2.0 * Vd_i));
+            case RectifierType::CurrentDoubler:
+                return cfg::get(d.config, "cdOutputFactor", 0.465) * Vbridge / (Ghr * (Vo_i + Vd_i));
+            case RectifierType::VoltageDoubler:
+                throw std::runtime_error("Kirchhoff SRC: voltageDoubler rectifier not supported");
+        }
+        throw std::runtime_error("Kirchhoff SRC: unreachable rectifier type");
+    };
+    const int wpo = rectifier_windings_per_output(d.rectifierType);   // 2 (CT) | 1 (FB/CD)
+    const size_t nOut = dr.at("outputs").size();
+    for (size_t i = 0; i < nOut; ++i) {
+        SrcOutputLeg leg{};
+        leg.voltage = nominal(dr.at("outputs").at(i).at("voltage"));
+        if (tasInputs.contains("operatingPoints") && !tasInputs.at("operatingPoints").empty())
+            leg.power = tasInputs.at("operatingPoints").at(0).at("outputs").at(i).at("power").get<double>();
+        else
+            leg.power = nominal(dr.at("outputs").at(i).at("power"));
+        const double iout_i = leg.power / leg.voltage;
+        leg.diodeDrop = req::dideal_diode_drop(iout_i);
+        if (i == 0) {
+            leg.turnsRatio = d.turnsRatio;               // preserve the main rail's exact scalar
+            leg.outputCapacitance = d.outputCapacitance;
+            leg.outputInductance = d.outputInductance;
+        } else {
+            const double ni = std::round(nForRail(leg.voltage, leg.diodeDrop) * 100.0) / 100.0;
+            leg.turnsRatio = req::provided_turns_ratio(dr, wpo * i).value_or(ni);
+            leg.outputCapacitance = 47e-6;
+            leg.outputInductance = leg.voltage /
+                (4.0 * d.resonantFrequency * cfg::ripple_ratio(d.config, 0.30) * iout_i);
+        }
+        leg.loadResistance = leg.voltage / iout_i;
+        d.outputs.push_back(leg);
+    }
+
+    // Shared tank re-sizing for N reflected loads (ABT #86): each rail reflects an AC-equivalent
+    // Rac_i = 8·n_i²/π²·Rload_i to the primary; the tank sees them in PARALLEL, so size the characteristic
+    // impedance against the parallel combination Rac_total = 1/Σ(1/Rac_i), keeping the design Q relative to
+    // the TOTAL load (Zr = Q·Rac_total). fr is unchanged (Lr·Cr fixed), so the main rail still resonates at
+    // fsw. Guarded on nOut>1 so the single-output tank (Zr = Q·Rac above) stays byte-identical.
+    if (nOut > 1) {
+        double gac = 0.0;   // Σ 1/Rac_i  (parallel reflected conductance)
+        for (const auto& leg : d.outputs)
+            gac += (M_PI * M_PI) / (8.0 * leg.turnsRatio * leg.turnsRatio * leg.loadResistance);
+        const double RacTotal = 1.0 / gac;
+        const double ZrTotal = cfg::get(d.config, "qualityFactor", kQualityFactor) * RacTotal;
+        d.resonantInductance = ZrTotal / (2.0 * M_PI * fr);
+        d.resonantCapacitance = 1.0 / (2.0 * M_PI * fr * ZrTotal);
+        d.magnetizingInductance = req::provided_inductance(dr).value_or(
+            cfg::get(d.config, "inductanceRatio", kLmRatio) * d.resonantInductance);
+    }
     return d;
 }
 
@@ -184,14 +244,20 @@ json build_src_tas(const SrcDesign& d) {
             req::winding_excitation("sinusoidal", fr, ItankPk, ItankRms, 0.0, ItankPkPk, std::nullopt,
                                     vLrPk, vLrRms, 0.0, vLrPkPk)});
 
-    // Transformer: primary Lpri = Lm; CT has TWO secondary half-windings (turnsRatios=[n,n]), FB/CD have
-    // ONE (turnsRatios=[n]). K=0.999 (MKF). windings = primary + wpo secondaries.
+    // Transformer: primary Lpri = Lm; CT has TWO secondary half-windings per output (turnsRatios=[n,n,…]),
+    // FB/CD ONE ([n,…]). K=0.999 (MKF). windings = primary + wpo·nOut secondaries. Multi-output (ABT #86):
+    // each rail's windings reuse the same isolationSide ordinal (CT halves share a centre tap); rail i gets
+    // isolation_side(1+i). Single-output produces exactly [n]/[n,n] + [primary,secondary(,secondary)].
+    const size_t nOut = d.outputs.size();
     std::vector<std::string> isoSides{"primary"};
     std::vector<double> turnsRatios;
-    for (int w = 0; w < wpo; ++w) { isoSides.push_back("secondary"); turnsRatios.push_back(n); }
+    for (size_t i = 0; i < nOut; ++i) {
+        const std::string side = req::isolation_side(1 + i);
+        for (int w = 0; w < wpo; ++w) { isoSides.push_back(side); turnsRatios.push_back(d.outputs[i].turnsRatio); }
+    }
     // Transformer (T1) EMBEDDED excitations from the SINGLE FHA source (the SPICE-validated analytical SRC
     // solver). bridgeVoltageFactor = 0.5 half-bridge | 1.0 full-bridge (ABT #91; analytical_src's own default
-    // is the full-bridge 1.0); turnsRatios is PER OUTPUT (CENTER_TAPPED splits it into primary + 2 secondary).
+    // is the full-bridge 1.0); turnsRatios/V/I are PER OUTPUT (CENTER_TAPPED splits each into 2 half-windings).
     // The resonant inductor Lr and the switch/diode ratings keep the inline tank FHA.
     namespace AN = Kirchhoff::analytical;
     const AN::SrcRectifier rect = (d.rectifierType == RectifierType::CenterTapped)
@@ -199,14 +265,19 @@ json build_src_tas(const SrcDesign& d) {
     // CD/VD reflect the winding through an output doubler, so n was sized against the WINDING terminal, not
     // the output terminal. The solver reflects n·Vout_arg, so it must be fed the winding-terminal V/I
     // (VD: Vo/2 & 2·Iout; CD: Vo/cdF & cdF·Iout); the raw output V/I would solve the embedded tank/windings
-    // at 2×/~0.47× the real reflected operating point. FB/CT feed the winding directly.
-    double vEmbed = d.outputVoltage, iEmbed = Iout;
-    if (d.rectifierType == RectifierType::VoltageDoubler) { vEmbed = d.outputVoltage / 2.0; iEmbed = 2.0 * Iout; }
-    else if (d.rectifierType == RectifierType::CurrentDoubler) {
-        const double cdF = cfg::get(d.config, "cdOutputFactor", 0.465);
-        vEmbed = d.outputVoltage / cdF; iEmbed = cdF * Iout;
+    // at 2×/~0.47× the real reflected operating point. FB/CT feed the winding directly. Per rail.
+    std::vector<double> vEmbeds, iEmbeds, nEmbeds;
+    for (const auto& leg : d.outputs) {
+        const double iout_i = leg.power / leg.voltage;
+        double vE = leg.voltage, iE = iout_i;
+        if (d.rectifierType == RectifierType::VoltageDoubler) { vE = leg.voltage / 2.0; iE = 2.0 * iout_i; }
+        else if (d.rectifierType == RectifierType::CurrentDoubler) {
+            const double cdF = cfg::get(d.config, "cdOutputFactor", 0.465);
+            vE = leg.voltage / cdF; iE = cdF * iout_i;
+        }
+        vEmbeds.push_back(vE); iEmbeds.push_back(iE); nEmbeds.push_back(leg.turnsRatio);
     }
-    const MAS::OperatingPoint aopT1 = AN::analytical_src(d.inputVoltage, {vEmbed}, {iEmbed}, {n}, fr,
+    const MAS::OperatingPoint aopT1 = AN::analytical_src(d.inputVoltage, vEmbeds, iEmbeds, nEmbeds, fr,
                                                          d.resonantInductance, d.resonantCapacitance,
                                                          d.fullBridge ? 1.0 : 0.5, rect);
     const std::vector<json> windings = AN::excitations_processed(aopT1, "T1");
@@ -270,7 +341,8 @@ json build_src_tas(const SrcDesign& d) {
         dr["powerRating"] = 0.25; dr["role"] = "balancing"; return c; };
 
     json cell; cell["name"] = "src-cell";
-    cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("g1"), port("g2")});
+    // Cell ports: vin/gnd/vout/g1/g2 for the main rail; extra isolated rails append a vout<i> port below.
+    std::vector<json> cports{port("vin"), port("gnd"), port("vout"), port("g1"), port("g2")};
 
     // Primary side: series resonant tank + either a split-cap half-bridge or a 4-MOSFET full bridge
     // (config.bridgeType, ABT #91), identical secondary rectifier for both. The half-bridge branch + the CT
@@ -324,6 +396,10 @@ json build_src_tas(const SrcDesign& d) {
                       pin("Csw1", "2"), pin("Csw2", "2")};
     }
 
+    // Shared ground-return endpoints: the primary side first, then each rail appends its own returns. Pushed
+    // as ONE gnd_net after the extra-rail loop (prt("gnd") last). Single-output reproduces the original
+    // [gndPrimary…, rail-0 returns, gnd] byte-for-byte (no extra rails append anything).
+    std::vector<json> gndEps = gndPrimary;
     switch (d.rectifierType) {
     case RectifierType::CenterTapped: {
         comps.insert(comps.end(), {comp("D1", diodeReq(reqD)), comp("D2", diodeReq(reqD)), comp("Cout", cout),
@@ -336,10 +412,8 @@ json build_src_tas(const SrcDesign& d) {
         conns.push_back(conn("vout_net", {pin("D1", "cathode"), pin("D2", "cathode"),
                           pin("Rsn1", "2"), pin("Csn1", "2"), pin("Rsn2", "2"), pin("Csn2", "2"),
                           pin("Cout", "1"), prt("vout")}));
-        std::vector<json> g = gndPrimary;
-        g.insert(g.end(), {pin("T1", "secondary1_end"), pin("T1", "secondary2_start"),
-                           pin("Cout", "2"), prt("gnd")});
-        conns.push_back(conn("gnd_net", g));
+        gndEps.insert(gndEps.end(), {pin("T1", "secondary1_end"), pin("T1", "secondary2_start"),
+                                     pin("Cout", "2")});
         break; }
     case RectifierType::FullBridge: {
         comps.insert(comps.end(), {comp("DH1", diodeReq(reqD)), comp("DH2", diodeReq(reqD)),
@@ -351,9 +425,7 @@ json build_src_tas(const SrcDesign& d) {
                                        pin("DL2", "cathode")}));
         conns.push_back(conn("vout_net", {pin("DH1", "cathode"), pin("DH2", "cathode"),
                           pin("Rsn1", "2"), pin("Csn1", "2"), pin("Cout", "1"), prt("vout")}));
-        std::vector<json> g = gndPrimary;
-        g.insert(g.end(), {pin("DL1", "anode"), pin("DL2", "anode"), pin("Cout", "2"), prt("gnd")});
-        conns.push_back(conn("gnd_net", g));
+        gndEps.insert(gndEps.end(), {pin("DL1", "anode"), pin("DL2", "anode"), pin("Cout", "2")});
         break; }
     case RectifierType::CurrentDoubler: {
         comps.insert(comps.end(), {comp("D1", diodeReq(reqD)), comp("D2", diodeReq(reqD)),
@@ -366,13 +438,74 @@ json build_src_tas(const SrcDesign& d) {
         conns.push_back(conn("lo2_out", {pin("Lo2", "primary_end"), pin("Rlb", "1")}));
         conns.push_back(conn("vout_net", {pin("Lo1", "primary_end"), pin("Rlb", "2"),
                           pin("Cout", "1"), prt("vout")}));
-        std::vector<json> g = gndPrimary;
-        g.insert(g.end(), {pin("D1", "anode"), pin("D2", "anode"), pin("Cout", "2"), prt("gnd")});
-        conns.push_back(conn("gnd_net", g));
+        gndEps.insert(gndEps.end(), {pin("D1", "anode"), pin("D2", "anode"), pin("Cout", "2")});
         break; }
     case RectifierType::VoltageDoubler:
         throw std::runtime_error("Kirchhoff SRC: voltageDoubler rectifier not supported");
     }
+
+    // ── Extra isolated rails (outputs[1..], ABT #86) ──
+    // Each hangs its own diode rectifier + output cap on its dedicated transformer secondary winding(s) and
+    // exposes an external vout<i> port (the assembler synthesizes that rail's load). Rail i's secondary
+    // windings are secondary(base)/secondary(base+1) (1-based over ALL secondaries) with base = wpo·i+1.
+    // Only the pure-diode rectifiers (CT/FB) are generalized to N rails; the currentDoubler adds per-rail
+    // output inductors + loop-breakers (not yet ported), so a multi-output CD spec throws loudly.
+    for (size_t i = 1; i < nOut; ++i) {
+        const auto& leg = d.outputs[i];
+        const double iout_i = leg.power / leg.voltage;
+        const std::string sfx = std::to_string(i + 1);                 // "2", "3", …
+        const size_t base = wpo * i + 1;                               // 1-based first secondary winding
+        const std::string voutP = "vout" + sfx;
+        // Per-rail rectifier diode rating: reverse-blocks ~2·Vout_i (CT) and carries the reflected half-sine.
+        const double ratedVrDi = 2.0 * leg.voltage / cfg::v_derate_diode(d.config);
+        const double maxVfDi   = (ratedVrDi < 100.0) ? 0.6 : 1.2;
+        const json reqDi = req::diode(ratedVrDi, (M_PI / 2.0) * iout_i, maxVfDi, 0.05 * Tfr);
+        json couti; couti["capacitor"] = json::object();
+        couti["inputs"]["designRequirements"]["capacitance"]["nominal"] = leg.outputCapacitance;
+        couti["inputs"]["designRequirements"]["ratedVoltage"] = leg.voltage * 2;
+        const std::string wA = "secondary" + std::to_string(base) + "_start";
+        const std::string wAe = "secondary" + std::to_string(base) + "_end";
+        const std::string wB = "secondary" + std::to_string(base + 1) + "_start";
+        const std::string wBe = "secondary" + std::to_string(base + 1) + "_end";
+        switch (d.rectifierType) {
+        case RectifierType::CenterTapped: {
+            const std::string D1 = "D1_" + sfx, D2 = "D2_" + sfx, Co = "Cout_" + sfx,
+                Rs1 = "Rsn1_" + sfx, Cs1 = "Csn1_" + sfx, Rs2 = "Rsn2_" + sfx, Cs2 = "Csn2_" + sfx;
+            comps.insert(comps.end(), {comp(D1.c_str(), diodeReq(reqDi)), comp(D2.c_str(), diodeReq(reqDi)),
+                comp(Co.c_str(), couti), comp(Rs1.c_str(), snubR()), comp(Cs1.c_str(), snubC()),
+                comp(Rs2.c_str(), snubR()), comp(Cs2.c_str(), snubC())});
+            conns.push_back(conn(("sec_top" + sfx).c_str(), {pin("T1", wA.c_str()), pin(D1.c_str(), "anode"),
+                                                             pin(Rs1.c_str(), "1"), pin(Cs1.c_str(), "1")}));
+            conns.push_back(conn(("sec_bot" + sfx).c_str(), {pin("T1", wBe.c_str()), pin(D2.c_str(), "anode"),
+                                                             pin(Rs2.c_str(), "1"), pin(Cs2.c_str(), "1")}));
+            conns.push_back(conn((voutP + "_net").c_str(), {pin(D1.c_str(), "cathode"), pin(D2.c_str(), "cathode"),
+                              pin(Rs1.c_str(), "2"), pin(Cs1.c_str(), "2"), pin(Rs2.c_str(), "2"), pin(Cs2.c_str(), "2"),
+                              pin(Co.c_str(), "1"), prt(voutP.c_str())}));
+            gndEps.insert(gndEps.end(), {pin("T1", wAe.c_str()), pin("T1", wB.c_str()), pin(Co.c_str(), "2")});
+            break; }
+        case RectifierType::FullBridge: {
+            const std::string DH1 = "DH1_" + sfx, DH2 = "DH2_" + sfx, DL1 = "DL1_" + sfx, DL2 = "DL2_" + sfx,
+                Co = "Cout_" + sfx, Rs1 = "Rsn1_" + sfx, Cs1 = "Csn1_" + sfx;
+            comps.insert(comps.end(), {comp(DH1.c_str(), diodeReq(reqDi)), comp(DH2.c_str(), diodeReq(reqDi)),
+                comp(DL1.c_str(), diodeReq(reqDi)), comp(DL2.c_str(), diodeReq(reqDi)), comp(Co.c_str(), couti),
+                comp(Rs1.c_str(), snubR()), comp(Cs1.c_str(), snubC())});
+            conns.push_back(conn(("sec_a" + sfx).c_str(), {pin("T1", wA.c_str()), pin(DH1.c_str(), "anode"),
+                                                           pin(DL1.c_str(), "cathode"), pin(Rs1.c_str(), "1"), pin(Cs1.c_str(), "1")}));
+            conns.push_back(conn(("sec_b" + sfx).c_str(), {pin("T1", wAe.c_str()), pin(DH2.c_str(), "anode"),
+                                                           pin(DL2.c_str(), "cathode")}));
+            conns.push_back(conn((voutP + "_net").c_str(), {pin(DH1.c_str(), "cathode"), pin(DH2.c_str(), "cathode"),
+                              pin(Rs1.c_str(), "2"), pin(Cs1.c_str(), "2"), pin(Co.c_str(), "1"), prt(voutP.c_str())}));
+            gndEps.insert(gndEps.end(), {pin(DL1.c_str(), "anode"), pin(DL2.c_str(), "anode"), pin(Co.c_str(), "2")});
+            break; }
+        default:
+            throw std::invalid_argument("Kirchhoff SRC multi-output: rectifierType '" +
+                cfg::get_str(d.config, "rectifierType", "centerTapped") +
+                "' is not supported for outputs[1..]; only centerTapped and fullBridge are (ABT #86)");
+        }
+        cports.push_back(port(voutP.c_str()));
+    }
+    gndEps.push_back(prt("gnd"));
+    conns.push_back(conn("gnd_net", gndEps));
     // Gate nets: half-bridge Q1->g1, Q2->g2; full-bridge diagonal pairs (Q1,Q4)->g1, (Q2,Q3)->g2 (ABT #91).
     if (!d.fullBridge) {
         conns.push_back(conn("g1_net", {pin("Q1", "gate"), prt("g1")}));
@@ -381,6 +514,7 @@ json build_src_tas(const SrcDesign& d) {
         conns.push_back(conn("g1_net", {pin("Q1", "gate"), pin("Q4", "gate"), prt("g1")}));
         conns.push_back(conn("g2_net", {pin("Q2", "gate"), pin("Q3", "gate"), prt("g2")}));
     }
+    cell["ports"] = cports;
     cell["components"] = comps;
     cell["connections"] = conns;
 
@@ -390,19 +524,31 @@ json build_src_tas(const SrcDesign& d) {
     dreq["inputType"] = "dc";
     dreq["inputVoltage"] = {{"minimum", d.inputVoltageMin}, {"nominal", d.inputVoltage}, {"maximum", d.inputVoltageMax}};
     dreq["switchingFrequency"]["nominal"] = d.switchingFrequency;
-    { json o; o["name"] = "out"; o["voltage"]["nominal"] = d.outputVoltage; o["regulation"] = "voltage";
-      dreq["outputs"] = json::array({o}); }
-    { json op; op["name"] = "full_load"; op["inputVoltage"] = d.inputVoltage; op["ambientTemperature"] = 25.0;
-      json o; o["name"] = "out"; o["power"] = d.outputPower; op["outputs"] = json::array({o});
-      tas["inputs"]["operatingPoints"] = json::array({op}); }
+    // Per-rail designRequirements.outputs + operatingPoints.outputs (main = "out"/Vout; extras "out2"/Vout2…).
+    // Single-output emits exactly {out} — byte-identical to the original.
+    dreq["outputs"] = json::array();
+    json op; op["name"] = "full_load"; op["inputVoltage"] = d.inputVoltage; op["ambientTemperature"] = 25.0;
+    op["outputs"] = json::array();
+    for (size_t i = 0; i < nOut; ++i) {
+        const std::string oname = (i == 0) ? "out" : "out" + std::to_string(i + 1);
+        json o; o["name"] = oname; o["voltage"]["nominal"] = d.outputs[i].voltage; o["regulation"] = "voltage";
+        dreq["outputs"].push_back(o);
+        json oo; oo["name"] = oname; oo["power"] = d.outputs[i].power; op["outputs"].push_back(oo);
+    }
+    tas["inputs"]["operatingPoints"] = json::array({op});
 
     tas["topology"]["stages"] = json::array({
         req::control_stage("llcController"),
         pstage("srcCell", "switchingCell", cell, bind("vin", "dcBus"), bind("vout", "dcOutput"))});
-    tas["topology"]["interStageConnections"] = json::array({
+    std::vector<json> iscs{
         isc("Vin", "externalPort", "input", {sp("srcCell", "vin")}),
         isc("GND", "externalPort", "input", {sp("srcCell", "gnd")}),
-        isc("Vout", "externalPort", "output", {sp("srcCell", "vout")})});
+        isc("Vout", "externalPort", "output", {sp("srcCell", "vout")})};
+    for (size_t i = 1; i < nOut; ++i) {
+        const std::string g = "Vout" + std::to_string(i + 1), pt = "vout" + std::to_string(i + 1);
+        iscs.push_back(isc(g.c_str(), "externalPort", "output", {sp("srcCell", pt.c_str())}));
+    }
+    tas["topology"]["interStageConnections"] = iscs;
 
     json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
     tas["simulation"]["analyses"] = json::array({an});
