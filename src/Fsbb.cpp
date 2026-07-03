@@ -140,6 +140,7 @@ json build_fsbb_tas(const FsbbDesign& d) {
     auto snub = [&]() { json c; c["capacitor"] = json::object();
         c["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::node_snubber_cap(d.config);
         c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) * 3;
+        cfg::mark_numerical_aid(c);   // dV/dt convergence aid — tagged for the real-fidelity strip (ABT #96)
         return c; };
 
     // REAL EMI/ring-damper RC snubber across each hard-switched node (sw1, sw2) to ground. The 4SBB is a

@@ -245,6 +245,7 @@ json build_psfb_tas(const PsfbDesign& d) {
     auto snub = [&]() { json c; c["capacitor"] = json::object();
         c["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::node_snubber_cap(d.config);  // bridge midpoint node cap
         c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) * 3;
+        cfg::mark_numerical_aid(c);   // dV/dt convergence aid — tagged for the real-fidelity strip (ABT #96)
         return c; };
 
     // REAL series-RC EMI/ring snubber across the transformer primary (a genuine board part, sourced +

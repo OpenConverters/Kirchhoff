@@ -169,6 +169,7 @@ json build_push_pull_tas(const PushPullDesign& d) {
         c["inputs"]["designRequirements"]["capacitance"]["nominal"] =
             cfg::snubber_cap(d.config, d.outputPower, 2.0 * d.inputVoltage, d.switchingFrequency);
         c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) * 3;
+        cfg::mark_numerical_aid(c);   // dV/dt convergence aid — tagged for the real-fidelity strip (ABT #96)
         return c; };
 
     // Series-RC leakage damper across the primary (drain-to-drain), mirroring the AHB Rdmp/Cdmp fix

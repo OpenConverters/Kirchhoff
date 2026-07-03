@@ -9,7 +9,9 @@
 #include "Psfb.hpp"
 #include "Dab.hpp"
 #include "Llc.hpp"
+#include "Src.hpp"
 #include "TasAssembler.hpp"
+#include "KirchhoffConfig.hpp"   // cfg::is_numerical_aid / mark_numerical_aid (ABT #96)
 #include "Fidelity.hpp"
 
 #include <nlohmann/json.hpp>
@@ -204,6 +206,66 @@ TEST_CASE("Real-MOSFET DAB keeps its bias resistor, strips the dV/dt cap, conver
     INFO("DAB real-deck vout = " << v << " (spec 12)");
     CHECK(v > 9.0);
     CHECK(v < 15.0);
+}
+
+// ABT #96: the real-fidelity snubber strip is driven by an EXPLICIT marker
+// (cfg::mark_numerical_aid -> inputs.designRequirements.name == cfg::kNumericalAidName), NOT the refdes
+// prefix. The old test stripped ANY component whose refdes started with Csn/Rsn/Csw, silently deleting real,
+// sourceable parts that happened to match. These two cases pin the new contract:
+//   (1) the predicate keys off the marker, so a REAL part with a Csn*-looking refdes but no marker is kept;
+//   (2) every design_*_tas marks EXACTLY the Csn*/Rsn*/Csw* numerical aids and nothing else (no real part,
+//       no functional Rbias*/Rdcr*/Rvd*/balancing resistor carries the marker).
+TEST_CASE("Numerical-aid predicate keys off the explicit marker, not the refdes (ABT #96)",
+          "[real][fidelity][abt96]") {
+    using Kirchhoff::cfg::is_numerical_aid;
+    using Kirchhoff::cfg::mark_numerical_aid;
+
+    // A real, sourced X7R cap that a librarian might name "Csnap" (starts with "Csn" — the old trap). It has
+    // NO marker -> not a numerical aid -> must be KEPT.
+    json realCap = json::parse(R"({
+        "capacitor": { "manufacturerInfo": { "name": "TDK", "datasheetInfo": {
+            "part": { "partNumber": "C3216X7R", "technology": "MLCC Class II" },
+            "electrical": { "capacitance": { "nominal": 1e-7 }, "ratedVoltage": 100 } } } },
+        "inputs": { "designRequirements": { "capacitance": { "nominal": 1e-7 }, "ratedVoltage": 100 } }
+    })");
+    CHECK_FALSE(is_numerical_aid(realCap));
+    json aid; aid["capacitor"] = json::object();
+    aid["inputs"]["designRequirements"]["capacitance"]["nominal"] = 1e-9;
+    CHECK_FALSE(is_numerical_aid(aid));       // before marking: not an aid
+    mark_numerical_aid(aid);
+    CHECK(is_numerical_aid(aid));             // after marking: an aid
+
+    // Every builder that emits a Csn*/Rsn*/Csw* numerical cap/resistor tags it, and ONLY those. Sweep the
+    // topologies that carry numerical aids and assert marker <=> refdes-prefix, per stage brick.
+    auto llc  = [](const json& s){ return Kirchhoff::build_llc_tas(Kirchhoff::design_llc(s)); };
+    auto src  = [](const json& s){ return Kirchhoff::build_src_tas(Kirchhoff::design_src(s)); };
+    auto dab  = [](const json& s){ return Kirchhoff::build_dab_tas(Kirchhoff::design_dab(s)); };
+    auto psfb = [](const json& s){ return Kirchhoff::build_psfb_tas(Kirchhoff::design_psfb(s)); };
+
+    json isoSpec = json::parse(R"({ "designRequirements": { "efficiency": 1.0,
+        "inputVoltage": { "minimum": 360, "nominal": 400, "maximum": 420 },
+        "switchingFrequency": { "nominal": 100000 },
+        "outputs": [ { "name": "out", "voltage": { "nominal": 48 } } ] },
+        "operatingPoints": [ { "inputVoltage": 400, "outputs": [ { "power": 480 } ] } ] })");
+
+    for (auto build : {+llc, +src, +dab, +psfb}) {
+        json tas = build(isoSpec);
+        int marked = 0, prefixed = 0;
+        for (const auto& st : tas["topology"]["stages"]) {
+            if (!st.contains("circuit") || !st["circuit"].is_object()) continue;
+            for (const auto& c : st["circuit"]["components"]) {
+                const std::string n = c["name"].get<std::string>();
+                const bool isPrefix = n.rfind("Csn", 0) == 0 || n.rfind("Rsn", 0) == 0 || n.rfind("Csw", 0) == 0;
+                const bool isMarked = is_numerical_aid(c["data"]);
+                if (isMarked) ++marked;
+                if (isPrefix) ++prefixed;
+                INFO("component " << n << " marked=" << isMarked << " prefix=" << isPrefix);
+                CHECK(isMarked == isPrefix);   // the marker set == the old prefix set, exactly
+            }
+        }
+        INFO("topology marked=" << marked << " prefixed=" << prefixed);
+        CHECK(marked > 0);                     // each of these topologies has ≥1 numerical aid
+    }
 }
 
 // NB: a resonant LLC/SRC real deck is NOT gated here. Once the body-diode strip (which the full-bridge

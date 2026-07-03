@@ -223,6 +223,7 @@ json build_ahb_tas(const AhbDesign& d) {
     auto snub = [&]() { json c; c["capacitor"] = json::object();
         c["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::node_snubber_cap(d.config);
         c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) * 3;
+        cfg::mark_numerical_aid(c);   // dV/dt convergence aid — tagged for the real-fidelity strip (ABT #96)
         return c; };
     // Series-RC damper across the transformer primary. The AHB transformer is tightly coupled (K=0.9999),
     // so its leakage (~Lm(1-K^2)) is tiny and rings (a few MHz) against the switch Coss at every dead-time

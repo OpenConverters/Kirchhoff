@@ -147,16 +147,19 @@ std::string sanitize(const std::string& s) {
     return r;
 }
 
-// Numerical dV/dt convergence snubbers (Csn*/Rsn*/Csw*) tame the infinite dV/dt of an IDEAL switch so
-// ngspice converges. When the switch becomes a REAL model carrying its output capacitance Coss (and the
-// rectifier diode its junction cap Cj), THAT parasitic does the dV/dt limiting physically, so the numerical
-// snubber is redundant and would over-damp (skew ZVS/loss). We strip it then — but ONLY when every
-// semiconductor in the brick is real-and-carries-its-parasitic (else an ideal switch still needs it).
-// NOT stripped (these are FUNCTIONAL, not dV/dt snubbers — Coss can't replace them): the Rdcr* loop-
-// breakers (coupled-inductor mesh singularity, every fidelity) and the DAB's Rbias* (the DC path that
-// defines its floating midpoint). Those carry deliberately non-"snubber" names so this never catches them.
-bool is_numerical_snubber(const std::string& n) {
-    return n.rfind("Csn", 0) == 0 || n.rfind("Rsn", 0) == 0 || n.rfind("Csw", 0) == 0;
+// Numerical dV/dt convergence snubbers tame the infinite dV/dt of an IDEAL switch so ngspice converges.
+// When the switch becomes a REAL model carrying its output capacitance Coss (and the rectifier diode its
+// junction cap Cj), THAT parasitic does the dV/dt limiting physically, so the numerical snubber is redundant
+// and would over-damp (skew ZVS/loss). We strip it then — but ONLY when every semiconductor in the brick is
+// real-and-carries-its-parasitic (else an ideal switch still needs it).
+//
+// The numerical aids are tagged EXPLICITLY at emit time (cfg::mark_numerical_aid → the schema-legal
+// inputs.designRequirements.name == cfg::kNumericalAidName marker), NOT inferred from the refdes (ABT #96):
+// a refdes-prefix test silently deleted any real, sourceable part whose name happened to start with
+// Csn/Rsn/Csw. FUNCTIONAL aids that must survive to the real deck (the Rdcr* coupled-inductor loop-breakers
+// and the DAB's Rbias* DC-reference) are simply left unmarked, so they are never candidates here.
+bool is_numerical_snubber(const json& componentData) {
+    return Kirchhoff::cfg::is_numerical_aid(componentData);
 }
 
 // A control stage carries a BEHAVIOURAL ANALOG control LAW iff one of its components has a `data.analog`
@@ -280,7 +283,7 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
         };
         double maxSnubberCap = 0.0;
         for (const auto& comp : brick.at("components"))
-            if (is_numerical_snubber(comp.at("name").get<std::string>())) {
+            if (is_numerical_snubber(comp.at("data"))) {
                 const double c = numAt(comp.at("data"), {"inputs", "designRequirements", "capacitance"});
                 if (c > maxSnubberCap) maxSnubberCap = c;
             }
@@ -340,7 +343,7 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
         std::set<std::string> strippedNumericalAids;   // snubbers + redundant body diodes dropped for a real brick
         for (const auto& comp : brick.at("components")) {
             const std::string cname = comp.at("name").get<std::string>();
-            if (stripSnubbers && is_numerical_snubber(cname)) { strippedNumericalAids.insert(cname); continue; }
+            if (stripSnubbers && is_numerical_snubber(comp.at("data"))) { strippedNumericalAids.insert(cname); continue; }
             if (isRedundantBodyDiode(cname, comp.at("data"))) { strippedNumericalAids.insert(cname); continue; }
             const json& data = comp.at("data");
             // Hoist a real magnetic's MKF subcircuit to the deck top level (once per reference); the

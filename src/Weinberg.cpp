@@ -193,7 +193,12 @@ json build_weinberg_tas(const WeinbergDesign& d) {
     // MKF's lossy R∥C: Kirchhoff delivers spec open-loop.
     auto snubC = [&]() { json c; c["capacitor"] = json::object();
         c["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::rectifier_snubber_cap(d.config);
-        c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage * 6 + d.outputVoltage); return c; };
+        c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage * 6 + d.outputVoltage);
+        cfg::mark_numerical_aid(c); return c; };   // rectifier dV/dt aid — tagged for the real strip (ABT #96)
+    // The RC-snubber resistor paired with each snubC. Wraps the generic res() (shared with the FUNCTIONAL
+    // Rdcr* loop-breakers, which must survive the real deck) and adds the numerical-aid tag so ONLY the
+    // Rsn* snubber resistors are stripped at real fidelity (ABT #96).
+    auto snubR = [&]() { json c = res(cfg::snubber_res(d.config)); cfg::mark_numerical_aid(c); return c; };
 
     json cell; cell["name"] = "weinberg-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("g1"), port("g2")});
@@ -206,10 +211,10 @@ json build_weinberg_tas(const WeinbergDesign& d) {
         comp("Rdcra", res(cfg::loop_breaker_res(d.config, d.loadResistance))), comp("Rdcrb", res(cfg::loop_breaker_res(d.config, d.loadResistance))),
         comp("S1", mosfet(reqSW)), comp("S2", mosfet(reqSW)),
         comp("Dpos", diode(reqRect)), comp("Dneg", diode(reqRect)), comp("Cout", cout),
-        comp("RsnS1", res(cfg::snubber_res(d.config))), comp("CsnS1", snubC()),
-        comp("RsnS2", res(cfg::snubber_res(d.config))), comp("CsnS2", snubC()),
-        comp("RsnDp", res(cfg::snubber_res(d.config))), comp("CsnDp", snubC()),
-        comp("RsnDn", res(cfg::snubber_res(d.config))), comp("CsnDn", snubC())});
+        comp("RsnS1", snubR()), comp("CsnS1", snubC()),
+        comp("RsnS2", snubR()), comp("CsnS2", snubC()),
+        comp("RsnDp", snubR()), comp("CsnDp", snubC()),
+        comp("RsnDn", snubR()), comp("CsnDn", snubC())});
     cell["connections"] = json::array({
         // Input: both L1 windings fed from vin (current-fed front end).
         conn("vin_net",  {pin("L1", "primary_start"), pin("L1", "secondary1_start"), prt("vin")}),

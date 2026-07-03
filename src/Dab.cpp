@@ -218,6 +218,7 @@ json build_dab_tas(const DabDesign& d) {
     auto snubC = [&]() { json c; c["capacitor"] = json::object();
         c["inputs"]["designRequirements"]["capacitance"]["nominal"] = snubCval;
         c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) * 3;
+        cfg::mark_numerical_aid(c);   // dV/dt convergence aid — tagged for the real-fidelity strip (ABT #96)
         return c; };
 
     // REAL series-RC EMI/ring snubber across the primary bridge output (midA↔midC, i.e. across Lr + the

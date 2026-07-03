@@ -186,6 +186,7 @@ json build_acf_tas(const AcfDesign& d) {
     json snb; snb["capacitor"] = json::object();
     snb["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::node_snubber_cap(d.config);
     snb["inputs"]["designRequirements"]["ratedVoltage"] = d.inputVoltage * 4;
+    cfg::mark_numerical_aid(snb);   // dV/dt convergence aid — explicitly tagged for the real-fidelity strip (ABT #96)
 
     // Active-clamp forward cell: main switch Q1 (vin->sw), 2-winding transformer (sw->gnd primary), the
     // clamp leg (Sc: vin->clamp_node, Cc: clamp_node->sw — clamp_node gets its DC path through Sc's

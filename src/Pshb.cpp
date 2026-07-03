@@ -214,6 +214,7 @@ json build_pshb_tas(const PshbDesign& d) {
     json csplit = cap(d.splitCapacitance, d.inputVoltage * 2);
     json capd   = cap(d.outputCapacitance, d.outputVoltage * 2);
     json snub   = cap(cfg::node_snubber_cap(d.config), (d.inputVoltage + d.outputVoltage) * 3);
+    cfg::mark_numerical_aid(snub);   // dV/dt convergence aid (Csn*) — tagged for the real-fidelity strip (ABT #96)
     // REAL series-RC EMI/ring snubber across the transformer primary (sourced + rendered, distinct from the
     // numerical Csn* node caps). The primary swings ±Vhb and rings at each NPC commutation; a damper across
     // the winding tames it. Sized from the ENERGY BUDGET (cfg::snubber_cap = eps·P/(Vhb²·fsw)) +

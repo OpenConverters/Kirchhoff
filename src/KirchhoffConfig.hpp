@@ -86,6 +86,32 @@ inline double snubber_cap(const json& in, double P, double Vblock, double fsw) {
     return get(in, "snubberCap", eps * P / (Vblock * Vblock * fsw));
 }
 
+// Explicit numerical-aid marker (ABT #96). A numerical convergence snubber / loop-breaker exists ONLY to
+// tame the infinite dV/dt of an IDEAL switch so ngspice converges; at real fidelity the switch's own Coss
+// does that physically, so the assembler STRIPS it (see TasAssembler::is_numerical_aid). That strip used to
+// be inferred from the refdes prefix (Csn*/Rsn*/Csw*), which silently deleted any REAL, sourceable part
+// whose refdes happened to match (e.g. a real "Csnubber"). Instead we tag each numerical aid EXPLICITLY, on
+// a schema-legal field: inputs.designRequirements.name == kNumericalAidName. It is a DEDICATED marker, never
+// the electrical refdes, so a real part can never be stripped by accident — a missed tag merely leaves a
+// redundant snubber in the deck (safe over-damping), never removes a real component. `name` is the only free
+// string the closed CAS/RAS designRequirements schemas expose (role is a fixed enum; extra keys are rejected
+// by unevaluatedProperties:false), so the marker lives there.
+inline const char* kNumericalAidName = "__kh_numerical_aid__";
+
+// Tag a numerical-aid component SEED (a capacitor/resistor `data` json, i.e. {capacitor|resistor, inputs})
+// so the real-fidelity strip removes it explicitly. Idempotent; overwrites any prior designRequirements.name.
+inline void mark_numerical_aid(json& seed) {
+    seed["inputs"]["designRequirements"]["name"] = kNumericalAidName;
+}
+
+// True iff a component `data` json carries the explicit numerical-aid marker.
+inline bool is_numerical_aid(const json& data) {
+    return data.is_object() && data.contains("inputs") && data.at("inputs").is_object()
+        && data.at("inputs").contains("designRequirements") && data.at("inputs").at("designRequirements").is_object()
+        && data.at("inputs").at("designRequirements").contains("name")
+        && data.at("inputs").at("designRequirements").at("name") == kNumericalAidName;
+}
+
 // Numerical commutation-snubber capacitances — documented constants above, each overridable. (Not
 // operating-point-derived; see kNodeSnubberCap for why a formula is wrong for these.)
 inline double node_snubber_cap(const json& in)      { return get(in, "nodeSnubberCap",      kNodeSnubberCap); }

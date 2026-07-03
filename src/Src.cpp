@@ -219,7 +219,8 @@ json build_src_tas(const SrcDesign& d) {
 
     auto snubC = [&]() { json c; c["capacitor"] = json::object();
         c["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::rectifier_snubber_cap(d.config);
-        c["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage * 3; return c; };
+        c["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage * 3;
+        cfg::mark_numerical_aid(c); return c; };   // rectifier dV/dt aid — tagged for the real strip (ABT #96)
     auto snubR = [&]() { json c; c["resistor"] = json::object();
         auto& dr = c["inputs"]["designRequirements"];
         dr["deviceType"] = "resistor";
@@ -227,7 +228,7 @@ json build_src_tas(const SrcDesign& d) {
         // RC-snubber R dissipates the cap energy each cycle: P = C*V^2*f (V = clamped reverse swing).
         const double vClamp = d.outputVoltage * 3.0;
         dr["powerRating"] = cfg::rectifier_snubber_cap(d.config) * vClamp * vClamp * d.switchingFrequency;
-        dr["role"] = "snubber"; return c; };
+        dr["role"] = "snubber"; cfg::mark_numerical_aid(c); return c; };   // RC-snubber R paired with snubC — tagged (ABT #96)
     // Cap-divider BALANCING resistors — give the bus-split midpoint msplit a DC reference at Vbus/2.
     // Without them msplit (Chi/Clo junction + transformer primary) has no DC path -> singular MNA
     // matrix -> garbage Vout at off-design frequencies and the regulator never converges (abt #54).
@@ -244,7 +245,8 @@ json build_src_tas(const SrcDesign& d) {
     // physically, leaving the DATASHEET/MKF_MODEL deck untouched (abt #54).
     auto swSnub = [&]() { json c; c["capacitor"] = json::object();
         c["inputs"]["designRequirements"]["capacitance"]["nominal"] = 100e-12;
-        c["inputs"]["designRequirements"]["ratedVoltage"] = d.inputVoltage * 2; return c; };
+        c["inputs"]["designRequirements"]["ratedVoltage"] = d.inputVoltage * 2;
+        cfg::mark_numerical_aid(c); return c; };   // sw-node dV/dt aid — tagged for the real strip (ABT #96)
     // CURRENT_DOUBLER output inductor (single-winding magnetic; carries Iout/2 DC with 2·fr ripple).
     auto outInductor = [&]() { json m; m["magnetic"] = json::object();
         const double Idc = Iout / 2.0, Irip = cfg::ripple_ratio(d.config, 0.30) * Idc;

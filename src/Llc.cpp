@@ -250,7 +250,8 @@ json build_llc_tas(const LlcDesign& d) {
     // Rectifier-diode RC snubbers (100Ω ∥ 100pF), as in MKF's LLC deck.
     auto snubC = [&]() { json c; c["capacitor"] = json::object();
         c["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::rectifier_snubber_cap(d.config);
-        c["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage * 3; return c; };
+        c["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage * 3;
+        cfg::mark_numerical_aid(c); return c; };   // rectifier dV/dt aid — tagged for the real strip (ABT #96)
     auto snubR = [&]() { json c; c["resistor"] = json::object();
         auto& dr = c["inputs"]["designRequirements"];
         dr["deviceType"] = "resistor";
@@ -258,7 +259,7 @@ json build_llc_tas(const LlcDesign& d) {
         // RC-snubber R dissipates the cap energy each cycle: P = C*V^2*f (V = clamped reverse swing).
         const double vClamp = d.outputVoltage * 3.0;
         dr["powerRating"] = cfg::rectifier_snubber_cap(d.config) * vClamp * vClamp * d.switchingFrequency;
-        dr["role"] = "snubber"; return c; };
+        dr["role"] = "snubber"; cfg::mark_numerical_aid(c); return c; };   // RC-snubber R paired with snubC — tagged (ABT #96)
     // Cap-divider BALANCING resistors. The bus-split midpoint msplit (Chi/Clo junction, = Vbus/2)
     // otherwise has NO DC path — only the two caps (open at DC) and the transformer primary inductor —
     // so ngspice's MNA matrix is SINGULAR at that node ("singular matrix: check node msplit"). At the
@@ -280,7 +281,8 @@ json build_llc_tas(const LlcDesign& d) {
     // limiting physically, leaving the DATASHEET/MKF_MODEL deck untouched (abt #54).
     auto swSnub = [&]() { json c; c["capacitor"] = json::object();
         c["inputs"]["designRequirements"]["capacitance"]["nominal"] = 100e-12;
-        c["inputs"]["designRequirements"]["ratedVoltage"] = d.inputVoltage * 2; return c; };
+        c["inputs"]["designRequirements"]["ratedVoltage"] = d.inputVoltage * 2;
+        cfg::mark_numerical_aid(c); return c; };   // sw-node dV/dt aid — tagged for the real strip (ABT #96)
     // CURRENT_DOUBLER output inductor: a single-winding magnetic carrying Iout/2 DC with 2·fr ripple
     // (the two inductors' ripples cancel at the output). Lo = d.outputInductance (sized in design_llc).
     auto outInductor = [&]() { json m; m["magnetic"] = json::object();
