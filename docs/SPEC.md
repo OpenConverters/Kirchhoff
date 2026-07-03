@@ -84,7 +84,14 @@ So you may send `outputs[i].power` inside `designRequirements.outputs[i]` if you
 `weinberg` — these dereference `operatingPoints[0]` unconditionally.
 
 **Multi-output:** `isolated_buck` / `isolated_buck_boost` require exactly **2** outputs (primary rail +
-isolated secondary). All other converters use `outputs[0]` only.
+isolated secondary). `forward`, `two_switch_forward`, `acf` support **N isolated secondaries** (ABT #86):
+each `designRequirements.outputs[i]` gets its own duty-derived turns ratio `n_i = Vin_min·D_max/(Vout_i+Vd_i)`,
+a secondary winding on the shared transformer (isolationSides ordinal per rail: `secondary`, `tertiary`, …),
+a rectifier + output filter (`Lout_i`/`Cout_i`), and its own external output port (`vout`, `vout2`, …) whose
+load the assembler synthesizes from `operatingPoints[0].outputs[i]`. The main rail (output 0) is single-output
+byte-identical; extra rails carry their `Cout_i` inside the switching cell. (`two_switch_forward` adds a tagged
+numerical clamp-node snubber only when >1 output, for the coupled-winding LC-ring convergence.) All other
+converters use `outputs[0]` only.
 
 ---
 
@@ -192,9 +199,9 @@ inverting Ćuk uses the opposite winding-dot orientation so the coupling does no
 
 | topology | efficiency default | pinning | key config (default) | quirks |
 |---|---|---|---|---|
-| **forward** (single-switch) | 0.9 | inductance, **turnsRatios[1]** | `maxDutyCycle`(0.5), `inductorRippleRatio`(0.4) | 3-winding (demag+secondary), isolationSides {primary,primary,secondary}; second magnetic = output inductor |
-| **two_switch_forward** | 0.9 | inductance, turnsRatios[0] | `maxDutyCycle`(0.5), `inductorRippleRatio`(0.4) | 2-winding; each switch blocks only Vin_max |
-| **acf** (active-clamp forward) | 0.9 | inductance, turnsRatios[0] | `operatingDutyCycle`(0.45), `deadTimeFraction`(0.01), `nodeSnubberCap`(2.2e-9) | synchronous rectifiers (MOSFETs, not diodes); active clamp resets core |
+| **forward** (single-switch) | 0.9 | inductance, **turnsRatios[1+i]** | `maxDutyCycle`(0.5), `inductorRippleRatio`(0.4) | 3-winding (demag+secondary), isolationSides {primary,primary,secondary,…}; second magnetic = output inductor; **multi-output** (N secondaries, ABT #86) |
+| **two_switch_forward** | 0.9 | inductance, turnsRatios[i] | `maxDutyCycle`(0.5), `inductorRippleRatio`(0.4) | 2-winding; each switch blocks only Vin_max; **multi-output** (N secondaries, ABT #86; adds a tagged clamp-node snubber when >1 output) |
+| **acf** (active-clamp forward) | 0.9 | inductance, turnsRatios[i] | `operatingDutyCycle`(0.45), `deadTimeFraction`(0.01), `nodeSnubberCap`(2.2e-9) | synchronous rectifiers (MOSFETs, not diodes); active clamp resets core; **multi-output** (N secondaries, ABT #86) |
 | **push_pull** | 0.9 | inductance, **turnsRatios[1]** | `maxDutyCycle`(0.48), `outputCapacitance`(100e-6) | center-tapped primary; secondary ratios emitted as **{maximum}** ceilings |
 | **weinberg** | **1.0** | inductance, **turnsRatios[1]** | `boostDutyTarget`(0.55), `l1RippleRatio`(0.30), `transformerCoupling`(0.999) | current-fed push-pull; **operatingPoints[0] mandatory**; boost regime (D>0.5) |
 

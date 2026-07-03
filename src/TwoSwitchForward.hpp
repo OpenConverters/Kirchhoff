@@ -5,19 +5,26 @@
 // OFF (no separate demag winding). Secondary feeds a buck-like output stage. Port of MKF TwoSwitchForward.
 
 #include <nlohmann/json.hpp>
+#include <vector>
 #include "Fidelity.hpp"
 
 namespace Kirchhoff {
 
+// One isolated output rail (multi-output two-switch forward, ABT #86). outputs[0] mirrors the scalars.
+struct TwoSwitchForwardOutputLeg {
+    double voltage, power, turnsRatio, diodeDrop, outputInductance, outputCapacitance, loadResistance;
+};
+
 struct TwoSwitchForwardDesign {
     double inputVoltage, inputVoltageMin, inputVoltageMax;
     double outputVoltage, outputPower, switchingFrequency, efficiency, diodeDrop;
-    double turnsRatio;             // n = primary:secondary
+    double turnsRatio;             // n = primary:secondary (main output)
     double dutyCycle;              // operating duty at nominal Vin
     double magnetizingInductance;
-    double outputInductance;
+    double outputInductance;       // main output filter inductor
     double loadResistance;
     double outputCapacitance;
+    std::vector<TwoSwitchForwardOutputLeg> outputs;   // >=1 entry; [0] duplicates the scalars above
     nlohmann::json config;
 };
 

@@ -6,19 +6,28 @@
 // MKF SingleSwitchForward. The 3-winding transformer is ONE magnetic component (turnsRatios = [1, n]).
 
 #include <nlohmann/json.hpp>
+#include <vector>
 #include "Fidelity.hpp"
 
 namespace Kirchhoff {
 
+// One isolated output rail. outputs[0] mirrors the top-level scalar fields (the primary/measured rail);
+// outputs[1..] are additional secondaries (multi-output forward). Each carries its own duty-derived turns
+// ratio, rectifier diode drop, output-filter inductor/capacitor, and load. (ABT #86)
+struct ForwardOutputLeg {
+    double voltage, power, turnsRatio, diodeDrop, outputInductance, outputCapacitance, loadResistance;
+};
+
 struct ForwardDesign {
     double inputVoltage, inputVoltageMin, inputVoltageMax;
     double outputVoltage, outputPower, switchingFrequency, efficiency, diodeDrop;
-    double turnsRatio;             // n = primary:secondary
+    double turnsRatio;             // n = primary:secondary (main output)
     double dutyCycle;              // operating duty at nominal Vin = n*(Vout+Vd)/Vin
     double magnetizingInductance;  // Lm (primary; demag is 1:1)
-    double outputInductance;       // Lout (the buck-like output filter inductor)
+    double outputInductance;       // Lout (the buck-like output filter inductor, main output)
     double loadResistance;
     double outputCapacitance;
+    std::vector<ForwardOutputLeg> outputs;   // >=1 entry; [0] duplicates the scalars above
     nlohmann::json config;
 };
 

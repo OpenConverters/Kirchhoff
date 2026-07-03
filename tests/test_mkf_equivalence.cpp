@@ -208,6 +208,45 @@ json kirchhoff_inputs(const json& in) {
     return d;
 }
 
+// ── Multi-output helper (ABT #86) ─────────────────────────────────────────────
+// Assemble the TAS, run it to a settled steady state, and average each external output node over the last
+// switching period. Returns one mean voltage per requested node (same order as `nodes`). The assembler
+// synthesizes one load per external output port, so this measures every rail delivering into its own load.
+std::vector<double> measure_multi_output(const json& tas, double fsw,
+                                         const std::vector<std::string>& nodes, const std::string& tag) {
+    std::string deck = Kirchhoff::tas_to_ngspice(tas, PEAS::Fidelity(PEAS::Fidelity::Origin::REQUIREMENTS));
+    const double period = 1.0 / fsw;
+    const double settle = std::max(1200.0 * period, 0.012);   // >= 10 output-filter RC for a 100u/12R rail
+    const double tstep = period / 200.0;
+    deck = std::regex_replace(deck, std::regex(R"(\.tran\s+\S+\s+\S+\s+\S+\s+\S+)"),
+        ".tran " + fmt(tstep) + " " + fmt(settle) + " 0 " + fmt(tstep));
+    auto cpos = deck.rfind("\n.control");
+    if (cpos != std::string::npos) deck = deck.substr(0, cpos);
+    std::ostringstream ctl; ctl << "\n.control\nrun\n";
+    for (size_t i = 0; i < nodes.size(); ++i)
+        ctl << "meas tran v" << i << " AVG v(" << nodes[i] << ") from=" << fmt(settle - period)
+            << " to=" << fmt(settle) << "\n";
+    ctl << "print";
+    for (size_t i = 0; i < nodes.size(); ++i) ctl << " v" << i;
+    ctl << "\n.endc\n.end\n";
+    deck += ctl.str();
+    std::string out = run_ngspice(deck, tag);
+    std::vector<double> res(nodes.size(), 0.0);
+    for (size_t i = 0; i < nodes.size(); ++i) parse_meas(out, "v" + std::to_string(i), res[i]);
+    return res;
+}
+
+// Number of secondary-side windings on the named magnetic in the assembled TAS (= turnsRatios.size()).
+size_t transformer_secondary_windings(const json& tas, const std::string& stageName, const std::string& comp) {
+    for (const auto& st : tas.at("topology").at("stages")) {
+        if (st.value("name", "") != stageName || !st.contains("circuit")) continue;
+        for (const auto& c : st.at("circuit").at("components"))
+            if (c.value("name", "") == comp)
+                return c.at("data").at("inputs").at("designRequirements").at("turnsRatios").size();
+    }
+    throw std::runtime_error("transformer_secondary_windings: component not found: " + comp);
+}
+
 TEST_CASE("Boost: Kirchhoff design+simulation matches MKF ideal reference", "[equivalence][boost]") {
     json fx = load_fixture("boost");
     const json& in = fx.at("inputs");
@@ -1387,6 +1426,55 @@ TEST_CASE("CLLLC reverse power flow: LV side sources, HV side delivered (ABT #85
     CHECK(r.vDelivered < 1.15 * 400.0);
     CHECK(r.pLoad > 50.0);
     CHECK(r.pSource >= r.pLoad * 0.9);
+}
+
+// ── Multi-output (N isolated secondaries) — ABT #86 ────────────────────────────
+// Each forward-family builder now reads every designRequirements.outputs[] and wires a secondary winding +
+// rectifier + output filter per rail (per-output turns ratio n_i = Vin_min·D_max/(Vout_i+Vd_i)). A 2-output
+// spec must (a) build N secondary windings on the transformer and (b) regulate BOTH rails in ngspice.
+// Node "Vout" is the main (output 0) rail; "Vout2" is the second rail (assembler auto-synthesizes its load).
+json two_output_forward_spec() {
+    return json::parse(R"({ "designRequirements": { "efficiency": 1.0,
+        "inputVoltage": { "minimum": 38, "nominal": 40, "maximum": 42 },
+        "switchingFrequency": { "nominal": 100000 },
+        "outputs": [ { "name": "out", "voltage": { "nominal": 5 } },
+                     { "name": "aux", "voltage": { "nominal": 12 } } ] },
+        "operatingPoints": [ { "inputVoltage": 40, "outputs": [ { "power": 25 }, { "power": 12 } ] } ] })");
+}
+void check_dual_rails(const std::vector<double>& v) {
+    INFO("main rail Vout=" << v.at(0) << " (target 5), aux rail Vout2=" << v.at(1) << " (target 12)");
+    CHECK(v.at(0) > 0.85 * 5.0);  CHECK(v.at(0) < 1.15 * 5.0);
+    CHECK(v.at(1) > 0.85 * 12.0); CHECK(v.at(1) < 1.15 * 12.0);
+}
+
+TEST_CASE("Forward multi-output: two isolated secondaries each regulate (ABT #86)",
+          "[equivalence][forward][multi]") {
+    Kirchhoff::ForwardDesign d = Kirchhoff::design_forward(two_output_forward_spec());
+    REQUIRE(d.outputs.size() == 2);
+    json tas = Kirchhoff::build_forward_tas(d);
+    // transformer = primary + demag + 2 secondaries -> 3 secondary-side windings.
+    CHECK(transformer_secondary_windings(tas, "forwardCell", "T1") == 3);
+    check_dual_rails(measure_multi_output(tas, 100000.0, {"Vout", "Vout2"}, "forward_multi"));
+}
+
+TEST_CASE("Two-switch forward multi-output: two isolated secondaries each regulate (ABT #86)",
+          "[equivalence][tsf][multi]") {
+    Kirchhoff::TwoSwitchForwardDesign d = Kirchhoff::design_two_switch_forward(two_output_forward_spec());
+    REQUIRE(d.outputs.size() == 2);
+    json tas = Kirchhoff::build_two_switch_forward_tas(d);
+    // no demag winding: primary + 2 secondaries -> 2 secondary-side windings.
+    CHECK(transformer_secondary_windings(tas, "forwardCell", "T1") == 2);
+    check_dual_rails(measure_multi_output(tas, 100000.0, {"Vout", "Vout2"}, "tsf_multi"));
+}
+
+TEST_CASE("Active-clamp forward multi-output: two isolated secondaries each regulate (ABT #86)",
+          "[equivalence][acf][multi]") {
+    Kirchhoff::AcfDesign d = Kirchhoff::design_acf(two_output_forward_spec());
+    REQUIRE(d.outputs.size() == 2);
+    json tas = Kirchhoff::build_acf_tas(d);
+    // active clamp resets (no demag): primary + 2 secondaries -> 2 secondary-side windings.
+    CHECK(transformer_secondary_windings(tas, "acfCell", "T1") == 2);
+    check_dual_rails(measure_multi_output(tas, 100000.0, {"Vout", "Vout2"}, "acf_multi"));
 }
 
 }  // namespace

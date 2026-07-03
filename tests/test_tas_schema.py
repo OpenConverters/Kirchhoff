@@ -102,5 +102,17 @@ def check(label, tas):
 check("flyback", PyKirchhoff.design_flyback_tas(FLYBACK_IN))
 check("boost", PyKirchhoff.design_boost_tas(BOOST_IN))
 
+# Multi-output (N isolated secondaries) — ABT #86. A 2-output forward-family spec must still emit a
+# schema-valid TAS (extra secondary windings, per-output rectifiers/filters, extra external output ports).
+MULTI_IN = {"designRequirements": {"efficiency": 1.0, "inputType": "dc",
+    "inputVoltage": {"minimum": 38, "nominal": 40, "maximum": 42}, "switchingFrequency": {"nominal": 100000},
+    "outputs": [{"name": "out", "voltage": {"nominal": 5}, "regulation": "voltage"},
+                {"name": "aux", "voltage": {"nominal": 12}, "regulation": "voltage"}]},
+    "operatingPoints": [{"name": "f", "inputVoltage": 40, "ambientTemperature": 25,
+                         "outputs": [{"name": "out", "power": 25}, {"name": "aux", "power": 12}]}]}
+check("forward-2out", PyKirchhoff.design_forward_tas(MULTI_IN))
+check("tsf-2out", PyKirchhoff.design_two_switch_forward_tas(MULTI_IN))
+check("acf-2out", PyKirchhoff.design_acf_tas(MULTI_IN))
+
 print("\n" + ("ALL KIRCHHOFF TAS CHECKS PASSED" if failures == 0 else f"{failures} CHECK(S) FAILED"))
 sys.exit(1 if failures else 0)

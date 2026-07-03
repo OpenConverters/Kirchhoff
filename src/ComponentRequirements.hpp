@@ -41,6 +41,20 @@ constexpr double ESR_RIPPLE_FRACTION = 0.005;  // ESR ripple-voltage budget = 0.
 // diode; a real sourced diode carries its own datasheet Vf@I — real-rectifier compensation must use that.)
 inline double dideal_diode_drop(double current) { return SAS::ideal_diode_drop(current); }
 
+// The MAS `isolationSide` enum, in ordinal order (utils.json#/$defs/isolationSide). A transformer with N
+// galvanically-distinct secondaries (multi-output isolated converters) tags winding k with ordinal k so
+// the magnetic adviser groups each output on its own ground. Windings that SHARE a ground (a demag/reset
+// winding referenced to the primary, a center-tap half-winding) reuse the same ordinal as their partner.
+// Throws past the enum (12 sides) rather than emitting a schema-invalid tag.
+inline std::string isolation_side(size_t ordinal) {
+    static const char* kSides[] = {"primary", "secondary", "tertiary", "quaternary", "quinary", "senary",
+                                   "septenary", "octonary", "nonary", "denary", "undenary", "duodenary"};
+    if (ordinal >= sizeof(kSides) / sizeof(kSides[0]))
+        throw std::runtime_error("req::isolation_side: ordinal " + std::to_string(ordinal) +
+                                 " exceeds the 12 MAS isolationSide values");
+    return kSides[ordinal];
+}
+
 // "Design around the magnetic" (ABT #30 / della-Pollock flow): if the caller pinned the magnetizing
 // inductance in the spec — any of magnetizingInductance / desiredInductance / inductance, as a number or
 // {nominal} — the topology sizes the REST of the stage around THAT L instead of computing its own. Returns

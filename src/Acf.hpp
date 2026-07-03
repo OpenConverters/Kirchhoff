@@ -12,21 +12,28 @@
 // switch is driven complementary to the main switch (assembler complementary drive).
 
 #include <nlohmann/json.hpp>
+#include <vector>
 #include "Fidelity.hpp"
 
 namespace Kirchhoff {
+
+// One isolated output rail (multi-output active-clamp forward, ABT #86). outputs[0] mirrors the scalars.
+struct AcfOutputLeg {
+    double voltage, power, turnsRatio, diodeDrop, outputInductance, outputCapacitance, loadResistance;
+};
 
 struct AcfDesign {
     double inputVoltage, inputVoltageMin, inputVoltageMax;
     double outputVoltage, outputPower, switchingFrequency, efficiency, diodeDrop;
     double dutyCycle;              // D = main-switch duty (operating point, fixed)
     double deadFraction;          // dead time fraction between main & clamp switches
-    double turnsRatio;            // n = Np:Ns
+    double turnsRatio;            // n = Np:Ns (main output)
     double magnetizingInductance; // Lm
     double clampCapacitance;      // Cc
-    double outputInductance;      // Lo
+    double outputInductance;      // Lo (main output)
     double loadResistance;
     double outputCapacitance;
+    std::vector<AcfOutputLeg> outputs;   // >=1 entry; [0] duplicates the scalars above
     nlohmann::json config;
 };
 
