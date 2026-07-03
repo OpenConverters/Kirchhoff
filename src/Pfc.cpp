@@ -79,19 +79,15 @@ PfcDesign design_pfc(const json& tasInputs) {
                                         "in {2,3}, got " + std::to_string(d.numberOfPhases));
     } else {
         d.numberOfPhases = 1;
-        if (d.topologyVariant == "totemPole")
-            // The analytical bipolar inductor excitation IS ported (analytical_pfc bipolar=true), but the
-            // bridgeless bipolar CLOSED-LOOP deck (polarity-steered slow leg + synchronous fast leg +
-            // bipolar current loop + inverted voltage-loop sign) is not implemented. Reject explicitly.
-            throw std::invalid_argument("design_pfc: totemPole topologyVariant is not yet supported — its "
-                                        "bridgeless bipolar closed-loop deck is not implemented (the "
-                                        "analytical bipolar inductor excitation IS available). "
-                                        "Available variants: boost, interleaved.");
-        if (d.topologyVariant == "sepic" || d.topologyVariant == "cuk")
-            throw std::invalid_argument("design_pfc: topologyVariant '" + d.topologyVariant +
-                                        "' (buck-boost class PFC) is not yet supported "
-                                        "(available: boost, interleaved)");
+        // totemPole (bipolar true-sine, bridgeless) and sepic/cuk (buck-boost class) each have their own
+        // deck builder below; boost is the default. The buck-boost front ends are sized in continuous
+        // conduction only — the DCM/CrM formulas below are boost-specific derivations, so reject a non-CCM
+        // request rather than apply a wrong-topology formula (no silent mis-sizing).
+        if ((d.topologyVariant == "sepic" || d.topologyVariant == "cuk") && d.mode != "ccm")
+            throw std::invalid_argument("design_pfc: '" + d.topologyVariant + "' PFC is sized in CCM only; "
+                                        "mode '" + d.mode + "' is not supported for the buck-boost class");
     }
+    const bool buckBoost = (d.topologyVariant == "sepic" || d.topologyVariant == "cuk");
 
     const double pin   = d.outputPower / std::max(d.efficiency, 1e-6);
     const double vpeak = d.inputVoltageRms * std::sqrt(2.0);
@@ -108,7 +104,9 @@ PfcDesign design_pfc(const json& tasInputs) {
     // ccm/dcm/crcm, :171/205/218). Every formula evaluates at the line-voltage peak (the worst case). For
     // an INTERLEAVED PFC each of the N phases carries 1/N of the line current, so the per-phase inductor is
     // sized to the per-phase power/current (MKF per_phase_power :163); N = 1 for boost/totem-pole.
-    const double dutyPeak   = 1.0 - vpeak / d.outputVoltage;   // boost duty at the line peak (Vd = 0)
+    // Duty at the line peak: boost-class D = 1 − Vpk/Vout; buck-boost-class (SEPIC/Ćuk) D = Vout/(Vout+Vpk).
+    const double dutyPeak   = buckBoost ? d.outputVoltage / (d.outputVoltage + vpeak)
+                                        : 1.0 - vpeak / d.outputVoltage;
     const double pinPhase   = pin   / d.numberOfPhases;        // per-phase input power
     const double iPeakPhase = iPeak / d.numberOfPhases;        // per-phase peak inductor current
     const double ripple     = cfg::get(d.config, "currentRippleFraction", kRippleFraction);
@@ -131,6 +129,19 @@ PfcDesign design_pfc(const json& tasInputs) {
     d.currentHysteresis = 0.5 * dILactual * d.senseResistance;   // half-band on the i·Rsense signal
     d.outputCapacitance = cfg::get(d.config, "outputCapacitance", kOutputCapacitance);
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
+
+    // ── SEPIC / Ćuk second inductor L2 + energy-transfer cap Cs. L2 is taken equal to the input inductor L1
+    // (a standard SEPIC/Ćuk choice; the two carry comparable ripple). Cs is placed so the L2–Cs resonance
+    // sits a decade below fsw — large enough to hold ~constant over a switching cycle, low enough that its
+    // resonance does not beat the current loop. Populated only for the buck-boost class (0 otherwise).
+    if (buckBoost) {
+        d.coupledInductance = d.boostInductance;                       // L2 = L1
+        const double fRes = d.switchingFrequency / 10.0;               // resonance a decade below fsw
+        d.couplingCapacitance = 1.0 / (std::pow(2.0 * kPi * fRes, 2.0) * d.coupledInductance);
+    } else {
+        d.coupledInductance = 0.0;
+        d.couplingCapacitance = 0.0;
+    }
 
     // ── Outer voltage loop: a DESIGNED PI compensator (derived from the plant, not hand-tuned). ──
     // The inner hysteretic current loop makes the stage emulate a conductance Ge = (1−gv)/Rsense, so the
@@ -158,12 +169,14 @@ PfcDesign design_pfc(const json& tasInputs) {
 // Variant deck builders (ABT #92) — defined after build_pfc_tas.
 static json build_pfc_totempole_tas(const PfcDesign& d);
 static json build_pfc_interleaved_tas(const PfcDesign& d);
+static json build_pfc_buckboost_tas(const PfcDesign& d);   // sepic + cuk
 
 json build_pfc_tas(const PfcDesign& d) {
     // Deck router (ABT #92). The mode (ccm/dcm/crm/transition) only changes the boost-inductor VALUE, so it
     // is common to every deck; the topology VARIANT changes the switching cell, so it selects the builder.
     if (d.topologyVariant == "totemPole") return build_pfc_totempole_tas(d);
     if (d.topologyVariant == "interleaved") return build_pfc_interleaved_tas(d);
+    if (d.topologyVariant == "sepic" || d.topologyVariant == "cuk") return build_pfc_buckboost_tas(d);
     if (d.topologyVariant != "boost")
         throw std::invalid_argument("build_pfc_tas: topologyVariant '" + d.topologyVariant +
                                     "' deck is not implemented");
@@ -342,17 +355,214 @@ json build_pfc_tas(const PfcDesign& d) {
     return tas;
 }
 
+// TOTEM-POLE bridgeless PFC (ABT #92) — the highest-value non-boost variant. There is NO diode bridge: the
+// boost inductor L sits directly on the AC line and sees a TRUE bipolar sine (analytical_pfc bipolar=true).
+// Two legs share the bus node `vout` (top of Cout) and ground:
+//   • FAST (HF) leg  : Q1 (high, vout↔SW) + Q2 (low, SW↔gnd), each with an anti-parallel free-wheel diode
+//     DQ1/DQ2 (real MOSFET body diodes — functional rectifiers, NOT numerical aids). L feeds the SW midpoint.
+//   • SLOW (line-freq) leg: two ordinary diodes Da (acNeutral→vout) + Db (gnd→acNeutral) return the neutral
+//     to whichever rail matches the line polarity (Db≈gnd on the positive half, Da≈vout on the negative).
+// Only ONE fast switch is actively PWM'd per half-cycle (the other leg free-wheels through its body diode):
+//   • positive half (V(acLine)>V(acNeutral)): Q2 is the boost switch; DQ1 rectifies to the bus.
+//   • negative half: Q1 is the boost switch; DQ2 free-wheels from ground.
+// The SAME hysteretic current law drives both: with iRefV = vLineClean·(1−gv) [a bipolar reference, the
+// analog of the bridged boost's busP·(1−gv)] and iSenseV = iL·Rsense (both ground-referenced via summers
+// with perfect common-mode rejection), Q2 turns ON when iRefV−iSenseV>+hyst (energise) and Q1 turns ON when
+// iSenseV−iRefV>+hyst — each gated by the line polarity so exactly one is active. The OUTER voltage loop is
+// BYTE-IDENTICAL to the boost's (same Iv integrator + Sgv summer producing gv); the totem-pole's sign
+// inversion lives entirely in forming (1−gv) against the SIGNED line voltage, not in the compensator.
 static json build_pfc_totempole_tas(const PfcDesign& d) {
-    // The bipolar-inductor magnetics excitation is ported (analytical_pfc bipolar=true), but the CLOSED-LOOP
-    // totem-pole DECK is a substantial control redesign vs. the bridged boost — a polarity-steered slow leg,
-    // a bipolar current reference, a complementary synchronous fast leg, and an inverted voltage-loop sign —
-    // and is not yet implemented. Reject explicitly (no silent boost fallback), per ABT #92.
-    (void)d;
-    throw std::invalid_argument(
-        "build_pfc_totempole_tas: totemPole topologyVariant is not yet supported — its bridgeless "
-        "bipolar closed-loop deck (polarity-steered slow leg + synchronous fast leg + bipolar current "
-        "loop) is not implemented. The analytical bipolar inductor excitation IS available "
-        "(analytical_pfc bipolar=true).");
+    auto port = [](const char* n) { json p; p["name"] = n; return p; };
+    auto pin  = [](const char* c, const char* p) { json e; e["component"] = c; e["pin"] = p; return e; };
+    auto prt  = [](const char* p) { json e; e["port"] = p; return e; };
+    auto conn = [](const char* name, std::vector<json> eps) { json c; c["name"] = name; c["endpoints"] = eps; return c; };
+    auto comp = [](const char* name, json data) { json c; c["name"] = name; c["data"] = data; return c; };
+    auto bind = [](const char* p, const char* type) { json b; b["port"] = p; b["type"] = type; return b; };
+    auto pstage = [](const char* name, const char* role, json brick, json inb, json outb) {
+        json s; s["name"] = name; s["role"] = role; s["circuit"] = brick;
+        s["inputPort"] = inb; s["outputPort"] = outb; return s; };
+    auto sp = [](const char* st, const char* po) { json e; e["stage"] = st; e["port"] = po; return e; };
+    auto isc = [](const char* name, const char* kind, const char* dir, std::vector<json> eps) {
+        json c; c["name"] = name; c["kind"] = kind; if (dir[0]) c["direction"] = dir; c["endpoints"] = eps; return c; };
+    auto mosfet = [](const json& reqs) { json j; j["semiconductor"]["mosfet"] = json::object();
+        j["inputs"]["designRequirements"] = reqs; return j; };
+    auto diode  = [](const json& reqs) { json j; j["semiconductor"]["diode"] = json::object();
+        j["inputs"]["designRequirements"] = reqs; return j; };
+    auto capBrick = [&](double c, double vr) { json j; j["capacitor"] = json::object();
+        j["inputs"]["designRequirements"]["capacitance"]["nominal"] = c;
+        j["inputs"]["designRequirements"]["ratedVoltage"] = vr; return j; };
+    auto indBrick = [&](double L, const json& excitation) { json j; j["magnetic"] = json::object();
+        j["inputs"] = req::magnetic_inputs(L, 0.2, /*single winding*/ {}, {"primary"},
+            std::nullopt, 25.0, {excitation}); return j; };
+    auto resBrick = [&](double r) { json j; j["resistor"] = json::object();
+        auto& dr = j["inputs"]["designRequirements"];
+        dr["deviceType"] = "resistor"; dr["resistance"]["nominal"] = r;
+        const double Iout_ = d.outputPower / d.outputVoltage, Vb_ = d.outputVoltage;
+        const double i2r_ = Iout_*Iout_*r, v2r_ = Vb_*Vb_/r;
+        dr["powerRating"] = (i2r_ < v2r_ ? i2r_ : v2r_);
+        return j; };
+    auto comparator = [&](double hyst, double lo, double hi) { json j; json& e = j["analog"]["comparator"]["behavioral"];
+        e["outputHigh"] = hi; e["outputLow"] = lo; e["threshold"] = 0.0; e["hysteresis"] = hyst; return j; };
+    auto multiplier = [&](double gain) { json j; j["analog"]["multiplier"]["behavioral"]["gain"] = gain; return j; };
+    auto summer = [&](double gA, double gB) { json j; json& e = j["analog"]["summer"]["behavioral"];
+        e["gainA"] = gA; e["gainB"] = gB; return j; };
+    auto integrator = [&](double gain, double initial, double ref, double lo, double hi) {
+        json j; json& e = j["analog"]["integrator"]["behavioral"];
+        e["gain"] = gain; e["initial"] = initial; e["reference"] = ref;
+        e["outputLow"] = lo; e["outputHigh"] = hi; return j; };
+
+    // Bipolar boost-inductor excitation from the SPICE-validated line-cycle solver (analytical_pfc
+    // bipolar=true): a TRUE bipolar sine current envelope (zero mean, ±I_pk) + HF ripple. PFC has ONE AC
+    // operating point, so the same op feeds both the embedded excitation and the semiconductor ratings.
+    namespace AN = Kirchhoff::analytical;
+    const MAS::OperatingPoint aopPfc = AN::analytical_pfc(d.inputVoltageRms, d.outputVoltage, d.outputPower,
+                                                          d.lineFrequency, d.switchingFrequency,
+                                                          d.boostInductance, d.efficiency,
+                                                          /*diodeVoltageDrop*/ 0.0, /*numberOfPeriods*/ 2,
+                                                          /*bipolar*/ true);
+    const double IpkL  = AN::winding_current(aopPfc, 0, "peak");
+    const double IrmsL = AN::winding_current(aopPfc, 0, "rms");
+    const double IavgL = AN::winding_current(aopPfc, 0, "offset");   // ~0 for a true bipolar sine
+    const json indExc = AN::excitations_processed(aopPfc, "L").at(0);
+
+    // ── semiconductor requirements (worst-case corner) ──  Every device blocks the DC bus Vout; the fast
+    // switches / free-wheel diodes carry the full inductor current; the slow-leg diodes carry the line-
+    // current envelope (peak of |i_line| per half-cycle). RMS heating uses the inductor RMS.
+    const double ratedVdsP  = d.outputVoltage / cfg::v_derate_mosfet(d.config);
+    const double ratedVrD   = d.outputVoltage / cfg::v_derate_diode(d.config);
+    const double maxRdsOnP  = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IrmsL * IrmsL);
+    const double maxVfD     = (ratedVrD < 100.0) ? 0.6 : 1.2;
+    const double IfFast     = IrmsL / 0.7;                       // fast free-wheel diode: inductor current
+    const double IfSlow     = (IavgL > 0.0 ? IavgL : IrmsL) / 0.7;  // slow-leg line-return current
+    const json reqSW   = req::mosfet("mainSwitch", ratedVdsP, IpkL, maxRdsOnP, 125.0);
+    const json reqDfw  = req::diode(ratedVrD, IfFast, maxVfD, 0.05 / d.switchingFrequency);  // fast free-wheel
+    const json reqDslow = req::diode(ratedVrD, IfSlow, maxVfD);  // line-freq return (no trr spec)
+
+    // ───────────── POWER stage: bridgeless totem-pole (fast leg + slow-diode return leg) ─────────────
+    // Rsense is in series with L on the AC-LINE side: acLine -> Rsense -> nL -> L -> SW. V(acLine)-V(nL) =
+    // iL·Rsense (signed) is the true bipolar inductor current; the control summer differences it to ground.
+    json pcell; pcell["name"] = "pfc-power-totempole";
+    pcell["ports"] = json::array({port("acLine"), port("acNeutral"), port("gnd"), port("vout"),
+                                  port("nL"), port("gHi"), port("gLo")});
+    pcell["components"] = json::array({
+        comp("Rsense", resBrick(d.senseResistance)),
+        comp("L", indBrick(d.boostInductance, indExc)),
+        comp("Q1", mosfet(reqSW)), comp("Q2", mosfet(reqSW)),               // fast leg (high, low)
+        comp("DQ1", diode(reqDfw)), comp("DQ2", diode(reqDfw)),             // anti-parallel free-wheel
+        comp("Da", diode(reqDslow)), comp("Db", diode(reqDslow)),          // slow-leg line return
+        comp("Cout", capBrick(d.outputCapacitance, d.outputVoltage * 2)),
+        comp("Rref", resBrick(10e3))});                                     // floating-mains reference
+    pcell["connections"] = json::array({
+        conn("acLine",  {pin("Rsense","1"), prt("acLine")}),
+        conn("nL",      {pin("Rsense","2"), pin("L","primary_start"), prt("nL")}),
+        // Fast-leg midpoint SW = L end + Q1 source + Q2 drain + both free-wheel diodes.
+        conn("swNode",  {pin("L","primary_end"), pin("Q1","source"), pin("Q2","drain"),
+                         pin("DQ1","anode"), pin("DQ2","cathode")}),
+        // Bus rail vout: Cout top, Q1 drain, DQ1 cathode, slow-leg Da cathode.
+        conn("vout_net",{pin("Q1","drain"), pin("DQ1","cathode"), pin("Da","cathode"),
+                         pin("Cout","1"), prt("vout")}),
+        // Ground rail: Q2 source, DQ2 anode, slow-leg Db anode, Cout bottom.
+        conn("gnd_net", {pin("Q2","source"), pin("DQ2","anode"), pin("Db","anode"),
+                         pin("Cout","2"), pin("Rref","2"), prt("gnd")}),
+        // Slow-leg neutral node: Da anode + Db cathode + Rref + the AC neutral terminal.
+        conn("acNeutral", {pin("Da","anode"), pin("Db","cathode"), pin("Rref","1"), prt("acNeutral")}),
+        conn("gHi_net", {pin("Q1","gate"), prt("gHi")}),
+        conn("gLo_net", {pin("Q2","gate"), prt("gLo")})});
+
+    // ──────────────── CONTROL stage: bipolar current loop + polarity steering + boost voltage loop ───────
+    // Voltage loop (IDENTICAL to the bridged boost): a designed PI produces gv from the bus error.
+    const double kref = d.referenceGain;
+    const double g0   = 1.0 - kref;
+    const double kv   = d.outputDividerGain;
+    const double kp   = d.proportionalGain;
+    const double vref = kv * d.outputVoltage;
+    const double ivInit = g0 - kp * vref;
+    const double gvLo = 1.0 - 4.0 * kref, gvHi = 1.0 - 0.1 * kref;
+    const double ivLo = gvLo - kp * vref, ivHi = gvHi - kp * vref;
+    const double rv2 = 1e3, rv1 = rv2 * (1.0 - kv) / kv;
+    const double hyst = d.currentHysteresis;
+
+    json ccell; ccell["name"] = "pfc-totempole-control";
+    ccell["ports"] = json::array({port("acLine"), port("acNeutral"), port("nL"),
+                                  port("vout"), port("gnd"), port("gHi"), port("gLo")});
+    ccell["components"] = json::array({
+        // Outer voltage loop → gv (boost-identical).
+        comp("Rv1", resBrick(rv1)), comp("Rv2", resBrick(rv2)),
+        comp("Iv", integrator(d.integralGain, ivInit, vref, ivLo, ivHi)),
+        comp("Sgv", summer(1.0, kp)),
+        // Bipolar current reference iRefV = vLineClean·(1−gv):
+        comp("Sline", summer(1.0, -1.0)),      // vLineClean = V(acLine) − V(acNeutral) (source-enforced sine)
+        comp("Mgv", multiplier(1.0)),          // vLineClean·gv
+        comp("Sref", summer(1.0, -1.0)),       // iRefV = vLineClean − vLineClean·gv
+        // Ground-referenced bipolar current sense iSenseV = V(acLine) − V(nL) = iL·Rsense:
+        comp("Ssense", summer(1.0, -1.0)),
+        // Line polarity (0/1) — steers which fast switch is active this half-cycle:
+        comp("Cpol", comparator(0.0, 0.0, 1.0)),   // 1 on the positive half (acLine>acNeutral)
+        comp("Cpoln", comparator(0.0, 0.0, 1.0)),  // 1 on the negative half (acNeutral>acLine)
+        // Hysteretic current comparators (0/1). cA: energise the LOW switch; cB: energise the HIGH switch:
+        comp("CcA", comparator(hyst, 0.0, 1.0)),   // 1 when iRefV − iSenseV > +hyst
+        comp("CcB", comparator(hyst, 0.0, 1.0)),   // 1 when iSenseV − iRefV > +hyst
+        // Gate = polarity AND current-demand, scaled to a 5 V drive (gain 5 → 5 V only when both are 1):
+        comp("MgLo", multiplier(5.0)),             // Q2 gate = 5·Cpol·CcA
+        comp("MgHi", multiplier(5.0))});           // Q1 gate = 5·Cpoln·CcB
+    ccell["connections"] = json::array({
+        // Voltage divider + PI (boost-identical).
+        conn("vout",      {pin("Rv1","1"), prt("vout")}),
+        conn("voutScaled",{pin("Rv1","2"), pin("Rv2","1"), pin("Iv","in"), pin("Sgv","inB")}),
+        conn("gnd",       {pin("Rv2","2"), prt("gnd")}),
+        conn("ivout",     {pin("Iv","out"), pin("Sgv","inA")}),
+        conn("gv",        {pin("Sgv","out"), pin("Mgv","inB")}),
+        // Bipolar reference chain.
+        conn("acLineC",   {pin("Sline","inA"), pin("Ssense","inA"), pin("Cpol","inPlus"),
+                           pin("Cpoln","inMinus"), prt("acLine")}),
+        conn("acNeutralC",{pin("Sline","inB"), pin("Cpol","inMinus"), pin("Cpoln","inPlus"), prt("acNeutral")}),
+        conn("vLineClean",{pin("Sline","out"), pin("Mgv","inA"), pin("Sref","inA")}),
+        conn("vLineGv",   {pin("Mgv","out"), pin("Sref","inB")}),
+        conn("iRefV",     {pin("Sref","out"), pin("CcA","inPlus"), pin("CcB","inMinus")}),
+        // Bipolar current sense.
+        conn("nLC",       {pin("Ssense","inB"), prt("nL")}),
+        conn("iSenseV",   {pin("Ssense","out"), pin("CcA","inMinus"), pin("CcB","inPlus")}),
+        // Polarity + current-demand → gates.
+        conn("pol",       {pin("Cpol","out"), pin("MgLo","inA")}),
+        conn("poln",      {pin("Cpoln","out"), pin("MgHi","inA")}),
+        conn("cA",        {pin("CcA","out"), pin("MgLo","inB")}),
+        conn("cB",        {pin("CcB","out"), pin("MgHi","inB")}),
+        conn("gLo",       {pin("MgLo","out"), prt("gLo")}),
+        conn("gHi",       {pin("MgHi","out"), prt("gHi")})});
+
+    json tas;
+    json& dreq = tas["inputs"]["designRequirements"];
+    dreq["efficiency"] = d.efficiency;
+    dreq["inputType"] = "acSinglePhase";
+    dreq["inputVoltage"]["nominal"] = d.inputVoltageRms;
+    dreq["lineFrequency"]["nominal"] = d.lineFrequency;
+    dreq["switchingFrequency"]["nominal"] = d.switchingFrequency;
+    { json o; o["name"] = "out"; o["voltage"]["nominal"] = d.outputVoltage; o["regulation"] = "voltage";
+      dreq["outputs"] = json::array({o}); }
+    { json op; op["name"] = "full_load"; op["inputVoltage"] = d.inputVoltageRms; op["ambientTemperature"] = 25.0;
+      json o; o["name"] = "out"; o["power"] = d.outputPower; op["outputs"] = json::array({o});
+      tas["inputs"]["operatingPoints"] = json::array({op}); }
+
+    tas["topology"]["stages"] = json::array({
+        req::control_stage("pfcController"),
+        pstage("pfcPower", "switchingCell", pcell, bind("acLine", "acInput"), bind("vout", "dcOutput")),
+        pstage("pfcControl", "control", ccell, bind("nL", "sense"), bind("gLo", "drive"))});
+    tas["topology"]["interStageConnections"] = json::array({
+        isc("AcLine", "externalPort", "input", {sp("pfcPower", "acLine"), sp("pfcControl", "acLine")}),
+        isc("AcNeutral", "externalPort", "input", {sp("pfcPower", "acNeutral"), sp("pfcControl", "acNeutral")}),
+        isc("GND", "externalPort", "input", {sp("pfcPower", "gnd"), sp("pfcControl", "gnd")}),
+        isc("Vout", "externalPort", "output", {sp("pfcPower", "vout"), sp("pfcControl", "vout")}),
+        isc("nL", "wire", "", {sp("pfcPower", "nL"), sp("pfcControl", "nL")}),
+        isc("driveHi", "wire", "", {sp("pfcControl", "gHi"), sp("pfcPower", "gHi")}),
+        isc("driveLo", "wire", "", {sp("pfcControl", "gLo"), sp("pfcPower", "gLo")})});
+
+    json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.06);
+    an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 2e-7);
+    tas["simulation"]["analyses"] = json::array({an});
+    { json ic; ic["node"] = "Vout"; ic["voltage"] = d.outputVoltage;
+      tas["simulation"]["initialConditions"] = json::array({ic}); }
+    req::finalize_control_seeds(tas, Topology::POWER_FACTOR_CORRECTION);
+    return tas;
 }
 
 // INTERLEAVED boost PFC (ABT #92): N phase-shifted boost legs share ONE input bridge and ONE bus cap. Each
@@ -544,6 +754,214 @@ static json build_pfc_interleaved_tas(const PfcDesign& d) {
     an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 2e-7);
     tas["simulation"]["analyses"] = json::array({an});
     { json ic; ic["node"] = "Vout"; ic["voltage"] = d.outputVoltage;
+      tas["simulation"]["initialConditions"] = json::array({ic}); }
+    req::finalize_control_seeds(tas, Topology::POWER_FACTOR_CORRECTION);
+    return tas;
+}
+
+// SEPIC / Ćuk PFC (ABT #92) — a BUCK-BOOST-class front end (Vout may sit above OR below the line peak).
+// The input side (bridge → Rsense → L1 → SW-to-ground) and its hysteretic current loop are IDENTICAL to the
+// bridged boost: L1's current is sensed across Rsense and driven to track busP·(1−gv) ∝ |Vac|, so the same
+// designed voltage/current loops apply unchanged. Only the OUTPUT cell differs:
+//   • SEPIC (non-inverting): Cs from the switch node to nB; L2 nB→gnd; D5 nB→vout(+); Cout vout→gnd.
+//   • Ćuk  (inverting):      Cs from the switch node to nB; L2 nB→vout(−); D5 gnd→nB; Cout vout→gnd.
+// For Ćuk the bus is NEGATIVE, so the voltage-loop sense is a summer negator voutScaled = −kv·Vout (the
+// resistive divider used for the positive SEPIC/boost bus would feed the PI a negative signal); the rest of
+// the compensator — Iv integrator, Sgv summer, Mv=busP·gv, hysteretic comparator — is byte-identical.
+static json build_pfc_buckboost_tas(const PfcDesign& d) {
+    const bool inverting = (d.topologyVariant == "cuk");
+    const double vbusSign = inverting ? -1.0 : 1.0;
+    const double vbus = vbusSign * d.outputVoltage;   // signed bus rail (SEPIC +Vout, Ćuk −Vout)
+
+    auto port = [](const char* n) { json p; p["name"] = n; return p; };
+    auto pin  = [](const char* c, const char* p) { json e; e["component"] = c; e["pin"] = p; return e; };
+    auto prt  = [](const char* p) { json e; e["port"] = p; return e; };
+    auto conn = [](const char* name, std::vector<json> eps) { json c; c["name"] = name; c["endpoints"] = eps; return c; };
+    auto comp = [](const char* name, json data) { json c; c["name"] = name; c["data"] = data; return c; };
+    auto bind = [](const char* p, const char* type) { json b; b["port"] = p; b["type"] = type; return b; };
+    auto pstage = [](const char* name, const char* role, json brick, json inb, json outb) {
+        json s; s["name"] = name; s["role"] = role; s["circuit"] = brick;
+        s["inputPort"] = inb; s["outputPort"] = outb; return s; };
+    auto sp = [](const char* st, const char* po) { json e; e["stage"] = st; e["port"] = po; return e; };
+    auto isc = [](const char* name, const char* kind, const char* dir, std::vector<json> eps) {
+        json c; c["name"] = name; c["kind"] = kind; if (dir[0]) c["direction"] = dir; c["endpoints"] = eps; return c; };
+    auto mosfet = [](const json& reqs) { json j; j["semiconductor"]["mosfet"] = json::object();
+        j["inputs"]["designRequirements"] = reqs; return j; };
+    auto diode  = [](const json& reqs) { json j; j["semiconductor"]["diode"] = json::object();
+        j["inputs"]["designRequirements"] = reqs; return j; };
+    auto capBrick = [&](double c, double vr) { json j; j["capacitor"] = json::object();
+        j["inputs"]["designRequirements"]["capacitance"]["nominal"] = c;
+        j["inputs"]["designRequirements"]["ratedVoltage"] = vr; return j; };
+    auto indBrick = [&](double L, const json& excitation) { json j; j["magnetic"] = json::object();
+        j["inputs"] = req::magnetic_inputs(L, 0.2, /*single winding*/ {}, {"primary"},
+            std::nullopt, 25.0, {excitation}); return j; };
+    auto resBrick = [&](double r) { json j; j["resistor"] = json::object();
+        auto& dr = j["inputs"]["designRequirements"];
+        dr["deviceType"] = "resistor"; dr["resistance"]["nominal"] = r;
+        const double Iout_ = d.outputPower / d.outputVoltage, Vb_ = d.outputVoltage;
+        const double i2r_ = Iout_*Iout_*r, v2r_ = Vb_*Vb_/r;
+        dr["powerRating"] = (i2r_ < v2r_ ? i2r_ : v2r_);
+        return j; };
+    auto comparator = [&](double hyst) { json j; json& e = j["analog"]["comparator"]["behavioral"];
+        e["outputHigh"] = 5.0; e["outputLow"] = 0.0; e["threshold"] = 0.0; e["hysteresis"] = hyst; return j; };
+    auto multiplier = [&]() { json j; j["analog"]["multiplier"]["behavioral"]["gain"] = 1.0; return j; };
+    auto summer = [&](double gA, double gB) { json j; json& e = j["analog"]["summer"]["behavioral"];
+        e["gainA"] = gA; e["gainB"] = gB; return j; };
+    auto integrator = [&](double gain, double initial, double ref, double lo, double hi) {
+        json j; json& e = j["analog"]["integrator"]["behavioral"];
+        e["gain"] = gain; e["initial"] = initial; e["reference"] = ref;
+        e["outputLow"] = lo; e["outputHigh"] = hi; return j; };
+
+    // Input-inductor L1 excitation from the (unipolar, bridged) analytical PFC solver — its current is the
+    // rectified-sine line-current envelope + HF ripple, exactly as for the boost (L1 IS the PFC inductor).
+    namespace AN = Kirchhoff::analytical;
+    const MAS::OperatingPoint aopPfc = AN::analytical_pfc(d.inputVoltageRms, d.outputVoltage, d.outputPower,
+                                                          d.lineFrequency, d.switchingFrequency,
+                                                          d.boostInductance, d.efficiency);
+    const double IpkL  = AN::winding_current(aopPfc, 0, "peak");
+    const double IrmsL = AN::winding_current(aopPfc, 0, "rms");
+    const double IavgL = AN::winding_current(aopPfc, 0, "offset");
+    const json indExc = AN::excitations_processed(aopPfc, "L").at(0);
+
+    // ── semiconductor requirements. The switch SW and diode D5 block Vout + the peak line voltage
+    // (buck-boost stress = Vout + Vpk); the bridge diodes block the bus; all carry the L1/line current. ──
+    const double vpeak = d.inputVoltageRms * std::sqrt(2.0);
+    const double vSwStress = d.outputVoltage + vpeak;
+    const double ratedVdsP     = vSwStress / cfg::v_derate_mosfet(d.config);
+    const double ratedVrD5     = vSwStress / cfg::v_derate_diode(d.config);
+    const double ratedVrBridge = d.outputVoltage / cfg::v_derate_diode(d.config);
+    const double maxRdsOnP     = cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IrmsL * IrmsL);
+    const double maxVfD5       = (ratedVrD5 < 100.0) ? 0.6 : 1.2;
+    const double maxVfBridge   = (ratedVrBridge < 100.0) ? 0.6 : 1.2;
+    const double IfBridge = IavgL / 0.7;
+    const double IfD5     = (d.outputPower / d.outputVoltage) / 0.7;   // output-side average current
+    const json reqSW = req::mosfet("mainSwitch", ratedVdsP, IpkL, maxRdsOnP, 125.0);
+    const json reqD5 = req::diode(ratedVrD5, IfD5, maxVfD5, 0.05 / d.switchingFrequency);
+    const json reqBridge = req::diode(ratedVrBridge, IfBridge, maxVfBridge);
+
+    // ───────────── POWER stage: diode bridge + SEPIC/Ćuk front end + L1-current sense ─────────────
+    json pcell; pcell["name"] = inverting ? "pfc-power-cuk" : "pfc-power-sepic";
+    pcell["ports"] = json::array({port("acLine"), port("acNeutral"), port("gnd"), port("vout"),
+                                  port("busP"), port("nL"), port("g")});
+    std::vector<json> pcomps = {
+        comp("D1", diode(reqBridge)), comp("D2", diode(reqBridge)),
+        comp("D3", diode(reqBridge)), comp("D4", diode(reqBridge)),
+        comp("Rsense", resBrick(d.senseResistance)),
+        comp("L1", indBrick(d.boostInductance, indExc)),
+        comp("SW", mosfet(reqSW)),
+        comp("Cs", capBrick(d.couplingCapacitance, vSwStress * 2)),
+        comp("L2", indBrick(d.coupledInductance, indExc)),
+        comp("D5", diode(reqD5)),
+        comp("Cout", capBrick(d.outputCapacitance, d.outputVoltage * 2)),
+        comp("Rref", resBrick(10e3))};
+    pcell["components"] = pcomps;
+    // The input side (bridge + Rsense + L1 + SW-to-gnd + Cs on the switch node nA) is common; only the
+    // output cell (L2 / D5 orientation and the bus sign) differs between SEPIC and Ćuk.
+    if (!inverting) {
+        // SEPIC (non-inverting): L2 nB→gnd; D5 nB(anode)→vout(+)(cathode); Cout vout(+)→gnd.
+        pcell["connections"] = json::array({
+            conn("acLine",  {pin("D1","anode"), pin("D3","cathode"), prt("acLine")}),
+            conn("acNeutral", {pin("D2","anode"), pin("D4","cathode"), pin("Rref","1"), prt("acNeutral")}),
+            conn("busP",    {pin("D1","cathode"), pin("D2","cathode"), pin("Rsense","1"), prt("busP")}),
+            conn("nL",      {pin("Rsense","2"), pin("L1","primary_start"), prt("nL")}),
+            conn("gnd_net", {pin("D3","anode"), pin("D4","anode"), pin("SW","source"),
+                             pin("L2","primary_end"), pin("Cout","2"), pin("Rref","2"), prt("gnd")}),
+            conn("nA",      {pin("L1","primary_end"), pin("SW","drain"), pin("Cs","1")}),
+            conn("nB",      {pin("Cs","2"), pin("L2","primary_start"), pin("D5","anode")}),
+            conn("vout_net",{pin("D5","cathode"), pin("Cout","1"), prt("vout")}),
+            conn("g_net",   {pin("SW","gate"), prt("g")})});
+    } else {
+        // Ćuk (inverting): Cs on the switch node; D5 nB(anode)→gnd(cathode) freewheels when SW is off;
+        // L2 nB→vout(−); Cout vout(−)→gnd. The bus is negative (precharged to −Vout).
+        pcell["connections"] = json::array({
+            conn("acLine",  {pin("D1","anode"), pin("D3","cathode"), prt("acLine")}),
+            conn("acNeutral", {pin("D2","anode"), pin("D4","cathode"), pin("Rref","1"), prt("acNeutral")}),
+            conn("busP",    {pin("D1","cathode"), pin("D2","cathode"), pin("Rsense","1"), prt("busP")}),
+            conn("nL",      {pin("Rsense","2"), pin("L1","primary_start"), prt("nL")}),
+            conn("gnd_net", {pin("D3","anode"), pin("D4","anode"), pin("SW","source"),
+                             pin("D5","cathode"), pin("Cout","2"), pin("Rref","2"), prt("gnd")}),
+            conn("nA",      {pin("L1","primary_end"), pin("SW","drain"), pin("Cs","1")}),
+            conn("nB",      {pin("Cs","2"), pin("L2","primary_start"), pin("D5","anode")}),
+            conn("vout_net",{pin("L2","primary_end"), pin("Cout","1"), prt("vout")}),
+            conn("g_net",   {pin("SW","gate"), prt("g")})});
+    }
+
+    // ──────────────── CONTROL stage: boost current loop + outer voltage loop (Ćuk: negated sense) ─────────
+    const double kref = d.referenceGain;
+    const double g0   = 1.0 - kref;
+    const double kv   = d.outputDividerGain;
+    const double kp   = d.proportionalGain;
+    const double vref = kv * d.outputVoltage;
+    const double ivInit = g0 - kp * vref;
+    const double gvLo = 1.0 - 4.0 * kref, gvHi = 1.0 - 0.1 * kref;
+    const double ivLo = gvLo - kp * vref, ivHi = gvHi - kp * vref;
+    const double rv2 = 1e3, rv1 = rv2 * (1.0 - kv) / kv;
+
+    json ccell; ccell["name"] = inverting ? "pfc-cuk-control" : "pfc-sepic-control";
+    ccell["ports"] = json::array({port("busP"), port("nL"), port("vout"), port("gnd"), port("g")});
+    std::vector<json> ccomps = {
+        comp("Iv", integrator(d.integralGain, ivInit, vref, ivLo, ivHi)),
+        comp("Sgv", summer(1.0, kp)),
+        comp("Mv", multiplier()),
+        comp("Cmp", comparator(d.currentHysteresis))};
+    // Voltage sense → voutScaled (always positive). SEPIC: resistive divider. Ćuk (negative bus): a summer
+    // negator voutScaled = −kv·V(vout) (inA=vout gain −kv; inB=gnd gain 0).
+    if (!inverting) {
+        ccomps.push_back(comp("Rv1", resBrick(rv1)));
+        ccomps.push_back(comp("Rv2", resBrick(rv2)));
+    } else {
+        ccomps.push_back(comp("Svo", summer(-kv, 0.0)));
+    }
+    ccell["components"] = ccomps;
+    std::vector<json> cconns = {
+        conn("ivout",     {pin("Iv","out"), pin("Sgv","inA")}),
+        conn("gv",        {pin("Sgv","out"), pin("Mv","inB")}),
+        conn("busP",      {pin("Mv","inA"), prt("busP")}),
+        conn("vth",       {pin("Mv","out"), pin("Cmp","inMinus")}),
+        conn("nL",        {pin("Cmp","inPlus"), prt("nL")}),
+        conn("g",         {pin("Cmp","out"), prt("g")})};
+    if (!inverting) {
+        cconns.push_back(conn("vout",      {pin("Rv1","1"), prt("vout")}));
+        cconns.push_back(conn("voutScaled",{pin("Rv1","2"), pin("Rv2","1"), pin("Iv","in"), pin("Sgv","inB")}));
+        cconns.push_back(conn("gnd",       {pin("Rv2","2"), prt("gnd")}));
+    } else {
+        cconns.push_back(conn("vout",      {pin("Svo","inA"), prt("vout")}));
+        cconns.push_back(conn("gnd",       {pin("Svo","inB"), prt("gnd")}));
+        cconns.push_back(conn("voutScaled",{pin("Svo","out"), pin("Iv","in"), pin("Sgv","inB")}));
+    }
+    ccell["connections"] = cconns;
+
+    json tas;
+    json& dreq = tas["inputs"]["designRequirements"];
+    dreq["efficiency"] = d.efficiency;
+    dreq["inputType"] = "acSinglePhase";
+    dreq["inputVoltage"]["nominal"] = d.inputVoltageRms;
+    dreq["lineFrequency"]["nominal"] = d.lineFrequency;
+    dreq["switchingFrequency"]["nominal"] = d.switchingFrequency;
+    { json o; o["name"] = "out"; o["voltage"]["nominal"] = d.outputVoltage; o["regulation"] = "voltage";
+      dreq["outputs"] = json::array({o}); }
+    { json op; op["name"] = "full_load"; op["inputVoltage"] = d.inputVoltageRms; op["ambientTemperature"] = 25.0;
+      json o; o["name"] = "out"; o["power"] = d.outputPower; op["outputs"] = json::array({o});
+      tas["inputs"]["operatingPoints"] = json::array({op}); }
+
+    tas["topology"]["stages"] = json::array({
+        req::control_stage("pfcController"),
+        pstage("pfcPower", "switchingCell", pcell, bind("acLine", "acInput"), bind("vout", "dcOutput")),
+        pstage("pfcControl", "control", ccell, bind("nL", "sense"), bind("g", "drive"))});
+    tas["topology"]["interStageConnections"] = json::array({
+        isc("AcLine", "externalPort", "input", {sp("pfcPower", "acLine")}),
+        isc("AcNeutral", "externalPort", "input", {sp("pfcPower", "acNeutral")}),
+        isc("GND", "externalPort", "input", {sp("pfcPower", "gnd"), sp("pfcControl", "gnd")}),
+        isc("Vout", "externalPort", "output", {sp("pfcPower", "vout"), sp("pfcControl", "vout")}),
+        isc("busP", "wire", "", {sp("pfcPower", "busP"), sp("pfcControl", "busP")}),
+        isc("nL", "wire", "", {sp("pfcPower", "nL"), sp("pfcControl", "nL")}),
+        isc("drive", "wire", "", {sp("pfcControl", "g"), sp("pfcPower", "g")})});
+
+    json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.06);
+    an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 2e-7);
+    tas["simulation"]["analyses"] = json::array({an});
+    // Precharge the SIGNED bus (SEPIC +Vout, Ćuk −Vout) so steady state is reached in a few line cycles.
+    { json ic; ic["node"] = "Vout"; ic["voltage"] = vbus;
       tas["simulation"]["initialConditions"] = json::array({ic}); }
     req::finalize_control_seeds(tas, Topology::POWER_FACTOR_CORRECTION);
     return tas;

@@ -250,12 +250,18 @@ TEST_CASE("PFC conduction mode drives the boost-inductor sizing (CCM/DCM/CrM/Tra
                                                                  json{{"mode","crm"}}));
     CHECK(dcrm.currentHysteresis > dccm.currentHysteresis);
 
-    // Unknown mode / unsupported variant THROW (no silent fallback).
+    // Unknown mode / unknown variant THROW (no silent fallback).
     CHECK_THROWS(Kirchhoff::design_pfc(pfc_inputs(vrms, vout, fline, fsw, pout, json{{"mode","turbo"}})));
     CHECK_THROWS(Kirchhoff::design_pfc(pfc_inputs(vrms, vout, fline, fsw, pout,
-                                                  json{{"topologyVariant","sepic"}})));
-    CHECK_THROWS(Kirchhoff::design_pfc(pfc_inputs(vrms, vout, fline, fsw, pout,
-                                                  json{{"topologyVariant","cuk"}})));
+                                                  json{{"topologyVariant","flyback"}})));
+    // SEPIC/Ćuk (buck-boost class) are sized in CCM ONLY — a non-CCM request throws (no wrong-topology
+    // formula), but the default (CCM) designs successfully.
+    for (const char* v : {"sepic", "cuk"}) {
+        CHECK_NOTHROW(Kirchhoff::design_pfc(pfc_inputs(vrms, vout, fline, fsw, pout,
+                                                       json{{"topologyVariant", v}})));
+        CHECK_THROWS(Kirchhoff::design_pfc(pfc_inputs(vrms, vout, fline, fsw, pout,
+                                                      json{{"topologyVariant", v}, {"mode", "dcm"}})));
+    }
 }
 
 TEST_CASE("interleaved boost PFC: per-phase sizing + the deck holds the bus", "[pfc][interleaved]") {
@@ -291,6 +297,103 @@ TEST_CASE("interleaved boost PFC: per-phase sizing + the deck holds the bus", "[
              << " (target Vout=" << vout << ", Pout=" << pout << ", Rload=" << rload << ")");
         // Bus regulated near target, power balance holds, near-unity PF: the N phases share the load.
         CHECK(std::abs(voavg - vout) / vout < 0.06);
+        CHECK(std::abs(pavg - voavg * voavg / rload) / pavg < 0.12);
+        CHECK(pf > 0.95);
+    }
+}
+
+TEST_CASE("totem-pole bridgeless PFC: bipolar true-sine deck holds the bus with high PF", "[pfc][totempole]") {
+    const double vrms = 120.0, vout = 400.0, fline = 400.0, fsw = 20e3, pout = 300.0;
+    // Same boost-class inductor sizing as the bridged boost (totem-pole IS a boost cell).
+    const double Lboost = Kirchhoff::design_pfc(pfc_inputs(vrms, vout, fline, fsw, pout)).boostInductance;
+
+    json cfg; cfg["topologyVariant"] = "totemPole";
+    Kirchhoff::PfcDesign d = Kirchhoff::design_pfc(pfc_inputs(vrms, vout, fline, fsw, pout, cfg));
+    CHECK(d.topologyVariant == "totemPole");
+    CHECK(d.bipolar == true);
+    CHECK(d.numberOfPhases == 1);
+    CHECK(d.boostInductance == Catch::Approx(Lboost).epsilon(1e-9));
+
+    json tas = Kirchhoff::build_pfc_tas(d);
+    // Bridgeless: an AC input, no diode BRIDGE (four rectifier diodes) — the fast leg + a slow-diode return.
+    CHECK(tas.at("inputs").at("designRequirements").at("inputType") == "acSinglePhase");
+    CHECK(tas.at("simulation").contains("stimulus") == false);
+    PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
+    const std::string base = Kirchhoff::tas_to_ngspice(tas, ideal);
+    // Structural: two fast MOSFETs (Q1 high, Q2 low) + their free-wheel diodes + the slow return diodes.
+    REQUIRE(base.find("SQ1 ") != std::string::npos);
+    REQUIRE(base.find("SQ2 ") != std::string::npos);
+    REQUIRE(base.find("DDQ1 ") != std::string::npos);
+    REQUIRE(base.find("DDQ2 ") != std::string::npos);
+    REQUIRE(base.find("DDa ") != std::string::npos);
+    REQUIRE(base.find("DDb ") != std::string::npos);
+    REQUIRE(base.find("Vac AcLine AcNeutral SIN(") != std::string::npos);
+
+    // LOAD-ROBUSTNESS sweep: the ONE designed controller (300 W) must hold the bus near target across a
+    // 0.5×–2× load range (150–600 W). The bipolar true-sine current loop keeps near-unity PF at every load.
+    const double tstop = 12.5e-3, tstep = 5e-7, t0 = 10e-3, t1 = 12.5e-3;
+    for (double pload : {150.0, 300.0, 600.0}) {
+        const double rload = vout * vout / pload;
+        std::string out = run_ngspice(make_deck(base, tstop, tstep, t0, t1, rload),
+                                      "totempole_" + std::to_string((int)pload));
+        double pavg=0, vrms_m=0, irms=0, voavg=0;
+        if (!(meas(out, "pavg", pavg) && meas(out, "voavg", voavg)))
+            WARN("totem-pole ngspice output:\n" << out.substr(0, out.size() > 4000 ? 4000 : out.size()));
+        REQUIRE(meas(out, "pavg", pavg));  REQUIRE(meas(out, "vrms", vrms_m));
+        REQUIRE(meas(out, "irms", irms));  REQUIRE(meas(out, "voavg", voavg));
+        const double pf = pavg / (vrms_m * irms);
+        INFO("totem-pole Pload=" << pload << ": Vout=" << voavg << " PF=" << pf << " Pin=" << pavg
+             << " (target Vout=" << vout << ", Rload=" << rload << ")");
+        CHECK(std::abs(voavg - vout) / vout < 0.06);
+        CHECK(std::abs(pavg - voavg * voavg / rload) / pavg < 0.12);
+        CHECK(pf > 0.95);
+    }
+}
+
+TEST_CASE("SEPIC / Ćuk PFC: buck-boost front end holds the bus with high PF", "[pfc][buckboost]") {
+    // A buck-boost-class PFC (Vout may sit above or below the line peak). SEPIC is non-inverting (bus +Vout);
+    // Ćuk is inverting (bus −Vout, sensed via the summer negator). Both reuse the boost current + voltage
+    // loops. The input inductor L1 is sized in CCM from the buck-boost duty D = Vout/(Vout+Vpk); L2 = L1 and
+    // the energy-transfer cap Cs places the L2–Cs resonance a decade below fsw.
+    const double vrms = 120.0, vout = 400.0, fline = 400.0, fsw = 20e3, pout = 300.0;
+    const double vpeak = vrms * std::sqrt(2.0), D = vout / (vout + vpeak);
+    const double iPeak = std::sqrt(2.0) * pout / vrms, ripple = 0.30;
+    const double L1_ref = vpeak * D / (ripple * iPeak * fsw);   // independent CCM buck-boost sizing check
+
+    for (const char* variant : {"sepic", "cuk"}) {
+        const bool inverting = std::string(variant) == "cuk";
+        const double vsign = inverting ? -1.0 : 1.0;
+        json cfg; cfg["topologyVariant"] = variant;
+        Kirchhoff::PfcDesign d = Kirchhoff::design_pfc(pfc_inputs(vrms, vout, fline, fsw, pout, cfg));
+        CHECK(d.topologyVariant == variant);
+        CHECK(d.boostInductance == Catch::Approx(L1_ref).epsilon(1e-9));   // buck-boost duty, not boost duty
+        CHECK(d.coupledInductance == Catch::Approx(d.boostInductance).epsilon(1e-9));
+        CHECK(d.couplingCapacitance > 0.0);
+
+        json tas = Kirchhoff::build_pfc_tas(d);
+        PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
+        const std::string base = Kirchhoff::tas_to_ngspice(tas, ideal);
+        // Structural: the SEPIC/Ćuk cell has TWO inductors (L1, L2) + a coupling cap Cs + the switch/diode.
+        REQUIRE(base.find("LL1_pri") != std::string::npos);   // single-winding magnetic emits as L<name>_pri
+        REQUIRE(base.find("LL2_pri") != std::string::npos);
+        REQUIRE(base.find("CCs ") != std::string::npos);
+        REQUIRE(base.find("SSW ") != std::string::npos);
+        REQUIRE(base.find("Vac AcLine AcNeutral SIN(") != std::string::npos);
+
+        const double tstop = 12.5e-3, tstep = 5e-7, t0 = 10e-3, t1 = 12.5e-3;
+        std::string out = run_ngspice(make_deck(base, tstop, tstep, t0, t1, /*rload*/0.0),
+                                      std::string("bb_") + variant);
+        double pavg=0, vrms_m=0, irms=0, voavg=0;
+        if (!(meas(out, "pavg", pavg) && meas(out, "voavg", voavg)))
+            WARN(variant << " ngspice output:\n" << out.substr(0, out.size() > 4000 ? 4000 : out.size()));
+        REQUIRE(meas(out, "pavg", pavg));  REQUIRE(meas(out, "vrms", vrms_m));
+        REQUIRE(meas(out, "irms", irms));  REQUIRE(meas(out, "voavg", voavg));
+        const double pf = pavg / (vrms_m * irms);
+        const double rload = d.loadResistance, vtarget = vsign * vout;
+        INFO(variant << ": Vout=" << voavg << " PF=" << pf << " Pin=" << pavg
+             << " (target Vout=" << vtarget << ", Pout=" << pout << ", Rload=" << rload << ")");
+        // Bus regulated near its (signed) target, power balance holds (Pin ≈ Vout²/Rload), near-unity PF.
+        CHECK(std::abs(voavg - vtarget) / vout < 0.06);
         CHECK(std::abs(pavg - voavg * voavg / rload) / pavg < 0.12);
         CHECK(pf > 0.95);
     }

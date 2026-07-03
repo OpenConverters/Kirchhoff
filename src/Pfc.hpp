@@ -44,9 +44,14 @@ struct PfcDesign {
     double outputDividerGain;   // kv: V(voutScaled) = kv·V(vout) (output-voltage sense)
     // ── Conduction mode + topology variant (ABT #92) ────────────────────────────────────────────────
     std::string mode;           // "ccm" | "dcm" | "crm" | "transition" — drives boostInductance sizing
-    std::string topologyVariant;// "boost" | "totemPole" | "interleaved" (SEPIC/Ćuk not yet supported)
+    std::string topologyVariant;// "boost" | "totemPole" | "interleaved" | "sepic" | "cuk"
     int numberOfPhases;         // interleaved: number of phase-shifted boost legs (2 or 3); else 1
     bool bipolar;               // totem-pole: bridgeless, the inductor sees a TRUE bipolar sine (no bridge)
+    // ── SEPIC / Ćuk (buck-boost class) front end (ABT #92) ───────────────────────────────────────────
+    // boostInductance doubles as the SEPIC/Ćuk INPUT inductor L1 (its current is the PFC-shaped line
+    // current). These are populated (>0) only for the sepic/cuk variants; 0 otherwise.
+    double coupledInductance;   // L2 (second / output-side inductor), sized equal to L1
+    double couplingCapacitance; // Cs (energy-transfer cap), resonance placed a decade below fsw
 };
 
 /** Design a single-phase current-mode (hysteretic) boost PFC. */

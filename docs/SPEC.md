@@ -285,7 +285,7 @@ at that frequency, so above/below-resonance operating points are produced (below
 
 | topology | efficiency default | pinning | key config (default) | quirks |
 |---|---|---|---|---|
-| **pfc** (boost PFC 1-φ) | 1.0 | — | `currentRippleFraction`(0.30), `outputCapacitance`(220e-6), `senseResistance`(0.1), `mode`("ccm"), `topologyVariant`("boost"), `numberOfPhases`(2, interleaved) | `inputType:"acSinglePhase"`; **`inputVoltage` = single-phase line RMS**, `lineFrequency` req; reads only `power` from operatingPoints; closed-loop (no open stimulus) |
+| **pfc** (1-φ; boost/interleaved/totemPole/sepic/cuk) | 1.0 | — | `currentRippleFraction`(0.30), `outputCapacitance`(220e-6), `senseResistance`(0.1), `mode`("ccm"), `topologyVariant`("boost"), `numberOfPhases`(2, interleaved) | `inputType:"acSinglePhase"`; **`inputVoltage` = single-phase line RMS**, `lineFrequency` req; reads only `power` from operatingPoints; closed-loop (no open stimulus). `topologyVariant`∈{boost,interleaved,totemPole,sepic,cuk}; **cuk** bus is negative (regulated to −Vout); sepic/cuk are CCM-only |
 | **vienna** (3-φ) | 1.0 | — | `busCapacitance`(470e-6), `balanceModulation`(4.0), `senseResistance`(0.1), `numberOfChannels`/`phaseCount`(1), `samplingStrategy`(`"fullLineCycle"`) | `inputType:"acThreePhase"`; **`inputVoltage` = per-phase line RMS**; `outputs[0].voltage` = full bus; switches block half bus, diodes full bus. `numberOfChannels`>1 interleaves each phase across N parallel channel inductors (analytical current split by 1/N; deck unchanged); `samplingStrategy` ∈ `fullLineCycle`\|`peakOfLineOnly`\|`peakOfLinePlusSectors` (last adds the six DPWM sector operating points) |
 
 **PFC/Vienna spec differences from DC converters:** `inputVoltage`/`lineFrequency`/`switchingFrequency`
@@ -296,15 +296,27 @@ are emitted as `{nominal}` only (no min/max triplet); `operatingPoints[0]` suppl
 `transition`} drives the boost-inductor sizing (MKF `calculate_inductance_ccm`/`_dcm`/`_crcm`; `crm` and
 `transition` share the boundary formula). The hysteretic current band follows the sized inductor's actual
 peak ripple, so CCM is byte-identical to the original. `config.topologyVariant` ∈ {`boost`(default),
-`interleaved`}: **interleaved** is N (=`numberOfPhases`, 2 or 3) phase-shifted boost legs sharing one bridge
-and bus cap — each leg carries 1/N of the line current, so its inductor is N× larger and the per-phase
-reference gain is 1/N (the plant gain K0 scales by N). **totemPole** is NOT yet supported (the analytical
-bipolar inductor excitation IS ported — `analytical_pfc(bipolar=true)`: true bipolar sine, zero mean — but
-the bridgeless bipolar closed-loop deck is not); `sepic`/`cuk` (buck-boost class) are NOT supported. Every
-unsupported variant/mode THROWS a specific exception (no silent boost/CCM fallback). NOTE: PFC decks (both
-boost and interleaved) use CIAS analog control blocks and do not fully validate under `tests/test_tas_schema.py`
-(a `oneOf` stage-shape mismatch that predates this work and is identical between boost and interleaved) —
-that harness covers only the DC converters.
+`interleaved`, `totemPole`, `sepic`, `cuk`}:
+- **interleaved** — N (=`numberOfPhases`, 2 or 3) phase-shifted boost legs sharing one bridge and bus cap;
+  each leg carries 1/N of the line current, so its inductor is N× larger and the per-phase reference gain is
+  1/N (the plant gain K0 scales by N).
+- **totemPole** — bridgeless bipolar true-sine front end (NO diode bridge): the boost inductor sits on the
+  AC line (`analytical_pfc(bipolar=true)`), a fast HF MOSFET leg (Q1/Q2 + anti-parallel free-wheel diodes)
+  feeds the bus, and a slow line-frequency diode return leg (Da/Db) steers the neutral. One fast switch is
+  actively PWM'd per half-cycle (the other free-wheels through its body diode); the bipolar current
+  reference is `vLineClean·(1−gv)` (signed) and the voltage loop is byte-identical to the boost's. ngspice:
+  bus regulated within ±3% at 400 V, PF ≈ 0.99 across a 150–600 W load sweep.
+- **sepic** / **cuk** — buck-boost-class front ends (Vout may sit above OR below the line peak). The input
+  side (bridge → Rsense → L1 → SW-to-gnd → coupling cap Cs) and both control loops are the bridged boost's;
+  only the output cell differs (SEPIC: L2→gnd, D5→+bus; Ćuk: L2 in series with the −bus, D5 free-wheel to
+  gnd). Ćuk's bus is NEGATIVE (precharged/regulated to −Vout; the voltage sense is a summer negator). Sized
+  in **CCM only** — `mode`≠`ccm` for sepic/cuk THROWS (the DCM/CrM formulas are boost-specific). L1 uses the
+  buck-boost duty D=Vout/(Vout+Vpk); L2=L1; Cs places the L2–Cs resonance a decade below fsw. ngspice: both
+  regulate |Vout|≈400 V at PF ≈ 0.99.
+
+Every unknown variant/mode THROWS a specific exception (no silent boost/CCM fallback). NOTE: PFC decks use
+CIAS analog control blocks and do not fully validate under `tests/test_tas_schema.py` (a `oneOf` stage-shape
+mismatch that predates this work) — that harness covers only the DC converters.
 
 ---
 
