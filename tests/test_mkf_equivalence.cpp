@@ -1568,4 +1568,14 @@ TEST_CASE("Active-clamp forward multi-output: two isolated secondaries each regu
     check_dual_rails(measure_multi_output(tas, 100000.0, {"Vout", "Vout2"}, "acf_multi"));
 }
 
+TEST_CASE("Flyback multi-output: two isolated secondaries each regulate (ABT #86)",
+          "[equivalence][flyback][multi]") {
+    Kirchhoff::FlybackDesign d = Kirchhoff::design_flyback(two_output_forward_spec());
+    REQUIRE(d.outputs.size() == 2);
+    json tas = Kirchhoff::build_flyback_tas(d);
+    // no demag winding: primary + 2 secondaries -> 2 secondary-side windings.
+    CHECK(transformer_secondary_windings(tas, "transformer", "T1") == 2);
+    check_dual_rails(measure_multi_output(tas, 100000.0, {"Vout", "Vout2"}, "flyback_multi"));
+}
+
 }  // namespace

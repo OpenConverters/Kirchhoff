@@ -10,9 +10,19 @@
 
 #include <nlohmann/json.hpp>
 #include <string>
+#include <vector>
 #include "Fidelity.hpp"
 
 namespace Kirchhoff {
+
+// One isolated output rail (multi-output flyback, ABT #86). outputs[0] mirrors the top-level scalar
+// fields (the main/regulated rail whose voltage sets the duty); outputs[1..] are additional secondaries.
+// Every secondary sees the same magnetizing flux, so each rail's turns ratio n_i = Np/Ns_i is scaled so
+// that n_i·(Vout_i+Vd_i) equals the shared reflected voltage Vor — i.e. each output regulates to its own
+// Vout at the common duty. Each rail carries its own rectifier, output capacitor and load.
+struct FlybackOutputLeg {
+    double voltage, power, turnsRatio, diodeDrop, outputCapacitance, loadResistance;
+};
 
 struct FlybackDesign {
     double inputVoltage;       // V (operating point Vin)
@@ -33,6 +43,7 @@ struct FlybackDesign {
     double outputCapacitance;
     nlohmann::json config;  // F
     double inputCapacitance;   // F
+    std::vector<FlybackOutputLeg> outputs;   // >=1 entry; [0] duplicates the scalars above (ABT #86)
 };
 
 // Design from TAS-style inputs.designRequirements + a chosen operating point.

@@ -113,6 +113,7 @@ MULTI_IN = {"designRequirements": {"efficiency": 1.0, "inputType": "dc",
 check("forward-2out", PyKirchhoff.design_forward_tas(MULTI_IN))
 check("tsf-2out", PyKirchhoff.design_two_switch_forward_tas(MULTI_IN))
 check("acf-2out", PyKirchhoff.design_acf_tas(MULTI_IN))
+check("flyback-2out", PyKirchhoff.design_flyback_tas(MULTI_IN))
 
 # Weinberg + its config-gated variants (ABT #88): the classic push-pull, the 4-switch H-bridge primary,
 # and the synchronous-rectifier secondary must all emit schema-valid TAS documents.

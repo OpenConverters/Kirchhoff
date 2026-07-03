@@ -52,6 +52,18 @@ FlybackDesign design_flyback(const json& tasInputs) {
     d.inputVoltageMax = vinMax;
     d.isolationVoltage = dr.value("isolationVoltage", 0.0);
 
+    // Total delivered power across all output rails (multi-output, ABT #86): the magnetizing inductance
+    // and the primary current must store/carry the SUM of the rails, not just output 0. Single output ->
+    // totalOutputPower == d.outputPower, so every value below stays byte-identical.
+    auto output_power_i = [&](size_t i) -> double {
+        if (tasInputs.contains("operatingPoints") && !tasInputs.at("operatingPoints").empty())
+            return tasInputs.at("operatingPoints").at(0).at("outputs").at(i).at("power").get<double>();
+        return nominal(dr.at("outputs").at(i).at("power"), "outputPower");
+    };
+    const size_t nOut = dr.at("outputs").size();
+    double totalOutputPower = 0.0;
+    for (size_t i = 0; i < nOut; ++i) totalOutputPower += output_power_i(i);
+
     // --- CCM design — faithful port of MKF Flyback::process_design_requirements()
     // (maximumDutyCycle branch, single output, no drain-source-voltage limit; Vd=0). ---
     const double rippleRatio  = 0.4;   // currentRippleRatio
@@ -74,8 +86,10 @@ FlybackDesign design_flyback(const json& tasInputs) {
     const double Vor = n * (d.outputVoltage + d.diodeDrop);
     d.dutyCycle = Vor / (d.inputVoltage + Vor);
 
-    // Magnetizing inductance sized at the maximum duty / minimum Vin corner (MKF).
-    const double centerSecondaryRamp = maxEffectiveLoadCurrent / (1.0 - maxDutyCycle);
+    // Magnetizing inductance sized at the maximum duty / minimum Vin corner (MKF). The secondary ramp
+    // (and hence Lm) is sized from the TOTAL rail power so the primary stores enough energy for every
+    // output (single output -> totalOutputPower == d.outputPower, so this is byte-identical).
+    const double centerSecondaryRamp = (totalOutputPower / d.outputVoltage) / (1.0 - maxDutyCycle);
     const double centerPrimaryRamp   = centerSecondaryRamp / n;
     const double tOn = maxDutyCycle / d.switchingFrequency;
     const double voltsSeconds = vinMin * tOn;
@@ -125,6 +139,31 @@ FlybackDesign design_flyback(const json& tasInputs) {
     const double iout = d.outputPower / d.outputVoltage;
     d.outputCapacitance = iout * d.dutyCycle / (d.switchingFrequency * 0.01 * d.outputVoltage);
     d.inputCapacitance = 10e-6;
+
+    // Per-output legs (multi-output: N isolated secondaries, ABT #86). All secondaries see the same
+    // magnetizing flux at the shared duty, so each rail's ratio n_i = Np/Ns_i is scaled so that the
+    // reflected voltage n_i·(Vout_i+Vd_i) equals the main rail's Vor = n_0·(Vout_0+Vd_0). Higher-voltage
+    // rails therefore get a SMALLER n_i. outputs[0] reproduces the scalars above byte-for-byte.
+    const double Vor0 = d.turnsRatio * (d.outputVoltage + d.diodeDrop);
+    for (size_t i = 0; i < nOut; ++i) {
+        FlybackOutputLeg leg{};
+        leg.voltage = nominal(dr.at("outputs").at(i).at("voltage"), "outputVoltage");
+        leg.power   = output_power_i(i);
+        const double iout_i = leg.power / leg.voltage;
+        leg.diodeDrop = req::dideal_diode_drop(iout_i);
+        if (i == 0) {
+            leg.turnsRatio = d.turnsRatio;
+            leg.diodeDrop  = d.diodeDrop;            // preserve the main rail's exact scalar value
+            leg.outputCapacitance = d.outputCapacitance;
+        } else {
+            double ni = Vor0 / (leg.voltage + leg.diodeDrop);
+            ni = std::round(ni * 100.0) / 100.0;
+            leg.turnsRatio = req::provided_turns_ratio(dr, i).value_or(ni);
+            leg.outputCapacitance = iout_i * d.dutyCycle / (d.switchingFrequency * 0.01 * leg.voltage);
+        }
+        leg.loadResistance = leg.voltage * leg.voltage / leg.power;
+        d.outputs.push_back(leg);
+    }
     return d;
 }
 
@@ -245,57 +284,57 @@ json build_flyback_tas(const FlybackDesign& d) {
     // voltages in the embedded excitation). analytical_flyback carries the DCM secondary correction.
     namespace AN = Kirchhoff::analytical;
     const double n = d.turnsRatio, fsw = d.switchingFrequency, T = 1.0 / fsw, Lm = d.magnetizingInductance;
-    const double Pin = d.outputPower / d.efficiency;
-    const double Iout = d.outputPower / d.outputVoltage;
+    const size_t nOut = d.outputs.size();
+
+    // Per-output vectors for the multi-secondary FHA solver (ABT #86). Single output -> {Vout}/{Iout}/{n}
+    // and isoSides {primary,secondary} exactly as before, so the single-output TAS stays byte-identical.
+    std::vector<double> Vouts, iouts, ratios;
+    std::vector<std::string> isoSides{"primary"};
+    double totalOutputPower = 0.0;
+    for (const auto& leg : d.outputs) {
+        Vouts.push_back(leg.voltage);
+        iouts.push_back(leg.power / leg.voltage);
+        ratios.push_back(leg.turnsRatio);
+        isoSides.push_back(req::isolation_side(isoSides.size()));   // sec0->secondary, sec1->tertiary, …
+        totalOutputPower += leg.power;
+    }
+    const double Pin = totalOutputPower / d.efficiency;
     const double IinMin = Pin / d.inputVoltageMin;
-    const MAS::OperatingPoint aopWorst = AN::analytical_flyback(d.inputVoltageMin, {d.outputVoltage}, {Iout},
-                                                               {n}, fsw, Lm, 0.0, d.efficiency);
-    const MAS::OperatingPoint aopNom   = AN::analytical_flyback(d.inputVoltage,    {d.outputVoltage}, {Iout},
-                                                               {n}, fsw, Lm, 0.0, d.efficiency);
+    const MAS::OperatingPoint aopWorst = AN::analytical_flyback(d.inputVoltageMin, Vouts, iouts,
+                                                               ratios, fsw, Lm, 0.0, d.efficiency);
+    const MAS::OperatingPoint aopNom   = AN::analytical_flyback(d.inputVoltage,    Vouts, iouts,
+                                                               ratios, fsw, Lm, 0.0, d.efficiency);
     const double IpkPri  = AN::winding_current(aopWorst, 0, "peak");
     const double IrmsPri = AN::winding_current(aopWorst, 0, "rms");
-    const double IpkSec  = AN::winding_current(aopWorst, 1, "peak");
-    const double IrmsSec = AN::winding_current(aopWorst, 1, "rms");
 
-    // VOLTAGES at Vin_max (max stress corner) for the semiconductor ratings.
+    // Primary-switch stresses (the one switch carries every rail's reflected power). VOLTAGES at Vin_max;
+    // the reflected voltage n_i·(Vout_i+Vd_i) is the shared Vor, so the main-rail term sizes the drain.
+    const double maxTrr    = 0.05 * T;
     const double VdsStress = d.inputVoltageMax + n * d.outputVoltage;
-    const double VrStress  = d.outputVoltage + d.inputVoltageMax / n;
-    const double ratedVds = VdsStress / cfg::v_derate_mosfet(d.config);
-    const double ratedVr  = VrStress  / cfg::v_derate_diode(d.config);
-    const double maxRdsOn = 0.01 * d.outputPower / (IrmsPri * IrmsPri);   // <=1% of Pout conduction
-    const double maxVf    = (ratedVr < 100.0) ? 0.6 : 1.2;               // Schottky-class if low V_R
-    const double maxTrr   = 0.05 * T;
-    const double IcoutRms = std::sqrt(std::max(0.0, IrmsSec * IrmsSec - Iout * Iout));
-    const double IcinRms  = std::sqrt(std::max(0.0, IrmsPri * IrmsPri - IinMin * IinMin));
+    const double ratedVds  = VdsStress / cfg::v_derate_mosfet(d.config);
+    const double maxRdsOn  = 0.01 * totalOutputPower / (IrmsPri * IrmsPri);   // <=1% of total Pout conduction
+    const double IcinRms   = std::sqrt(std::max(0.0, IrmsPri * IrmsPri - IinMin * IinMin));
 
     // --- component PEAS docs: discriminator + detailed inputs.designRequirements ---
     json mosfet; mosfet["semiconductor"]["mosfet"] = json::object();
     mosfet["inputs"]["designRequirements"] = req::mosfet("mainSwitch", ratedVds, IpkPri, maxRdsOn, 125.0);
 
-    json diode;  diode["semiconductor"]["diode"] = json::object();
-    diode["inputs"]["designRequirements"] = req::diode(ratedVr, Iout / 0.7, maxVf, maxTrr);
-
-    std::vector<std::string> isoSides{"primary", "secondary"};
     std::optional<double> isoV = d.isolationVoltage > 0 ? std::optional<double>(d.isolationVoltage) : std::nullopt;
 
     json mag; mag["magnetic"] = json::object();
-    mag["inputs"] = req::magnetic_inputs(Lm, 0.1, {n}, isoSides, isoV, 25.0, AN::excitations_processed(aopNom, "T1"));
+    mag["inputs"] = req::magnetic_inputs(Lm, 0.1, ratios, isoSides, isoV, 25.0, AN::excitations_processed(aopNom, "T1"));
 
     json capCin; capCin["capacitor"] = json::object();
     capCin["inputs"]["designRequirements"] = req::capacitor(
         d.inputCapacitance, d.inputVoltageMax / cfg::v_derate_capacitor(d.config), IcinRms,
         req::ESR_RIPPLE_FRACTION * d.inputVoltage / IpkPri, "inputFilter");
-    json capCout; capCout["capacitor"] = json::object();
-    capCout["inputs"]["designRequirements"] = req::capacitor(
-        d.outputCapacitance, d.outputVoltage / cfg::v_derate_capacitor(d.config), IcoutRms,
-        req::ESR_RIPPLE_FRACTION * d.outputVoltage / IpkSec, "outputFilter");
     // REAL RC clamp/snubber across the primary winding (dc+ ↔ sw = the primary, since primary_start=VIN and
     // primary_end=drain). The flyback is HARD-switched: at turn-off the leakage energy rings the drain up
     // past Vin+n·Vout, so a real RC clamp is a genuine board part here (an RCD clamp's damping network),
     // sourced + rendered — NOT a sim-only numerical aid. Sized from the ENERGY BUDGET (cfg::snubber_cap =
     // eps·P/(Vds²·fsw)) + cfg::snubber_res, rated to the drain stress. REAL refdes (Cclmp/Rclmp, role
     // "snubber") -> not matched by the numerical-aid strip (Csn*/Rsn*/Csw*).
-    const double clampSnubC = cfg::snubber_cap(d.config, d.outputPower, VdsStress, fsw);
+    const double clampSnubC = cfg::snubber_cap(d.config, totalOutputPower, VdsStress, fsw);
     const auto clampSnub = req::snubber(clampSnubC, cfg::snubber_res(d.config), VdsStress, fsw);
     const json& clampCap = clampSnub.first;
     const json& clampRes = clampSnub.second;
@@ -312,45 +351,101 @@ json build_flyback_tas(const FlybackDesign& d) {
         conn("gate",   {pin("Q1", "gate"), prt("gate")}),
         conn("dc_neg", {pin("Q1", "source"), pin("Cin", "2"), prt("dc-")})});
 
-    json xfmr; xfmr["name"] = "flyback-transformer";
-    xfmr["ports"] = json::array({port("pri"), port("pri_rtn"), port("sec"), port("sec_rtn")});
-    xfmr["components"] = json::array({comp("T1", mag)});
-    xfmr["connections"] = json::array({
-        conn("primary",       {pin("T1", "primary_start"), prt("pri")}),
-        conn("primary_rtn",   {pin("T1", "primary_end"), prt("pri_rtn")}),
-        conn("secondary",     {pin("T1", "secondary1_end"), prt("sec")}),
-        conn("secondary_rtn", {pin("T1", "secondary1_start"), prt("sec_rtn")})});
-
-    json rect; rect["name"] = "diode-rectifier";
-    rect["ports"] = json::array({port("ac_in"), port("dc_out")});
-    rect["components"] = json::array({comp("D1", diode)});
-    rect["connections"] = json::array({
-        conn("anode",   {pin("D1", "anode"), prt("ac_in")}),
-        conn("cathode", {pin("D1", "cathode"), prt("dc_out")})});
-
-    // The output filter is part of the converter; the LOAD is not — it is synthesized from the
-    // outputs requirement by the assembler (the dual of the input source). So this stage is Cout only.
-    json filt; filt["name"] = "output-filter";
-    filt["ports"] = json::array({port("in"), port("rtn")});
-    filt["components"] = json::array({comp("Cout", capCout)});
-    filt["connections"] = json::array({
-        conn("out", {pin("Cout", "1"), prt("in")}),
-        conn("ret", {pin("Cout", "2"), prt("rtn")})});
-
-    // typed terminal bindings (portType) — a powerStage has one input + one output; the isolation
-    // stage may fan out (outputPorts[]).
+    // typed terminal bindings (portType) + stage/ISC builders — a powerStage has one input + one output;
+    // the isolation stage fans out (outputPorts[]). Defined before the per-output loop that uses them.
     auto bind = [](const char* p, const char* type) { json b; b["port"] = p; b["type"] = type; return b; };
-    auto pstage = [](const char* name, const char* role, json brick, json inb, json outb) {
+    auto pstage = [](const std::string& name, const char* role, json brick, json inb, json outb) {
         json s; s["name"] = name; s["role"] = role; s["circuit"] = brick;
         s["inputPort"] = inb; s["outputPort"] = outb; return s; };
     auto istage = [](const char* name, json brick, json inb, std::vector<json> outbs) {
         json s; s["name"] = name; s["role"] = "isolation"; s["circuit"] = brick;
         s["inputPort"] = inb; s["outputPorts"] = outbs; return s; };
-
     auto sp = [](const char* st, const char* po) { json e; e["stage"] = st; e["port"] = po; return e; };
-    auto isc = [](const char* name, const char* kind, const char* dir, std::vector<json> eps) {
+    auto isc = [](const std::string& name, const char* kind, const char* dir, std::vector<json> eps) {
         json c; c["name"] = name; c["kind"] = kind; if (dir[0]) c["direction"] = dir;
         c["endpoints"] = eps; return c; };
+
+    // --- isolation transformer: primary + N secondary windings, one (sec,sec_rtn) port pair per rail ---
+    json xfmr; xfmr["name"] = "flyback-transformer";
+    std::vector<json> xports{port("pri"), port("pri_rtn")};
+    std::vector<json> xconns{
+        conn("primary",     {pin("T1", "primary_start"), prt("pri")}),
+        conn("primary_rtn", {pin("T1", "primary_end"),   prt("pri_rtn")})};
+    std::vector<json> secBinds;
+
+    // --- per-output rectifier + output-filter stages. Every secondary return + filter rtn ties to GND
+    // (galvanic isolation between rails is a later phase; the sim references all rails to one ground). ---
+    std::vector<json> rectFiltStages;
+    std::vector<json> outIscs;                        // (sec wire, Vout external) per rail, in output order
+    std::vector<json> gndEps{sp("inverter", "dc-")};  // GND ISC endpoints (primary return first)
+
+    for (size_t i = 0; i < nOut; ++i) {
+        const auto& leg = d.outputs[i];
+        const std::string sfx = (i == 0) ? std::string() : std::to_string(i + 1);   // "", "2", "3", …
+        const std::string wStart = "secondary" + std::to_string(i + 1) + "_start";
+        const std::string wEnd   = "secondary" + std::to_string(i + 1) + "_end";
+        const std::string secP = "sec" + sfx, secRtnP = "sec_rtn" + sfx;
+        const std::string rectStage = "rectifier" + sfx, filtStage = "filter" + sfx;
+        const std::string dName = (i == 0) ? "D1" : "D" + std::to_string(i + 1);
+        const std::string coutName = "Cout" + sfx;
+        const std::string voutPort = "Vout" + sfx;
+
+        // rail ratings from its OWN secondary winding (worst corner). Rectifier blocks Vout_i + Vin_max/n_i.
+        const double IpkSec  = AN::winding_current(aopWorst, i + 1, "peak");
+        const double IrmsSec = AN::winding_current(aopWorst, i + 1, "rms");
+        const double Iout_i  = leg.power / leg.voltage;
+        const double VrStress = leg.voltage + d.inputVoltageMax / leg.turnsRatio;
+        const double ratedVr  = VrStress / cfg::v_derate_diode(d.config);
+        const double maxVf    = (ratedVr < 100.0) ? 0.6 : 1.2;               // Schottky-class if low V_R
+        const double IcoutRms = std::sqrt(std::max(0.0, IrmsSec * IrmsSec - Iout_i * Iout_i));
+
+        json diode; diode["semiconductor"]["diode"] = json::object();
+        diode["inputs"]["designRequirements"] = req::diode(ratedVr, Iout_i / 0.7, maxVf, maxTrr);
+        json capCout; capCout["capacitor"] = json::object();
+        capCout["inputs"]["designRequirements"] = req::capacitor(
+            leg.outputCapacitance, leg.voltage / cfg::v_derate_capacitor(d.config), IcoutRms,
+            req::ESR_RIPPLE_FRACTION * leg.voltage / IpkSec, "outputFilter");
+
+        // transformer secondary winding -> its (sec,sec_rtn) port pair (flyback diode conducts during OFF,
+        // so the secondary_end/dot-opposite end feeds the rectifier anode; the dot end returns to ground).
+        xports.push_back(port(secP.c_str()));
+        xports.push_back(port(secRtnP.c_str()));
+        xconns.push_back(conn(("secondary" + sfx).c_str(),     {pin("T1", wEnd.c_str()),   prt(secP.c_str())}));
+        xconns.push_back(conn(("secondary_rtn" + sfx).c_str(), {pin("T1", wStart.c_str()), prt(secRtnP.c_str())}));
+        secBinds.push_back(bind(secP.c_str(), "hfAc"));
+
+        json rect; rect["name"] = "diode-rectifier" + sfx;
+        rect["ports"] = json::array({port("ac_in"), port("dc_out")});
+        rect["components"] = json::array({comp(dName.c_str(), diode)});
+        rect["connections"] = json::array({
+            conn("anode",   {pin(dName.c_str(), "anode"),   prt("ac_in")}),
+            conn("cathode", {pin(dName.c_str(), "cathode"), prt("dc_out")})});
+
+        // The output filter is part of the converter; the LOAD is not — it is synthesized from the
+        // outputs requirement by the assembler (the dual of the input source). So this stage is Cout only.
+        json filt; filt["name"] = "output-filter" + sfx;
+        filt["ports"] = json::array({port("in"), port("rtn")});
+        filt["components"] = json::array({comp(coutName.c_str(), capCout)});
+        filt["connections"] = json::array({
+            conn("out", {pin(coutName.c_str(), "1"), prt("in")}),
+            conn("ret", {pin(coutName.c_str(), "2"), prt("rtn")})});
+
+        rectFiltStages.push_back(pstage(rectStage, "outputRectifier", rect,
+                                        bind("ac_in", "hfAc"), bind("dc_out", "pulsatingDc")));
+        rectFiltStages.push_back(pstage(filtStage, "outputFilter", filt,
+                                        bind("in", "pulsatingDc"), bind("in", "dcOutput")));
+
+        outIscs.push_back(isc("sec" + sfx, "wire", "",
+                              {sp("transformer", secP.c_str()), sp(rectStage.c_str(), "ac_in")}));
+        outIscs.push_back(isc(voutPort, "externalPort", "output",
+                              {sp(rectStage.c_str(), "dc_out"), sp(filtStage.c_str(), "in")}));
+        gndEps.push_back(sp("transformer", secRtnP.c_str()));
+        gndEps.push_back(sp(filtStage.c_str(), "rtn"));
+    }
+
+    xfmr["ports"] = xports;
+    xfmr["components"] = json::array({comp("T1", mag)});
+    xfmr["connections"] = xconns;
 
     json tas;
     json& dreq = tas["inputs"]["designRequirements"];
@@ -359,25 +454,30 @@ json build_flyback_tas(const FlybackDesign& d) {
     dreq["inputVoltage"] = {{"minimum", d.inputVoltageMin}, {"nominal", d.inputVoltage}, {"maximum", d.inputVoltageMax}};
     dreq["switchingFrequency"]["nominal"] = d.switchingFrequency;
     if (d.isolationVoltage > 0) dreq["isolationVoltage"] = d.isolationVoltage;
-    { json o; o["name"] = "out"; o["voltage"]["nominal"] = d.outputVoltage; o["regulation"] = "voltage";
-      dreq["outputs"] = json::array({o}); }
-    { json op; op["name"] = "full_load"; op["inputVoltage"] = d.inputVoltage; op["ambientTemperature"] = 25.0;
-      json o; o["name"] = "out"; o["power"] = d.outputPower; op["outputs"] = json::array({o});
-      tas["inputs"]["operatingPoints"] = json::array({op}); }
+    dreq["outputs"] = json::array();
+    json opDoc; opDoc["name"] = "full_load"; opDoc["inputVoltage"] = d.inputVoltage; opDoc["ambientTemperature"] = 25.0;
+    opDoc["outputs"] = json::array();
+    for (size_t i = 0; i < nOut; ++i) {
+        const std::string oname = (i == 0) ? "out" : "out" + std::to_string(i + 1);
+        json o; o["name"] = oname; o["voltage"]["nominal"] = d.outputs[i].voltage; o["regulation"] = "voltage";
+        dreq["outputs"].push_back(o);
+        json oo; oo["name"] = oname; oo["power"] = d.outputs[i].power; opDoc["outputs"].push_back(oo);
+    }
+    tas["inputs"]["operatingPoints"] = json::array({opDoc});
 
-    tas["topology"]["stages"] = json::array({
+    std::vector<json> stages{
         req::control_stage("pwmController"),
         pstage("inverter", "inverter", inv, bind("dc+", "dcBus"), bind("sw", "hfAc")),
-        istage("transformer", xfmr, bind("pri", "hfAc"), {bind("sec", "hfAc")}),
-        pstage("rectifier", "outputRectifier", rect, bind("ac_in", "hfAc"), bind("dc_out", "pulsatingDc")),
-        pstage("filter", "outputFilter", filt, bind("in", "pulsatingDc"), bind("in", "dcOutput"))});
-    tas["topology"]["interStageConnections"] = json::array({
+        istage("transformer", xfmr, bind("pri", "hfAc"), secBinds)};
+    for (auto& s : rectFiltStages) stages.push_back(s);
+    tas["topology"]["stages"] = stages;
+
+    std::vector<json> iscs{
         isc("Vin", "externalPort", "input", {sp("inverter", "dc+"), sp("transformer", "pri")}),
-        isc("GND", "externalPort", "input",
-            {sp("inverter", "dc-"), sp("transformer", "sec_rtn"), sp("filter", "rtn")}),
-        isc("sw_node", "wire", "", {sp("inverter", "sw"), sp("transformer", "pri_rtn")}),
-        isc("sec", "wire", "", {sp("transformer", "sec"), sp("rectifier", "ac_in")}),
-        isc("Vout", "externalPort", "output", {sp("rectifier", "dc_out"), sp("filter", "in")})});
+        isc("GND", "externalPort", "input", gndEps),
+        isc("sw_node", "wire", "", {sp("inverter", "sw"), sp("transformer", "pri_rtn")})};
+    for (auto& c : outIscs) iscs.push_back(c);
+    tas["topology"]["interStageConnections"] = iscs;
 
     json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.006); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
     tas["simulation"]["analyses"] = json::array({an});
