@@ -42,6 +42,23 @@ FsbbDesign design_fsbb(const json& tasInputs) {
     d.deadFraction = cfg::get(d.config, "deadTimeFraction", kDeadFrac);
     // Buck-boost simultaneous mode gain M = D/(1-D) = Vo/Vin  =>  D = Vo/(Vin+Vo).
     d.dutyCycle = Vo / (Vin + Vo);
+    // Operating-region classification at the NOMINAL input (MKF FourSwitchBuckBoost::Region). A real 4SBB
+    // controller runs only the buck leg when Vin comfortably exceeds Vo (BUCK), only the boost leg when Vo
+    // exceeds Vin (BOOST), and commutes all four switches in the narrow transition band (BUCK_BOOST). The
+    // KH deck previously ran the 4-switch SIMULTANEOUS scheme for EVERY point, giving buck/boost-dominant
+    // designs the wrong (lossier) gate drive. `fsbbTransitionBand` (default 0.10) is the ±fraction of Vo
+    // around Vin within which we stay in the all-switching buck-boost region.
+    const double band = cfg::get(d.config, "fsbbTransitionBand", 0.10);
+    if (Vin > Vo * (1.0 + band)) {
+        d.region = "buck";
+        d.regionDuty = Vo / (Vin * d.efficiency);
+    } else if (Vin < Vo * (1.0 - band)) {
+        d.region = "boost";
+        d.regionDuty = 1.0 - (Vin * d.efficiency) / Vo;
+    } else {
+        d.region = "buckBoost";
+        d.regionDuty = d.dutyCycle;
+    }
 
     // Worst-case inductor: max(L_buck @ Vin_max, L_boost @ Vin_min). Each region's formula is only
     // valid on its side of Vo (returns 0 otherwise). (MKF compute_worst_case_inductance.)
@@ -94,9 +111,15 @@ json build_fsbb_tas(const FsbbDesign& d) {
     const double fsw = d.switchingFrequency, L_H = d.inductance;
     const double Vo = d.outputVoltage, Io = d.outputPower / Vo;
     namespace AN = Kirchhoff::analytical;
-    const AN::FsbbMode kMode = AN::FsbbMode::SIMULTANEOUS;
-    const MAS::OperatingPoint aopWorst = AN::analytical_fsbb(d.inputVoltageMin, Vo, Io, fsw, L_H, d.efficiency, kMode);
-    const MAS::OperatingPoint aopNom   = AN::analytical_fsbb(d.inputVoltage,    Vo, Io, fsw, L_H, d.efficiency, kMode);
+    // Region-aware waveform source: BUCK/BOOST regions embed analytical_fsbb's per-region (buck-/boost-like)
+    // inductor waveform; the transition band embeds the 4-switch SIMULTANEOUS waveform. Ratings pull from
+    // the region's own worst corner (buck: Vin_max = max ripple & block voltage; boost/bb: Vin_min = max
+    // duty & inductor current).
+    const AN::FsbbMode kMode = (d.region == "buckBoost") ? AN::FsbbMode::SIMULTANEOUS
+                                                         : AN::FsbbMode::BUCK_BOOST_AUTO;
+    const double vinWorst = (d.region == "buck") ? d.inputVoltageMax : d.inputVoltageMin;
+    const MAS::OperatingPoint aopWorst = AN::analytical_fsbb(vinWorst,        Vo, Io, fsw, L_H, d.efficiency, kMode);
+    const MAS::OperatingPoint aopNom   = AN::analytical_fsbb(d.inputVoltage,  Vo, Io, fsw, L_H, d.efficiency, kMode);
     const double IpkL  = AN::winding_current(aopWorst, 0, "peak");
     const double IrmsL = AN::winding_current(aopWorst, 0, "rms");
     json lind; lind["magnetic"] = json::object();
@@ -181,20 +204,38 @@ json build_fsbb_tas(const FsbbDesign& d) {
 
     json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
     tas["simulation"]["analyses"] = json::array({an});
-    // Q1+Q4 ON during D (charge); Q2+Q3 ON during (1-D) (discharge). Each leg has a dead band: the
-    // low-going switch (Q2 in leg1, Q3 in leg2) starts a dead-band after its partner turns off and is
-    // trimmed not to wrap past the period; body diodes carry the inductor current across the dead time.
-    const double D = d.dutyCycle, dt = d.deadFraction;
-    auto stim = [&](const char* sw, const char* g, double duty, double phaseDeg) {
+    // Region-dependent gate drive (MKF FourSwitchBuckBoost). Each leg has a dead band on its complementary
+    // pair; body diodes carry the inductor current across the dead time.
+    //   BUCK  (Vin>Vo): only the buck leg switches (Q1 PWM @ D=Vo/Vin, Q2 complementary); the boost leg is
+    //                   static — Q3 ON connects sw2→vout, Q4 OFF. Inductor behaves like a buck output choke.
+    //   BOOST (Vo>Vin): only the boost leg switches (Q4 PWM @ D=1−Vin/Vo charges L, Q3 complementary); the
+    //                   buck leg is static — Q1 ON connects vin→sw1, Q2 OFF.
+    //   BUCK_BOOST    : all four commute (Q1+Q4 charge D, Q2+Q3 discharge) — the transition-band scheme.
+    const double dt = d.deadFraction, Dr = d.regionDuty;
+    auto stim = [&](const char* sw, double duty, double phaseDeg) {
         json st; st["stage"] = "fsbbCell"; st["component"] = sw; st["signal"] = "gate";
         st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;
         st["waveform"]["dutyCycle"] = duty; st["waveform"]["phase"] = phaseDeg;
-        (void)g; return st; };
-    tas["simulation"]["stimulus"] = json::array({
-        stim("Q1", "g1", D, 0.0),
-        stim("Q4", "g4", D, 0.0),
-        stim("Q2", "g2", (1.0 - D) - 2.0 * dt, (D + dt) * 360.0),
-        stim("Q3", "g3", (1.0 - D) - 2.0 * dt, (D + dt) * 360.0)});
+        return st; };
+    if (d.region == "buck") {
+        tas["simulation"]["stimulus"] = json::array({
+            stim("Q1", Dr, 0.0),                                   // buck HS PWM
+            stim("Q2", std::max(0.0, (1.0 - Dr) - 2.0 * dt), (Dr + dt) * 360.0),  // buck LS complementary
+            stim("Q3", 1.0, 0.0),                                  // boost HS static ON (sw2->vout)
+            stim("Q4", 0.0, 0.0)});                                // boost LS static OFF
+    } else if (d.region == "boost") {
+        tas["simulation"]["stimulus"] = json::array({
+            stim("Q1", 1.0, 0.0),                                  // buck HS static ON (vin->sw1)
+            stim("Q2", 0.0, 0.0),                                  // buck LS static OFF
+            stim("Q4", Dr, 0.0),                                   // boost LS PWM (charge L)
+            stim("Q3", std::max(0.0, (1.0 - Dr) - 2.0 * dt), (Dr + dt) * 360.0)});  // boost HS complementary
+    } else {
+        tas["simulation"]["stimulus"] = json::array({
+            stim("Q1", Dr, 0.0),
+            stim("Q4", Dr, 0.0),
+            stim("Q2", std::max(0.0, (1.0 - Dr) - 2.0 * dt), (Dr + dt) * 360.0),
+            stim("Q3", std::max(0.0, (1.0 - Dr) - 2.0 * dt), (Dr + dt) * 360.0)});
+    }
     req::finalize_control_seeds(tas, Topology::FOUR_SWITCH_BUCK_BOOST_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }

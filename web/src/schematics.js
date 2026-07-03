@@ -391,68 +391,89 @@ function pushPull(bom) {
 // hotspots map to BOM rows. The host also sets the transformer's winding shape to match (a
 // center-tapped winding for CT, a single winding for FB / CD).
 
-// Center-tapped full-wave: two half-windings (transformer drawn ct:'right'), D1/D2, tap → return.
-function secCT(bom, tx, ty, h) {
+// Output-filter tail shared by every secondary: an optional series output inductor `lout` on the
+// positive rail, then Cout ∥ LOAD → VOUT. Positive rail enters at (x0, yTop); the return rail sits at
+// retY. Returns the svg elements plus retX (where the return rail should reach the load bottom).
+function outTail(bom, x0, yTop, retY, lout) {
+  const els = []
+  let px = x0
+  if (lout) { els.push(wire(x0, yTop, x0 + 12, yTop), indH(lout, bom, x0 + 40, yTop), wire(x0 + 68, yTop, x0 + 80, yTop)); px = x0 + 80 }
+  const cX = px + 44, lX = cX + 58, pX = cX + 112, cY = (yTop + retY) / 2
+  els.push(
+    wire(px, yTop, cX + 88, yTop), dot(cX, yTop),
+    capV('Cout', bom, cX, cY), wire(cX, yTop, cX, cY - 10), wire(cX, cY + 10, cX, retY), dot(cX, retY),
+    loadR(lX, cY, yTop, retY), dot(lX, yTop), dot(lX, retY),
+    port(pX, yTop, 'VOUT'), wire(cX + 88, yTop, pX, yTop),
+  )
+  return { els, retX: lX }
+}
+
+// Center-tapped full-wave: two half-windings (transformer drawn ct:'right'), diodes o.d1/o.d2, tap →
+// return. o.lout (name) inserts a series output inductor (bridge families have one; resonant doesn't).
+function secCT(bom, tx, ty, h, o = {}) {
+  const d1 = o.d1 || 'D1', d2 = o.d2 || 'D2'
   const yT = ty - h / 2, yB = ty + h / 2, aT = yT - 18, aB = yB + 18, retY = yB + 90
-  const dX = tx + 100, jX = tx + 180, cX = tx + 230, lX = tx + 288, pX = tx + 344
+  const dX = tx + 100, jX = tx + 180
+  const t = outTail(bom, jX, aT, retY, o.lout)
   return [
     wire(tx + 10, yT, tx + 10, aT, tx + 80, aT),
-    diode('D1', bom, dX, aT, 'right'), wire(dX + 20, aT, jX, aT), dot(jX, aT),
+    diode(d1, bom, dX, aT, 'right'), wire(dX + 20, aT, jX, aT), dot(jX, aT),
     wire(tx + 10, yB, tx + 10, aB, tx + 80, aB),
-    diode('D2', bom, dX, aB, 'right', 'below'), wire(dX + 20, aB, jX, aB), wire(jX, aB, jX, aT),
-    wire(tx + 24, ty, tx + 35, ty, tx + 35, retY, lX, retY),
-    wire(jX, aT, cX + 90, aT), dot(cX, aT),
-    capV('Cout', bom, cX, (aT + retY) / 2), wire(cX, aT, cX, (aT + retY) / 2 - 10), wire(cX, (aT + retY) / 2 + 10, cX, retY), dot(cX, retY),
-    loadR(lX, (aT + retY) / 2, aT, retY), dot(lX, aT), dot(lX, retY),
-    port(pX, aT, 'VOUT'), wire(cX + 90, aT, pX, aT),
+    diode(d2, bom, dX, aB, 'right', 'below'), wire(dX + 20, aB, jX, aB), wire(jX, aB, jX, aT),
+    wire(tx + 24, ty, tx + 35, ty, tx + 35, retY, t.retX, retY),
+    ...t.els,
   ]
 }
 
-// Single-winding full-bridge (4 diodes Dr1..Dr4). Resonant output has no filter inductor → straight
-// to Cout. The winding's two ends drive the two bridge leg-mids.
-function secFB(bom, tx, ty, h) {
+// Single-winding full-bridge (4 diodes o.diodes). The winding's two ends drive the two bridge leg-mids.
+function secFB(bom, tx, ty, h, o = {}) {
+  const ds = o.diodes || ['DH1', 'DL1', 'DH2', 'DL2']
   const yM = ty, yP = ty - h / 2 - 30, yN = ty + h / 2 + 90
-  const xA = tx + 90, xB = tx + 160, cX = xB + 80, lX = cX + 70
+  const xA = tx + 90, xB = tx + 160
+  const t = outTail(bom, xB, yP, yN, o.lout)
   return [
     wire(tx + 10, ty - h / 2, tx + 10, yM, xA, yM), dot(xA, yM),
     wire(tx + 10, ty + h / 2, tx + 40, ty + h / 2, tx + 40, yN + 34, xB + 44, yN + 34, xB + 44, yM, xB, yM), dot(xB, yM),
-    diode('Dh1', bom, xA, (yP + yM) / 2, 'up'), wire(xA, (yP + yM) / 2 - 20, xA, yP), wire(xA, (yP + yM) / 2 + 20, xA, yM),
-    diode('Dl1', bom, xA, (yN + yM) / 2, 'up', 'left'), wire(xA, (yN + yM) / 2 - 20, xA, yM), wire(xA, (yN + yM) / 2 + 20, xA, yN),
-    diode('Dh2', bom, xB, (yP + yM) / 2, 'up'), wire(xB, (yP + yM) / 2 - 20, xB, yP), wire(xB, (yP + yM) / 2 + 20, xB, yM),
-    diode('Dl2', bom, xB, (yN + yM) / 2, 'up'), wire(xB, (yN + yM) / 2 - 20, xB, yM), wire(xB, (yN + yM) / 2 + 20, xB, yN),
+    diode(ds[0], bom, xA, (yP + yM) / 2, 'up'), wire(xA, (yP + yM) / 2 - 20, xA, yP), wire(xA, (yP + yM) / 2 + 20, xA, yM),
+    diode(ds[1], bom, xA, (yN + yM) / 2, 'up', 'left'), wire(xA, (yN + yM) / 2 - 20, xA, yM), wire(xA, (yN + yM) / 2 + 20, xA, yN),
+    diode(ds[2], bom, xB, (yP + yM) / 2, 'up'), wire(xB, (yP + yM) / 2 - 20, xB, yP), wire(xB, (yP + yM) / 2 + 20, xB, yM),
+    diode(ds[3], bom, xB, (yN + yM) / 2, 'up'), wire(xB, (yN + yM) / 2 - 20, xB, yM), wire(xB, (yN + yM) / 2 + 20, xB, yN),
     dot(xA, yP), dot(xB, yP), wire(xA, yP, xB, yP),
-    wire(xA, yN, lX, yN), gnd(xA + 20, yN),
-    wire(xB, yP, cX + 70, yP), dot(cX, yP),
-    capV('Cout', bom, cX, (yP + yN) / 2), wire(cX, yP, cX, (yP + yN) / 2 - 10), wire(cX, (yP + yN) / 2 + 10, cX, yN), dot(cX, yN),
-    loadR(lX, (yP + yN) / 2, yP, yN), dot(lX, yP), dot(lX, yN),
-    port(cX + 70, yP, 'VOUT'), wire(cX, yP, cX + 70, yP),
+    wire(xA, yN, t.retX, yN), gnd(xA + 20, yN),
+    ...t.els,
   ]
 }
 
-// Current-doubler: single winding, two output inductors Lo1/Lo2, two catch diodes D1/D2.
-function secCD(bom, tx, ty, h) {
-  const yT = ty - h / 2, yB = ty + h / 2, retY = yB + 90, voX = tx + 150, cX = tx + 210, lX = cX + 70
+// Current-doubler: single winding, two output inductors o.lo1/o.lo2, two catch diodes o.d1/o.d2.
+function secCD(bom, tx, ty, h, o = {}) {
+  const lo1 = o.lo1 || 'Lo1', lo2 = o.lo2 || 'Lo2', d1 = o.d1 || 'D1', d2 = o.d2 || 'D2'
+  const yT = ty - h / 2, yB = ty + h / 2, retY = yB + 90, voX = tx + 150
+  const t = outTail(bom, voX, yT, retY, null)
   return [
-    indH('Lo1', bom, tx + 90, yT), wire(tx + 10, yT, tx + 62, yT), wire(tx + 118, yT, voX, yT), dot(voX, yT),
-    indH('Lo2', bom, tx + 90, yB), wire(tx + 10, yB, tx + 62, yB), wire(tx + 118, yB, voX, yB),
+    indH(lo1, bom, tx + 90, yT), wire(tx + 10, yT, tx + 62, yT), wire(tx + 118, yT, voX, yT), dot(voX, yT),
+    indH(lo2, bom, tx + 90, yB), wire(tx + 10, yB, tx + 62, yB), wire(tx + 118, yB, voX, yB),
     wire(voX, yT, voX, yB),
-    diode('D1', bom, tx + 40, (yT + retY) / 2, 'up', 'left'), wire(tx + 40, (yT + retY) / 2 - 20, tx + 40, yT), wire(tx + 40, (yT + retY) / 2 + 20, tx + 40, retY),
-    diode('D2', bom, tx + 90, (yB + retY) / 2, 'up'), wire(tx + 90, (yB + retY) / 2 - 20, tx + 90, yB), wire(tx + 90, (yB + retY) / 2 + 20, tx + 90, retY),
-    wire(tx + 40, retY, lX, retY), gnd(tx + 60, retY),
-    wire(voX, yT, cX + 70, yT), dot(cX, yT),
-    capV('Cout', bom, cX, (yT + retY) / 2), wire(cX, yT, cX, (yT + retY) / 2 - 10), wire(cX, (yT + retY) / 2 + 10, cX, retY), dot(cX, retY),
-    loadR(lX, (yT + retY) / 2, yT, retY), dot(lX, yT), dot(lX, retY),
-    port(cX + 70, yT, 'VOUT'), wire(cX, yT, cX + 70, yT),
+    diode(d1, bom, tx + 40, (yT + retY) / 2, 'up', 'left'), wire(tx + 40, (yT + retY) / 2 - 20, tx + 40, yT), wire(tx + 40, (yT + retY) / 2 + 20, tx + 40, retY),
+    diode(d2, bom, tx + 90, (yB + retY) / 2, 'up'), wire(tx + 90, (yB + retY) / 2 - 20, tx + 90, yB), wire(tx + 90, (yB + retY) / 2 + 20, tx + 90, retY),
+    wire(tx + 40, retY, t.retX, retY), gnd(tx + 60, retY),
+    ...t.els,
   ]
 }
 
-// Pick the secondary drawer + the matching transformer center-tap option for a rectifier variant.
-function resonantSecondary(bom, tx, ty, h, variant) {
-  if (variant === 'fullBridge') return secFB(bom, tx, ty, h)
-  if (variant === 'currentDoubler') return secCD(bom, tx, ty, h)
-  return secCT(bom, tx, ty, h)
+// Dispatch to the secondary drawer for a rectifier variant, forwarding refdes/inductor options.
+function secondaryFor(bom, tx, ty, h, variant, o = {}) {
+  if (variant === 'fullBridge') return secFB(bom, tx, ty, h, o)
+  if (variant === 'currentDoubler') return secCD(bom, tx, ty, h, o)
+  return secCT(bom, tx, ty, h, o)
 }
+const resonantSecondary = (bom, tx, ty, h, variant) => secondaryFor(bom, tx, ty, h, variant)
 const ctOpt = (variant) => (variant === 'centerTapped' ? 'right' : undefined)
+// Bridge families (ahb/psfb/pshb) name the rectifier Dr*/Lout and carry an output inductor.
+function bridgeRefs(variant) {
+  if (variant === 'fullBridge') return { diodes: ['Dr1', 'Dr2', 'Dr3', 'Dr4'], lout: 'Lout' }
+  if (variant === 'currentDoubler') return { d1: 'Dr1', d2: 'Dr2', lo1: 'Lout', lo2: 'Lo2' }
+  return { d1: 'Dr1', d2: 'Dr2', lout: 'Lout' }
+}
 
 function llc(bom, variant = 'centerTapped') {
   const tx = 380, ty = 170, h = 80
@@ -500,32 +521,6 @@ function dab(bom) {
     loadR(760, 170, 78, 262),
     port(788, 78, 'VOUT'), wire(760, 78, 782, 78),
   ].join(''))
-}
-
-// Secondary full-bridge diode rectifier + output LC + load, shared by AHB / PSFB / PSHB
-// (all default to a 4-diode full-bridge secondary off a single transformer winding). The
-// transformer's secondary terminals must sit at (sx, 150) top and (sx, 270) bottom. Emits
-// Dr1..Dr4 and Lout/Cout with the exact refdes the TAS builders use.
-function fwBridgeOut(bom, sx) {
-  const topY = 150, botY = 270, yP = 120, yN = 300, yM = 210
-  const xA = sx + 95, xB = sx + 165
-  const cx = xB + 150, lx = xB + 220
-  return [
-    // AC leg-mid entries — secB wraps under the gnd rail (clean no-connect crossing) into leg B
-    wire(sx, topY, sx + 40, topY, sx + 40, yM, xA, yM),
-    wire(sx, botY, sx + 62, botY, sx + 62, 342, xB + 48, 342, xB + 48, yM, xB, yM),
-    dot(xA, yM), dot(xB, yM),
-    diode('Dr1', bom, xA, 165, 'up'), wire(xA, 145, xA, yP), wire(xA, 185, xA, yM),
-    diode('Dr3', bom, xA, 255, 'up', 'left'), wire(xA, 235, xA, yM), wire(xA, 275, xA, yN),
-    diode('Dr2', bom, xB, 165, 'up'), wire(xB, 145, xB, yP), wire(xB, 185, xB, yM),
-    diode('Dr4', bom, xB, 255, 'up'), wire(xB, 235, xB, yM), wire(xB, 275, xB, yN),
-    dot(xA, yP), dot(xB, yP), wire(xA, yP, xB, yP),
-    wire(xA, yN, lx, yN), gnd(xA + 20, yN),
-    wire(xB, yP, cx - 52, yP), indH('Lout', bom, cx - 24, yP), wire(cx + 4, yP, cx + 90, yP), dot(cx, yP),
-    capV('Cout', bom, cx, 210), wire(cx, yP, cx, 190), wire(cx, 230, cx, yN), dot(cx, yN),
-    loadR(lx, 210, yP, yN), dot(lx, yP), dot(lx, yN),
-    port(lx + 60, yP, 'VOUT'), wire(lx, yP, lx + 60, yP),
-  ]
 }
 
 // ── two-switch forward: Q1/Q2 sandwich the primary, D1/D2 clamp the reset to the bus ─────
@@ -637,22 +632,24 @@ function weinberg(bom) {
 }
 
 // ── asymmetric half-bridge: Q1/Q2 half bridge + DC-blocking cap Cb feed the primary ──────
-function ahb(bom) {
-  return svg(920, 360, [
+function ahb(bom, variant = 'fullBridge') {
+  const tx = 320, ty = 190, h = 90
+  return svg(1000, 380, [
     srcDC(60, 175), wire(60, 160, 60, 80, 300, 80), wire(60, 190, 60, 320, 200, 320),
     mosfetV('Q1', bom, 170, 128, 'left'), wire(170, 102, 170, 80), dot(170, 80), wire(170, 154, 170, 190), dot(170, 190),
     mosfetV('Q2', bom, 170, 240, 'left'), wire(170, 190, 170, 214), wire(170, 266, 170, 320), dot(170, 320), gnd(120, 320),
     // DC-blocking cap Cb from the Vin rail down into the primary
-    capV('Cb', bom, 270, 122, 'left'), wire(270, 80, 270, 102), dot(270, 80), wire(270, 142, 310, 142, 310, 150),
-    xfmr('T1', bom, 320, 190, { h: 90, labelDy: -24 }),
-    wire(310, 235, 310, 260, 210, 260, 210, 190, 170, 190), // primary return → sw node
-    ...fwBridgeOut(bom, 330),
+    capV('Cb', bom, 270, 122, 'left'), wire(270, 80, 270, 102), dot(270, 80), wire(270, 142, tx - 10, 142, tx - 10, 150),
+    xfmr('T1', bom, tx, ty, { h, ct: ctOpt(variant), labelDy: -24 }),
+    wire(tx - 10, 235, tx - 10, 260, 210, 260, 210, 190, 170, 190), // primary return → sw node
+    ...secondaryFor(bom, tx, ty, h, variant, bridgeRefs(variant)),
   ].join(''))
 }
 
 // ── phase-shifted full bridge: four switches, series Lr, full-bridge secondary ───────────
-function psfb(bom) {
-  return svg(980, 360, [
+function psfb(bom, variant = 'fullBridge') {
+  const tx = 330, ty = 195, h = 90
+  return svg(1040, 380, [
     srcDC(60, 175), wire(60, 160, 60, 80, 320, 80), wire(60, 190, 60, 320, 200, 320),
     mosfetV('QA', bom, 150, 128, 'left', true), wire(150, 102, 150, 80), dot(150, 80), wire(150, 154, 150, 200), dot(150, 200),
     mosfetV('QB', bom, 150, 246, 'left', true), wire(150, 200, 150, 220), wire(150, 272, 150, 320), dot(150, 320),
@@ -660,15 +657,16 @@ function psfb(bom) {
     mosfetV('QD', bom, 280, 246, 'right', true), wire(280, 195, 280, 220), wire(280, 272, 280, 320), dot(280, 320), gnd(110, 320),
     // leg-A mid → series Lr → transformer primary; primary return → leg-C mid
     wire(150, 200, 200, 200), indH('Lr', bom, 228, 200), wire(256, 200, 300, 200, 300, 150),
-    xfmr('T1', bom, 330, 195, { h: 90, labelDy: -24 }),
-    wire(320, 240, 320, 300, 280, 300, 280, 195), dot(280, 195),
-    ...fwBridgeOut(bom, 340),
+    xfmr('T1', bom, tx, ty, { h, ct: ctOpt(variant), labelDy: -24 }),
+    wire(tx - 10, 240, tx - 10, 300, 280, 300, 280, 195), dot(280, 195),
+    ...secondaryFor(bom, tx, ty, h, variant, bridgeRefs(variant)),
   ].join(''))
 }
 
 // ── phase-shifted half bridge (3-level NPC): split caps + clamp diodes + series Lr ───────
-function pshb(bom) {
-  return svg(980, 380, [
+function pshb(bom, variant = 'fullBridge') {
+  const tx = 430, ty = 240, h = 90
+  return svg(1060, 400, [
     srcDC(60, 180), wire(60, 165, 60, 70, 150, 70), wire(60, 195, 60, 340, 200, 340),
     // split input caps CsHi / CsLo about the neutral (mid)
     capV('CsHi', bom, 150, 100, 'left'), wire(150, 70, 150, 80), dot(150, 70), wire(150, 120, 150, 170), dot(150, 170),
@@ -683,9 +681,9 @@ function pshb(bom) {
     diode('DC2', bom, 200, 310, 'left', 'below'), wire(180, 310, 150, 310, 150, 170), wire(220, 310, 250, 310),
     // stack output (bridge_a) → series Lr → primary; primary return → neutral (mid)
     wire(250, 225, 300, 225), indH('Lr', bom, 328, 225), wire(356, 225, 400, 225, 400, 195),
-    xfmr('T1', bom, 430, 240, { h: 90, labelDy: -24 }),
-    wire(420, 285, 420, 300, 150, 300, 150, 170),
-    ...fwBridgeOut(bom, 440),
+    xfmr('T1', bom, tx, ty, { h, ct: ctOpt(variant), labelDy: -24 }),
+    wire(tx - 10, 285, tx - 10, 300, 150, 300, 150, 170),
+    ...secondaryFor(bom, tx, ty, h, variant, bridgeRefs(variant)),
   ].join(''))
 }
 

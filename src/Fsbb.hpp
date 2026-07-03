@@ -21,6 +21,8 @@ struct FsbbDesign {
     double inputVoltage, inputVoltageMin, inputVoltageMax;
     double outputVoltage, outputPower, switchingFrequency, efficiency;
     double dutyCycle;       // D = Vo/(Vin+Vo) (buck-boost simultaneous gain)
+    std::string region;     // operating region at nominal Vin: "buck" | "boost" | "buckBoost" (MKF Region)
+    double regionDuty;      // the region's PWM duty (buck D=Vo/Vin·η; boost D=1−Vin·η/Vo; bb D=Vo/(Vin+Vo))
     double deadFraction;    // per-leg dead time as a fraction of the period
     double inductance;      // single inductor L (worst-case of buck@Vinmax / boost@Vinmin)
     double loadResistance;

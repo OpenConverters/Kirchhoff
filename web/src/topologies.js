@@ -151,10 +151,17 @@ const SYNC_RECT = [
   { id: 'diode', name: 'Diode', desc: 'Schottky rectifier — simplest and most robust.' },
   { id: 'synchronous', name: 'Synchronous', desc: 'MOSFET rectifier — higher efficiency, esp. at low Vout.' },
 ]
+const FLYBACK_MODE = [
+  { id: 'ccm', name: 'CCM', desc: 'Continuous: magnetizing current never resets — lowest RMS, hard turn-on.' },
+  { id: 'dcm', name: 'DCM', desc: 'Discontinuous: current resets each cycle — smaller core, low turn-on loss.' },
+  { id: 'bcm', name: 'Boundary (BCM)', desc: 'Critical inductance — sits on the CCM/DCM boundary.' },
+  { id: 'qrm', name: 'Quasi-resonant', desc: 'Boundary + valley switching — turn on at the Vds minimum.' },
+]
 
 export const VARIANTS = {
   buck: { key: 'rectifier', label: 'Rectifier', default: 'diode', options: SYNC_RECT },
   boost: { key: 'rectifier', label: 'Rectifier', default: 'diode', options: SYNC_RECT },
+  flyback: { key: 'mode', label: 'Conduction mode', default: 'ccm', options: FLYBACK_MODE },
   ahb: { key: 'rectifierType', label: 'Secondary rectifier', default: 'fullBridge', options: RECTIFIER_3 },
   psfb: { key: 'rectifierType', label: 'Secondary rectifier', default: 'fullBridge', options: RECTIFIER_3 },
   pshb: { key: 'rectifierType', label: 'Secondary rectifier', default: 'fullBridge', options: RECTIFIER_3 },

@@ -82,6 +82,45 @@ FlybackDesign design_flyback(const json& tasInputs) {
     d.magnetizingInductance = req::provided_inductance(dr).value_or(
         voltsSeconds / rippleRatio / centerPrimaryRamp);
 
+    // Conduction mode (ABT #80): CCM (default) sizes L for continuous magnetizing current; DCM/BCM/QRM
+    // size L at/below the CCM–DCM boundary so the magnetizing current resets each cycle. A pinned magnetic
+    // (della-Pollock Pass 2) always wins. analytical_flyback already renders DCM vs CCM from L vs its own
+    // critical inductance, and the ngspice deck uses d.dutyCycle + d.magnetizingInductance — so the mode
+    // flows to the design values, the analytical waveforms AND the simulation from this one knob.
+    const std::string mode = cfg::get_str(d.config, "mode", "ccm");
+    // CCM–DCM boundary (critical) inductance at the OPERATING point (Basso 2nd ed. p.747) — the same
+    // formula analytical_flyback uses, evaluated at the operating Vin (not the min-Vin design corner).
+    const double auxV = n * (d.outputVoltage + d.diodeDrop);
+    const double Lcrit = (d.outputPower > 0.0)
+        ? d.efficiency * d.inputVoltage * d.inputVoltage * auxV * auxV
+            / (2.0 * d.outputPower * d.switchingFrequency
+               * (d.inputVoltage + auxV) * (auxV + d.efficiency * d.inputVoltage))
+        : 0.0;
+    if (!req::provided_inductance(dr)) {
+        if (mode == "ccm") {
+            // keep the ripple-sized CCM inductance above
+        } else if (mode == "dcm") {
+            d.magnetizingInductance = 0.6 * Lcrit;                 // solidly discontinuous
+        } else if (mode == "bcm" || mode == "qrm") {
+            d.magnetizingInductance = Lcrit;                        // critical (BCM) / valley-switched (QRM) boundary
+        } else {
+            throw std::runtime_error("design_flyback: unknown conduction mode '" + mode +
+                                     "' (flyback modes: ccm, dcm, bcm, qrm)");
+        }
+    }
+    // Operating-point duty: DCM/BCM/QRM follow the energy-balance duty D = sqrt(2·Pin·L·fsw)/Vin; CCM keeps
+    // the voltage-ratio duty computed above. (QRM valley-switching only delays turn-on — a control
+    // refinement — so its design-point waveform equals BCM here; variable-frequency valley tracking is a
+    // regulation concern, not a design-point change.)
+    if (mode != "ccm") {
+        const double Pin = d.outputPower / d.efficiency;
+        const double dEnergy = std::sqrt(2.0 * Pin * d.magnetizingInductance * d.switchingFrequency) / d.inputVoltage;
+        if (!(dEnergy > 0.0 && dEnergy < 0.99))
+            throw std::runtime_error("design_flyback: " + mode + " duty out of range (" +
+                                     std::to_string(dEnergy) + ") at this operating point");
+        d.dutyCycle = dEnergy;
+    }
+
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
     const double iout = d.outputPower / d.outputVoltage;
     d.outputCapacitance = iout * d.dutyCycle / (d.switchingFrequency * 0.01 * d.outputVoltage);

@@ -357,18 +357,18 @@ json build_llc_tas(const LlcDesign& d) {
         break; }
     case RectifierType::FullBridge: {
         // One secondary winding (sec_a=secondary1_start, sec_b=secondary1_end) into a 4-diode bridge:
-        // Dh1/Dh2 cathodes = vout, Dl1/Dl2 anodes = gnd; sec_a between Dh1/Dl1, sec_b between Dh2/Dl2.
-        comps.insert(comps.end(), {comp("Dh1", diodeReq(reqD)), comp("Dh2", diodeReq(reqD)),
-            comp("Dl1", diodeReq(reqD)), comp("Dl2", diodeReq(reqD)), comp("Cout", cout),
+        // DH1/DH2 cathodes = vout, DL1/DL2 anodes = gnd; sec_a between DH1/DL1, sec_b between DH2/DL2.
+        comps.insert(comps.end(), {comp("DH1", diodeReq(reqD)), comp("DH2", diodeReq(reqD)),
+            comp("DL1", diodeReq(reqD)), comp("DL2", diodeReq(reqD)), comp("Cout", cout),
             comp("Csw1", swSnub()), comp("Rsn1", snubR()), comp("Csn1", snubC())});
-        conns.push_back(conn("sec_a", {pin("T1", "secondary1_start"), pin("Dh1", "anode"),
-                                       pin("Dl1", "cathode"), pin("Rsn1", "1"), pin("Csn1", "1")}));
-        conns.push_back(conn("sec_b", {pin("T1", "secondary1_end"), pin("Dh2", "anode"),
-                                       pin("Dl2", "cathode")}));
-        conns.push_back(conn("vout_net", {pin("Dh1", "cathode"), pin("Dh2", "cathode"),
+        conns.push_back(conn("sec_a", {pin("T1", "secondary1_start"), pin("DH1", "anode"),
+                                       pin("DL1", "cathode"), pin("Rsn1", "1"), pin("Csn1", "1")}));
+        conns.push_back(conn("sec_b", {pin("T1", "secondary1_end"), pin("DH2", "anode"),
+                                       pin("DL2", "cathode")}));
+        conns.push_back(conn("vout_net", {pin("DH1", "cathode"), pin("DH2", "cathode"),
                           pin("Rsn1", "2"), pin("Csn1", "2"), pin("Cout", "1"), prt("vout")}));
         std::vector<json> g = gndPrimary;
-        g.insert(g.end(), {pin("Dl1", "anode"), pin("Dl2", "anode"), pin("Cout", "2"), prt("gnd")});
+        g.insert(g.end(), {pin("DL1", "anode"), pin("DL2", "anode"), pin("Cout", "2"), prt("gnd")});
         conns.push_back(conn("gnd_net", g));
         break; }
     case RectifierType::CurrentDoubler: {

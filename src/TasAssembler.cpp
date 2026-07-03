@@ -511,12 +511,22 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
         fswKnown = true;
         const double duty = wf.at("dutyCycle").get<double>();   // schema-required on a pwmWaveform
         const double period = 1.0 / fsw, ton = duty * period;
-        // Optional phase shift (degrees) -> PULSE delay TD = phaseDeg/360 * period. Enables
-        // interleaved / phase-shifted multi-switch drives (push-pull 180 deg, bridges, etc.).
-        const double phaseDeg = wf.value("phase", 0.0);
-        const double td = (phaseDeg / 360.0) * period;
-        os << "Vstim_" << stage << "_" << comp << " " << stimNode << " 0 PULSE(0 5 "
-           << td << " 1n 1n " << ton << " " << period << ")\n";
+        // A statically-held synchronous switch (e.g. an FSBB leg kept ON in the buck/boost region, or a
+        // gate held OFF) is expressed as dutyCycle 1.0 / 0.0. A PULSE with ton==period glitches at every
+        // period boundary (fall coincident with the next rise), briefly opening the switch; emit a constant
+        // DC gate instead. Fractional duties keep the normal PULSE drive.
+        if (duty >= 1.0) {
+            os << "Vstim_" << stage << "_" << comp << " " << stimNode << " 0 DC 5\n";
+        } else if (duty <= 0.0) {
+            os << "Vstim_" << stage << "_" << comp << " " << stimNode << " 0 DC 0\n";
+        } else {
+            // Optional phase shift (degrees) -> PULSE delay TD = phaseDeg/360 * period. Enables
+            // interleaved / phase-shifted multi-switch drives (push-pull 180 deg, bridges, etc.).
+            const double phaseDeg = wf.value("phase", 0.0);
+            const double td = (phaseDeg / 360.0) * period;
+            os << "Vstim_" << stage << "_" << comp << " " << stimNode << " 0 PULSE(0 5 "
+               << td << " 1n 1n " << ton << " " << period << ")\n";
+        }
     }
 
     // transient analysis

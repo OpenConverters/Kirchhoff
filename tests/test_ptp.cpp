@@ -44,6 +44,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <fstream>
 
 using nlohmann::json;
 
@@ -274,3 +275,22 @@ TEST_CASE("PtP: Sepic synchronous rectifier delivers spec", "[ptp][sepic][syncre
         CHECK(std::abs(ck.vout) == Catch::Approx(12.0).epsilon(0.12));
     }
 }
+
+TEST_CASE("PtP: FSBB operating regions deliver spec (buck / boost / buck-boost)", "[ptp][fsbb][region]") {
+    // MKF FourSwitchBuckBoost runs only the buck leg when Vin>Vo (BUCK), only the boost leg when Vo>Vin
+    // (BOOST), and all four switches in the transition band (BUCK_BOOST). KH previously ran SIMULTANEOUS for
+    // every point. Verify each region's deck converges and lands on target, and that the region is classified.
+    if (!Kirchhoff::ngspice_in_process_available()) { WARN("no libngspice — skipping"); return; }
+    struct Case { const char* name; double vin; double vout; const char* region; };
+    for (const Case c : {Case{"buck", 24, 12, "buck"}, Case{"boost", 12, 24, "boost"}, Case{"buckboost", 12, 12, "buckBoost"}}) {
+        INFO("case " << c.name << " " << c.vin << "->" << c.vout);
+        json spec = spec_for(c.vin, c.vout, c.vout * 2.0, 100000);
+        Kirchhoff::FsbbDesign d = Kirchhoff::design_fsbb(spec);
+        CHECK(d.region == std::string(c.region));
+        SimResult s = run_spice(Kirchhoff::build_fsbb_tas(d), 100000, (c.vout * c.vout / (c.vout * 2.0)) * 1e-4);
+        INFO("region=" << d.region << " Vout=" << s.vout);
+        REQUIRE(s.ok);
+        CHECK(s.vout == Catch::Approx(c.vout).epsilon(0.12));
+    }
+}
+

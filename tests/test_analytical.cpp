@@ -130,3 +130,26 @@ TEST_CASE("analytical Vout matches the SPICE deck (in-process)", "[analytical][n
         CHECK(*spiceVout == Catch::Approx(op.outputVoltage).epsilon(0.05));
     }
 }
+
+// ABT #80 — flyback conduction-mode variant: CCM (default) / DCM / BCM / QRM size the magnetizing
+// inductance at or below the CCM–DCM boundary. DCM = 0.6·critical, BCM/QRM = critical.
+TEST_CASE("design_flyback conduction modes size L at/below the critical boundary", "[analytical][design][flyback]") {
+    using Kirchhoff::design_flyback;
+    auto withMode = [](const char* m) { json s = spec_for(48, 12, 24); s["config"]["mode"] = m; return design_flyback(s); };
+    auto dcm = withMode("dcm");
+    auto bcm = withMode("bcm");
+    auto qrm = withMode("qrm");
+    // DCM sits solidly below the boundary; DCM = 0.6·BCM by construction.
+    CHECK(dcm.magnetizingInductance < bcm.magnetizingInductance);
+    CHECK(dcm.magnetizingInductance == Catch::Approx(0.6 * bcm.magnetizingInductance).epsilon(1e-6));
+    // QRM shares BCM's boundary inductance at the design point (valley switching is a control refinement).
+    CHECK(qrm.magnetizingInductance == Catch::Approx(bcm.magnetizingInductance).epsilon(1e-9));
+    // Non-CCM duty follows the energy-balance law and stays a valid (0,1) duty.
+    CHECK(dcm.dutyCycle > 0.0);
+    CHECK(dcm.dutyCycle < 1.0);
+    // CCM (default, no config.mode) is a distinct, larger inductance (continuous conduction).
+    auto ccm = design_flyback(spec_for(48, 12, 24));
+    CHECK(ccm.magnetizingInductance != Catch::Approx(bcm.magnetizingInductance));
+    // Unknown mode fails loud.
+    { json s = spec_for(48, 12, 24); s["config"]["mode"] = "bogus"; CHECK_THROWS(design_flyback(s)); }
+}
