@@ -30,8 +30,10 @@ struct CukDesign {
     double turnsRatio = 1.0;                  // n = Ns/Np (config.turnsRatio; also honours pinned turnsRatios[0])
     double secondaryCouplingCapacitance = 0;  // C1b (F), on the secondary side
     double magnetizingInductance = 0;         // transformer Lm (H)
-    // Bidirectional Ćuk (V5, ABT #90): reverse power flow (Vout side sources, Vin side receives).
-    bool bidirectional = false;
+    // Bidirectional Ćuk (V5, ABT #90): reverse power flow (config.powerFlowDirection=="reverse") — the Vout
+    // side sources and the Vin side receives. Requires the synchronous rectifier so current can flow both
+    // ways. Same source/load-swap mechanism as the CLLC bidirectional (ABT #85).
+    bool reverse = false;
     nlohmann::json config;
 };
 

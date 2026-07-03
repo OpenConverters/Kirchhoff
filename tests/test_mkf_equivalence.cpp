@@ -1130,6 +1130,38 @@ TEST_CASE("Isolated Ćuk (V3): transformer coupling delivers |Vout| across turns
     CHECK(std::fabs(vSync) < 16.0);
 }
 
+// ABT #90 V5: bidirectional Ćuk — reverse power flow. config.powerFlowDirection="reverse" (requires the
+// synchronous rectifier) makes the −|Vo| rail source power and the Vin rail receive it; the input-side and
+// output-side switches swap main/rectifier roles. The inverting single-switch cell means the open-loop
+// magnitude/efficiency are suboptimal (a closed loop trims duty), so we assert genuine reverse delivery +
+// energy conservation, not a pinned setpoint.
+TEST_CASE("Bidirectional Ćuk (V5): reverse power flow, Vout side sources (ABT #90)",
+          "[equivalence][cuk][reverse]") {
+    json in = json::parse(R"({ "designRequirements": { "efficiency": 0.9,
+        "inputVoltage": { "minimum": 18, "nominal": 24, "maximum": 30 },
+        "switchingFrequency": { "nominal": 200000 },
+        "outputs": [ { "name": "out", "voltage": { "nominal": 12 } } ] },
+        "operatingPoints": [ { "inputVoltage": 24, "outputs": [ { "power": 24 } ] } ],
+        "config": { "rectifier": "synchronous", "powerFlowDirection": "reverse" } })");
+    Kirchhoff::CukDesign d = Kirchhoff::design_cuk(in);
+    CHECK(d.reverse);
+    json tas = Kirchhoff::build_cuk_tas(d);
+    const std::string deck = Kirchhoff::tas_to_ngspice(tas, PEAS::Fidelity(PEAS::Fidelity::Origin::REQUIREMENTS));
+    CHECK(deck.find("VVout Vout 0 DC -12") != std::string::npos);   // the −|Vo| rail sources
+    CHECK(deck.find("VVin ") == std::string::npos);                 // Vin is the delivered load, not a source
+
+    // src rail magnitude = |Vo| = 12; delivered rail = Vin = 24. run_reverse measures v(Vin) & i(VVout).
+    ReverseResult r = run_reverse(tas, 12.0, 24.0, 24.0, "cuk_rev");
+    INFO("Ćuk reverse: v(Vin)=" << r.vDelivered << " pSource=" << r.pSource << " pLoad=" << r.pLoad);
+    CHECK(r.vDelivered > 6.0);              // genuine reverse delivery to the Vin rail (open-loop droop OK)
+    CHECK(r.pLoad > 2.0);                    // real power flows Vout->Vin
+    CHECK(r.pSource >= r.pLoad * 0.85);      // energy conservation: the −|Vo| source supplies the delivered power
+
+    // reverse without a sync rectifier is rejected (a diode can't carry reverse current).
+    json noSync = in; noSync["config"].erase("rectifier");
+    CHECK_THROWS(Kirchhoff::design_cuk(noSync));
+}
+
 TEST_CASE("Coupled-inductor SEPIC/Cuk/Zeta: one 2-winding magnetic, delivers spec (ABT #89)",
           "[equivalence][coupled]") {
     struct Case { const char* name; json (*build)(const json&); double vout; };

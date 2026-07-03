@@ -158,9 +158,14 @@ coupling cap (C1b), and the output is referred through `turnsRatio` = n = Np/Ns 
 secondary is the primary /n; also honours a pinned `designRequirements.turnsRatios[0]`). This adds galvanic
 isolation and a step-up/step-down beyond the D/(1-D) range — the design sizes the duty against the
 primary-referred output `|Vo|·n` so the transformer restores `|Vo|` on the secondary. Works with
-`rectifier: "synchronous"`. Mutually exclusive with `coupledInductor`. Bidirectional (reverse power flow, V5)
-is **not yet implemented** and throws (the inverting single-switch cell makes the source/load swap awkward,
-unlike the symmetric CLLC bridge) — the remaining ABT #90 item.
+`rectifier: "synchronous"`. Mutually exclusive with `coupledInductor`.
+
+**Bidirectional Ćuk (`config.powerFlowDirection="reverse"`, ABT #90 V5).** Reverse power flow: the −|Vo| rail
+sources power and the Vin rail receives it (same key as the CLLC bidirectional). Requires
+`rectifier: "synchronous"` so the rectifier branch can carry reverse current, and swaps the main/rectifier
+roles of the two switches. The inverting single-switch cell means the open-loop operating point is
+suboptimal (a closed loop trims the duty), so reverse delivers genuine power Vout→Vin with energy conserved
+rather than a pinned magnitude. Not combinable with `isolated` yet (throws).
 
 **SEPIC / Ćuk / Zeta coupled inductor (`config.coupledInductor`, ABT #89).** By default L1 and L2 are two
 independent single-winding magnetics. With `coupledInductor: true` they share ONE core as a single

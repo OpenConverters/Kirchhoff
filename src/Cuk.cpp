@@ -59,28 +59,38 @@ CukDesign design_cuk(const json& tasInputs) {
     // Isolation and the 1:1 coupled-inductor variant are mutually exclusive (the isolated cell already splits
     // the two inductors onto opposite sides of the transformer).
     d.isolated = cfg::get_bool(d.config, "isolated", false);
-    d.bidirectional = cfg::get_bool(d.config, "bidirectional", false);
-    // Bidirectional Ćuk (V5) — reverse power flow — is not yet wired (the inverting single-switch cell makes
-    // the LV/HV source-load swap sign-awkward, unlike the symmetric CLLC bridge). Reject it loudly rather
-    // than silently building a forward deck (no-silent-shortcuts). Tracked as the remaining ABT #90 item.
-    if (d.bidirectional)
-        throw std::invalid_argument("design_cuk: bidirectional (reverse power flow) Ćuk is not yet "
-                                    "implemented (ABT #90 V5 follow-up); only forward flow is supported");
+    // Bidirectional Ćuk (V5, ABT #90): reverse power flow via config.powerFlowDirection (same key as the CLLC
+    // bidirectional). Reverse makes the Vout side the source and delivers to Vin; it needs the sync rectifier
+    // so the rectifier branch can carry reverse current (a diode blocks it).
+    const std::string dir = cfg::get_str(d.config, "powerFlowDirection", "forward");
+    if (dir != "forward" && dir != "reverse")
+        throw std::invalid_argument("design_cuk: config.powerFlowDirection must be 'forward' or 'reverse', got '" + dir + "'");
+    d.reverse = (dir == "reverse");
+    if (d.reverse && !d.synchronousRectifier)
+        throw std::invalid_argument("design_cuk: reverse power flow requires a synchronous rectifier "
+                                    "(config.rectifier='synchronous') so current can flow both ways");
     if (d.isolated && d.coupledInductor)
         throw std::invalid_argument("design_cuk: 'isolated' and 'coupledInductor' are mutually exclusive");
+    if (d.isolated && d.reverse)
+        throw std::invalid_argument("design_cuk: isolated + reverse (bidirectional isolated Ćuk) is not "
+                                    "supported yet; use one at a time (ABT #90)");
     d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(cfg::get(d.config, "turnsRatio", 1.0));
     if (d.isolated && !(d.turnsRatio > 0.0))
         throw std::invalid_argument("design_cuk: isolated turnsRatio must be > 0");
     const double n = d.isolated ? d.turnsRatio : 1.0;
     // Sync MOSFET has no forward drop → size duty with Vd=0 so the open-loop deck lands on target.
     d.diodeDrop = d.synchronousRectifier ? 0.0 : req::dideal_diode_drop(iout);
-    // Isolated: reflect the output to the primary (|Vo|·n, since n = Np/Ns) for the D/(1-D) sizing; the
-    // transformer steps it back down by n to |Vo| on the secondary.
-    const double voRefDuty = d.outputVoltageMag * n;
-    d.dutyCycle = duty(d.inputVoltage, voRefDuty, d.diodeDrop, d.efficiency);
+    // Direction-aware D/(1-D) sizing. Forward: Vin drives, delivers the primary-referred output |Vo|·n (the
+    // transformer, if isolated, restores |Vo|). Reverse (V5): the |Vo| rail drives and delivers Vin, so the
+    // driving/driven voltages swap — sizing the duty here makes the OPEN-LOOP reverse deck land on the Vin
+    // target (a closed loop trims the residual), instead of running the forward duty backwards.
+    const double dutyDriveNom = d.reverse ? d.outputVoltageMag : d.inputVoltage;
+    const double dutyDriveMax = d.reverse ? d.outputVoltageMag : vinMax;   // reverse source has no tolerance
+    const double dutyDeliver  = d.reverse ? d.inputVoltage : (d.outputVoltageMag * n);
+    d.dutyCycle = duty(dutyDriveNom, dutyDeliver, d.diodeDrop, d.efficiency);
 
-    // L1 sized at the worst corner (max Vin) for its current-ripple target (MKF).
-    const double dMax = duty(vinMax, voRefDuty, d.diodeDrop, d.efficiency);
+    // L1 sized at the worst corner for its current-ripple target (MKF).
+    const double dMax = duty(dutyDriveMax, dutyDeliver, d.diodeDrop, d.efficiency);
     const double iL1avg = iout * dMax / (1.0 - dMax);
     const double dIL1 = cfg::get(d.config, "l1RippleRatio", kRippleRatioL1) * iL1avg;
     d.inductanceL1 = vinMax * dMax / (dIL1 * fsw);
@@ -322,16 +332,26 @@ json build_cuk_tas(const CukDesign& d) {
         conn("out", {pin("Cout", "1"), prt("in")}),
         conn("ret", {pin("Cout", "2"), prt("rtn")})});
 
+    // Source / delivered rails (ABT #90 V5). Forward: source Vin, deliver Vout (the inverting −|Vo| rail).
+    // Reverse: the −|Vo| rail sources and the Vin rail receives — the assembler drives a DC source on the
+    // "input" external port and sizes the load on the "output" port, so flipping the external-port directions
+    // (and the source/delivered voltages) realises reverse power flow (same mechanism as CLLC). The output
+    // filter cap (Cout) stays on the −|Vo| rail either way.
+    const double voNom = -d.outputVoltageMag;                 // the inverting output rail
+    const double srcV     = d.reverse ? voNom : d.inputVoltage;
+    const double srcVmin  = d.reverse ? voNom : d.inputVoltageMin;
+    const double srcVmax  = d.reverse ? voNom : d.inputVoltageMax;
+    const double deliverV = d.reverse ? d.inputVoltage : voNom;
     json tas;
     json& dreq = tas["inputs"]["designRequirements"];
     dreq["efficiency"] = d.efficiency;
     dreq["inputType"] = "dc";
-    dreq["inputVoltage"] = {{"minimum", d.inputVoltageMin}, {"nominal", d.inputVoltage}, {"maximum", d.inputVoltageMax}};
+    dreq["inputVoltage"] = {{"minimum", srcVmin}, {"nominal", srcV}, {"maximum", srcVmax}};
     dreq["switchingFrequency"]["nominal"] = d.switchingFrequency;
-    // Output voltage is NEGATIVE (inverting): the synthesized load measures v(Vout) < 0.
-    { json o; o["name"] = "out"; o["voltage"]["nominal"] = -d.outputVoltageMag; o["regulation"] = "voltage";
+    // Output voltage: forward = the NEGATIVE (inverting) rail; reverse = the delivered Vin rail.
+    { json o; o["name"] = "out"; o["voltage"]["nominal"] = deliverV; o["regulation"] = "voltage";
       dreq["outputs"] = json::array({o}); }
-    { json op; op["name"] = "full_load"; op["inputVoltage"] = d.inputVoltage; op["ambientTemperature"] = 25.0;
+    { json op; op["name"] = "full_load"; op["inputVoltage"] = srcV; op["ambientTemperature"] = 25.0;
       json o; o["name"] = "out"; o["power"] = d.outputPower; op["outputs"] = json::array({o});
       tas["inputs"]["operatingPoints"] = json::array({op}); }
 
@@ -339,20 +359,32 @@ json build_cuk_tas(const CukDesign& d) {
         req::control_stage("pwmController"),
         pstage("cukCell", "switchingCell", cell, bind("vin", "dcBus"), bind("vout", "pulsatingDc")),
         pstage("filter", "outputFilter", filt, bind("in", "pulsatingDc"), bind("in", "dcOutput"))});
-    tas["topology"]["interStageConnections"] = json::array({
-        isc("Vin", "externalPort", "input", {sp("cukCell", "vin")}),
-        isc("GND", "externalPort", "input", {sp("cukCell", "gnd"), sp("filter", "rtn")}),
-        isc("Vout", "externalPort", "output", {sp("cukCell", "vout"), sp("filter", "in")})});
+    // Node names stay tied to the physical rails (Vin, Vout); only the source/load DIRECTION flips (ABT #90).
+    tas["topology"]["interStageConnections"] = d.reverse
+        ? json::array({
+            isc("Vout", "externalPort", "input",  {sp("cukCell", "vout"), sp("filter", "in")}),   // −|Vo| sources
+            isc("GND",  "externalPort", "input",  {sp("cukCell", "gnd"), sp("filter", "rtn")}),
+            isc("Vin",  "externalPort", "output", {sp("cukCell", "vin")})})                        // Vin delivered
+        : json::array({
+            isc("Vin",  "externalPort", "input",  {sp("cukCell", "vin")}),
+            isc("GND",  "externalPort", "input",  {sp("cukCell", "gnd"), sp("filter", "rtn")}),
+            isc("Vout", "externalPort", "output", {sp("cukCell", "vout"), sp("filter", "in")})});
 
     json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
     tas["simulation"]["analyses"] = json::array({an});
-    json st; st["stage"] = "cukCell"; st["component"] = "Q1"; st["signal"] = "gate";
+    // Gate drive. Forward: Q1 (input-side switch) is the MAIN switch at duty D; the sync rectifier Q2
+    // (output side) runs complementary. Reverse (V5): the roles SWAP — Q2 (now the driving side) becomes the
+    // main switch at D and Q1 becomes the complementary rectifier — because in reverse the |Vo| bus drives
+    // through the output-side switch. d.dutyCycle is already sized for the active direction.
+    const char* mainSw = d.reverse ? "Q2" : "Q1";
+    const char* compSw = d.reverse ? "Q1" : "Q2";
+    const double dt = d.deadFraction;
+    json st; st["stage"] = "cukCell"; st["component"] = mainSw; st["signal"] = "gate";
     st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;
     st["waveform"]["dutyCycle"] = d.dutyCycle;
     tas["simulation"]["stimulus"] = json::array({st});
     if (d.synchronousRectifier) {
-        const double dt = d.deadFraction;
-        json st2; st2["stage"] = "cukCell"; st2["component"] = "Q2"; st2["signal"] = "gate";
+        json st2; st2["stage"] = "cukCell"; st2["component"] = compSw; st2["signal"] = "gate";
         st2["waveform"]["type"] = "pwm"; st2["waveform"]["frequency"] = d.switchingFrequency;
         st2["waveform"]["dutyCycle"] = std::max(0.0, (1.0 - d.dutyCycle) - 2.0 * dt);
         st2["waveform"]["phase"] = (d.dutyCycle + dt) * 360.0;
