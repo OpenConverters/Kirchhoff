@@ -831,6 +831,28 @@ TEST_CASE("analytical_pfc: 1 winding, rectified-sine envelope peak = I_pk, non-z
     CHECK(*vlt.get_negative_peak() < -100.0);                       // OFF-time = Vin−Vout (boost discharge)
 }
 
+TEST_CASE("analytical_pfc bipolar (totem-pole): TRUE sine inductor current, zero mean, ±I_pk",
+          "[analytical][solver][pfc]") {
+    // Bridgeless TOTEM-POLE branch (ABT #92, bipolar=true): the inductor sits on the AC line with no
+    // rectifier, so it carries a TRUE bipolar sine — reaching BOTH +I_pk and −I_pk with a ~zero mean —
+    // instead of the bridged boost's rectified-sine (unipolar, (2/π)·I_pk mean). Same design point.
+    using Kirchhoff::analytical::analytical_pfc;
+    MAS::OperatingPoint op = analytical_pfc(kPfcVrms, kPfcVout, kPfcPo, kPfcFline, kPfcFsw, kPfcL,
+                                            /*efficiency*/1.0, /*Vd*/0.0, /*numberOfPeriods*/2,
+                                            /*bipolar*/true);
+    REQUIRE(op.get_excitations_per_winding().size() == 1);
+    const auto cur = processed_current(op, 0);
+    REQUIRE(cur.get_peak().has_value());
+    REQUIRE(cur.get_negative_peak().has_value());
+    REQUIRE(cur.get_average().has_value());
+    // Reaches both rails: +I_pk and −I_pk (± up to ΔI_pp/2 of switching ripple).
+    CHECK(*cur.get_peak()          == Catch::Approx(+kPfcIpk).margin(kPfcDIpp));
+    CHECK(*cur.get_negative_peak() == Catch::Approx(-kPfcIpk).margin(kPfcDIpp));
+    // Zero-mean (bipolar), NOT the rectified-sine (2/π)·I_pk of the bridged boost.
+    CHECK(std::abs(*cur.get_average()) < 1.0);
+    CHECK(*cur.get_average() < 0.5 * kPfcMean);   // clearly distinct from the unipolar mean
+}
+
 TEST_CASE("analytical_pfc rejects non-positive line/bus/power/fsw/L and infeasible step-up",
           "[analytical][solver][pfc]") {
     using Kirchhoff::analytical::analytical_pfc;

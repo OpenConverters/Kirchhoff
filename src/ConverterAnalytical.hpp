@@ -501,6 +501,10 @@ MAS::OperatingPoint analytical_vienna(double linePhaseVoltageRms,
 // defaults) on: non-positive inputVoltageRms / outputVoltage / outputPower / lineFrequency /
 // switchingFrequency / boostInductance; efficiency ∉ (0,1]; and outputVoltage+Vd ≤ √2·inputVoltageRms
 // (a boost PFC can only step UP — the boost-family analogue of Vienna's over-modulation guard).
+// `bipolar` selects the bridgeless TOTEM_POLE branch (MKF :393-432): the inductor sees a TRUE bipolar
+// sine (signed current envelope, signed off-time bus polarity) instead of the bridged |sin| envelope, so
+// its excitation carries no rectified DC offset. INTERLEAVED_BOOST reuses this solver per phase with the
+// per-phase power (outputPower/N); SEPIC/Ćuk (buck-boost class) remain unported.
 MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
                                    double outputVoltage,
                                    double outputPower,
@@ -509,7 +513,8 @@ MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
                                    double boostInductance,
                                    double efficiency = 1.0,
                                    double diodeVoltageDrop = 0.0,
-                                   int numberOfPeriods = 2);
+                                   int numberOfPeriods = 2,
+                                   bool bipolar = false);
 
 // ── Phase 8: magnetic-COMPONENT operating-point models ───────────────────────
 // The final three MKF converter_models that have no KH analytical counterpart. Unlike the switching

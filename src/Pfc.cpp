@@ -6,6 +6,8 @@
 #include <cmath>
 #include <vector>
 #include <stdexcept>
+#include <string>
+#include <cctype>
 
 namespace Kirchhoff {
 using nlohmann::json;
@@ -16,6 +18,38 @@ constexpr double kSenseResistance   = 0.1;     // input-current sense [Ω]
 constexpr double kRippleFraction    = 0.30;    // hysteretic current ripple as a fraction of peak iL
 constexpr double kOutputCapacitance = 220e-6;  // bus cap
 constexpr double kPi                = 3.14159265358979323846;
+
+std::string to_lower(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+// Normalize the conduction-mode knob to the canonical {ccm, dcm, crm, transition}. crm and transition
+// are the SAME boundary-conduction sizing (MKF process_design_requirements :283 folds them together);
+// they are kept distinct only as design intent. Throws on an unrecognised mode (no silent CCM fallback).
+std::string normalize_pfc_mode(const std::string& raw) {
+    const std::string m = to_lower(raw);
+    if (m == "ccm" || m == "continuous" || m == "continuousconductionmode") return "ccm";
+    if (m == "dcm" || m == "discontinuous" || m == "discontinuousconductionmode") return "dcm";
+    if (m == "crm" || m == "critical" || m == "criticalconductionmode") return "crm";
+    if (m == "transition" || m == "transitionmode" || m == "boundary" || m == "bcm" || m == "tm")
+        return "transition";
+    throw std::invalid_argument("design_pfc: unknown mode '" + raw +
+                                "' (expected ccm | dcm | crm | transition)");
+}
+
+// Normalize the topology-variant knob to the canonical name. Throws on an unrecognised variant.
+std::string normalize_pfc_variant(const std::string& raw) {
+    const std::string v = to_lower(raw);
+    if (v == "boost" || v.empty()) return "boost";
+    if (v == "totempole" || v == "totem-pole" || v == "totem_pole") return "totemPole";
+    if (v == "interleaved" || v == "interleavedboost" || v == "interleaved-boost" ||
+        v == "interleaved_boost") return "interleaved";
+    if (v == "sepic") return "sepic";
+    if (v == "cuk" || v == "ćuk" || v == "cúk") return "cuk";
+    throw std::invalid_argument("design_pfc: unknown topologyVariant '" + raw +
+                                "' (expected boost | totemPole | interleaved | sepic | cuk)");
+}
 } // namespace
 
 PfcDesign design_pfc(const json& tasInputs) {
@@ -32,20 +66,69 @@ PfcDesign design_pfc(const json& tasInputs) {
     else
         d.outputPower = nominal(dr.at("outputs").at(0).at("power"));
 
+    // ── Conduction mode + topology variant (ABT #92) ─────────────────────────────────────────────────
+    d.mode            = normalize_pfc_mode(cfg::get_str(d.config, "mode", "ccm"));
+    d.topologyVariant = normalize_pfc_variant(cfg::get_str(d.config, "topologyVariant", "boost"));
+    d.bipolar         = (d.topologyVariant == "totemPole");
+    // Supported-variant gate (mirrors MKF PowerFactorCorrection::validate_topology_variant :46). An
+    // unsupported variant THROWS here — never a silent boost fallback.
+    if (d.topologyVariant == "interleaved") {
+        d.numberOfPhases = static_cast<int>(std::llround(cfg::get(d.config, "numberOfPhases", 2.0)));
+        if (d.numberOfPhases < 2 || d.numberOfPhases > 3)   // MKF :71-83 (2 or 3 phases only)
+            throw std::invalid_argument("design_pfc: interleaved topologyVariant requires numberOfPhases "
+                                        "in {2,3}, got " + std::to_string(d.numberOfPhases));
+    } else {
+        d.numberOfPhases = 1;
+        if (d.topologyVariant == "totemPole")
+            // The analytical bipolar inductor excitation IS ported (analytical_pfc bipolar=true), but the
+            // bridgeless bipolar CLOSED-LOOP deck (polarity-steered slow leg + synchronous fast leg +
+            // bipolar current loop + inverted voltage-loop sign) is not implemented. Reject explicitly.
+            throw std::invalid_argument("design_pfc: totemPole topologyVariant is not yet supported — its "
+                                        "bridgeless bipolar closed-loop deck is not implemented (the "
+                                        "analytical bipolar inductor excitation IS available). "
+                                        "Available variants: boost, interleaved.");
+        if (d.topologyVariant == "sepic" || d.topologyVariant == "cuk")
+            throw std::invalid_argument("design_pfc: topologyVariant '" + d.topologyVariant +
+                                        "' (buck-boost class PFC) is not yet supported "
+                                        "(available: boost, interleaved)");
+    }
+
     const double pin   = d.outputPower / std::max(d.efficiency, 1e-6);
     const double vpeak = d.inputVoltageRms * std::sqrt(2.0);
-    const double rEmul = d.inputVoltageRms * d.inputVoltageRms / pin;  // emulated input resistance
-    const double iPeak = vpeak / rEmul;                                // peak inductor/line current
+    const double rEmul = d.inputVoltageRms * d.inputVoltageRms / pin;  // emulated input resistance (total)
+    const double iPeak = vpeak / rEmul;                                // total peak inductor/line current
 
     d.senseResistance = cfg::get(d.config, "senseResistance", kSenseResistance);
-    // i_ref voltage = kref·V(busP) must equal the target sense voltage iL·Rsense = (V(busP)/rEmul)·Rsense.
-    d.referenceGain = d.senseResistance / rEmul;
-    // CCM ripple ΔiL = fraction·iPeak; size L for the target switching frequency at the line peak:
-    //   f_peak = Vpk·(Vout−Vpk) / (ΔiL·L·Vout)  =>  L = Vpk·(Vout−Vpk) / (ΔiL·f·Vout).
-    const double dIL = cfg::get(d.config, "currentRippleFraction", kRippleFraction) * iPeak;
-    d.boostInductance = vpeak * (d.outputVoltage - vpeak)
-                        / (dIL * d.switchingFrequency * d.outputVoltage);
-    d.currentHysteresis = 0.5 * dIL * d.senseResistance;   // half-band on the i·Rsense signal
+    // i_ref voltage = kref·V(busP) must equal the PER-PHASE target sense voltage iL_phase·Rsense. Each of the
+    // N interleaved phases carries 1/N of the line current, so its emulated resistance is N·rEmul → the
+    // per-phase reference gain is Rsense/(N·rEmul). N = 1 for boost/totem-pole (unchanged).
+    d.referenceGain = d.senseResistance / (rEmul * d.numberOfPhases);
+
+    // ── Conduction mode drives the boost-inductor sizing (MKF PowerFactorCorrection::calculate_inductance_
+    // ccm/dcm/crcm, :171/205/218). Every formula evaluates at the line-voltage peak (the worst case). For
+    // an INTERLEAVED PFC each of the N phases carries 1/N of the line current, so the per-phase inductor is
+    // sized to the per-phase power/current (MKF per_phase_power :163); N = 1 for boost/totem-pole.
+    const double dutyPeak   = 1.0 - vpeak / d.outputVoltage;   // boost duty at the line peak (Vd = 0)
+    const double pinPhase   = pin   / d.numberOfPhases;        // per-phase input power
+    const double iPeakPhase = iPeak / d.numberOfPhases;        // per-phase peak inductor current
+    const double ripple     = cfg::get(d.config, "currentRippleFraction", kRippleFraction);
+    if (d.mode == "ccm") {
+        // ΔiL = ripple·iLpeak; L = Vpk·D / (ΔiL·fsw) ≡ the original Vpk·(Vout−Vpk)/(ΔiL·fsw·Vout).
+        d.boostInductance = vpeak * dutyPeak / (ripple * iPeakPhase * d.switchingFrequency);
+    } else if (d.mode == "dcm") {
+        // L = Vpk²·D² / (2·Pin·fsw)  (MKF calculate_inductance_dcm :214). Smaller L → deep ripple, the
+        // inductor fully de-energises each cycle.
+        d.boostInductance = vpeak * vpeak * dutyPeak * dutyPeak
+                            / (2.0 * pinPhase * d.switchingFrequency);
+    } else {   // "crm" || "transition" — boundary conduction (MKF calculate_inductance_crcm :229)
+        // L = Vpk·D / (2·iLpeak·fsw): the boundary where ΔiL = 2·iLpeak (the valley just touches zero).
+        d.boostInductance = vpeak * dutyPeak / (2.0 * iPeakPhase * d.switchingFrequency);
+    }
+    // Comparator hysteresis = half the ACTUAL peak ripple the sized (L, D) produce at the line peak, so the
+    // hysteretic current band stays self-consistent with the mode's inductor. For CCM this collapses to
+    // exactly ripple·iLpeak (byte-identical to the original boost/CCM band).
+    const double dILactual = vpeak * dutyPeak / (d.boostInductance * d.switchingFrequency);
+    d.currentHysteresis = 0.5 * dILactual * d.senseResistance;   // half-band on the i·Rsense signal
     d.outputCapacitance = cfg::get(d.config, "outputCapacitance", kOutputCapacitance);
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
 
@@ -61,7 +144,9 @@ PfcDesign design_pfc(const json& tasInputs) {
     //     kp = ωc·Rsense·C·Vbus / (kv·Vrms²) = ωc/(kv·K0),   ki = kp·ωp.
     d.outputDividerGain = 0.01;                                   // kv: V(voutScaled)=kv·Vout (~4 V at 400 V)
     const double kv = d.outputDividerGain;
-    const double K0 = d.inputVoltageRms * d.inputVoltageRms
+    // N interleaved phases each present conductance (1−gv)/Rsense, so the total control-to-power gain scales
+    // by N (the plant pole/zero placement is otherwise identical). N = 1 for boost/totem-pole (unchanged).
+    const double K0 = d.numberOfPhases * d.inputVoltageRms * d.inputVoltageRms
                       / (d.senseResistance * d.outputCapacitance * d.outputVoltage);
     const double wp = 2.0 / (d.loadResistance * d.outputCapacitance);   // load pole
     const double wc = 2.0 * kPi * d.lineFrequency / 10.0;               // crossover (ripple-safe)
@@ -70,7 +155,18 @@ PfcDesign design_pfc(const json& tasInputs) {
     return d;
 }
 
+// Variant deck builders (ABT #92) — defined after build_pfc_tas.
+static json build_pfc_totempole_tas(const PfcDesign& d);
+static json build_pfc_interleaved_tas(const PfcDesign& d);
+
 json build_pfc_tas(const PfcDesign& d) {
+    // Deck router (ABT #92). The mode (ccm/dcm/crm/transition) only changes the boost-inductor VALUE, so it
+    // is common to every deck; the topology VARIANT changes the switching cell, so it selects the builder.
+    if (d.topologyVariant == "totemPole") return build_pfc_totempole_tas(d);
+    if (d.topologyVariant == "interleaved") return build_pfc_interleaved_tas(d);
+    if (d.topologyVariant != "boost")
+        throw std::invalid_argument("build_pfc_tas: topologyVariant '" + d.topologyVariant +
+                                    "' deck is not implemented");
     auto port = [](const char* n) { json p; p["name"] = n; return p; };
     auto pin  = [](const char* c, const char* p) { json e; e["component"] = c; e["pin"] = p; return e; };
     auto prt  = [](const char* p) { json e; e["port"] = p; return e; };
@@ -243,6 +339,213 @@ json build_pfc_tas(const PfcDesign& d) {
     { json ic; ic["node"] = "Vout"; ic["voltage"] = d.outputVoltage;
       tas["simulation"]["initialConditions"] = json::array({ic}); }
     req::finalize_control_seeds(tas, Topology::POWER_FACTOR_CORRECTION);  // CTAS seed: topology+fsw for switching controllers
+    return tas;
+}
+
+static json build_pfc_totempole_tas(const PfcDesign& d) {
+    // The bipolar-inductor magnetics excitation is ported (analytical_pfc bipolar=true), but the CLOSED-LOOP
+    // totem-pole DECK is a substantial control redesign vs. the bridged boost — a polarity-steered slow leg,
+    // a bipolar current reference, a complementary synchronous fast leg, and an inverted voltage-loop sign —
+    // and is not yet implemented. Reject explicitly (no silent boost fallback), per ABT #92.
+    (void)d;
+    throw std::invalid_argument(
+        "build_pfc_totempole_tas: totemPole topologyVariant is not yet supported — its bridgeless "
+        "bipolar closed-loop deck (polarity-steered slow leg + synchronous fast leg + bipolar current "
+        "loop) is not implemented. The analytical bipolar inductor excitation IS available "
+        "(analytical_pfc bipolar=true).");
+}
+
+// INTERLEAVED boost PFC (ABT #92): N phase-shifted boost legs share ONE input bridge and ONE bus cap. Each
+// leg carries 1/N of the line current (design_pfc sizes L and the per-phase reference gain accordingly), so
+// N smaller inductors replace the single boost inductor. This REUSES the proven single-phase boost cell and
+// its hysteretic current loop per phase, all driven by the ONE shared outer voltage loop (the phases self-
+// oscillate hysteretically and share the load). MKF PowerFactorCorrection INTERLEAVED_BOOST (per_phase_power
+// :163). N = 2 or 3 (validated in design_pfc, mirroring MKF :71-83).
+static json build_pfc_interleaved_tas(const PfcDesign& d) {
+    const int N = d.numberOfPhases;
+    auto port = [](const std::string& n) { json p; p["name"] = n; return p; };
+    auto pin  = [](const std::string& c, const char* p) { json e; e["component"] = c; e["pin"] = p; return e; };
+    auto prt  = [](const std::string& p) { json e; e["port"] = p; return e; };
+    auto conn = [](const std::string& name, std::vector<json> eps) { json c; c["name"] = name; c["endpoints"] = eps; return c; };
+    auto comp = [](const std::string& name, json data) { json c; c["name"] = name; c["data"] = data; return c; };
+    auto bind = [](const char* p, const char* type) { json b; b["port"] = p; b["type"] = type; return b; };
+    auto pstage = [](const char* name, const char* role, json brick, json inb, json outb) {
+        json s; s["name"] = name; s["role"] = role; s["circuit"] = brick;
+        s["inputPort"] = inb; s["outputPort"] = outb; return s; };
+    auto sp = [](const char* st, const std::string& po) { json e; e["stage"] = st; e["port"] = po; return e; };
+    auto isc = [](const std::string& name, const char* kind, const char* dir, std::vector<json> eps) {
+        json c; c["name"] = name; c["kind"] = kind; if (dir[0]) c["direction"] = dir; c["endpoints"] = eps; return c; };
+    auto mosfet = [](const json& reqs) { json j; j["semiconductor"]["mosfet"] = json::object();
+        j["inputs"]["designRequirements"] = reqs; return j; };
+    auto diode  = [](const json& reqs) { json j; j["semiconductor"]["diode"] = json::object();
+        j["inputs"]["designRequirements"] = reqs; return j; };
+    auto capBrick = [&](double c, double vr) { json j; j["capacitor"] = json::object();
+        j["inputs"]["designRequirements"]["capacitance"]["nominal"] = c;
+        j["inputs"]["designRequirements"]["ratedVoltage"] = vr; return j; };
+    auto indBrick = [&](double L, const json& excitation) { json j; j["magnetic"] = json::object();
+        j["inputs"] = req::magnetic_inputs(L, 0.2, /*single winding*/ {}, {"primary"},
+            std::nullopt, 25.0, {excitation}); return j; };
+    auto resBrick = [&](double r) { json j; j["resistor"] = json::object();
+        auto& dr = j["inputs"]["designRequirements"];
+        dr["deviceType"] = "resistor"; dr["resistance"]["nominal"] = r;
+        const double Iout_ = d.outputPower / d.outputVoltage, Vb_ = d.outputVoltage;
+        const double i2r_ = Iout_*Iout_*r, v2r_ = Vb_*Vb_/r;
+        dr["powerRating"] = (i2r_ < v2r_ ? i2r_ : v2r_);
+        return j; };
+    auto comparator = [&](double hyst) { json j; json& e = j["analog"]["comparator"]["behavioral"];
+        e["outputHigh"] = 5.0; e["outputLow"] = 0.0; e["threshold"] = 0.0; e["hysteresis"] = hyst; return j; };
+    auto multiplier = [&]() { json j; j["analog"]["multiplier"]["behavioral"]["gain"] = 1.0; return j; };
+    auto summer = [&](double gA, double gB) { json j; json& e = j["analog"]["summer"]["behavioral"];
+        e["gainA"] = gA; e["gainB"] = gB; return j; };
+    auto integrator = [&](double gain, double initial, double ref, double lo, double hi) {
+        json j; json& e = j["analog"]["integrator"]["behavioral"];
+        e["gain"] = gain; e["initial"] = initial; e["reference"] = ref;
+        e["outputLow"] = lo; e["outputHigh"] = hi; return j; };
+    auto nL = [](int p) { return "nL" + std::to_string(p); };
+    auto gp = [](int p) { return "g"  + std::to_string(p); };
+
+    // Per-PHASE inductor excitation: analytical_pfc at the per-phase power (Pout/N) and the per-phase L.
+    namespace AN = Kirchhoff::analytical;
+    const double poutPhase = d.outputPower / N;
+    const MAS::OperatingPoint aopPfc = AN::analytical_pfc(d.inputVoltageRms, d.outputVoltage, poutPhase,
+                                                          d.lineFrequency, d.switchingFrequency,
+                                                          d.boostInductance, d.efficiency);
+    const double IpkL  = AN::winding_current(aopPfc, 0, "peak");
+    const double IrmsL = AN::winding_current(aopPfc, 0, "rms");
+    const double IavgL = AN::winding_current(aopPfc, 0, "offset");
+    const json indExc = AN::excitations_processed(aopPfc, "L").at(0);
+
+    // Ratings: each phase switch/diode carries the PER-PHASE current; the shared bridge carries the TOTAL
+    // (sum of all N phases). All block the DC bus.
+    const double ratedVdsP     = d.outputVoltage / cfg::v_derate_mosfet(d.config);
+    const double ratedVrBoost  = d.outputVoltage / cfg::v_derate_diode(d.config);
+    const double ratedVrBridge = d.outputVoltage / cfg::v_derate_diode(d.config);
+    const double maxRdsOnP     = cfg::rds_on_loss_fraction(d.config) * poutPhase / (IrmsL * IrmsL);
+    const double maxVfBoost    = (ratedVrBoost  < 100.0) ? 0.6 : 1.2;
+    const double maxVfBridge   = (ratedVrBridge < 100.0) ? 0.6 : 1.2;
+    const double IfBridge = N * IavgL / 0.7;   // bridge carries the sum of the phase currents
+    const double IfBoost  = IavgL / 0.7;       // per-phase boost-diode average current
+    const json reqSW = req::mosfet("mainSwitch", ratedVdsP, IpkL, maxRdsOnP, 125.0);
+    const json reqD5 = req::diode(ratedVrBoost, IfBoost, maxVfBoost, 0.05 / d.switchingFrequency);
+    const json reqBridge = req::diode(ratedVrBridge, IfBridge, maxVfBridge);
+
+    // ───────────── POWER stage: one bridge + N boost legs sharing busP / vout / gnd ─────────────
+    json pcell; pcell["name"] = "pfc-power-interleaved";
+    std::vector<json> pports = {port("acLine"), port("acNeutral"), port("gnd"), port("vout"), port("busP")};
+    for (int p = 1; p <= N; ++p) { pports.push_back(port(nL(p))); pports.push_back(port(gp(p))); }
+    pcell["ports"] = pports;
+
+    std::vector<json> pcomps = {
+        comp("D1", diode(reqBridge)), comp("D2", diode(reqBridge)),
+        comp("D3", diode(reqBridge)), comp("D4", diode(reqBridge)),
+        comp("Cout", capBrick(d.outputCapacitance, d.outputVoltage * 2)),
+        comp("Rref", resBrick(10e3))};
+    for (int p = 1; p <= N; ++p) {
+        pcomps.push_back(comp("Rsense" + std::to_string(p), resBrick(d.senseResistance)));
+        pcomps.push_back(comp("L" + std::to_string(p), indBrick(d.boostInductance, indExc)));
+        pcomps.push_back(comp("SW" + std::to_string(p), mosfet(reqSW)));
+        pcomps.push_back(comp("D5" + std::to_string(p), diode(reqD5)));
+    }
+    pcell["components"] = pcomps;
+
+    // Shared nets: busP (all Rsense_p.1), gnd (all SW_p.source), vout (all D5_p.cathode).
+    std::vector<json> busPeps  = {pin("D1","cathode"), pin("D2","cathode"), prt("busP")};
+    std::vector<json> gndEps   = {pin("D3","anode"), pin("D4","anode"), pin("Cout","2"), pin("Rref","2"), prt("gnd")};
+    std::vector<json> voutEps  = {pin("Cout","1"), prt("vout")};
+    for (int p = 1; p <= N; ++p) {
+        busPeps.push_back(pin("Rsense" + std::to_string(p), "1"));
+        gndEps.push_back(pin("SW" + std::to_string(p), "source"));
+        voutEps.push_back(pin("D5" + std::to_string(p), "cathode"));
+    }
+    std::vector<json> pconns = {
+        conn("acLine",    {pin("D1","anode"), pin("D3","cathode"), prt("acLine")}),
+        conn("acNeutral", {pin("D2","anode"), pin("D4","cathode"), pin("Rref","1"), prt("acNeutral")}),
+        conn("busP",    busPeps),
+        conn("gnd_net", gndEps),
+        conn("vout_net",voutEps)};
+    for (int p = 1; p <= N; ++p) {
+        const std::string ps = std::to_string(p);
+        pconns.push_back(conn(nL(p),      {pin("Rsense"+ps,"2"), pin("L"+ps,"primary_start"), prt(nL(p))}));
+        pconns.push_back(conn("swNode"+ps,{pin("L"+ps,"primary_end"), pin("SW"+ps,"drain"), pin("D5"+ps,"anode")}));
+        pconns.push_back(conn(gp(p),      {pin("SW"+ps,"gate"), prt(gp(p))}));
+    }
+    pcell["connections"] = pconns;
+
+    // ──────────────── CONTROL stage: ONE outer voltage loop + N per-phase current comparators ───────────
+    const double kref = d.referenceGain;            // PER-PHASE reference gain (Rsense/(N·rEmul))
+    const double g0   = 1.0 - kref;
+    const double kv   = d.outputDividerGain;
+    const double kp   = d.proportionalGain;
+    const double vref = kv * d.outputVoltage;
+    const double ivInit = g0 - kp * vref;
+    const double gvLo = 1.0 - 4.0 * kref, gvHi = 1.0 - 0.1 * kref;
+    const double ivLo = gvLo - kp * vref, ivHi = gvHi - kp * vref;
+    const double rv2 = 1e3, rv1 = rv2 * (1.0 - kv) / kv;
+    json ccell; ccell["name"] = "pfc-voltage-current-control-interleaved";
+    std::vector<json> cports = {port("busP"), port("vout"), port("gnd")};
+    for (int p = 1; p <= N; ++p) { cports.push_back(port(nL(p))); cports.push_back(port(gp(p))); }
+    ccell["ports"] = cports;
+    std::vector<json> ccomps = {
+        comp("Rv1", resBrick(rv1)), comp("Rv2", resBrick(rv2)),
+        comp("Iv", integrator(d.integralGain, ivInit, vref, ivLo, ivHi)),
+        comp("Sgv", summer(1.0, kp)),
+        comp("Mv", multiplier())};
+    for (int p = 1; p <= N; ++p)
+        ccomps.push_back(comp("Cmp" + std::to_string(p), comparator(d.currentHysteresis)));
+    ccell["components"] = ccomps;
+    // Shared reference vth = busP·gv fans out to every phase comparator's inMinus.
+    std::vector<json> vthEps = {pin("Mv","out")};
+    for (int p = 1; p <= N; ++p) vthEps.push_back(pin("Cmp" + std::to_string(p), "inMinus"));
+    std::vector<json> cconns = {
+        conn("vout",      {pin("Rv1","1"), prt("vout")}),
+        conn("voutScaled",{pin("Rv1","2"), pin("Rv2","1"), pin("Iv","in"), pin("Sgv","inB")}),
+        conn("gnd",       {pin("Rv2","2"), prt("gnd")}),
+        conn("ivout",     {pin("Iv","out"), pin("Sgv","inA")}),
+        conn("gv",        {pin("Sgv","out"), pin("Mv","inB")}),
+        conn("busP",      {pin("Mv","inA"), prt("busP")}),
+        conn("vth",       vthEps)};
+    for (int p = 1; p <= N; ++p) {
+        cconns.push_back(conn(nL(p), {pin("Cmp"+std::to_string(p),"inPlus"), prt(nL(p))}));
+        cconns.push_back(conn(gp(p), {pin("Cmp"+std::to_string(p),"out"),    prt(gp(p))}));
+    }
+    ccell["connections"] = cconns;
+
+    json tas;
+    json& dreq = tas["inputs"]["designRequirements"];
+    dreq["efficiency"] = d.efficiency;
+    dreq["inputType"] = "acSinglePhase";
+    dreq["inputVoltage"]["nominal"] = d.inputVoltageRms;
+    dreq["lineFrequency"]["nominal"] = d.lineFrequency;
+    dreq["switchingFrequency"]["nominal"] = d.switchingFrequency;
+    { json o; o["name"] = "out"; o["voltage"]["nominal"] = d.outputVoltage; o["regulation"] = "voltage";
+      dreq["outputs"] = json::array({o}); }
+    { json op; op["name"] = "full_load"; op["inputVoltage"] = d.inputVoltageRms; op["ambientTemperature"] = 25.0;
+      json o; o["name"] = "out"; o["power"] = d.outputPower; op["outputs"] = json::array({o});
+      tas["inputs"]["operatingPoints"] = json::array({op}); }
+
+    tas["topology"]["stages"] = json::array({
+        req::control_stage("pfcController"),
+        pstage("pfcPower", "switchingCell", pcell, bind("acLine", "acInput"), bind("vout", "dcOutput")),
+        pstage("pfcControl", "control", ccell, bind("nL1", "sense"), bind("g1", "drive"))});
+    std::vector<json> iscs = {
+        isc("AcLine", "externalPort", "input", {sp("pfcPower", "acLine")}),
+        isc("AcNeutral", "externalPort", "input", {sp("pfcPower", "acNeutral")}),
+        isc("GND", "externalPort", "input", {sp("pfcPower", "gnd"), sp("pfcControl", "gnd")}),
+        isc("Vout", "externalPort", "output", {sp("pfcPower", "vout"), sp("pfcControl", "vout")}),
+        isc("busP", "wire", "", {sp("pfcPower", "busP"), sp("pfcControl", "busP")})};
+    for (int p = 1; p <= N; ++p) {
+        iscs.push_back(isc(nL(p), "wire", "", {sp("pfcPower", nL(p)), sp("pfcControl", nL(p))}));
+        iscs.push_back(isc("drive" + std::to_string(p), "wire", "",
+                           {sp("pfcControl", gp(p)), sp("pfcPower", gp(p))}));
+    }
+    tas["topology"]["interStageConnections"] = iscs;
+
+    json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.06);
+    an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 2e-7);
+    tas["simulation"]["analyses"] = json::array({an});
+    { json ic; ic["node"] = "Vout"; ic["voltage"] = d.outputVoltage;
+      tas["simulation"]["initialConditions"] = json::array({ic}); }
+    req::finalize_control_seeds(tas, Topology::POWER_FACTOR_CORRECTION);
     return tas;
 }
 

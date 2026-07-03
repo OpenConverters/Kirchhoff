@@ -27,6 +27,7 @@
 
 #include <nlohmann/json.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 
 #include <cmath>
 #include <cstdio>
@@ -189,6 +190,111 @@ Point run_pfc(double vrms, double vout, double fline, double pout, double rloadO
     return {voavg, pf, pavg, rload, vout};
 }
 }  // namespace
+
+namespace {
+// Build PFC design inputs, optionally with a `config` object (ABT #92 mode/variant knobs).
+json pfc_inputs(double vrms, double vout, double fline, double fsw, double pout, json config = json()) {
+    json di;
+    di["designRequirements"]["efficiency"] = 1.0;
+    di["designRequirements"]["inputType"] = "acSinglePhase";
+    di["designRequirements"]["inputVoltage"]["nominal"] = vrms;
+    di["designRequirements"]["lineFrequency"]["nominal"] = fline;
+    di["designRequirements"]["switchingFrequency"]["nominal"] = fsw;
+    { json o; o["name"]="out"; o["voltage"]["nominal"]=vout; di["designRequirements"]["outputs"]=json::array({o}); }
+    { json op; op["inputVoltage"]=vrms; json o; o["power"]=pout; op["outputs"]=json::array({o});
+      di["operatingPoints"]=json::array({op}); }
+    if (!config.is_null()) di["config"] = config;
+    return di;
+}
+}  // namespace
+
+TEST_CASE("PFC conduction mode drives the boost-inductor sizing (CCM/DCM/CrM/Transition)", "[pfc][mode]") {
+    // Unit-check the per-mode inductance formulas (MKF PowerFactorCorrection::calculate_inductance_
+    // ccm/dcm/crcm) against an INDEPENDENT recomputation — no ngspice needed for pure sizing. All three
+    // formulas evaluate at the line-voltage peak.
+    const double vrms = 120.0, vout = 400.0, fline = 400.0, fsw = 20e3, pout = 300.0;
+    const double vpeak = vrms * std::sqrt(2.0);
+    const double pin   = pout;                       // efficiency = 1
+    const double D     = 1.0 - vpeak / vout;         // boost duty at the line peak
+    const double iPeak = std::sqrt(2.0) * pin / vrms;
+    const double ripple = 0.30;                       // kRippleFraction
+
+    const double Lccm_ref = vpeak * D / (ripple * iPeak * fsw);
+    const double Ldcm_ref = vpeak * vpeak * D * D / (2.0 * pin * fsw);
+    const double Lcrm_ref = vpeak * D / (2.0 * iPeak * fsw);
+
+    auto L_of = [&](const char* mode) {
+        json cfg; if (mode) cfg["mode"] = mode;
+        return Kirchhoff::design_pfc(pfc_inputs(vrms, vout, fline, fsw, pout,
+                                                mode ? cfg : json())).boostInductance;
+    };
+
+    // Default (no mode) == explicit CCM == the original formula (regression: unchanged).
+    CHECK(L_of(nullptr) == Catch::Approx(Lccm_ref).epsilon(1e-9));
+    CHECK(L_of("ccm")   == Catch::Approx(Lccm_ref).epsilon(1e-9));
+    CHECK(L_of("dcm")   == Catch::Approx(Ldcm_ref).epsilon(1e-9));
+    CHECK(L_of("crm")   == Catch::Approx(Lcrm_ref).epsilon(1e-9));
+    // Transition mode == CrM sizing (MKF folds them together).
+    CHECK(L_of("transition") == Catch::Approx(Lcrm_ref).epsilon(1e-9));
+
+    // Sanity: the modes are genuinely different, and CrM (boundary) is well below a 30%-ripple CCM design.
+    CHECK(Lcrm_ref < Lccm_ref);
+    // L_ccm/L_crm = (2·iPeak)/(ripple·iPeak) = 2/ripple.
+    CHECK(std::abs(Lccm_ref / Lcrm_ref - 2.0 / ripple) < 1e-6);
+    CHECK(L_of("dcm") != Catch::Approx(Lccm_ref));
+
+    // The comparator hysteresis band tracks the ACTUAL peak ripple of the sized inductor, so a smaller L
+    // (DCM/CrM) gives a proportionally larger band. For CCM the band is byte-identical to the original.
+    Kirchhoff::PfcDesign dccm = Kirchhoff::design_pfc(pfc_inputs(vrms, vout, fline, fsw, pout));
+    Kirchhoff::PfcDesign dcrm = Kirchhoff::design_pfc(pfc_inputs(vrms, vout, fline, fsw, pout,
+                                                                 json{{"mode","crm"}}));
+    CHECK(dcrm.currentHysteresis > dccm.currentHysteresis);
+
+    // Unknown mode / unsupported variant THROW (no silent fallback).
+    CHECK_THROWS(Kirchhoff::design_pfc(pfc_inputs(vrms, vout, fline, fsw, pout, json{{"mode","turbo"}})));
+    CHECK_THROWS(Kirchhoff::design_pfc(pfc_inputs(vrms, vout, fline, fsw, pout,
+                                                  json{{"topologyVariant","sepic"}})));
+    CHECK_THROWS(Kirchhoff::design_pfc(pfc_inputs(vrms, vout, fline, fsw, pout,
+                                                  json{{"topologyVariant","cuk"}})));
+}
+
+TEST_CASE("interleaved boost PFC: per-phase sizing + the deck holds the bus", "[pfc][interleaved]") {
+    const double vrms = 120.0, vout = 400.0, fline = 400.0, fsw = 20e3, pout = 300.0;
+    // Single-phase reference inductance (boost).
+    const double L1 = Kirchhoff::design_pfc(pfc_inputs(vrms, vout, fline, fsw, pout)).boostInductance;
+
+    for (int N : {2, 3}) {
+        json cfg; cfg["topologyVariant"] = "interleaved"; cfg["numberOfPhases"] = N;
+        Kirchhoff::PfcDesign d = Kirchhoff::design_pfc(pfc_inputs(vrms, vout, fline, fsw, pout, cfg));
+        // Each phase carries 1/N the current at the same ripple RATIO, so its inductor is N× larger; the
+        // per-phase reference gain is 1/N of the single-phase value (design_pfc).
+        CHECK(d.numberOfPhases == N);
+        CHECK(d.boostInductance == Catch::Approx(N * L1).epsilon(1e-9));
+
+        json tas = Kirchhoff::build_pfc_tas(d);
+        PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
+        const std::string base = Kirchhoff::tas_to_ngspice(tas, ideal);
+        // Structural: N boost legs (L1..LN, SW1..SWN) + N phase comparators.
+        for (int p = 1; p <= N; ++p) {
+            REQUIRE(base.find("L" + std::to_string(p) + " ") != std::string::npos);
+        }
+
+        const double tstop = 12.5e-3, tstep = 1e-6, t0 = 10e-3, t1 = 12.5e-3;
+        std::string out = run_ngspice(make_deck(base, tstop, tstep, t0, t1, /*rload*/0.0),
+                                      "il_" + std::to_string(N));
+        double pavg=0, vrms_m=0, irms=0, voavg=0;
+        REQUIRE(meas(out, "pavg", pavg));  REQUIRE(meas(out, "vrms", vrms_m));
+        REQUIRE(meas(out, "irms", irms));  REQUIRE(meas(out, "voavg", voavg));
+        const double pf = pavg / (vrms_m * irms);
+        const double rload = d.loadResistance;
+        INFO("N=" << N << " Vout=" << voavg << " PF=" << pf << " Pin=" << pavg
+             << " (target Vout=" << vout << ", Pout=" << pout << ", Rload=" << rload << ")");
+        // Bus regulated near target, power balance holds, near-unity PF: the N phases share the load.
+        CHECK(std::abs(voavg - vout) / vout < 0.06);
+        CHECK(std::abs(pavg - voavg * voavg / rload) / pavg < 0.12);
+        CHECK(pf > 0.95);
+    }
+}
 
 TEST_CASE("single-phase boost PFC: structural — AC input, closed loop, designed PI blocks", "[pfc][ac]") {
     json di;

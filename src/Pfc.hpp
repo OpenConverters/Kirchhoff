@@ -20,6 +20,7 @@
 // DC bus), not by the MKF-equivalence suite.
 
 #include <nlohmann/json.hpp>
+#include <string>
 #include "Fidelity.hpp"
 
 namespace Kirchhoff {
@@ -41,6 +42,11 @@ struct PfcDesign {
     double proportionalGain;    // outer voltage-loop PROPORTIONAL gain (kp), derived from the plant
     double integralGain;        // outer voltage-loop INTEGRAL gain (ki = kp·ωp), derived from the plant
     double outputDividerGain;   // kv: V(voutScaled) = kv·V(vout) (output-voltage sense)
+    // ── Conduction mode + topology variant (ABT #92) ────────────────────────────────────────────────
+    std::string mode;           // "ccm" | "dcm" | "crm" | "transition" — drives boostInductance sizing
+    std::string topologyVariant;// "boost" | "totemPole" | "interleaved" (SEPIC/Ćuk not yet supported)
+    int numberOfPhases;         // interleaved: number of phase-shifted boost legs (2 or 3); else 1
+    bool bipolar;               // totem-pole: bridgeless, the inductor sees a TRUE bipolar sine (no bridge)
 };
 
 /** Design a single-phase current-mode (hysteretic) boost PFC. */

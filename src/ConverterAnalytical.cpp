@@ -2543,7 +2543,8 @@ MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
                                    double boostInductance,
                                    double efficiency,
                                    double diodeVoltageDrop,
-                                   int numberOfPeriods) {
+                                   int numberOfPeriods,
+                                   bool bipolar) {
     using Lbl = MAS::WaveformLabel;
 
     // Guards — mirror MKF's own (PowerFactorCorrection::run_checks :175-216,
@@ -2597,16 +2598,23 @@ MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
 
         const double theta = 2.0 * M_PI * t / mainsPeriod;
         // Bridged boost → rectified |sin| (unipolar inductor current/voltage).  MKF :523-526
-        const double vinShape   = std::abs(std::sin(theta));
-        const double vinInst     = vinPeakMin * vinShape;
-        const double vinAbsInst  = vinInst;   // vinShape is already non-negative for the boost bridge
+        // Bridgeless TOTEM-POLE (bipolar=true) → the inductor sits on the AC line with no rectifier, so it
+        // sees a TRUE bipolar sine: signed current envelope and signed off-time bus polarity.  MKF :393-432
+        const double vinShape   = bipolar ? std::sin(theta) : std::abs(std::sin(theta));
+        double vinInst          = vinPeakMin * vinShape;
+        double vinAbsInst       = vinPeakMin * std::abs(vinShape);
+        // Floor |Vin| near the line zero-crossing so the boost duty stays bounded.  MKF :399-404
+        if (bipolar && vinAbsInst < vinPeakMin * 0.05) {
+            vinAbsInst = vinPeakMin * 0.05;
+            vinInst    = std::copysign(vinAbsInst, vinShape);
+        }
 
-        // Boost duty D = 1 − Vin/(Vout+Vd), clipped to the physical [0, 1].  MKF :543-547
+        // Boost duty D = 1 − |Vin|/(Vout+Vd), clipped to the physical [0, 1].  MKF :543-547
         double D = 1.0 - vinAbsInst / (outputVoltage + diodeVoltageDrop);
         if (D < 0.0) D = 0.0;
         if (D > 1.0) D = 1.0;
 
-        const double iAvgInst = iLinePeak * vinShape;                       // MKF :549
+        const double iAvgInst = iLinePeak * vinShape;                       // signed for totem-pole  MKF :549
         const double deltaI   = vinAbsInst * D / (L * switchingFrequency);  // MKF :550
 
         // Integer switching-cycle phase (4 samples/period since timeStep = Tsw/4).  MKF :557-559
@@ -2625,8 +2633,10 @@ MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
         if (switchPhase < D) {
             voltageData.push_back(vinInst);                                 // ON: L sees +Vin.  MKF :570-572
         } else {
-            // Boost-family OFF-time: inductor sees Vin − Vout − Vd.  MKF :579-585 (voutSigned = Vout).
-            voltageData.push_back(vinInst - outputVoltage - diodeVoltageDrop);
+            // Boost-family OFF-time: inductor sees Vin − Vout − Vd. For totem-pole the bus polarity the
+            // inductor sees is also signed with the half-cycle (voutSigned).  MKF :579-585.
+            const double voutSigned = bipolar ? std::copysign(outputVoltage, vinShape) : outputVoltage;
+            voltageData.push_back(vinInst - voutSigned - diodeVoltageDrop);
         }
     }
 
