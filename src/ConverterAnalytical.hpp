@@ -427,27 +427,39 @@ MAS::OperatingPoint analytical_clllc(double inputVoltage,
 // Vienna.cpp:556) plus the helpers it calls: compute_phase_peak_voltage (:105), compute_modulation_index
 // (:111), compute_line_peak_current (:117), and build_line_cycle_waveform (:282). MKF's diagnostic-only
 // members (last*/computed* switch/diode RMS/avg stresses via compute_switch_rms etc.) are OMITTED — they
-// shape no winding excitation. MKF's phaseCount>1 interleaving and the peakOfLinePlusSectors strategy
-// (a different helper, emit_switching_period_op_at_line_angle) are OMITTED to match KH's single-channel-
-// per-phase ViennaDesign; N_ch is fixed at 1 → exactly THREE windings ("Phase A/B/C").
+// shape no winding excitation.
+//
+// INTERLEAVING (`numberOfChannels`, MKF's phaseCount): each phase leg may split its boost current across
+// `numberOfChannels` parallel, interleaved channel inductors. The per-phase current envelope is divided
+// across the channels — the per-channel DC/envelope peak scales by 1/numberOfChannels, while each channel
+// keeps its own switching ripple (ΔI_pp = V_L·D·Tsw/L is set by the per-channel inductance L, independent
+// of the current it carries). numberOfChannels = 1 (DEFAULT) → exactly THREE windings ("Phase A/B/C");
+// numberOfChannels = N → 3·N windings ("Phase A ch0", "Phase A ch1", …). THROWS on numberOfChannels < 1.
 //
 // Parameterization mirrors KH's ViennaDesign (src/Vienna.hpp): `linePhaseVoltageRms` is the per-phase
 // line-to-NEUTRAL RMS (KH `inputVoltageRms`), so V_phase_peak = √2·linePhaseVoltageRms — identical to
 // MKF's compute_phase_peak_voltage(V_LL) = √2·V_LL/√3 once V_LL = √3·linePhaseVoltageRms. `outputDcVoltage`
 // is the FULL bus Vdc (split ±Vdc/2); `outputPower` is the total 3-phase output power (MKF's P = Vout·Iout).
 //
-// Two shaping modes, both faithful to MKF's branches:
+// Three shaping/sampling modes, all faithful to MKF's branches (selected by `fullLineCycle` +
+// `peakOfLinePlusSectors`):
 //   fullLineCycle = true  (DEFAULT): each winding carries the full 50/60 Hz line cycle (MKF
 //     build_line_cycle_waveform) — a bipolar full-sine current envelope of amplitude I_pk, shifted ±120°
 //     per phase, with the per-angle switching-ripple triangle superimposed. complete_excitation runs at
 //     the LINE frequency. This is the "rectified-sine envelope with HF ripple" KH's build_vienna_tas uses.
-//   fullLineCycle = false (MKF peakOfLineOnly default): the switching-period snapshot at peak-of-line —
-//     TRIANGULAR current about I_pk (ΔI_pp = V_phase_peak·(1−M)·Tsw/L) + RECTANGULAR ±(V_phase_peak /
-//     V_phase_peak−Vdc/2) voltage, at the SWITCHING frequency.
+//   fullLineCycle = false, peakOfLinePlusSectors = false (MKF peakOfLineOnly default): the switching-period
+//     snapshot at peak-of-line — TRIANGULAR current about I_pk (ΔI_pp = V_phase_peak·(1−M)·Tsw/L) +
+//     RECTANGULAR ±(V_phase_peak / V_phase_peak−Vdc/2) voltage, at the SWITCHING frequency.
+//   fullLineCycle = false, peakOfLinePlusSectors = true (MKF peakOfLinePlusSectors): the peak-of-line
+//     snapshot PLUS one switching-period snapshot at each of the SIX DPWM sector-centre line angles
+//     (30°+k·60°, k=0..5). Per phase (per channel) this yields 1 + 6 = 7 windings — the ripple/duty at
+//     each sector is evaluated from that angle's phase voltage, so the set characterises the inductor
+//     across the whole line cycle, not just its peak. Only valid with fullLineCycle = false.
 //
 // THROWS (mirroring MKF's guards; no fabricated defaults) on: non-positive linePhaseVoltageRms /
 // outputDcVoltage / outputPower / switchingFrequency / boostInductance / lineFrequency; efficiency ∉ (0,1];
-// powerFactor ∉ (0,1]; over-modulation M = V_phase_peak/(Vdc/2) > 1; and (fullLineCycle only) Fsw ≤ F_line.
+// powerFactor ∉ (0,1]; over-modulation M = V_phase_peak/(Vdc/2) > 1; numberOfChannels < 1; and
+// (fullLineCycle only) Fsw ≤ F_line.
 MAS::OperatingPoint analytical_vienna(double linePhaseVoltageRms,
                                       double outputDcVoltage,
                                       double outputPower,
@@ -456,7 +468,9 @@ MAS::OperatingPoint analytical_vienna(double linePhaseVoltageRms,
                                       double boostInductance,
                                       double efficiency = 1.0,
                                       double powerFactor = 1.0,
-                                      bool fullLineCycle = true);
+                                      bool fullLineCycle = true,
+                                      int numberOfChannels = 1,
+                                      bool peakOfLinePlusSectors = false);
 
 // ── Phase 7: single-phase AC-input PFC (boost front end) ─────────────────────
 // Single-phase hysteretic/CCM boost Power-Factor-Correction stage. The magnetic is the boost

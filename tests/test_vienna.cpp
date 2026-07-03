@@ -19,9 +19,11 @@
 #include "Vienna.hpp"
 #include "TasAssembler.hpp"
 #include "Fidelity.hpp"
+#include "ConverterAnalytical.hpp"
 
 #include <nlohmann/json.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 
 #include <cmath>
 #include <cstdio>
@@ -230,4 +232,83 @@ TEST_CASE("three-phase Vienna rectifier: active rail balancing under an asymmetr
     INFO("rail imbalance |busP+busN|: balancing ON=" << imbOn << " V, OFF=" << imbOff << " V");
     CHECK(imbOn < 3.0);             // tightly balanced with the loop
     CHECK(imbOn < 0.5 * imbOff);    // and markedly tighter than with the loop disabled
+}
+
+// ─── analytical_vienna: interleaving (numberOfChannels) + peakOfLinePlusSectors sampling (ABT #93) ──────
+// PURE-ANALYTICAL tests (no ngspice): the analytical solver's interleaving current-split and the six-sector
+// DPWM sampling strategy. Design point: 230 V L-N → 800 V split bus, 10 kW, 50 Hz line, 70 kHz sw, L=500 µH.
+namespace {
+constexpr double kVph = 230.0, kVdc = 800.0, kPo = 10000.0, kFline = 50.0, kFsw = 70000.0, kL = 500e-6;
+const double kVpk  = std::sqrt(2.0) * kVph;                 // 325.27 V
+const double kMod  = kVpk / (kVdc / 2.0);                   // 0.8132
+const double kIpk  = std::sqrt(2.0) * kPo / (3.0 * kVph);   // 20.50 A per-phase line-current peak
+const double kDIpp = kVpk * (1.0 - kMod) / kFsw / kL;       // 1.736 A peak-of-line ripple
+
+// processed-current accessor for a winding (get_current()/get_processed() return std::optional by value).
+MAS::ProcessedWaveform vienna_processed_current(const MAS::OperatingPoint& op, size_t w) {
+    return *op.get_excitations_per_winding().at(w).get_current()->get_processed();
+}
+}  // namespace
+
+TEST_CASE("analytical_vienna interleaving: per-channel peak = single-channel peak / N_ch", "[vienna][analytical][interleave]") {
+    using Kirchhoff::analytical::analytical_vienna;
+
+    // Single-channel baseline (default N_ch = 1): three windings, full line-cycle envelope of peak ≈ I_pk.
+    MAS::OperatingPoint op1 = analytical_vienna(kVph, kVdc, kPo, kFline, kFsw, kL);
+    REQUIRE(op1.get_excitations_per_winding().size() == 3);
+    const double peakSingle = *vienna_processed_current(op1, 0).get_peak();
+    CHECK(peakSingle == Catch::Approx(kIpk).margin(kDIpp));
+
+    // N_ch = 2: each phase splits into TWO channel inductors (3·2 = 6 windings). Each channel carries half
+    // the phase current → its envelope peak is HALF the single-channel peak (the switching ripple, set by L,
+    // is not divided, hence the ΔI_pp margin).
+    MAS::OperatingPoint op2 = analytical_vienna(kVph, kVdc, kPo, kFline, kFsw, kL, 1.0, 1.0, true, 2);
+    REQUIRE(op2.get_excitations_per_winding().size() == 6);
+    const double peakCh = *vienna_processed_current(op2, 0).get_peak();
+    CHECK(peakCh == Catch::Approx(peakSingle / 2.0).margin(kDIpp));
+
+    // The exact DC/envelope split is cleaner in the peak-of-line snapshot: the triangular current is centred
+    // on the per-channel average I_pk/N_ch (no ripple in the offset). N_ch = 4 → 12 windings, offset = I_pk/4.
+    MAS::OperatingPoint op4 = analytical_vienna(kVph, kVdc, kPo, kFline, kFsw, kL, 1.0, 1.0, /*fullLineCycle=*/false, 4);
+    REQUIRE(op4.get_excitations_per_winding().size() == 12);
+    CHECK(*vienna_processed_current(op4, 0).get_average() == Catch::Approx(kIpk / 4.0).margin(0.1));
+
+    // numberOfChannels < 1 is rejected (no silent clamp to 1).
+    CHECK_THROWS(analytical_vienna(kVph, kVdc, kPo, kFline, kFsw, kL, 1.0, 1.0, false, 0));
+    CHECK_THROWS(analytical_vienna(kVph, kVdc, kPo, kFline, kFsw, kL, 1.0, 1.0, false, -2));
+}
+
+TEST_CASE("analytical_vienna peakOfLinePlusSectors: peak-of-line + six DPWM sector operating points", "[vienna][analytical][sectors]") {
+    using Kirchhoff::analytical::analytical_vienna;
+
+    // peakOfLinePlusSectors (fullLineCycle=false, plusSectors=true): per phase → 1 peak-of-line snapshot +
+    // 6 sector snapshots = 7 windings; three phases → 21 windings total.
+    MAS::OperatingPoint op = analytical_vienna(kVph, kVdc, kPo, kFline, kFsw, kL,
+                                               1.0, 1.0, /*fullLineCycle=*/false, /*numberOfChannels=*/1,
+                                               /*peakOfLinePlusSectors=*/true);
+    REQUIRE(op.get_excitations_per_winding().size() == 3 * 7);
+
+    // Winding 0 is Phase A's peak-of-line snapshot: triangular current centred on the line-current peak I_pk.
+    CHECK(*vienna_processed_current(op, 0).get_average() == Catch::Approx(kIpk).margin(0.2));
+
+    // The six Phase-A sectors follow at windings 1..6, sampled at line angles 30°+k·60° (k=0..5). Their
+    // per-angle average current is I_pk·sin(angle): {0.5, 1, 0.5, −0.5, −1, −0.5}·I_pk. Sector k=1 (90°)
+    // coincides with the peak; k=4 (270°) is the negative peak.
+    const double kSin[6] = {0.5, 1.0, 0.5, -0.5, -1.0, -0.5};
+    for (int k = 0; k < 6; ++k) {
+        CHECK(*vienna_processed_current(op, 1 + k).get_average()
+              == Catch::Approx(kIpk * kSin[k]).margin(0.3));
+    }
+
+    // Interleaving composes with the sector sampling: N_ch = 2 → 3 phases × 2 channels × 7 = 42 windings,
+    // and every sector current is halved.
+    MAS::OperatingPoint opN = analytical_vienna(kVph, kVdc, kPo, kFline, kFsw, kL,
+                                                1.0, 1.0, false, /*numberOfChannels=*/2, true);
+    REQUIRE(opN.get_excitations_per_winding().size() == 3 * 2 * 7);
+    CHECK(*vienna_processed_current(opN, 0).get_average() == Catch::Approx(kIpk / 2.0).margin(0.2));
+
+    // The default (fullLineCycle) path is unaffected by the plusSectors flag → still exactly three windings.
+    MAS::OperatingPoint opFull = analytical_vienna(kVph, kVdc, kPo, kFline, kFsw, kL,
+                                                   1.0, 1.0, /*fullLineCycle=*/true, 1, /*plusSectors=*/true);
+    CHECK(opFull.get_excitations_per_winding().size() == 3);
 }

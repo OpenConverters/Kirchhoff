@@ -2314,8 +2314,9 @@ MAS::OperatingPoint analytical_clllc(double inputVoltage,
 // Phase 6: three-phase AC-input PFC — Vienna rectifier.
 // Ported from MKF converter_models/Vienna.cpp:556 (process_operating_point_for_input_voltage)
 // plus the helpers it calls (compute_phase_peak_voltage :105, compute_modulation_index :111,
-// compute_line_peak_current :117, build_line_cycle_waveform :282). Diagnostics-only members and
-// the phaseCount>1 / peakOfLinePlusSectors paths are omitted (see header). N_ch = 1 → 3 windings.
+// compute_line_peak_current :117, build_line_cycle_waveform :282). Diagnostics-only members are
+// omitted (see header). Interleaving (numberOfChannels, MKF's phaseCount) splits each phase's current
+// across N_ch channel inductors; peakOfLinePlusSectors adds the six DPWM sector operating points.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // MKF Vienna::compute_phase_peak_voltage (Vienna.cpp:105). Expressed with the per-phase
@@ -2418,12 +2419,16 @@ MAS::OperatingPoint analytical_vienna(double linePhaseVoltageRms,
                                       double boostInductance,
                                       double efficiency,
                                       double powerFactor,
-                                      bool fullLineCycle) {
+                                      bool fullLineCycle,
+                                      int numberOfChannels,
+                                      bool peakOfLinePlusSectors) {
     using Lbl = MAS::WaveformLabel;
 
     const double Fsw = switchingFrequency;
     if (Fsw <= 0)
         throw std::invalid_argument("analytical_vienna: switchingFrequency must be > 0");   // MKF Vienna.cpp:566
+    if (numberOfChannels < 1)   // MKF Vienna.cpp:420 (phaseCount >= 1); no silent clamp to 1
+        throw std::invalid_argument("analytical_vienna: numberOfChannels must be >= 1");
     const double Vdc = outputDcVoltage;
 
     // MKF Vienna.cpp:573-579: phase peak, modulation index, over-modulation gate.
@@ -2450,32 +2455,71 @@ MAS::OperatingPoint analytical_vienna(double linePhaseVoltageRms,
     const double Tsw     = 1.0 / Fsw;
     const double DeltaI_pp = V_L_on * duty_at_peak * Tsw / L;
 
-    // MKF Vienna.cpp:655-665: three phase-inductor windings, shifted ±120°. N_ch fixed at 1 (KH).
+    // MKF Vienna.cpp:655-665: three phase-inductor windings, shifted ±120°.
     static const char*  phaseNames[3]   = {"Phase A", "Phase B", "Phase C"};
     static const double phaseOffsets[3] = {0.0, -2.0 * M_PI / 3.0, +2.0 * M_PI / 3.0};
 
+    // Interleaving (MKF Vienna.cpp:420,646,677): split the per-phase current across N_ch parallel channel
+    // inductors. Each channel carries 1/N_ch of the phase's DC/envelope current (its peak scales by 1/N_ch);
+    // the per-channel switching ripple ΔI_pp = V_L·D·Tsw/L is UNCHANGED (set by the per-channel inductance L,
+    // not by the current the channel carries), so it is not divided down.
+    const double I_pk_ch = I_pk / static_cast<double>(numberOfChannels);
+    const double Vhalf   = Vdc / 2.0;
+
+    // MKF's 6-sector DPWM operating points (Vienna.cpp:488-522,733): the line angles are the sector centres,
+    // 30° + k·60° (k = 0..5). At each we take a switching-period snapshot evaluated at that angle's phase
+    // voltage/current — capturing the inductor stress across the whole line cycle, not just at its peak.
+    static const int kViennaSectorCount = 6;
+
     MAS::OperatingPoint operatingPoint;
     for (int ph = 0; ph < 3; ++ph) {
-        MAS::Waveform currentWaveform, voltageWaveform;
-        double opFreq = Fsw;
+        for (int ch = 0; ch < numberOfChannels; ++ch) {
+            std::string baseName = phaseNames[ph];
+            if (numberOfChannels > 1) baseName += " ch" + std::to_string(ch);
 
-        if (fullLineCycle) {
-            // MKF Vienna.cpp:677-685: full line-cycle envelope, complete_excitation at the LINE frequency.
-            currentWaveform = vienna_build_line_cycle_waveform(
-                ViennaLineCycleKind::CURRENT, I_pk, V_phase_peak, Vdc, L, Fsw, lineFrequency, phaseOffsets[ph]);
-            voltageWaveform = vienna_build_line_cycle_waveform(
-                ViennaLineCycleKind::VOLTAGE, I_pk, V_phase_peak, Vdc, L, Fsw, lineFrequency, phaseOffsets[ph]);
-            opFreq = lineFrequency;
-        } else {
-            // MKF Vienna.cpp:687-703: peak-of-line switching-period snapshot. RECTANGULAR voltage with
-            // offset=0 yields V_on = pp·(1−D) = V_phase_peak and V_off = −pp·D = V_phase_peak − Vdc/2
-            // (volt-second balanced, zero mean) — see the MKF comment at Vienna.cpp:690.
-            currentWaveform = WP::create_waveform(Lbl::TRIANGULAR, DeltaI_pp, Fsw, duty_at_peak, I_pk, 0);
-            voltageWaveform = WP::create_waveform(Lbl::RECTANGULAR, V_L_pp, Fsw, duty_at_peak, 0.0, 0);
+            MAS::Waveform currentWaveform, voltageWaveform;
+            double opFreq = Fsw;
+
+            if (fullLineCycle) {
+                // MKF Vienna.cpp:677-685: full line-cycle envelope, complete_excitation at the LINE frequency.
+                currentWaveform = vienna_build_line_cycle_waveform(
+                    ViennaLineCycleKind::CURRENT, I_pk_ch, V_phase_peak, Vdc, L, Fsw, lineFrequency, phaseOffsets[ph]);
+                voltageWaveform = vienna_build_line_cycle_waveform(
+                    ViennaLineCycleKind::VOLTAGE, I_pk_ch, V_phase_peak, Vdc, L, Fsw, lineFrequency, phaseOffsets[ph]);
+                opFreq = lineFrequency;
+            } else {
+                // MKF Vienna.cpp:687-703: peak-of-line switching-period snapshot. RECTANGULAR voltage with
+                // offset=0 yields V_on = pp·(1−D) = V_phase_peak and V_off = −pp·D = V_phase_peak − Vdc/2
+                // (volt-second balanced, zero mean) — see the MKF comment at Vienna.cpp:690.
+                currentWaveform = WP::create_waveform(Lbl::TRIANGULAR, DeltaI_pp, Fsw, duty_at_peak, I_pk_ch, 0);
+                voltageWaveform = WP::create_waveform(Lbl::RECTANGULAR, V_L_pp, Fsw, duty_at_peak, 0.0, 0);
+            }
+
+            operatingPoint.get_mutable_excitations_per_winding().push_back(
+                WP::complete_excitation(currentWaveform, voltageWaveform, opFreq, baseName));
+
+            // MKF Vienna.cpp:488-522: the additional DPWM sector operating points. Only for the peak-of-line
+            // family (fullLineCycle=false); each sector is its own switching-period snapshot at a sector-centre
+            // line angle, with the duty/ripple/current re-evaluated from that angle's phase voltage.
+            if (!fullLineCycle && peakOfLinePlusSectors) {
+                for (int s = 0; s < kViennaSectorCount; ++s) {
+                    const double lineAngle  = (M_PI / 6.0) + s * (M_PI / 3.0);   // 30° + s·60°
+                    const double localAngle = lineAngle + phaseOffsets[ph];
+                    const double Vphase_s   = V_phase_peak * std::sin(localAngle);
+                    const double Iavg_s     = I_pk_ch * std::sin(localAngle);
+
+                    double dutyAbs = 1.0 - std::abs(Vphase_s) / Vhalf;   // per-angle boost duty
+                    if (dutyAbs < 0.0) dutyAbs = 0.0;
+                    if (dutyAbs > 1.0) dutyAbs = 1.0;
+                    const double dIpp_s = std::abs(Vphase_s) * dutyAbs * (1.0 / Fsw) / L;
+
+                    MAS::Waveform curS = WP::create_waveform(Lbl::TRIANGULAR, dIpp_s, Fsw, dutyAbs, Iavg_s, 0);
+                    MAS::Waveform volS = WP::create_waveform(Lbl::RECTANGULAR, V_L_pp, Fsw, dutyAbs, 0.0, 0);
+                    operatingPoint.get_mutable_excitations_per_winding().push_back(
+                        WP::complete_excitation(curS, volS, Fsw, baseName + " sector " + std::to_string(s)));
+                }
+            }
         }
-
-        operatingPoint.get_mutable_excitations_per_winding().push_back(
-            WP::complete_excitation(currentWaveform, voltageWaveform, opFreq, phaseNames[ph]));
     }
 
     return operatingPoint;

@@ -248,7 +248,7 @@ reflected about the tank (driver = the LV winding). The reverse open-loop gain a
 | topology | efficiency default | pinning | key config (default) | quirks |
 |---|---|---|---|---|
 | **pfc** (boost PFC 1-φ) | 1.0 | — | `currentRippleFraction`(0.30), `outputCapacitance`(220e-6), `senseResistance`(0.1) | `inputType:"acSinglePhase"`; **`inputVoltage` = single-phase line RMS**, `lineFrequency` req; reads only `power` from operatingPoints; closed-loop (no open stimulus) |
-| **vienna** (3-φ) | 1.0 | — | `busCapacitance`(470e-6), `balanceModulation`(4.0), `senseResistance`(0.1) | `inputType:"acThreePhase"`; **`inputVoltage` = per-phase line RMS**; `outputs[0].voltage` = full bus; switches block half bus, diodes full bus |
+| **vienna** (3-φ) | 1.0 | — | `busCapacitance`(470e-6), `balanceModulation`(4.0), `senseResistance`(0.1), `numberOfChannels`/`phaseCount`(1), `samplingStrategy`(`"fullLineCycle"`) | `inputType:"acThreePhase"`; **`inputVoltage` = per-phase line RMS**; `outputs[0].voltage` = full bus; switches block half bus, diodes full bus. `numberOfChannels`>1 interleaves each phase across N parallel channel inductors (analytical current split by 1/N; deck unchanged); `samplingStrategy` ∈ `fullLineCycle`\|`peakOfLineOnly`\|`peakOfLinePlusSectors` (last adds the six DPWM sector operating points) |
 
 **PFC/Vienna spec differences from DC converters:** `inputVoltage`/`lineFrequency`/`switchingFrequency`
 are emitted as `{nominal}` only (no min/max triplet); `operatingPoints[0]` supplies only

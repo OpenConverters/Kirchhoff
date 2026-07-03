@@ -121,10 +121,19 @@ json build_vienna_tas(const ViennaDesign& d) {
     // line-cycle solver): the per-phase rectified-sine current envelope + HF ripple, as processed
     // peak/rms/offset. One AC operating point, so the same op feeds both the embedded excitation and ratings.
     namespace AN = Kirchhoff::analytical;
+    // Interleaving + sampling knobs (analytical breadth; the emitted deck is unchanged). numberOfChannels
+    // (MKF's phaseCount) splits each phase's boost current across N_ch parallel channel inductors; the
+    // samplingStrategy selects the line-cycle vs peak-of-line vs peak-of-line-plus-DPWM-sectors envelope.
+    const int viennaChannels = static_cast<int>(
+        cfg::get(d.config, "numberOfChannels", cfg::get(d.config, "phaseCount", 1.0)));
+    const std::string viennaSampling = cfg::get_str(d.config, "samplingStrategy", "fullLineCycle");
+    const bool viennaFullLine    = (viennaSampling == "fullLineCycle");
+    const bool viennaPlusSectors = (viennaSampling == "peakOfLinePlusSectors");
     const MAS::OperatingPoint aopVienna = AN::analytical_vienna(d.inputVoltageRms, d.outputVoltage,
                                                                d.outputPower, d.lineFrequency,
                                                                d.switchingFrequency, d.boostInductance,
-                                                               d.efficiency);
+                                                               d.efficiency, 1.0, viennaFullLine,
+                                                               viennaChannels, viennaPlusSectors);
     const double IpkLV  = AN::winding_current(aopVienna, 0, "peak");
     const double IrmsLV = AN::winding_current(aopVienna, 0, "rms");
     const double IavgLV = AN::winding_current(aopVienna, 0, "offset");
