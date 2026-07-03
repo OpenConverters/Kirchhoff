@@ -131,11 +131,32 @@ MAS::OperatingPoint analytical_two_switch_forward(double inputVoltage,
 // (turnsRatios[1] in MKF); `inductance` is magnetizing, `outputInductance` the output filter L
 // (DCM boundary). Pushes Primary Half 1, Primary Half 2, Secondary 0 Half 1, Secondary 0 Half 2
 // (four center-tapped windings). Ported from MKF PushPull.cpp:71. Throws if t_on > T/2.
-MAS::OperatingPoint analytical_push_pull(double inputVoltage, double outputVoltage,
+//
+// Multi-output (ABT #86): each declared output gets its OWN center-tapped secondary pair —
+// `turnsRatios` is one N_i per output (the primary-half : secondary-half ratio of that rail),
+// `mainOutputInductance` sizes the DCM boundary for the main rail. The primary Half windings carry
+// the SUM of every rail's reflected current; each output emits "Secondary i Half 1/2". CCM is fully
+// per-output; DCM (minimumPrimaryCurrent < 0) is modeled for a single output only (throws for >1).
+MAS::OperatingPoint analytical_push_pull(double inputVoltage,
+                                         const std::vector<double>& outputVoltages,
+                                         const std::vector<double>& outputCurrents,
+                                         const std::vector<double>& turnsRatios,
+                                         double switchingFrequency, double inductance,
+                                         double mainOutputInductance, double currentRippleRatio,
+                                         double diodeVoltageDrop = 0.0);
+
+// Scalar convenience (single output) — forwards to the N-output form. Keeps the historical
+// call sites / tests byte-identical (one output => one center-tapped secondary pair).
+inline MAS::OperatingPoint analytical_push_pull(double inputVoltage, double outputVoltage,
                                          double outputCurrent, double switchingFrequency,
                                          double turnsRatio, double inductance,
                                          double outputInductance, double currentRippleRatio,
-                                         double diodeVoltageDrop = 0.0);
+                                         double diodeVoltageDrop = 0.0) {
+    return analytical_push_pull(inputVoltage, std::vector<double>{outputVoltage},
+                                std::vector<double>{outputCurrent}, std::vector<double>{turnsRatio},
+                                switchingFrequency, inductance, outputInductance, currentRippleRatio,
+                                diodeVoltageDrop);
+}
 
 // Weinberg (CT-forward + input coupled-inductor). `inductance` is the L1 coupled-inductor
 // (magnetizing) value; `turnsRatio` the combined Pri:Sec ratio. Pushes Primary + Secondary

@@ -567,28 +567,48 @@ MAS::OperatingPoint analytical_two_switch_forward(double inputVoltage,
     return operatingPoint;
 }
 
-// Ported from MKF converter_models/PushPull.cpp:71 (single main output: the auxiliary-secondary
-// loop does not execute, so this reproduces the canonical four center-tapped windings).
-MAS::OperatingPoint analytical_push_pull(double inputVoltage, double outputVoltage,
-                                         double outputCurrent, double switchingFrequency,
-                                         double turnsRatio, double inductance,
-                                         double outputInductance, double currentRippleRatio,
+// Ported from MKF converter_models/PushPull.cpp:71. Vectorized for N isolated outputs (ABT #86):
+// each rail gets its OWN center-tapped secondary pair — "Secondary i Half 1/2" — sized from that
+// rail's turns ratio / current / ripple; the two primary halves carry the SUM of every rail's
+// reflected current. For a single output the auxiliary loop reproduces the canonical four
+// center-tapped windings byte-for-byte. DCM is modeled for the single-output case only.
+MAS::OperatingPoint analytical_push_pull(double inputVoltage,
+                                         const std::vector<double>& outputVoltages,
+                                         const std::vector<double>& outputCurrents,
+                                         const std::vector<double>& turnsRatios,
+                                         double switchingFrequency, double inductance,
+                                         double mainOutputInductance, double currentRippleRatio,
                                          double diodeVoltageDrop) {
     using Lbl = MAS::WaveformLabel;
-    const double mainSecondaryTurnsRatio = turnsRatio;
-    const double inductorCurrentRipple = currentRippleRatio * outputCurrent;
+    if (outputVoltages.empty() || outputVoltages.size() != outputCurrents.size() ||
+        turnsRatios.size() != outputVoltages.size())
+        throw std::invalid_argument("analytical_push_pull: need one turnsRatio per output");
+
+    const double mainOutputVoltage = outputVoltages[0];
+    const double mainOutputCurrent = outputCurrents[0];
+    const double mainSecondaryTurnsRatio = turnsRatios[0];
+    const double inductorCurrentRipple = currentRippleRatio * mainOutputCurrent;   // main-rail ΔI (DCM branch)
+    const double outputInductance = mainOutputInductance;                          // main-rail Lo (DCM branch)
     const double period = 1.0 / switchingFrequency;
-    double t1 = period / 2 * (outputVoltage + diodeVoltageDrop) / (inputVoltage / mainSecondaryTurnsRatio);
+    double t1 = period / 2 * (mainOutputVoltage + diodeVoltageDrop) / (inputVoltage / mainSecondaryTurnsRatio);
     if (t1 > period / 2)
         throw std::invalid_argument("analytical_push_pull: T1 cannot be larger than period/2, wrong topology configuration");
 
     double magnetizationCurrent = inputVoltage * t1 / inductance;
-    double minimumSecondaryCurrent = outputCurrent - inductorCurrentRipple / 2;
-    double maximumSecondaryCurrent = outputCurrent + inductorCurrentRipple / 2;
-    // DCM discriminant: minimumPrimaryCurrent < 0 (reflected load below the magnetizing peak). See the
-    // CCM/DCM convention note in analytical_forward — load-proportional ripple, exact at the rated point.
-    double minimumPrimaryCurrent = minimumSecondaryCurrent / mainSecondaryTurnsRatio - magnetizationCurrent / 2;
-    double maximumPrimaryCurrent = maximumSecondaryCurrent / mainSecondaryTurnsRatio + magnetizationCurrent / 2;
+    // Per-rail secondary current extremes + running total of the reflected primary current. The two
+    // primary halves see Σ_i (i_sec,i / N_i) ± magnetizing (DCM discriminant: minimumPrimaryCurrent < 0
+    // when the reflected load falls below the magnetizing peak — see the note in analytical_forward).
+    std::vector<double> minSec(outputVoltages.size()), maxSec(outputVoltages.size());
+    double minimumPrimaryCurrent = -magnetizationCurrent / 2;
+    double maximumPrimaryCurrent =  magnetizationCurrent / 2;
+    for (size_t i = 0; i < outputVoltages.size(); ++i) {
+        const double ripple_i = currentRippleRatio * outputCurrents[i];
+        minSec[i] = outputCurrents[i] - ripple_i / 2;
+        maxSec[i] = outputCurrents[i] + ripple_i / 2;
+        minimumPrimaryCurrent += minSec[i] / turnsRatios[i];
+        maximumPrimaryCurrent += maxSec[i] / turnsRatios[i];
+    }
+    const double minimumSecondaryCurrent = minSec[0], maximumSecondaryCurrent = maxSec[0];  // DCM branch aliases
 
     MAS::OperatingPoint operatingPoint;
     auto pushCustom = [&](const std::vector<double>& iData, const std::vector<double>& iTime,
@@ -608,13 +628,6 @@ MAS::OperatingPoint analytical_push_pull(double inputVoltage, double outputVolta
     if (minimumPrimaryCurrent > 0) {  // CCM
         double minPriI = minimumPrimaryCurrent, maxPriI = maximumPrimaryCurrent;
         double minPriV = -inputVoltage, maxPriV = inputVoltage;
-        double minSecT1OfFET = minimumSecondaryCurrent, maxSecT1OfFET = maximumSecondaryCurrent;
-        double minSecT2Other = (maximumSecondaryCurrent / mainSecondaryTurnsRatio + magnetizationCurrent / 2) / 2 * mainSecondaryTurnsRatio - inductorCurrentRipple / 2;
-        double maxSecT2Other = (maximumSecondaryCurrent / mainSecondaryTurnsRatio + magnetizationCurrent / 2) / 2 * mainSecondaryTurnsRatio;
-        double minSecT2OfFET = minimumSecondaryCurrent - minSecT2Other;
-        double maxSecT2OfFET = maximumSecondaryCurrent - maxSecT2Other;
-        double minSecV = -inputVoltage / mainSecondaryTurnsRatio, maxSecV = inputVoltage / mainSecondaryTurnsRatio;
-
         pushCustom({minPriI, maxPriI, 0, 0}, {0, t1, t1, period},
                    {maxPriV, maxPriV, 0, 0, minPriV, minPriV, 0, 0},
                    {0, t1, t1, period / 2, period / 2, period / 2 + t1, period / 2 + t1, period},
@@ -623,17 +636,35 @@ MAS::OperatingPoint analytical_push_pull(double inputVoltage, double outputVolta
                    {minPriV, minPriV, 0, 0, maxPriV, maxPriV, 0, 0},
                    {0, t1, t1, period / 2, period / 2, period / 2 + t1, period / 2 + t1, period},
                    "Primary Half 2");
-        pushCustom({0, 0, maxSecT2Other, minSecT2Other, minSecT1OfFET, maxSecT1OfFET, maxSecT2OfFET, minSecT2OfFET},
-                   {0, t1, t1, period / 2, period / 2, period / 2 + t1, period / 2 + t1, period},
-                   {minSecV, minSecV, 0, 0, maxSecV, maxSecV, 0, 0},
-                   {0, t1, t1, period / 2, period / 2, period / 2 + t1, period / 2 + t1, period},
-                   "Secondary 0 Half 1");
-        pushCustom({minSecT1OfFET, maxSecT1OfFET, maxSecT2OfFET, minSecT2OfFET, 0, 0, maxSecT2Other, minSecT2Other},
-                   {0, t1, t1, period / 2, period / 2, period / 2 + t1, period / 2 + t1, period},
-                   {maxSecV, maxSecV, 0, 0, minSecV, minSecV, 0, 0},
-                   {0, t1, t1, period / 2, period / 2, period / 2 + t1, period / 2 + t1, period},
-                   "Secondary 0 Half 2");
+        // Per-rail center-tapped secondary pair. Each half anchors its freewheel share to that rail's
+        // MAXIMUM secondary current (the shared magnetizing splits equally across both halves), with the
+        // decay term using that rail's OWN inductor ripple. Generalizes the historical Secondary 0 pair.
+        for (size_t i = 0; i < outputVoltages.size(); ++i) {
+            const double N_i = turnsRatios[i];
+            const double ripple_i = currentRippleRatio * outputCurrents[i];
+            const double minSecT1OfFET = minSec[i], maxSecT1OfFET = maxSec[i];
+            const double minSecT2Other = (maxSec[i] / N_i + magnetizationCurrent / 2) / 2 * N_i - ripple_i / 2;
+            const double maxSecT2Other = (maxSec[i] / N_i + magnetizationCurrent / 2) / 2 * N_i;
+            const double minSecT2OfFET = minSec[i] - minSecT2Other;
+            const double maxSecT2OfFET = maxSec[i] - maxSecT2Other;
+            const double minSecV = -inputVoltage / N_i, maxSecV = inputVoltage / N_i;
+            const std::string tag = "Secondary " + std::to_string(i);
+            pushCustom({0, 0, maxSecT2Other, minSecT2Other, minSecT1OfFET, maxSecT1OfFET, maxSecT2OfFET, minSecT2OfFET},
+                       {0, t1, t1, period / 2, period / 2, period / 2 + t1, period / 2 + t1, period},
+                       {minSecV, minSecV, 0, 0, maxSecV, maxSecV, 0, 0},
+                       {0, t1, t1, period / 2, period / 2, period / 2 + t1, period / 2 + t1, period},
+                       tag + " Half 1");
+            pushCustom({minSecT1OfFET, maxSecT1OfFET, maxSecT2OfFET, minSecT2OfFET, 0, 0, maxSecT2Other, minSecT2Other},
+                       {0, t1, t1, period / 2, period / 2, period / 2 + t1, period / 2 + t1, period},
+                       {maxSecV, maxSecV, 0, 0, minSecV, minSecV, 0, 0},
+                       {0, t1, t1, period / 2, period / 2, period / 2 + t1, period / 2 + t1, period},
+                       tag + " Half 2");
+        }
     } else {  // DCM
+        if (outputVoltages.size() > 1)
+            throw std::invalid_argument("analytical_push_pull: multi-output DCM is not modeled — "
+                                        "design the push-pull in CCM (raise load / Lm) or use a single output");
+        const double outputVoltage = mainOutputVoltage, outputCurrent = mainOutputCurrent;
         double t1d = std::sqrt(2 * outputCurrent * outputInductance * (outputVoltage + diodeVoltageDrop) /
                                (2 * switchingFrequency * (inputVoltage / mainSecondaryTurnsRatio - diodeVoltageDrop - outputVoltage) *
                                 (inputVoltage / mainSecondaryTurnsRatio)));

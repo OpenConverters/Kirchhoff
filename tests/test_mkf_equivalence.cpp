@@ -1578,4 +1578,15 @@ TEST_CASE("Flyback multi-output: two isolated secondaries each regulate (ABT #86
     check_dual_rails(measure_multi_output(tas, 100000.0, {"Vout", "Vout2"}, "flyback_multi"));
 }
 
+TEST_CASE("Push-pull multi-output: two isolated center-tapped secondaries each regulate (ABT #86)",
+          "[equivalence][pushpull][multi]") {
+    Kirchhoff::PushPullDesign d = Kirchhoff::design_push_pull(two_output_forward_spec());
+    REQUIRE(d.outputs.size() == 2);
+    json tas = Kirchhoff::build_push_pull_tas(d);
+    // each output is its OWN center-tapped secondary pair: [1:1 2nd-primary-half, (N0,N0), (N1,N1)]
+    // -> 5 secondary-side windings. Both rails must regulate to their own Vout in ngspice.
+    CHECK(transformer_secondary_windings(tas, "pushPullCell", "T1") == 5);
+    check_dual_rails(measure_multi_output(tas, 100000.0, {"Vout", "Vout2"}, "push_pull_multi"));
+}
+
 }  // namespace

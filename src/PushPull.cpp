@@ -63,6 +63,39 @@ PushPullDesign design_push_pull(const json& tasInputs) {
     d.dutyCycle = N * (d.outputVoltage + d.diodeDrop) / (2.0 * d.inputVoltage);
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
     d.outputCapacitance = cfg::get(d.config, "outputCapacitance", 100e-6);
+
+    // Per-output legs (multi-output: N isolated center-tapped secondaries, ABT #86). Every rail sees the
+    // SAME primary volt-seconds, so each turns ratio scales with its own (Vout_i+Vd_i):
+    // N_i = D_max·2·Vin_min/(Vout_i+Vd_i) — each rail regulates to its own Vout at the shared max duty.
+    // Rectifier/output-filter sizing repeats the main-output formulas per rail. outputs[0] reproduces the
+    // scalars above byte-for-byte (a pinned turnsRatios[1+i] still overrides per rail).
+    const double ripple = cfg::get(d.config, "inductorRippleRatio", kRippleRatio);
+    const size_t nOut = dr.at("outputs").size();
+    for (size_t i = 0; i < nOut; ++i) {
+        PushPullOutputLeg leg{};
+        leg.voltage = nominal(dr.at("outputs").at(i).at("voltage"));
+        if (tasInputs.contains("operatingPoints") && !tasInputs.at("operatingPoints").empty())
+            leg.power = tasInputs.at("operatingPoints").at(0).at("outputs").at(i).at("power").get<double>();
+        else
+            leg.power = nominal(dr.at("outputs").at(i).at("power"));
+        const double iout_i = leg.power / leg.voltage;
+        leg.diodeDrop = req::dideal_diode_drop(iout_i);
+        if (i == 0) {
+            leg.turnsRatio = d.turnsRatio;
+            leg.diodeDrop = d.diodeDrop;      // preserve the main rail's exact scalar value
+            leg.outputInductance = d.outputInductance;
+            leg.outputCapacitance = d.outputCapacitance;
+        } else {
+            double ni = d.maxDutyCycle * 2.0 * vinMin / (leg.voltage + leg.diodeDrop);
+            ni = std::round(ni * 100.0) / 100.0;
+            leg.turnsRatio = req::provided_turns_ratio(dr, 1 + i).value_or(ni);
+            const double tOnSec_i = (T / 2.0) * (leg.voltage + leg.diodeDrop) * leg.turnsRatio / vinMax;
+            leg.outputInductance = (vinMax / leg.turnsRatio - leg.voltage) * tOnSec_i / (ripple * iout_i);
+            leg.outputCapacitance = d.outputCapacitance;
+        }
+        leg.loadResistance = leg.voltage * leg.voltage / leg.power;
+        d.outputs.push_back(leg);
+    }
     return d;
 }
 
@@ -83,76 +116,81 @@ json build_push_pull_tas(const PushPullDesign& d) {
     auto diode  = [&]() { json j; j["semiconductor"]["diode"] = json::object();
         j["inputs"]["designRequirements"] = req::body_diode(d.inputVoltage, d.outputPower / d.inputVoltage); return j; };
 
-    const double N = d.turnsRatio, Lm = d.magnetizingInductance;
+    const double Lm = d.magnetizingInductance;
     const double fsw = d.switchingFrequency;
-    const double Vin = d.inputVoltage, Vout = d.outputVoltage, Dn = d.dutyCycle;
+    const double Vin = d.inputVoltage, Dn = d.dutyCycle;
 
     // --- per-winding stresses from the SINGLE FHA source (the SPICE-validated analytical solver) ---
     // Two operating points: the WORST-CASE corner (Vin_min → higher per-switch duty → higher primary
     // conduction) drives the transformer/switch RATINGS; the DECLARED nominal operating point is what the
-    // TAS embeds for the transformer. The output inductor Lout is a SEPARATE magnetic (not one of
-    // analytical_push_pull's four transformer windings), so it keeps its inline buck-derived stresses.
+    // TAS embeds for the transformer. The output inductors Lout_i are SEPARATE magnetics (not
+    // analytical_push_pull's transformer windings), so they keep their inline buck-derived stresses.
+    //
+    // Multi-output (ABT #86): every declared output is its OWN center-tapped secondary pair. The solver
+    // takes the full {Vout_i}/{Iout_i}/{N_i} vectors (primary halves carry the summed reflected current);
+    // the deck loops a rectifier + output filter per rail. Single-output reproduces the canonical deck.
     namespace AN = Kirchhoff::analytical;
     const double rippleRatio = cfg::get(d.config, "inductorRippleRatio", kRippleRatio);
-    const double Iout  = d.outputPower / Vout;
-    const MAS::OperatingPoint aopWorst = AN::analytical_push_pull(d.inputVoltageMin, Vout, Iout, fsw,
-                                            N, Lm, d.outputInductance, rippleRatio, d.diodeDrop);
-    const MAS::OperatingPoint aopNom   = AN::analytical_push_pull(d.inputVoltage,    Vout, Iout, fsw,
-                                            N, Lm, d.outputInductance, rippleRatio, d.diodeDrop);
-    // Output inductor (SEPARATE magnetic): DC-biased triangle, avg=Iout, ripple from the inductor sizing.
-    const double dILout = rippleRatio * Iout;
-    const double IpkLout = Iout + dILout / 2.0;
-    const double IrmsLout = std::sqrt(Iout * Iout + dILout * dILout / 12.0);
+    const size_t nOut = d.outputs.size();
+    std::vector<double> Vouts, iouts, turnsN;
+    double totalOutputPower = 0.0;
+    for (const auto& leg : d.outputs) {
+        Vouts.push_back(leg.voltage);
+        iouts.push_back(leg.power / leg.voltage);
+        turnsN.push_back(leg.turnsRatio);
+        totalOutputPower += leg.power;
+    }
+    const MAS::OperatingPoint aopWorst = AN::analytical_push_pull(d.inputVoltageMin, Vouts, iouts, turnsN, fsw,
+                                            Lm, d.outputInductance, rippleRatio, d.diodeDrop);
+    const MAS::OperatingPoint aopNom   = AN::analytical_push_pull(d.inputVoltage,    Vouts, iouts, turnsN, fsw,
+                                            Lm, d.outputInductance, rippleRatio, d.diodeDrop);
     // Primary-half switch conduction (winding 0 = "Primary Half 1") from the worst-case corner.
     const double IpkPri  = AN::winding_current(aopWorst, 0, "peak");
     const double IrmsPri = AN::winding_current(aopWorst, 0, "rms");
-    // VOLTAGES (output inductor only; the transformer volt-seconds come from the analytical excitation).
-    // The output inductor sees +(Vin/N - Vout) when either diode conducts (combined duty 2·Dn), -Vout otherwise.
+    // Per-switch operating duty is shared across rails (common primary); the output-inductor volt-seconds
+    // (below, per rail) use it directly.
     const double D2 = std::min(1.0, 2.0 * Dn);
-    const double vLoutOn = Vin / N - Vout;
-    const double vLoutPk = std::max(std::fabs(vLoutOn), Vout), vLoutPkPk = Vin / N;
-    const double vLoutRms = std::sqrt(D2 * vLoutOn * vLoutOn + (1.0 - D2) * Vout * Vout);
 
     // --- semiconductor stresses (push-pull, center-tapped) ---
     // Each primary switch blocks 2*Vin: when its half is off, the conducting half drives the center tap
     // such that the off switch drain sees the rail (Vin) plus the reflected opposite half (Vin) = 2*Vin.
-    // Worst case at the max input corner: ratedVds = 2*Vin_max / V_DERATE.
+    // Worst case at the max input corner: ratedVds = 2*Vin_max / V_DERATE. RdsOn budget spans the TOTAL
+    // rail power (all outputs flow through the one primary pair).
     const double VdsStress = 2.0 * d.inputVoltageMax;
     const double ratedVds  = VdsStress / cfg::v_derate_mosfet(d.config);
     const double maxRdsOn  = (IrmsPri > 0.0)
-        ? cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IrmsPri * IrmsPri)
-        : cfg::rds_on_loss_fraction(d.config) * d.outputPower;
-    // Center-tapped full-wave output rectifiers Dtop/Dbot are REAL rectifiers (not FET body diodes):
-    // each reverse-blocks the FULL secondary swing 2*Vin/N (N = Np/Ns; the non-conducting diode sees both
-    // half windings in series, each at Vin/N) and carries the inductor current during its half-cycle (~Iout).
-    const double ratedVr  = (2.0 * d.inputVoltageMax / N) / cfg::v_derate_diode(d.config);
-    const double maxVf    = (ratedVr < 100.0) ? 0.6 : 1.2;
+        ? cfg::rds_on_loss_fraction(d.config) * totalOutputPower / (IrmsPri * IrmsPri)
+        : cfg::rds_on_loss_fraction(d.config) * totalOutputPower;
     const double Tsw      = 1.0 / fsw;
     const double maxTrr   = 0.05 * Tsw;
     auto mosfetReq = [&]() { json j = mosfet();
         j["inputs"]["designRequirements"] = req::mosfet("mainSwitch", ratedVds, IpkPri, maxRdsOn, 125.0); return j; };
-    auto rectDiode = [&]() { json j = diode();
-        j["inputs"]["designRequirements"] = req::diode(ratedVr, Iout / 0.7, maxVf, maxTrr); return j; };
+    // Center-tapped full-wave output rectifiers Dtop_i/Dbot_i are REAL rectifiers (not FET body diodes):
+    // each reverse-blocks the FULL secondary swing 2*Vin/N_i (the non-conducting diode sees both half
+    // windings in series, each at Vin/N_i) and carries the inductor current during its half-cycle (~Iout_i).
+    auto rectDiode = [&](double N_i, double iout_i) { json j = diode();
+        const double ratedVr_i = (2.0 * d.inputVoltageMax / N_i) / cfg::v_derate_diode(d.config);
+        const double maxVf_i   = (ratedVr_i < 100.0) ? 0.6 : 1.2;
+        j["inputs"]["designRequirements"] = req::diode(ratedVr_i, iout_i / 0.7, maxVf_i, maxTrr); return j; };
 
-    // 4-winding transformer: turnsRatios = [1 (2nd primary half), N (sec top), N (sec bot)].
+    // (2 + 2·N)-winding transformer: turnsRatios = [1 (2nd primary half), (N_i, N_i) per output].
     // Dot/terminal order mirrors MKF: Lpri_top pri_top->center_tap; Lpri_bot center_tap->pri_bot;
-    // Lsec_top sec_top->gnd; Lsec_bot gnd->sec_bot. Isolated -> isolationSides per winding
-    // {primary, primary, secondary, secondary}. PushPullDesign carries no isolationVoltage -> nullopt.
-    // Transformer (MAIN magnetic): four center-tapped windings [Primary Half 1/2, Secondary 0 Half 1/2]
-    // sourced from analytical_push_pull at the nominal operating point — the FHA physics lives in ONE place.
+    // each Lsec_top_i sec_top_i->gnd; Lsec_bot_i gnd->sec_bot_i. isolationSides: both primary halves
+    // "primary"; each output's pair shares its own isolation side (secondary, tertiary, …).
+    // Sourced from analytical_push_pull at the nominal operating point — the FHA physics lives in ONE place.
+    std::vector<double> xfmrRatios{1.0};                       // secondary1 = 2nd primary half (1:1)
+    std::vector<std::string> xfmrIso{"primary", "primary"};    // PriHalf1 (implicit) + PriHalf2
+    std::vector<bool> ceil{false};                             // 2nd primary half is structural 1:1 {nominal}
+    for (size_t i = 0; i < nOut; ++i) {
+        const std::string side = req::isolation_side(1 + i);   // out0->secondary, out1->tertiary, …
+        xfmrRatios.push_back(d.outputs[i].turnsRatio);  xfmrRatios.push_back(d.outputs[i].turnsRatio);
+        xfmrIso.push_back(side);                        xfmrIso.push_back(side);
+        ceil.push_back(true);                           ceil.push_back(true);   // duty-derived {maximum}
+    }
     json xfmr; xfmr["magnetic"] = json::object();
-    xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, {1.0, N, N},
-        {"primary", "primary", "secondary", "secondary"}, std::nullopt, 25.0,
-        AN::excitations_processed(aopNom, "T1"),
-        // N (computed at maxDutyCycle, line ~42) is the duty CEILING -> emit the two secondary ratios as
-        // {maximum}; the 1.0 second-primary half is a structural 1:1 and stays {nominal}.
-        /*turnsRatioIsCeiling=*/{false, true, true});
-    json lout; lout["magnetic"] = json::object();
-    lout["inputs"] = req::magnetic_inputs(d.outputInductance, 0.2, /*single winding*/ {}, {"primary"},
-        std::nullopt, 25.0, {
-            req::winding_excitation("triangular", fsw, IpkLout, IrmsLout, Iout, dILout, D2,
-                                    vLoutPk, vLoutRms, 0.0, vLoutPkPk)});
-    json capd; capd["capacitor"] = json::object();
+    xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, xfmrRatios, xfmrIso, std::nullopt, 25.0,
+        AN::excitations_processed(aopNom, "T1"), ceil);
+    json capd; capd["capacitor"] = json::object();      // main-rail output cap (output-filter stage)
     capd["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;
     capd["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage * 2;
     // Snubber caps at the switching nodes. A push-pull's center-tapped transformer leaves the primary
@@ -167,7 +205,7 @@ json build_push_pull_tas(const PushPullDesign& d) {
     // while keeping the open-loop Vout on the analytical target. Overridable via config "snubberCap".
     auto snub = [&]() { json c; c["capacitor"] = json::object();
         c["inputs"]["designRequirements"]["capacitance"]["nominal"] =
-            cfg::snubber_cap(d.config, d.outputPower, 2.0 * d.inputVoltage, d.switchingFrequency);
+            cfg::snubber_cap(d.config, totalOutputPower, 2.0 * d.inputVoltage, d.switchingFrequency);
         c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) * 3;
         cfg::mark_numerical_aid(c);   // dV/dt convergence aid — tagged for the real-fidelity strip (ABT #96)
         return c; };
@@ -189,31 +227,81 @@ json build_push_pull_tas(const PushPullDesign& d) {
         c["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::get(d.config, "leakDampC", 1.0e-9);
         c["inputs"]["designRequirements"]["ratedVoltage"] = 2.0 * d.inputVoltage * 3; return c; };
 
+    // Per-output filter inductor Lout_i (SEPARATE magnetic): DC-biased triangle, avg=Iout_i; sees
+    // +(Vin/N_i - Vout_i) when either of the rail's diodes conducts (combined duty 2·Dn), -Vout_i otherwise.
+    auto loutMag = [&](double N_i, double Vout_i, double iout_i, double Lo_i) {
+        const double dILout = rippleRatio * iout_i;
+        const double IpkLout = iout_i + dILout / 2.0;
+        const double IrmsLout = std::sqrt(iout_i * iout_i + dILout * dILout / 12.0);
+        const double vLoutOn = Vin / N_i - Vout_i;
+        const double vLoutPk = std::max(std::fabs(vLoutOn), Vout_i), vLoutPkPk = Vin / N_i;
+        const double vLoutRms = std::sqrt(D2 * vLoutOn * vLoutOn + (1.0 - D2) * Vout_i * Vout_i);
+        json l; l["magnetic"] = json::object();
+        l["inputs"] = req::magnetic_inputs(Lo_i, 0.2, /*single winding*/ {}, {"primary"}, std::nullopt, 25.0, {
+            req::winding_excitation("triangular", fsw, IpkLout, IrmsLout, iout_i, dILout, D2,
+                                    vLoutPk, vLoutRms, 0.0, vLoutPkPk)});
+        return l; };
+
+    // Base components (primary side, shared): transformer + two low-side switches; per-rail rectifier +
+    // output inductor (+ per-rail snubbers) are appended in the loop; primary snubbers + leakage damper last.
+    std::vector<json> comps{comp("T1", xfmr), comp("Q1", mosfetReq()), comp("Q2", mosfetReq())};
+    std::vector<json> cports{port("vin"), port("gnd"), port("vout"), port("gate1"), port("gate2")};
+    std::vector<json> conns;
+    conns.push_back(conn("vin_net", {pin("T1", "primary_end"), pin("T1", "secondary1_start"), prt("vin")}));
+    conns.push_back(conn("pri_top", {pin("T1", "primary_start"), pin("Q1", "drain"), pin("Csn1", "1"), pin("Rdmp", "1")}));
+    conns.push_back(conn("pri_bot", {pin("T1", "secondary1_end"), pin("Q2", "drain"), pin("Csn2", "1"), pin("Cdmp", "2")}));
+    conns.push_back(conn("dmp_mid", {pin("Rdmp", "2"), pin("Cdmp", "1")}));
+    std::vector<json> gndEps{pin("Q1", "source"), pin("Q2", "source")};
+
+    for (size_t i = 0; i < nOut; ++i) {
+        const auto& leg = d.outputs[i];
+        const double iout_i = leg.power / leg.voltage;
+        const std::string sfx = (i == 0) ? std::string() : std::to_string(i + 1);   // "", "2", "3", …
+        const std::string dtop = "Dtop" + sfx, dbot = "Dbot" + sfx, loutN = "Lout" + sfx;
+        const std::string csnT = "Csn" + std::to_string(3 + 2 * i), csnB = "Csn" + std::to_string(4 + 2 * i);
+        const std::string half1 = "secondary" + std::to_string(2 + 2 * i);  // Sec i Half 1 winding
+        const std::string half2 = "secondary" + std::to_string(3 + 2 * i);  // Sec i Half 2 winding
+
+        comps.push_back(comp(dtop.c_str(), rectDiode(leg.turnsRatio, iout_i)));
+        comps.push_back(comp(dbot.c_str(), rectDiode(leg.turnsRatio, iout_i)));
+        comps.push_back(comp(loutN.c_str(), loutMag(leg.turnsRatio, leg.voltage, iout_i, leg.outputInductance)));
+
+        // secondary halves -> full-wave rectifier diodes (rail center tap = gnd) (+ snubber cap to gnd)
+        conns.push_back(conn(("sec_top" + sfx).c_str(),  {pin("T1", (half1 + "_start").c_str()), pin(dtop.c_str(), "anode"), pin(csnT.c_str(), "1")}));
+        conns.push_back(conn(("sec_bot" + sfx).c_str(),  {pin("T1", (half2 + "_end").c_str()),   pin(dbot.c_str(), "anode"), pin(csnB.c_str(), "1")}));
+        conns.push_back(conn(("sec_rect" + sfx).c_str(), {pin(dtop.c_str(), "cathode"), pin(dbot.c_str(), "cathode"), pin(loutN.c_str(), "primary_start")}));
+        if (i == 0) {
+            conns.push_back(conn("vout_net", {pin("Lout", "primary_end"), prt("vout")}));   // main rail -> output-filter stage
+        } else {
+            json capi; capi["capacitor"] = json::object();
+            capi["inputs"]["designRequirements"]["capacitance"]["nominal"] = leg.outputCapacitance;
+            capi["inputs"]["designRequirements"]["ratedVoltage"] = leg.voltage * 2;
+            const std::string coutN = "Cout" + sfx, voutP = "vout" + sfx;
+            comps.push_back(comp(coutN.c_str(), capi));
+            cports.push_back(port(voutP.c_str()));
+            conns.push_back(conn((voutP + "_net").c_str(), {pin(loutN.c_str(), "primary_end"), pin(coutN.c_str(), "1"), prt(voutP.c_str())}));
+            gndEps.push_back(pin(coutN.c_str(), "2"));
+        }
+        // rail center tap (= gnd) + this rail's secondary snubber returns
+        gndEps.push_back(pin("T1", (half1 + "_end").c_str()));
+        gndEps.push_back(pin("T1", (half2 + "_start").c_str()));
+        comps.push_back(comp(csnT.c_str(), snub()));
+        comps.push_back(comp(csnB.c_str(), snub()));
+        gndEps.push_back(pin(csnT.c_str(), "2"));
+        gndEps.push_back(pin(csnB.c_str(), "2"));
+    }
+    // primary snubbers + drain-to-drain leakage damper (appended after the per-rail block)
+    comps.push_back(comp("Csn1", snub()));  comps.push_back(comp("Csn2", snub()));
+    comps.push_back(comp("Rdmp", dampR())); comps.push_back(comp("Cdmp", dampC()));
+    gndEps.push_back(pin("Csn1", "2"));  gndEps.push_back(pin("Csn2", "2"));  gndEps.push_back(prt("gnd"));
+    conns.push_back(conn("gnd_net", gndEps));
+    conns.push_back(conn("gate1_net", {pin("Q1", "gate"), prt("gate1")}));
+    conns.push_back(conn("gate2_net", {pin("Q2", "gate"), prt("gate2")}));
+
     json cell; cell["name"] = "push-pull-cell";
-    cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate1"), port("gate2")});
-    cell["components"] = json::array({comp("T1", xfmr), comp("Q1", mosfetReq()), comp("Q2", mosfetReq()),
-                                      comp("Dtop", rectDiode()), comp("Dbot", rectDiode()), comp("Lout", lout),
-                                      comp("Csn1", snub()), comp("Csn2", snub()),
-                                      comp("Csn3", snub()), comp("Csn4", snub()),
-                                      comp("Rdmp", dampR()), comp("Cdmp", dampC())});
-    cell["connections"] = json::array({
-        // center tap (= Vin) shared by both primary halves
-        conn("vin_net",   {pin("T1", "primary_end"), pin("T1", "secondary1_start"), prt("vin")}),
-        // primary half tops -> low-side switches (+ snubber cap to gnd + leakage-damper R)
-        conn("pri_top",   {pin("T1", "primary_start"), pin("Q1", "drain"), pin("Csn1", "1"), pin("Rdmp", "1")}),
-        // bottom half -> Q2 (+ snubber cap to gnd + leakage-damper C); Rdmp–Cdmp bridge the two drains
-        conn("pri_bot",   {pin("T1", "secondary1_end"), pin("Q2", "drain"), pin("Csn2", "1"), pin("Cdmp", "2")}),
-        conn("dmp_mid",   {pin("Rdmp", "2"), pin("Cdmp", "1")}),
-        // secondary halves -> full-wave rectifier diodes (center tap = gnd) (+ snubber cap to gnd)
-        conn("sec_top",   {pin("T1", "secondary2_start"), pin("Dtop", "anode"), pin("Csn3", "1")}),
-        conn("sec_bot",   {pin("T1", "secondary3_end"), pin("Dbot", "anode"), pin("Csn4", "1")}),
-        conn("sec_rect",  {pin("Dtop", "cathode"), pin("Dbot", "cathode"), pin("Lout", "primary_start")}),
-        conn("vout_net",  {pin("Lout", "primary_end"), prt("vout")}),
-        conn("gnd_net",   {pin("Q1", "source"), pin("Q2", "source"),
-                           pin("T1", "secondary2_end"), pin("T1", "secondary3_start"),
-                           pin("Csn1", "2"), pin("Csn2", "2"), pin("Csn3", "2"), pin("Csn4", "2"), prt("gnd")}),
-        conn("gate1_net", {pin("Q1", "gate"), prt("gate1")}),
-        conn("gate2_net", {pin("Q2", "gate"), prt("gate2")})});
+    cell["ports"] = cports;
+    cell["components"] = comps;
+    cell["connections"] = conns;
 
     json filt; filt["name"] = "output-filter";
     filt["ports"] = json::array({port("in"), port("rtn")});
@@ -228,20 +316,30 @@ json build_push_pull_tas(const PushPullDesign& d) {
     dreq["inputType"] = "dc";
     dreq["inputVoltage"] = {{"minimum", d.inputVoltageMin}, {"nominal", d.inputVoltage}, {"maximum", d.inputVoltageMax}};
     dreq["switchingFrequency"]["nominal"] = d.switchingFrequency;
-    { json o; o["name"] = "out"; o["voltage"]["nominal"] = d.outputVoltage; o["regulation"] = "voltage";
-      dreq["outputs"] = json::array({o}); }
-    { json op; op["name"] = "full_load"; op["inputVoltage"] = d.inputVoltage; op["ambientTemperature"] = 25.0;
-      json o; o["name"] = "out"; o["power"] = d.outputPower; op["outputs"] = json::array({o});
-      tas["inputs"]["operatingPoints"] = json::array({op}); }
+    dreq["outputs"] = json::array();
+    json opDoc; opDoc["name"] = "full_load"; opDoc["inputVoltage"] = d.inputVoltage; opDoc["ambientTemperature"] = 25.0;
+    opDoc["outputs"] = json::array();
+    for (size_t i = 0; i < nOut; ++i) {
+        const std::string oname = (i == 0) ? "out" : "out" + std::to_string(i + 1);
+        json o; o["name"] = oname; o["voltage"]["nominal"] = d.outputs[i].voltage; o["regulation"] = "voltage";
+        dreq["outputs"].push_back(o);
+        json oo; oo["name"] = oname; oo["power"] = d.outputs[i].power; opDoc["outputs"].push_back(oo);
+    }
+    tas["inputs"]["operatingPoints"] = json::array({opDoc});
 
     tas["topology"]["stages"] = json::array({
         req::control_stage("pwmController"),
         pstage("pushPullCell", "switchingCell", cell, bind("vin", "dcBus"), bind("vout", "pulsatingDc")),
         pstage("filter", "outputFilter", filt, bind("in", "pulsatingDc"), bind("in", "dcOutput"))});
-    tas["topology"]["interStageConnections"] = json::array({
+    std::vector<json> iscs{
         isc("Vin", "externalPort", "input", {sp("pushPullCell", "vin")}),
         isc("GND", "externalPort", "input", {sp("pushPullCell", "gnd"), sp("filter", "rtn")}),
-        isc("Vout", "externalPort", "output", {sp("pushPullCell", "vout"), sp("filter", "in")})});
+        isc("Vout", "externalPort", "output", {sp("pushPullCell", "vout"), sp("filter", "in")})};
+    for (size_t i = 1; i < nOut; ++i) {
+        const std::string g = "Vout" + std::to_string(i + 1), pt = "vout" + std::to_string(i + 1);
+        iscs.push_back(isc(g.c_str(), "externalPort", "output", {sp("pushPullCell", pt.c_str())}));
+    }
+    tas["topology"]["interStageConnections"] = iscs;
 
     json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
     tas["simulation"]["analyses"] = json::array({an});
