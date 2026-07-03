@@ -1578,4 +1578,47 @@ TEST_CASE("Flyback multi-output: two isolated secondaries each regulate (ABT #86
     check_dual_rails(measure_multi_output(tas, 100000.0, {"Vout", "Vout2"}, "flyback_multi"));
 }
 
+// ── Resonant multi-output (N isolated secondaries on ONE shared Lr–Cr tank) — ABT #86 ─────────────────
+// The SRC/LLC now read every designRequirements.outputs[]: a per-rail turns ratio n_i (sized so
+// n_i·(Vout_i+Vd_i) matches the shared bridge drive → every secondary reflects to the same primary clamp
+// and conducts together), a diode rectifier + output cap per rail, and an external vout<i> port. The shared
+// series tank is sized against the SUM of the reflected loads (parallel Rac) so the main rail still
+// resonates at fsw. Spec mirrors the working single-output SRC (Vin=400, main 48 V) + a second 24 V rail.
+// Resonant rails settle ~8% high by the SRC gain-headroom design, so allow a ±15% band around spec.
+json two_output_resonant_spec() {
+    return json::parse(R"({ "designRequirements": { "efficiency": 1.0,
+        "inputVoltage": { "minimum": 380, "nominal": 400, "maximum": 420 },
+        "switchingFrequency": { "nominal": 100000 },
+        "outputs": [ { "name": "out", "voltage": { "nominal": 48 } },
+                     { "name": "aux", "voltage": { "nominal": 24 } } ] },
+        "operatingPoints": [ { "inputVoltage": 400, "outputs": [ { "power": 240 }, { "power": 120 } ] } ] })");
+}
+void check_dual_rails_resonant(const std::vector<double>& v) {
+    INFO("main rail Vout=" << v.at(0) << " (spec 48, ~8% headroom), aux rail Vout2=" << v.at(1) << " (spec 24)");
+    CHECK(v.at(0) > 0.85 * 48.0);  CHECK(v.at(0) < 1.15 * 48.0);
+    CHECK(v.at(1) > 0.85 * 24.0);  CHECK(v.at(1) < 1.15 * 24.0);
+}
+
+TEST_CASE("SRC multi-output: two isolated secondaries each regulate on one shared tank (ABT #86)",
+          "[equivalence][src][multi]") {
+    Kirchhoff::SrcDesign d = Kirchhoff::design_src(two_output_resonant_spec());
+    REQUIRE(d.outputs.size() == 2);
+    json tas = Kirchhoff::build_src_tas(d);
+    // center-tapped rectifier: 2 half-windings per rail -> 4 secondary-side windings.
+    CHECK(transformer_secondary_windings(tas, "srcCell", "T1") == 4);
+    check_dual_rails_resonant(measure_multi_output(tas, 100000.0, {"Vout", "Vout2"}, "src_multi"));
+}
+
+TEST_CASE("LLC multi-output: two isolated secondaries each regulate on one shared tank (ABT #86)",
+          "[equivalence][llc][multi]") {
+    // The LLC runs AT resonance (M=1) by default, so both rails settle near spec (48 V / 24 V). Same shared
+    // Lr–Cr–Lm tank, sized against the parallel reflected load; each rail its own CT rectifier + cap + port.
+    Kirchhoff::LlcDesign d = Kirchhoff::design_llc(two_output_resonant_spec());
+    REQUIRE(d.outputs.size() == 2);
+    json tas = Kirchhoff::build_llc_tas(d);
+    // center-tapped rectifier: 2 half-windings per rail -> 4 secondary-side windings.
+    CHECK(transformer_secondary_windings(tas, "llcCell", "T1") == 4);
+    check_dual_rails_resonant(measure_multi_output(tas, 100000.0, {"Vout", "Vout2"}, "llc_multi"));
+}
+
 }  // namespace
