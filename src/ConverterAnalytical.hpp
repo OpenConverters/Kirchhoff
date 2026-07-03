@@ -173,21 +173,32 @@ MAS::OperatingPoint analytical_zeta(double inputVoltage, double outputVoltage,
 
 // Four-switch buck-boost mode selector. BUCK_BOOST_AUTO reproduces MKF's separate BUCK/BOOST
 // region models (throws in the Vo==Vin transition). SIMULTANEOUS is the 4-switch simultaneous
-// (buck-boost) mode Kirchhoff's deck actually runs for EVERY Vin/Vo: all four switches commute
-// each cycle, D = Vo/(Vin+Vo), so it is regular at Vo==Vin (no transition singularity).
-enum class FsbbMode { BUCK_BOOST_AUTO, SIMULTANEOUS };
+// (buck-boost) mode: all four switches commute each cycle, D = Vo/(Vin+Vo), so it is regular at
+// Vo==Vin (no transition singularity). SPLIT_PWM is MKF's DEFAULT transition-band scheme
+// (LM5176/LT8390): the buck leg and boost leg run at DIFFERENT duties, phase-shifting the two legs
+// so the inductor sees a mild intermediate (Vin−Vo) freewheel interval instead of the full ±Vin/∓Vo
+// swing → lower inductor-current ripple. Regular at Vo==Vin.
+enum class FsbbMode { BUCK_BOOST_AUTO, SIMULTANEOUS, SPLIT_PWM };
 
 // Four-switch buck-boost (single-phase, non-bidirectional). One "Inductor" excitation.
 // BUCK_BOOST_AUTO (default): BUCK region (Vo < Vin) D = Vo/(Vin·η), iL_avg = Iout, pp_voltage = Vin;
 // BOOST region (Vo > Vin) D = 1 − Vin·η/Vo, iL_avg = Iout/(1−D), pp_voltage = Vo (ported from MKF
 // FourSwitchBuckBoost.cpp BUCK/BOOST branches); throws at Vo == Vin.
-// SIMULTANEOUS: the mode the Kirchhoff deck runs — charge phase applies +Vin across L for D·T,
-// discharge phase −Vo for (1−D)·T, D = Vo/(Vin+Vo), iL_avg = Iout/(1−D), ΔiL = Vin·D·T/L,
-// pp_voltage = Vin+Vo (volt-second balanced). Valid for all Vin/Vo including Vo == Vin.
+// SIMULTANEOUS: charge phase applies +Vin across L for D·T, discharge phase −Vo for (1−D)·T,
+// D = Vo/(Vin+Vo), iL_avg = Iout/(1−D), ΔiL = Vin·D·T/L, pp_voltage = Vin+Vo (volt-second balanced).
+// SPLIT_PWM: the phase-shifted transition-band scheme (MKF default). The boost leg's low-side charges
+// for t1 = splitRatio·D of the period (state +Vin), then the buck HS + boost HS overlap applies the
+// mild (Vin−Vo) freewheel for (t2−t1), then the buck LS + boost HS discharge −Vo for (1−t2), with
+// t2 = Vo·(1−t1)/Vin (volt-second balanced so Vout lands exactly on Vo). Because the strong +Vin
+// charge interval is shortened (t1 < D) and the output is fed over the longer (1−t1) window, the
+// inductor-current ripple is STRICTLY LOWER than SIMULTANEOUS at the same L. splitRatio κ ∈ (0,1]
+// selects the split (κ→1 collapses to SIMULTANEOUS). Emits a piecewise (CUSTOM) inductor current +
+// 3-level voltage. Both SIMULTANEOUS and SPLIT_PWM are valid for all Vin/Vo including Vo == Vin.
 MAS::OperatingPoint analytical_fsbb(double inputVoltage, double outputVoltage,
                                     double outputCurrent, double switchingFrequency,
                                     double inductance, double efficiency = 1.0,
-                                    FsbbMode mode = FsbbMode::BUCK_BOOST_AUTO);
+                                    FsbbMode mode = FsbbMode::BUCK_BOOST_AUTO,
+                                    double splitRatio = 0.5);
 
 // Isolated buck (fly-buck). Two outputs: the primary buck rail (Vpri, Ipri) and one isolated
 // secondary (Vsec, Isec). `inductance` is the primary/magnetizing inductance, `turnsRatio` the

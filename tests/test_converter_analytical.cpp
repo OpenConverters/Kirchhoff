@@ -291,6 +291,33 @@ TEST_CASE("analytical_fsbb SIMULTANEOUS: regular at Vo==Vin (buck-boost mode)", 
     CHECK_THROWS(analytical_fsbb(24, 24, 5, 100000, 20e-6));   // AUTO still throws at Vo==Vin
 }
 
+TEST_CASE("analytical_fsbb SPLIT_PWM: lower inductor ripple than SIMULTANEOUS, on-target VSB (ABT #94)",
+          "[analytical][solver][fsbb][splitpwm]") {
+    using Kirchhoff::analytical::analytical_fsbb;
+    using Kirchhoff::analytical::FsbbMode;
+    // 24 V -> 24 V, 5 A, 100 kHz, L=20 uH — the transition point. SIMULTANEOUS: D=0.5, iL_avg=10 A,
+    // ΔiL = Vin*D*T/L = 6 A pk-pk. SPLIT_PWM κ=0.5: t1=κ*D=0.25 (charge), t2=Vo(1-t1)/Vin=0.75, so the
+    // +Vin charge interval is halved → ΔiL ≈ Vin*t1*T/L = 3 A pk-pk (half), and iL_avg = Iout/(1-t1)=6.67 A.
+    const double Vin = 24, Vo = 24, Io = 5, fsw = 100000, L = 20e-6;
+    MAS::OperatingPoint simul = analytical_fsbb(Vin, Vo, Io, fsw, L, 1.0, FsbbMode::SIMULTANEOUS);
+    MAS::OperatingPoint split = analytical_fsbb(Vin, Vo, Io, fsw, L, 1.0, FsbbMode::SPLIT_PWM, 0.5);
+    const double simulPP = *processed_current(simul, 0).get_peak_to_peak();
+    const double splitPP = *processed_current(split, 0).get_peak_to_peak();
+    INFO("simul ΔiL=" << simulPP << " A, split ΔiL=" << splitPP << " A");
+    CHECK(simulPP == Catch::Approx(6.0).margin(0.2));
+    CHECK(splitPP == Catch::Approx(3.0).margin(0.2));            // κ=0.5 halves the charge interval
+    CHECK(splitPP < simulPP);                                    // the whole point of split PWM
+    CHECK(*processed_current(split, 0).get_average() == Catch::Approx(6.667).margin(0.1));   // Iout/(1-t1)
+    CHECK(voltage_average(split, 0) == Catch::Approx(0.0).margin(0.3));                      // volt-second balance
+    // κ=1 collapses to SIMULTANEOUS (state 2 vanishes): same ripple as SIMULTANEOUS.
+    MAS::OperatingPoint atUnity = analytical_fsbb(Vin, Vo, Io, fsw, L, 1.0, FsbbMode::SPLIT_PWM, 1.0);
+    CHECK(*processed_current(atUnity, 0).get_peak_to_peak() == Catch::Approx(simulPP).margin(0.2));
+    // Regular at Vo==Vin (no transition singularity), and bad splitRatio throws.
+    CHECK_NOTHROW(analytical_fsbb(24, 24, 5, 100000, 20e-6, 1.0, FsbbMode::SPLIT_PWM, 0.5));
+    CHECK_THROWS(analytical_fsbb(24, 24, 5, 100000, 20e-6, 1.0, FsbbMode::SPLIT_PWM, 0.0));   // κ out of (0,1]
+    CHECK_THROWS(analytical_fsbb(24, 24, 5, 100000, 20e-6, 1.0, FsbbMode::SPLIT_PWM, 1.5));
+}
+
 TEST_CASE("analytical_isolated_buck: primary avg=Ipri, secondary avg=Isec", "[analytical][solver][isolatedbuck]") {
     using Kirchhoff::analytical::analytical_isolated_buck;
     // 12 V; primary rail 3.3 V @ 1 A; isolated secondary 5 V @ 0.5 A; n=0.5, L=22 uH.

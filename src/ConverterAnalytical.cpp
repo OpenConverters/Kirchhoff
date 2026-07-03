@@ -882,13 +882,63 @@ MAS::OperatingPoint analytical_zeta(double inputVoltage, double outputVoltage,
 // process_operating_point_for_excitation; compute_buck_duty:56 / compute_boost_duty:76).
 MAS::OperatingPoint analytical_fsbb(double inputVoltage, double outputVoltage,
                                     double outputCurrent, double switchingFrequency,
-                                    double inductance, double efficiency, FsbbMode mode) {
+                                    double inductance, double efficiency, FsbbMode mode,
+                                    double splitRatio) {
     using Lbl = MAS::WaveformLabel;
     const double period = 1.0 / switchingFrequency;
     const double maximumDutyCycle = 0.95;
     if (inputVoltage <= 0) throw std::invalid_argument("analytical_fsbb: input voltage must be > 0");
     if (outputVoltage <= 0) throw std::invalid_argument("analytical_fsbb: output voltage must be > 0");
     if (inductance <= 0) throw std::invalid_argument("analytical_fsbb: inductance must be > 0");
+
+    if (mode == FsbbMode::SPLIT_PWM) {
+        // MKF-default transition-band scheme (LM5176/LT8390): the buck leg (Q1/Q2) and boost leg
+        // (Q4/Q3) run at DIFFERENT, phase-shifted duties so the inductor never sees the full ±Vin/∓Vo
+        // swing of SIMULTANEOUS. Three sub-intervals per period (edge-aligned at t=0):
+        //   state 1 [0, t1]     Q1+Q4 on : v_L = +Vin           (charge)
+        //   state 2 [t1, t2]    Q1+Q3 on : v_L = Vin−Vo         (mild freewheel, ≈0 near transition)
+        //   state 4 [t2, 1]     Q2+Q3 on : v_L = −Vo            (discharge, feeds output via Q3)
+        // Volt-second balance sets Vout on target: t2 = Vo·(1−t1)/Vin, with t1 = κ·D (κ=splitRatio,
+        // D = Vo/(Vin+Vo) the SIMULTANEOUS duty). κ→1 ⇒ t1=t2=D ⇒ state 2 vanishes ⇒ SIMULTANEOUS.
+        // The output is fed whenever Q3 conducts (states 2+4 = 1−t1), so iL_avg = Iout/(1−t1); the
+        // shortened +Vin charge (t1 < D) makes ΔiL strictly lower than SIMULTANEOUS at the same L.
+        if (!(splitRatio > 0.0 && splitRatio <= 1.0))
+            throw std::invalid_argument("analytical_fsbb: SPLIT_PWM splitRatio must be in (0, 1]");
+        const double D = outputVoltage / (inputVoltage + outputVoltage);
+        const double t1 = splitRatio * D;                       // boost-LS (Q4) charge duty
+        const double t2 = outputVoltage * (1.0 - t1) / inputVoltage;   // buck-HS (Q1) duty (VSB)
+        if (t2 >= maximumDutyCycle)
+            throw std::invalid_argument("analytical_fsbb: SPLIT_PWM buck-leg duty exceeds maximumDutyCycle "
+                                        "(splitRatio too small for this Vin/Vo)");
+        if (t2 < t1)   // must not cross (numerical guard; VSB keeps t2>=t1 for κ<=1)
+            throw std::invalid_argument("analytical_fsbb: SPLIT_PWM inconsistent duties (t2 < t1)");
+        const double iL_avg = outputCurrent / (1.0 - t1);
+        // Per-interval inductor-current change (volt-second / L). r1+r2+r3 == 0 by VSB.
+        const double r1 =  inputVoltage                 * (t1 * period)        / inductance;
+        const double r2 = (inputVoltage - outputVoltage) * ((t2 - t1) * period) / inductance;
+        const double r3 = -outputVoltage                * ((1.0 - t2) * period) / inductance;
+        // Piecewise current i(0)=s, i(t1)=s+r1, i(t2)=s+r1+r2, i(T)=s (periodic). Choose s so the
+        // trapezoidal mean equals iL_avg (offset of the piecewise-linear waveform about its start).
+        const double offset = 0.5 * r1 * t1
+                            + (r1 + 0.5 * r2) * (t2 - t1)
+                            - 0.5 * r3 * (1.0 - t2);            // note r1+r2 = −r3
+        const double s = iL_avg - offset;
+        MAS::Waveform currentWaveform;
+        currentWaveform.set_data(std::vector<double>{s, s + r1, s + r1 + r2, s});
+        currentWaveform.set_time(std::vector<double>{0.0, t1 * period, t2 * period, period});
+        currentWaveform.set_ancillary_label(Lbl::CUSTOM);
+        MAS::Waveform voltageWaveform;   // 3-level staircase: +Vin / (Vin−Vo) / −Vo
+        voltageWaveform.set_data(std::vector<double>{inputVoltage, inputVoltage,
+                                                     inputVoltage - outputVoltage, inputVoltage - outputVoltage,
+                                                     -outputVoltage, -outputVoltage});
+        voltageWaveform.set_time(std::vector<double>{0.0, t1 * period, t1 * period,
+                                                     t2 * period, t2 * period, period});
+        voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
+        MAS::OperatingPoint operatingPoint;
+        operatingPoint.get_mutable_excitations_per_winding().push_back(
+            WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Inductor"));
+        return operatingPoint;
+    }
 
     double dutyForWaveform, dIL, iL_avg, primaryVoltagePtp;
     if (mode == FsbbMode::SIMULTANEOUS) {

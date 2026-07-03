@@ -38,6 +38,7 @@
 #include "Analytical.hpp"
 #include "NgspiceRunner.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <regex>
@@ -292,5 +293,67 @@ TEST_CASE("PtP: FSBB operating regions deliver spec (buck / boost / buck-boost)"
         REQUIRE(s.ok);
         CHECK(s.vout == Catch::Approx(c.vout).epsilon(0.12));
     }
+}
+
+// ── ABT #94: split-PWM sub-mode measurably lowers the inductor-current ripple ─────────────────────
+// In the buck-boost transition band the MKF-default SPLIT_PWM scheme phase-shifts the buck and boost
+// legs (different per-leg duties) so the inductor sees a mild (Vin−Vo) freewheel interval instead of
+// the full ±Vin/∓Vo swing of SIMULTANEOUS. Build BOTH decks at the SAME operating point / same L and
+// verify in ngspice: each lands Vout on target, and SPLIT_PWM's inductor-current ripple is strictly
+// lower. (The inductor is emitted as "LL_pri"; its branch current is captured as ll_pri#branch.)
+namespace {
+struct FsbbMeas { double vout; double iLpp; bool ok; };
+FsbbMeas measure_fsbb(const json& tas, double fsw) {
+    PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
+    std::string deck = Kirchhoff::tas_to_ngspice(tas, ideal);
+    const double period = 1.0 / fsw;
+    const double tstop = 500.0 * period;      // ~8 output RC (Rload=6Ω, Co=100uF) → settled
+    const double tstep = period / 400.0;      // fine enough to resolve the triangular ripple
+    deck = std::regex_replace(deck, std::regex(R"(\.tran\s+\S+\s+\S+\s+\S+\s+\S+)"),
+                              ".tran " + num(tstep) + " " + num(tstop) + " 0 " + num(tstep));
+    Kirchhoff::NgspiceRunResult r = Kirchhoff::run_ngspice_in_process(deck);
+    if (!r.success) return {0, 0, false};
+    const double from = tstop - 3.0 * period, to = tstop;   // a few settled periods
+    auto v = r.average("v(Vout)", from, to);
+    // Locate the inductor branch-current vector (raw key contains "ll_pri") and take its peak-to-peak.
+    const std::vector<double>* iL = nullptr;
+    for (const auto& kv : r.vectors) {
+        std::string key = kv.first;
+        std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c){ return std::tolower(c); });
+        if (key.find("ll_pri") != std::string::npos) { iL = &kv.second; break; }
+    }
+    if (!iL || !v) return {v.value_or(0.0), 0.0, false};
+    double lo = 1e300, hi = -1e300;
+    for (size_t i = 0; i < r.time.size() && i < iL->size(); ++i) {
+        if (r.time[i] < from || r.time[i] > to) continue;
+        lo = std::min(lo, (*iL)[i]);
+        hi = std::max(hi, (*iL)[i]);
+    }
+    return {*v, hi - lo, hi >= lo};
+}
+}  // namespace
+
+TEST_CASE("PtP: FSBB split-PWM lowers inductor ripple vs simultaneous (ABT #94)", "[ptp][fsbb][splitpwm]") {
+    if (!Kirchhoff::ngspice_in_process_available()) { WARN("no libngspice — skipping"); return; }
+    const double fsw = 100000;
+    // 12 V -> 12 V lands in the buck-boost transition band, where the sub-mode matters.
+    json base = spec_for(12, 12, 24, fsw);
+    json splitSpec = base;  splitSpec["config"]["transitionMode"] = "splitPwm";      // MKF default
+    json simulSpec = base;  simulSpec["config"]["transitionMode"] = "simultaneous";
+    Kirchhoff::FsbbDesign dS = Kirchhoff::design_fsbb(splitSpec);
+    Kirchhoff::FsbbDesign dM = Kirchhoff::design_fsbb(simulSpec);
+    REQUIRE(dS.region == "buckBoost");
+    REQUIRE(dM.region == "buckBoost");
+    CHECK(dS.inductance == Catch::Approx(dM.inductance));   // same L → a fair ripple comparison
+
+    FsbbMeas s = measure_fsbb(Kirchhoff::build_fsbb_tas(dS), fsw);
+    FsbbMeas m = measure_fsbb(Kirchhoff::build_fsbb_tas(dM), fsw);
+    REQUIRE(s.ok);
+    REQUIRE(m.ok);
+    INFO("splitPwm  Vout=" << s.vout << " ΔiL=" << s.iLpp
+         << " | simultaneous Vout=" << m.vout << " ΔiL=" << m.iLpp);
+    CHECK(s.vout == Catch::Approx(12.0).epsilon(0.12));     // splitPwm lands on target
+    CHECK(m.vout == Catch::Approx(12.0).epsilon(0.12));     // simultaneous lands on target
+    CHECK(s.iLpp < m.iLpp * 0.9);                           // split PWM measurably cuts the ripple
 }
 

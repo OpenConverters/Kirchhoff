@@ -185,7 +185,20 @@ classic zero-input-ripple design (TI SLYT411). The TAS emits it as one magnetic 
 a `leakageInductance` of `L1·(1-k²)`, so the ngspice path renders the pairwise coupling `K` exactly as it
 does for a transformer. Coupling steers the ripple between windings without changing the DC transfer; the
 inverting Ćuk uses the opposite winding-dot orientation so the coupling does not shift its operating point.
-| **fsbb** (4-switch buck-boost) | 0.9 | inductance | `deadTimeFraction`(0.01), `inductorRippleRatio`(0.4), `outputCapacitance`(100e-6) | L = worst of buck@Vin_max / boost@Vin_min; unity fallback if Vin_min==Vin_max==Vo |
+| **fsbb** (4-switch buck-boost) | 0.9 | inductance | `deadTimeFraction`(0.01), `inductorRippleRatio`(0.4), `outputCapacitance`(100e-6), `fsbbTransitionBand`(0.10), `transitionMode`(**splitPwm**), `fsbbSplitRatio`(0.5), `powerFlowDirection`(forward) | region-aware gate drive (buck@Vin>Vo / boost@Vo>Vin / buck-boost band); L = worst of buck@Vin_max / boost@Vin_min, unity fallback if Vin_min==Vin_max==Vo; `phaseCount>1` (interleaved) throws (not implemented) |
+
+**FSBB transition sub-mode + bidirectional (ABT #94).** In the buck-boost transition band (`fsbbTransitionBand`,
+±10% of Vo around Vin) the sub-mode selects the gate scheme. `transitionMode: "splitPwm"` (MKF default,
+LM5176/LT8390) runs the buck and boost legs at DIFFERENT, phase-shifted duties: the boost leg charges the
+inductor for `t1 = fsbbSplitRatio·D` (κ=0.5 default), then a mild `(Vin−Vo)` freewheel interval, then
+discharge, with `t2 = Vo·(1−t1)/Vin` volt-second-balanced so Vout stays on target. Because the strong +Vin
+charge is shortened, the inductor-current ripple is **strictly lower** than `"simultaneous"` (all four
+switches commuting together) at the same L — measured ~2.2 A pk-pk vs ~4.4 A at 12→12 V/24 W/100 kHz.
+`κ→1` collapses split-PWM back to simultaneous. `powerFlowDirection: "reverse"` makes the Vout rail source
+power and delivers to Vin (the synchronous H-bridge conducts both ways — the two legs swap source/delivered
+roles; the output filter cap moves to the delivered Vin rail); open-loop it asserts genuine reverse delivery +
+energy conservation, not a pinned setpoint. Interleaved multi-phase (`phaseCount>1`) is not yet implemented
+and is rejected loudly.
 
 ### Flyback & isolated buck
 

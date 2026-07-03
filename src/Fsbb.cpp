@@ -38,27 +38,57 @@ FsbbDesign design_fsbb(const json& tasInputs) {
     d.inputVoltageMax = vinMax;
 
     const double Vin = d.inputVoltage, Vo = d.outputVoltage, Fs = d.switchingFrequency;
-    const double Io = d.outputPower / Vo;
     d.deadFraction = cfg::get(d.config, "deadTimeFraction", kDeadFrac);
-    // Buck-boost simultaneous mode gain M = D/(1-D) = Vo/Vin  =>  D = Vo/(Vin+Vo).
-    d.dutyCycle = Vo / (Vin + Vo);
-    // Operating-region classification at the NOMINAL input (MKF FourSwitchBuckBoost::Region). A real 4SBB
-    // controller runs only the buck leg when Vin comfortably exceeds Vo (BUCK), only the boost leg when Vo
-    // exceeds Vin (BOOST), and commutes all four switches in the narrow transition band (BUCK_BOOST). The
-    // KH deck previously ran the 4-switch SIMULTANEOUS scheme for EVERY point, giving buck/boost-dominant
-    // designs the wrong (lossier) gate drive. `fsbbTransitionBand` (default 0.10) is the ±fraction of Vo
-    // around Vin within which we stay in the all-switching buck-boost region.
+
+    // --- transition sub-mode + power-flow direction + interleaving (ABT #94) ---
+    d.transitionMode = cfg::get_str(d.config, "transitionMode", "splitPwm");   // MKF default: splitPwm
+    if (d.transitionMode != "splitPwm" && d.transitionMode != "simultaneous")
+        throw std::invalid_argument("design_fsbb: config.transitionMode must be 'splitPwm' or 'simultaneous', got '"
+                                    + d.transitionMode + "'");
+    d.splitRatio = cfg::get(d.config, "fsbbSplitRatio", 0.5);
+    if (!(d.splitRatio > 0.0 && d.splitRatio <= 1.0))
+        throw std::invalid_argument("design_fsbb: config.fsbbSplitRatio must be in (0, 1]");
+    const std::string dir = cfg::get_str(d.config, "powerFlowDirection", "forward");
+    if (dir != "forward" && dir != "reverse")
+        throw std::invalid_argument("design_fsbb: config.powerFlowDirection must be 'forward' or 'reverse', got '"
+                                    + dir + "'");
+    d.reverse = (dir == "reverse");
+    // Interleaved (multi-phase) FSBB is not wired yet — reject loudly rather than silently building a
+    // single-phase deck (no-silent-shortcuts). Tracked as the remaining ABT #94 follow-up.
+    if (cfg::get(d.config, "phaseCount", 1.0) != 1.0)
+        throw std::invalid_argument("design_fsbb: interleaved (phaseCount > 1) FSBB is not implemented "
+                                    "(ABT #94 follow-up); only single-phase is supported");
+
+    // Source / delivered rails. Forward: source Vin, deliver Vo. Reverse (bidirectional, ABT #94): the Vout
+    // rail sources and the Vin rail receives — the symmetric synchronous H-bridge conducts both ways, so
+    // reverse is the same converter with the two legs' roles swapped. Region/duty are sized on (Vsrc,Vdel).
+    const double Vsrc = d.reverse ? Vo : Vin;
+    const double Vdel = d.reverse ? Vin : Vo;
+    const double Io = d.outputPower / Vdel;     // current into the delivered (load) rail
+    // Simultaneous buck-boost gain M = D/(1-D) = Vdel/Vsrc  =>  D = Vdel/(Vsrc+Vdel).
+    d.dutyCycle = Vdel / (Vsrc + Vdel);
+    // Operating-region classification at the NOMINAL point (MKF FourSwitchBuckBoost::Region). A real 4SBB
+    // controller runs only the buck leg when Vsrc comfortably exceeds Vdel (BUCK), only the boost leg when
+    // Vdel exceeds Vsrc (BOOST), and commutes all four switches in the narrow transition band (BUCK_BOOST).
+    // The KH deck previously ran the 4-switch SIMULTANEOUS scheme for EVERY point, giving buck/boost-dominant
+    // designs the wrong (lossier) gate drive. `fsbbTransitionBand` (default 0.10) is the ±fraction of Vdel
+    // around Vsrc within which we stay in the all-switching buck-boost region.
     const double band = cfg::get(d.config, "fsbbTransitionBand", 0.10);
-    if (Vin > Vo * (1.0 + band)) {
+    if (Vsrc > Vdel * (1.0 + band)) {
         d.region = "buck";
-        d.regionDuty = Vo / (Vin * d.efficiency);
-    } else if (Vin < Vo * (1.0 - band)) {
+        d.regionDuty = Vdel / (Vsrc * d.efficiency);
+    } else if (Vsrc < Vdel * (1.0 - band)) {
         d.region = "boost";
-        d.regionDuty = 1.0 - (Vin * d.efficiency) / Vo;
+        d.regionDuty = 1.0 - (Vsrc * d.efficiency) / Vdel;
     } else {
         d.region = "buckBoost";
         d.regionDuty = d.dutyCycle;
     }
+    // Split-PWM transition-band duties (only used in the buckBoost region with transitionMode="splitPwm").
+    // t1 = boost-leg-LS charge duty = κ·D; t2 = buck-leg-HS duty = Vdel·(1−t1)/Vsrc (volt-second balanced so
+    // the open-loop deck lands on the delivered target). At κ=1 ⇒ t1=t2=D ⇒ collapses to SIMULTANEOUS.
+    d.splitBoostDuty = d.splitRatio * d.dutyCycle;
+    d.splitBuckDuty  = Vdel * (1.0 - d.splitBoostDuty) / Vsrc;
 
     // Worst-case inductor: max(L_buck @ Vin_max, L_boost @ Vin_min). Each region's formula is only
     // valid on its side of Vo (returns 0 otherwise). (MKF compute_worst_case_inductance.)
@@ -79,7 +109,7 @@ FsbbDesign design_fsbb(const json& tasInputs) {
     d.inductance = req::provided_inductance(dr).value_or(
         L);
 
-    d.loadResistance = Vo * Vo / d.outputPower;
+    d.loadResistance = Vdel * Vdel / d.outputPower;   // load sits on the delivered rail (Vo fwd / Vin rev)
     d.outputCapacitance = cfg::get(d.config, "outputCapacitance", 100e-6);
     return d;
 }
@@ -103,23 +133,30 @@ json build_fsbb_tas(const FsbbDesign& d) {
         j["inputs"]["designRequirements"] = reqs.is_null()
             ? req::body_diode(d.inputVoltage, d.outputPower / d.inputVoltage) : reqs; return j; };
 
-    // Single inductor L (single-winding magnetic) sourced from the SINGLE FHA source — analytical_fsbb in
-    // SIMULTANEOUS mode: the 4-switch buck-boost mode this deck runs for EVERY Vin/Vo (charge phase +Vin
-    // across L for D·T, discharge −Vo for (1-D)·T, D = Vo/(Vin+Vo)), regular at Vo==Vin. Ratings pull from
-    // the Vin_min corner (max duty / max inductor current, mirrors Boost); the embedded excitation is the
-    // nominal-Vin operating point (same convention as the boost/pfc/vienna single-inductor conversions).
+    // Single inductor L (single-winding magnetic) sourced from the SINGLE FHA source. The transition-band
+    // waveform depends on the sub-mode (ABT #94): SPLIT_PWM (MKF default) phase-shifts the two legs for a
+    // strictly lower inductor ripple; "simultaneous" runs all four switches together (charge +Vin for D·T,
+    // discharge −Vo for (1−D)·T, D = Vo/(Vin+Vo)). Both are regular at Vo==Vin. BUCK/BOOST regions embed the
+    // per-region (buck-/boost-like) waveform. Ratings pull from the region's worst corner (buck: Vin_max =
+    // max ripple & block voltage; boost/bb: Vin_min = max duty & inductor current).
     const double fsw = d.switchingFrequency, L_H = d.inductance;
-    const double Vo = d.outputVoltage, Io = d.outputPower / Vo;
+    const double Vo = d.outputVoltage;
     namespace AN = Kirchhoff::analytical;
-    // Region-aware waveform source: BUCK/BOOST regions embed analytical_fsbb's per-region (buck-/boost-like)
-    // inductor waveform; the transition band embeds the 4-switch SIMULTANEOUS waveform. Ratings pull from
-    // the region's own worst corner (buck: Vin_max = max ripple & block voltage; boost/bb: Vin_min = max
-    // duty & inductor current).
-    const AN::FsbbMode kMode = (d.region == "buckBoost") ? AN::FsbbMode::SIMULTANEOUS
-                                                         : AN::FsbbMode::BUCK_BOOST_AUTO;
-    const double vinWorst = (d.region == "buck") ? d.inputVoltageMax : d.inputVoltageMin;
-    const MAS::OperatingPoint aopWorst = AN::analytical_fsbb(vinWorst,        Vo, Io, fsw, L_H, d.efficiency, kMode);
-    const MAS::OperatingPoint aopNom   = AN::analytical_fsbb(d.inputVoltage,  Vo, Io, fsw, L_H, d.efficiency, kMode);
+    // Source / delivered rails (ABT #94). Forward: source Vin, deliver Vo. Reverse (bidirectional): the Vout
+    // rail sources and delivers to Vin — the symmetric synchronous H-bridge with the two legs' roles swapped.
+    const double srcNom  = d.reverse ? Vo : d.inputVoltage;
+    const double delV    = d.reverse ? d.inputVoltage : Vo;
+    const double Idel    = d.outputPower / delV;              // current into the delivered (load) rail
+    // Reverse source (the Vout rail) is a single regulated value with no tolerance corner, so the reverse
+    // ratings pull from the nominal point; forward keeps the per-region worst input corner.
+    const double srcWorst = d.reverse ? srcNom
+                                      : ((d.region == "buck") ? d.inputVoltageMax : d.inputVoltageMin);
+    const bool splitBand = (d.region == "buckBoost" && d.transitionMode == "splitPwm");
+    const AN::FsbbMode kMode = (d.region == "buckBoost")
+        ? (splitBand ? AN::FsbbMode::SPLIT_PWM : AN::FsbbMode::SIMULTANEOUS)
+        : AN::FsbbMode::BUCK_BOOST_AUTO;
+    const MAS::OperatingPoint aopWorst = AN::analytical_fsbb(srcWorst, delV, Idel, fsw, L_H, d.efficiency, kMode, d.splitRatio);
+    const MAS::OperatingPoint aopNom   = AN::analytical_fsbb(srcNom,   delV, Idel, fsw, L_H, d.efficiency, kMode, d.splitRatio);
     const double IpkL  = AN::winding_current(aopWorst, 0, "peak");
     const double IrmsL = AN::winding_current(aopWorst, 0, "rms");
     json lind; lind["magnetic"] = json::object();
@@ -201,15 +238,24 @@ json build_fsbb_tas(const FsbbDesign& d) {
         conn("out", {pin("Cout", "1"), prt("in")}),
         conn("ret", {pin("Cout", "2"), prt("rtn")})});
 
+    // Source / delivered rails at the deck level (ABT #94). Forward: source Vin (with its tolerance), deliver
+    // Vo. Reverse: the Vout rail sources (a single regulated value) and the Vin rail is the delivered output;
+    // the assembler drives a DC source on the "input" external port and sizes the load on the "output" port,
+    // so flipping the external-port directions realises reverse power flow (same mechanism as the Ćuk/CLLC
+    // bidirectional). The output filter cap rides the delivered rail either way.
+    const double srcNomV = d.reverse ? Vo : d.inputVoltage;
+    const double srcMinV = d.reverse ? Vo : d.inputVoltageMin;
+    const double srcMaxV = d.reverse ? Vo : d.inputVoltageMax;
+    const double deliverV = d.reverse ? d.inputVoltage : Vo;
     json tas;
     json& dreq = tas["inputs"]["designRequirements"];
     dreq["efficiency"] = d.efficiency;
     dreq["inputType"] = "dc";
-    dreq["inputVoltage"] = {{"minimum", d.inputVoltageMin}, {"nominal", d.inputVoltage}, {"maximum", d.inputVoltageMax}};
+    dreq["inputVoltage"] = {{"minimum", srcMinV}, {"nominal", srcNomV}, {"maximum", srcMaxV}};
     dreq["switchingFrequency"]["nominal"] = d.switchingFrequency;
-    { json o; o["name"] = "out"; o["voltage"]["nominal"] = d.outputVoltage; o["regulation"] = "voltage";
+    { json o; o["name"] = "out"; o["voltage"]["nominal"] = deliverV; o["regulation"] = "voltage";
       dreq["outputs"] = json::array({o}); }
-    { json op; op["name"] = "full_load"; op["inputVoltage"] = d.inputVoltage; op["ambientTemperature"] = 25.0;
+    { json op; op["name"] = "full_load"; op["inputVoltage"] = srcNomV; op["ambientTemperature"] = 25.0;
       json o; o["name"] = "out"; o["power"] = d.outputPower; op["outputs"] = json::array({o});
       tas["inputs"]["operatingPoints"] = json::array({op}); }
 
@@ -217,44 +263,73 @@ json build_fsbb_tas(const FsbbDesign& d) {
         req::control_stage("pwmController"),
         pstage("fsbbCell", "switchingCell", cell, bind("vin", "dcBus"), bind("vout", "pulsatingDc")),
         pstage("filter", "outputFilter", filt, bind("in", "pulsatingDc"), bind("in", "dcOutput"))});
-    tas["topology"]["interStageConnections"] = json::array({
-        isc("Vin", "externalPort", "input", {sp("fsbbCell", "vin")}),
-        isc("GND", "externalPort", "input", {sp("fsbbCell", "gnd"), sp("filter", "rtn")}),
-        isc("Vout", "externalPort", "output", {sp("fsbbCell", "vout"), sp("filter", "in")})});
+    // Node names stay tied to the physical rails (Vin, Vout); only the source/load DIRECTION flips (ABT #94).
+    // Reverse: the Vout rail sources and the output filter cap moves onto the delivered Vin rail.
+    tas["topology"]["interStageConnections"] = d.reverse
+        ? json::array({
+            isc("Vout", "externalPort", "input",  {sp("fsbbCell", "vout")}),                   // Vout sources
+            isc("GND",  "externalPort", "input",  {sp("fsbbCell", "gnd"), sp("filter", "rtn")}),
+            isc("Vin",  "externalPort", "output", {sp("fsbbCell", "vin"), sp("filter", "in")})})  // Vin delivered
+        : json::array({
+            isc("Vin",  "externalPort", "input",  {sp("fsbbCell", "vin")}),
+            isc("GND",  "externalPort", "input",  {sp("fsbbCell", "gnd"), sp("filter", "rtn")}),
+            isc("Vout", "externalPort", "output", {sp("fsbbCell", "vout"), sp("filter", "in")})});
 
     json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
     tas["simulation"]["analyses"] = json::array({an});
     // Region-dependent gate drive (MKF FourSwitchBuckBoost). Each leg has a dead band on its complementary
-    // pair; body diodes carry the inductor current across the dead time.
-    //   BUCK  (Vin>Vo): only the buck leg switches (Q1 PWM @ D=Vo/Vin, Q2 complementary); the boost leg is
-    //                   static — Q3 ON connects sw2→vout, Q4 OFF. Inductor behaves like a buck output choke.
-    //   BOOST (Vo>Vin): only the boost leg switches (Q4 PWM @ D=1−Vin/Vo charges L, Q3 complementary); the
-    //                   buck leg is static — Q1 ON connects vin→sw1, Q2 OFF.
-    //   BUCK_BOOST    : all four commute (Q1+Q4 charge D, Q2+Q3 discharge) — the transition-band scheme.
+    // pair; body diodes carry the inductor current across the dead time. The four switches are addressed
+    // through leg-role ALIASES so forward and reverse share one code path (ABT #94): the "buck leg" is the
+    // SOURCE-side half-bridge, the "boost leg" the DELIVERED-side half-bridge. Forward source = Vin leg
+    // (Q1/Q2), delivered = Vout leg (Q3/Q4). Reverse source = Vout leg (Q3/Q4), delivered = Vin leg (Q1/Q2),
+    // so the roles swap. (bkHS drain=source rail, bkLS→gnd; bsHS drain=delivered rail, bsLS→gnd.)
+    //   BUCK  (Vsrc>Vdel): only the buck (source) leg switches (bkHS PWM @ D=Vdel/Vsrc, bkLS complementary);
+    //                      the boost leg is static — bsHS ON connects its node→delivered rail, bsLS OFF.
+    //   BOOST (Vdel>Vsrc): only the boost (delivered) leg switches (bsLS PWM @ D=1−Vsrc/Vdel charges L, bsHS
+    //                      complementary); the buck leg is static — bkHS ON connects source→its node, bkLS OFF.
+    //   BUCK_BOOST simultaneous: all four commute (bkHS+bsLS charge D, bkLS+bsHS discharge).
+    //   BUCK_BOOST splitPwm    : the two legs run at DIFFERENT phase-shifted duties — bkHS @ t2, bsLS @ t1
+    //                            (t1=κD charge, t2=Vdel(1−t1)/Vsrc), so the inductor sees a mild (Vsrc−Vdel)
+    //                            freewheel interval instead of the full swing → strictly lower ripple.
+    const char* bkHS = d.reverse ? "Q3" : "Q1";   // source-side high-side
+    const char* bkLS = d.reverse ? "Q4" : "Q2";   // source-side low-side
+    const char* bsHS = d.reverse ? "Q1" : "Q3";   // delivered-side high-side
+    const char* bsLS = d.reverse ? "Q2" : "Q4";   // delivered-side low-side
     const double dt = d.deadFraction, Dr = d.regionDuty;
     auto stim = [&](const char* sw, double duty, double phaseDeg) {
         json st; st["stage"] = "fsbbCell"; st["component"] = sw; st["signal"] = "gate";
         st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;
         st["waveform"]["dutyCycle"] = duty; st["waveform"]["phase"] = phaseDeg;
         return st; };
+    auto compl_of = [&](double duty) { return std::max(0.0, (1.0 - duty) - 2.0 * dt); };
     if (d.region == "buck") {
         tas["simulation"]["stimulus"] = json::array({
-            stim("Q1", Dr, 0.0),                                   // buck HS PWM
-            stim("Q2", std::max(0.0, (1.0 - Dr) - 2.0 * dt), (Dr + dt) * 360.0),  // buck LS complementary
-            stim("Q3", 1.0, 0.0),                                  // boost HS static ON (sw2->vout)
-            stim("Q4", 0.0, 0.0)});                                // boost LS static OFF
+            stim(bkHS, Dr, 0.0),                                   // buck HS PWM
+            stim(bkLS, compl_of(Dr), (Dr + dt) * 360.0),          // buck LS complementary
+            stim(bsHS, 1.0, 0.0),                                  // boost HS static ON (node->delivered)
+            stim(bsLS, 0.0, 0.0)});                               // boost LS static OFF
     } else if (d.region == "boost") {
         tas["simulation"]["stimulus"] = json::array({
-            stim("Q1", 1.0, 0.0),                                  // buck HS static ON (vin->sw1)
-            stim("Q2", 0.0, 0.0),                                  // buck LS static OFF
-            stim("Q4", Dr, 0.0),                                   // boost LS PWM (charge L)
-            stim("Q3", std::max(0.0, (1.0 - Dr) - 2.0 * dt), (Dr + dt) * 360.0)});  // boost HS complementary
-    } else {
+            stim(bkHS, 1.0, 0.0),                                  // buck HS static ON (source->node)
+            stim(bkLS, 0.0, 0.0),                                  // buck LS static OFF
+            stim(bsLS, Dr, 0.0),                                   // boost LS PWM (charge L)
+            stim(bsHS, compl_of(Dr), (Dr + dt) * 360.0)});        // boost HS complementary
+    } else if (splitBand) {
+        // Phase-shifted split PWM (MKF default). bkHS on [0,t2] (states 1+2), bsLS on [0,t1] (state 1 only);
+        // the complements bkLS/bsHS fill the rest with per-leg dead time. Charge (+Vsrc) for t1, mild
+        // freewheel (Vsrc−Vdel) for t2−t1, discharge (−Vdel) for 1−t2 — volt-second balanced onto Vdel.
+        const double t1 = d.splitBoostDuty, t2 = d.splitBuckDuty;
         tas["simulation"]["stimulus"] = json::array({
-            stim("Q1", Dr, 0.0),
-            stim("Q4", Dr, 0.0),
-            stim("Q2", std::max(0.0, (1.0 - Dr) - 2.0 * dt), (Dr + dt) * 360.0),
-            stim("Q3", std::max(0.0, (1.0 - Dr) - 2.0 * dt), (Dr + dt) * 360.0)});
+            stim(bkHS, t2, 0.0),
+            stim(bsLS, t1, 0.0),
+            stim(bkLS, compl_of(t2), (t2 + dt) * 360.0),
+            stim(bsHS, compl_of(t1), (t1 + dt) * 360.0)});
+    } else {   // buckBoost, simultaneous
+        tas["simulation"]["stimulus"] = json::array({
+            stim(bkHS, Dr, 0.0),
+            stim(bsLS, Dr, 0.0),
+            stim(bkLS, compl_of(Dr), (Dr + dt) * 360.0),
+            stim(bsHS, compl_of(Dr), (Dr + dt) * 360.0)});
     }
     req::finalize_control_seeds(tas, Topology::FOUR_SWITCH_BUCK_BOOST_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;

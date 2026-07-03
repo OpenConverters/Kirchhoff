@@ -1388,6 +1388,45 @@ TEST_CASE("Bidirectional Ćuk (V5): reverse power flow, Vout side sources (ABT #
     CHECK_THROWS(Kirchhoff::design_cuk(noSync));
 }
 
+// ABT #94: bidirectional FSBB — reverse power flow. config.powerFlowDirection="reverse" makes the Vout rail
+// source power and the Vin rail receive it. The four devices are already synchronous MOSFETs, so the H-bridge
+// conducts both ways: reverse is the SAME cell with the two legs' roles swapped (the Vout leg becomes the
+// source-side "buck" leg, the Vin leg the delivered-side "boost" leg). Here Vout=12 sources and the Vin rail
+// is boosted to ~24 V; we assert genuine reverse delivery + energy conservation (open-loop, no pinned setpoint).
+TEST_CASE("Bidirectional FSBB: reverse power flow, Vout side sources (ABT #94)",
+          "[equivalence][fsbb][reverse]") {
+    json in = json::parse(R"({ "designRequirements": { "efficiency": 0.95,
+        "inputVoltage": { "minimum": 24, "nominal": 24, "maximum": 24 },
+        "switchingFrequency": { "nominal": 100000 },
+        "outputs": [ { "name": "out", "voltage": { "nominal": 12 } } ] },
+        "operatingPoints": [ { "inputVoltage": 24, "outputs": [ { "power": 24 } ] } ],
+        "config": { "powerFlowDirection": "reverse", "outputCapacitance": 1e-5 } })");
+    // Small output cap (10 uF) so the delivered Vin rail settles inside run_reverse's 600-period window
+    // (τ = Co·Rload = 240 us ≈ 24 periods); the boost ripple is handled by the 1-period measurement average.
+    Kirchhoff::FsbbDesign d = Kirchhoff::design_fsbb(in);
+    CHECK(d.reverse);
+    CHECK(d.region == "boost");        // Vsrc(=Vo=12) < Vdel(=Vin=24) → boost from the source side
+    json tas = Kirchhoff::build_fsbb_tas(d);
+    const std::string deck = Kirchhoff::tas_to_ngspice(tas, PEAS::Fidelity(PEAS::Fidelity::Origin::REQUIREMENTS));
+    CHECK(deck.find("VVout Vout 0 DC 12") != std::string::npos);   // the Vout rail sources
+    CHECK(deck.find("VVin ") == std::string::npos);                // Vin is the delivered load, not a source
+
+    // src rail = Vout = 12; delivered rail = Vin = 24. run_reverse measures v(Vin) & i(VVout).
+    ReverseResult r = run_reverse(tas, 12.0, 24.0, 24.0, "fsbb_rev");
+    INFO("FSBB reverse: v(Vin)=" << r.vDelivered << " pSource=" << r.pSource << " pLoad=" << r.pLoad);
+    CHECK(r.vDelivered > 18.0);              // genuine reverse boost delivery to the Vin rail (open-loop droop OK)
+    CHECK(r.pLoad > 8.0);                     // real power flows Vout->Vin
+    CHECK(r.pSource >= r.pLoad * 0.85);       // energy conservation: the Vout source supplies the delivered power
+
+    // Config guards: bad direction / bad split ratio throw (no silent fallback).
+    json badDir = in; badDir["config"]["powerFlowDirection"] = "sideways";
+    CHECK_THROWS(Kirchhoff::design_fsbb(badDir));
+    json badSplit = in; badSplit["config"]["fsbbSplitRatio"] = 0.0;
+    CHECK_THROWS(Kirchhoff::design_fsbb(badSplit));
+    json interleaved = in; interleaved["config"]["phaseCount"] = 2;
+    CHECK_THROWS(Kirchhoff::design_fsbb(interleaved));   // interleaved not implemented — rejected, not silent
+}
+
 TEST_CASE("Coupled-inductor SEPIC/Cuk/Zeta: one 2-winding magnetic, delivers spec (ABT #89)",
           "[equivalence][coupled]") {
     struct Case { const char* name; json (*build)(const json&); double vout; };

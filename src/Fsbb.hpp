@@ -27,6 +27,17 @@ struct FsbbDesign {
     double inductance;      // single inductor L (worst-case of buck@Vinmax / boost@Vinmin)
     double loadResistance;
     double outputCapacitance;
+    // Transition-band (buckBoost region) sub-mode (ABT #94). "splitPwm" (MKF default, LM5176/LT8390):
+    // the buck and boost legs run at DIFFERENT, phase-shifted duties → lower inductor ripple.
+    // "simultaneous": all four switches commute together (D=Vo/(Vin+Vo)). Only affects the buckBoost region.
+    std::string transitionMode;   // "splitPwm" | "simultaneous"
+    double splitRatio;            // κ ∈ (0,1]: split-PWM boost-LS charge duty as a fraction of D (κ→1 ⇒ simultaneous)
+    double splitBoostDuty;        // t1 = κ·D — boost-leg low-side (Q4) charge duty (splitPwm/buckBoost only)
+    double splitBuckDuty;         // t2 = Vo·(1−t1)/Vin — buck-leg high-side (Q1) duty (splitPwm/buckBoost only)
+    // Bidirectional (ABT #94): config.powerFlowDirection="reverse" makes Vout the source and delivers to Vin
+    // (mirror of the Ćuk/CLLC pattern). All four devices are already synchronous MOSFETs, so the H-bridge
+    // conducts both ways; only the source/load direction, the duty target, and the gate mapping flip.
+    bool reverse;
     nlohmann::json config;
 };
 
