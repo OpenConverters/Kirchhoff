@@ -302,19 +302,35 @@ def _parse_deck(deck):
 # operating point, summarised peak/rms/avg/pp) to every PASSIVE component, so the realism gate + BOM read REAL
 # per-component stresses instead of only the magnetic's design excitation.
 #
-# What we emit (the reliable subset — every quantity is directly MEASURED, never a placeholder):
+# What we emit (every quantity is directly MEASURED or reconstructed from a measured waveform, never a placeholder):
 #   * VOLTAGE for every passive (capacitor / resistor / inductor): `.meas tran RMS|PP|MAX|MIN|AVG v(n1,n2)` —
 #     fully reliable for any node pair.
-#   * CURRENT for INDUCTORS/magnetic windings only: the winding current is continuous (no displacement spikes),
-#     so `.meas` on the savecurrents device vector `@l.<xinst>.<elem>[i]` gives a trustworthy RMS/AVG/peak.
-# What we deliberately OMIT (per the no-silent-wrong-value rule):
-#   * capacitor / resistor CURRENT. The instantaneous device current through a cap/resistor is dominated by
-#     switching-edge DISPLACEMENT spikes (measured e.g. 682 A peak-to-peak on a boost output cap whose real
-#     ripple RMS is ~4.8 A): the RMS/AVG are actually sane, but the PEAK/PP are numerical artefacts. Rather than
-#     emit a half-trustworthy current (a valid processedWaveform needs a peak), we emit NO current for these —
-#     never a 0 or a placeholder. (A series 0 V current sense per passive, or a rawfile parse, would give a
-#     clean full current; left as future work — see abt #35 path (b).)
+#   * CURRENT for INDUCTORS/magnetic windings: the winding current is continuous (no displacement spikes), so
+#     `.meas` on the savecurrents device vector `@l.<xinst>.<elem>[i]` gives a trustworthy RMS/AVG/peak.
+#   * CURRENT for CAPACITORS/RESISTORS: abt #97. The ngspice device current `@c[i]`/`@r[i]` carries the true
+#     ripple PLUS narrow switching-DISPLACEMENT delta-spikes at each switch edge (e.g. -684 A on a boost Cout
+#     whose real ripple is ~4.8 A rms). Those spikes span essentially zero real time and carry ~zero charge, so
+#     the time-integrated RMS/AVG measured by `.meas` are untouched — but the raw peak/peakToPeak are not. So we
+#     take RMS/AVG from `.meas` (reliable) and reconstruct the PEAK/PP from the `wrdata`-dumped current waveform
+#     after excising ONLY the delta-narrow spikes (see _clean_current_extrema): the result matches the analytical
+#     design ripple. When a current cannot be cleanly recovered (rms unmeasurable, too few samples, or the signal
+#     is dominated by spikes) we emit NO current for that passive — never a 0 or a placeholder.
 _LETTER_OF = {"magnetic": "L", "capacitor": "C", "resistor": "R"}
+
+# ── capacitor/resistor current de-spiking (abt #97) ───────────────────────────────────────────────────────
+# A ngspice cap/resistor DEVICE current reads the physical ripple plus numerical switching-displacement
+# delta-spikes at the switch edges. A sample is a *candidate* artifact when |i| exceeds _SPIKE_FACTOR * its
+# (spike-robust, .meas-integrated) rms — a threshold far above any real converter cap/resistor crest factor
+# (~1.4-4, up to ~5 for very discontinuous ripple) yet far below the artifact (crest ~20-140). A candidate
+# excursion is a genuine delta-spike (excised) ONLY if it also lasts < _DELTA_SPAN_FRAC of a switching period:
+# the numerical spikes span ~0 real time (measured 0.03 ns / 0.0007% of period), whereas a REAL high-crest
+# pulse — e.g. an RCD-clamp leakage dump — spans nanoseconds (~0.2% of period) and is KEPT (its peak is
+# physical). Each excised spike also takes a small _SPIKE_GUARD_FRAC time-guard on either side (its
+# sub-threshold shoulders). Values are deliberately conservative and validated on boost/buck/flyback.
+_SPIKE_FACTOR = 8.0
+_DELTA_SPAN_FRAC = 5.0e-4
+_SPIKE_GUARD_FRAC = 5.0e-3
+_MIN_CURRENT_SAMPLES = 16
 
 
 def _passive_elements(deck):
@@ -384,6 +400,46 @@ def _processed(stats):
     return p
 
 
+def _clean_current_extrema(samples, meas_rms, period):
+    """Reconstruct (minimum, maximum, peakToPeak) of a capacitor/resistor PHYSICAL current from its ngspice
+    device-current waveform, or None when it cannot be cleanly recovered (abt #97). `samples` is the
+    [(t, i), ...] time-series over the measurement window; `meas_rms` is the spike-robust, `.meas`-integrated
+    rms of the same current (which the delta-spikes do NOT corrupt).
+
+    The raw device current carries the real ripple plus numerical switching-displacement delta-spikes at each
+    switch edge. We excise ONLY the delta-narrow super-threshold excursions (a candidate is |i| > _SPIKE_FACTOR
+    * rms lasting < _DELTA_SPAN_FRAC of a period, i.e. carrying ~zero charge), together with a small time-guard
+    on each side for its sub-threshold shoulders; genuinely time-extended high-crest pulses (e.g. an RCD-clamp
+    dump) are KEPT because their peak is physical. The peak/peakToPeak then come from the surviving samples.
+    Returns None (=> emit no current, never a placeholder) if the rms is unmeasurable, there are too few
+    samples, or de-spiking leaves too few survivors (a signal dominated by spikes we cannot trust)."""
+    if not meas_rms or abs(meas_rms) <= 0.0 or len(samples) < _MIN_CURRENT_SAMPLES:
+        return None
+    thr = _SPIKE_FACTOR * abs(meas_rms)
+    guard = _SPIKE_GUARD_FRAC * period
+    span_max = _DELTA_SPAN_FRAC * period
+    n = len(samples)
+    excise = [False] * n
+    i = 0
+    while i < n:
+        if abs(samples[i][1]) <= thr:
+            i += 1
+            continue
+        j = i                                     # contiguous run of super-threshold samples (one excursion)
+        while j + 1 < n and abs(samples[j + 1][1]) > thr:
+            j += 1
+        if samples[j][0] - samples[i][0] <= span_max:    # delta-narrow => numerical displacement spike -> excise
+            lo, hi = samples[i][0] - guard, samples[j][0] + guard
+            for k in range(n):
+                if lo <= samples[k][0] <= hi:
+                    excise[k] = True
+        i = j + 1                                 # (a time-extended excursion is a real pulse -> left intact)
+    surv = [v for (t, v), bad in zip(samples, excise) if not bad]
+    if len(surv) < _MIN_CURRENT_SAMPLES:
+        return None
+    return min(surv), max(surv), max(surv) - min(surv)
+
+
 def attach_simulated_excitations(tas, fidelity, tag="attach"):
     """Re-run the (regulated) deck once and attach a SIMULATED operating point to every passive component, in
     place on `tas`. The control field must already be set to the regulated value. Returns {component_name: op}
@@ -413,6 +469,7 @@ def attach_simulated_excitations(tas, fidelity, tag="attach"):
         return {}
     frm, to = settle - period, settle
     ctrl = ["run"]
+    cr_index = []                             # (i, element) for each cap/resistor whose current we de-spike
     # `meas ... v(a,b)` FAILS when a node is subckt-internal (hierarchical) — ngspice only accepts a single
     # saved vector there. So materialise each component's terminal-voltage DIFFERENTIAL with a `let` first
     # (v(n1)-v(n2), or v(n1) to ground), then meas that vector. Inductor current reads the savecurrents device
@@ -425,6 +482,18 @@ def attach_simulated_excitations(tas, fidelity, tag="attach"):
         if e["letter"] == "L":                # inductor current: continuous, no displacement spikes -> reliable
             for suf, typ in (("irms", "rms"), ("ipp", "pp"), ("imax", "max"), ("imin", "min"), ("iavg", "avg")):
                 ctrl.append(f"meas tran m_{i}_{suf} {typ} {e['dev_i']} from={frm:.12g} to={to:.12g}")
+        else:                                 # cap/resistor current (abt #97): rms/avg from .meas (spike-robust,
+            for suf, typ in (("irms", "rms"), ("iavg", "avg")):   # time-integrated); peak/pp come from the
+                ctrl.append(f"meas tran m_{i}_{suf} {typ} {e['dev_i']} from={frm:.12g} to={to:.12g}")  # waveform
+            cr_index.append((i, e))
+    # Dump the cap/resistor device currents so we can reconstruct a de-spiked peak/peakToPeak in Python. wrdata
+    # writes an interleaved (time,value) column pair per vector; we stream-read only the [frm,to] window below.
+    wf_path = None
+    if cr_index:
+        wf = tempfile.NamedTemporaryFile("w", suffix=f"_{tag}.wrdata", delete=False)
+        wf.close()
+        wf_path = wf.name
+        ctrl.append("wrdata " + wf_path + " " + " ".join(e["dev_i"] for _i, e in cr_index))
     deck += "\n.control\n" + "\n".join(ctrl) + "\n.endc\n.end\n"
     with tempfile.NamedTemporaryFile("w", suffix=f"_{tag}.cir", delete=False) as f:
         f.write(deck)
@@ -434,6 +503,27 @@ def attach_simulated_excitations(tas, fidelity, tag="attach"):
         text = out.stdout + out.stderr
     finally:
         os.unlink(path)
+
+    # Stream the wrdata window into per-element current time-series {element_index: [(t, i), ...]} then discard.
+    cr_curves = {}
+    if wf_path:
+        ncr = len(cr_index)
+        try:
+            with open(wf_path) as fh:
+                for line in fh:
+                    parts = line.split()
+                    if len(parts) < 2 * ncr:
+                        continue
+                    try:
+                        vals = [float(x) for x in parts[:2 * ncr]]
+                    except ValueError:        # a wrdata header/blank line (numbers only in the data rows)
+                        continue
+                    for col, (idx, _e) in enumerate(cr_index):
+                        t = vals[2 * col]
+                        if frm <= t <= to:
+                            cr_curves.setdefault(idx, []).append((t, vals[2 * col + 1]))
+        finally:
+            os.unlink(wf_path)
 
     def grab(name):
         m = re.search(rf"\b{name}\s*=\s*([-\d.eE+]+)", text)
@@ -452,6 +542,12 @@ def attach_simulated_excitations(tas, fidelity, tag="attach"):
             if any(val is None for val in cur.values()):
                 raise ValueError(f"attach_simulated_excitations: no simulated current for inductor "
                                  f"{e['name']} ({e['dev_i']}) — savecurrents/device-name bug")
+        else:                                 # cap/resistor (abt #97): rms/avg from .meas, peak/pp de-spiked from
+            irms, iavg = grab(f"m_{i}_irms"), grab(f"m_{i}_iavg")   # the waveform; omit (no placeholder) if the
+            ext = _clean_current_extrema(cr_curves.get(i, []), irms, period)   # current can't be cleanly recovered
+            if ext is not None and iavg is not None:
+                imin, imax, ipp = ext
+                cur = {"rms": irms, "avg": iavg, "max": imax, "min": imin, "pp": ipp}
         per_comp.setdefault(owner, []).append((e, v, cur))
 
     attached = {}
@@ -476,9 +572,11 @@ def attach_simulated_excitations(tas, fidelity, tag="attach"):
             op = {"name": "simulated", "conditions": {"ambientTemperature": temp},
                   "excitationsPerWinding": windings}
         else:                                 # two-terminal (capacitor / resistor): a single excitation
-            e, v, _cur = max(elems, key=lambda t: _sanitize(owner) == t[0]["body"])
-            op = {"name": "simulated", "conditions": {"ambientTemperature": temp},
-                  "excitation": {"frequency": fsw, "voltage": {"processed": _processed(v)}}}
+            e, v, cur = max(elems, key=lambda t: _sanitize(owner) == t[0]["body"])
+            exc = {"frequency": fsw, "voltage": {"processed": _processed(v)}}
+            if cur is not None:               # de-spiked cap/resistor current (abt #97), when cleanly recovered
+                exc["current"] = {"processed": _processed(cur)}
+            op = {"name": "simulated", "conditions": {"ambientTemperature": temp}, "excitation": exc}
         # Simulated op-point lands at operatingPoints[0] (what the realism gate / BOM read); any DESIGN op-points
         # are preserved after it. Re-attachment replaces a prior 'simulated' op rather than stacking duplicates.
         data["inputs"]["operatingPoints"] = [op] + [o for o in prior if o.get("name") != "simulated"]

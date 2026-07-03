@@ -72,6 +72,20 @@ def test_regulate_duty_boost():       # ABT #28's example topology
     eta = _eta_boost(12, 24, 108)
     assert abs(r["efficiency"] - eta) <= 0.04, f"boost eff sim {r['efficiency']:.3f} vs analytical {eta:.3f}"
 
+    # ABT #97: the simulated Cout current must be the de-spiked PHYSICAL ripple (rms ~ the analytical output-cap
+    # ripple), NOT the raw switching-DISPLACEMENT artifact (hundreds of A peak-to-peak on this ~4.8 A-rms cap).
+    cout = r["component_excitations"]["Cout"]["excitation"]
+    assert "current" in cout, "boost Cout emitted no simulated current (abt #97 de-spiking regressed?)"
+    ic = cout["current"]["processed"]
+    d = 1.0 - 12.0 / 24.0                                # boost duty at the regulated point (~0.5)
+    iout = 108.0 / 24.0                                  # output current 4.5 A
+    ana_rms = iout * math.sqrt(d / (1.0 - d))           # CCM output-cap ripple rms ~ 4.5 A (ignores L-ripple)
+    assert 0.7 * ana_rms <= ic["rms"] <= 1.6 * ana_rms, \
+        f"boost Cout current rms {ic['rms']:.3f} A implausible vs analytical {ana_rms:.3f} A"
+    # A clean physical peak is a small multiple of the ripple rms; the displacement artifact was ~140x it.
+    assert ic["peak"] <= 8.0 * ic["rms"] and ic["peak"] < 40.0, \
+        f"boost Cout current peak {ic['peak']:.1f} A is a switching-displacement artifact, not the real ripple"
+
 
 def test_regulate_phase_psfb():
     _check(PyKirchhoff.design_psfb_tas, "psfb", 400, 12, 600, 100000)
