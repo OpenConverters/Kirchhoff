@@ -4,6 +4,7 @@
 #include "ConverterAnalytical.hpp"   // single FHA source: analytical_zeta + excitations_processed/winding_current
 #include "KirchhoffConfig.hpp"
 #include <cmath>
+#include <algorithm>
 #include <vector>
 
 namespace Kirchhoff {
@@ -41,7 +42,11 @@ ZetaDesign design_zeta(const json& tasInputs) {
     d.inputVoltageMax = vinMax;
 
     const double iout = d.outputPower / d.outputVoltage, fsw = d.switchingFrequency;
-    d.diodeDrop = req::dideal_diode_drop(d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
+    // MKF Zeta variant: synchronous rectifier (MOSFET replacing the catch diode D1), complementary to Q1.
+    d.synchronousRectifier = (cfg::get_str(d.config, "rectifier", "diode") == std::string("synchronous"));
+    d.deadFraction = cfg::get(d.config, "deadTimeFraction", 0.01);
+    // Sync MOSFET has no forward drop → size duty with Vd=0 so the open-loop deck lands on target.
+    d.diodeDrop = d.synchronousRectifier ? 0.0 : req::dideal_diode_drop(d.outputPower / d.outputVoltage);
     d.dutyCycle = duty(d.inputVoltage, d.outputVoltage, d.diodeDrop, d.efficiency);
 
     // L1 sized at the worst corner (max Vin) for its current-ripple target (MKF).
@@ -121,21 +126,44 @@ json build_zeta_tas(const ZetaDesign& d) {
     json md = diode();
     md["inputs"]["designRequirements"] = req::diode(vSwingRating / cfg::v_derate_diode(d.config), iout / 0.7,
                                                     (vSwingRating < 100.0) ? 0.6 : 1.2, 0.05 / fsw);
+    // Synchronous rectifier: a low-side MOSFET Q2 (channel node_X->gnd, mirroring the catch diode) + its
+    // body diode D2, driven complementary to Q1 (MKF Zeta synchronous variant).
+    json syncFet = mosfet();
+    syncFet["inputs"]["designRequirements"] = req::mosfet("synchronousRectifier",
+        vSwingRating / cfg::v_derate_mosfet(d.config), iout + IL1avg,
+        cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IswRms * IswRms), 125.0);
+    json bodyD = diode();
+    bodyD["inputs"]["designRequirements"] = req::body_diode(vSwingRating / cfg::v_derate_diode(d.config), iout / 0.7);
 
     // Zeta cell — high-side switch, non-inverting. D1 catch: anode at gnd, cathode at node_X.
     json cell; cell["name"] = "zeta-cell";
-    cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate")});
-    cell["components"] = json::array({comp("Q1", mq), comp("L1", L1), comp("Cc", cc),
-                                      comp("D1", md), comp("L2", L2)});
-    cell["connections"] = json::array({
-        conn("vin_net",  {pin("Q1", "drain"), prt("vin")}),
-        // node_SW: switch -> L1 (to gnd) + coupling cap
-        conn("node_sw",  {pin("Q1", "source"), pin("L1", "primary_start"), pin("Cc", "1")}),
-        conn("gnd_net",  {pin("L1", "primary_end"), pin("D1", "anode"), prt("gnd")}),
-        // node_X: coupling cap -> catch-diode cathode + output inductor
-        conn("node_x",   {pin("Cc", "2"), pin("D1", "cathode"), pin("L2", "primary_start")}),
-        conn("vout_net", {pin("L2", "primary_end"), prt("vout")}),
-        conn("gate_net", {pin("Q1", "gate"), prt("gate")})});
+    if (d.synchronousRectifier) {
+        cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate"), port("gate2")});
+        cell["components"] = json::array({comp("Q1", mq), comp("L1", L1), comp("Cc", cc),
+                                          comp("Q2", syncFet), comp("D2", bodyD), comp("L2", L2)});
+        cell["connections"] = json::array({
+            conn("vin_net",  {pin("Q1", "drain"), prt("vin")}),
+            conn("node_sw",  {pin("Q1", "source"), pin("L1", "primary_start"), pin("Cc", "1")}),
+            // catch node -> gnd: sync MOSFET drain at node_X, source at gnd (body-diode anode=gnd,cathode=node_X)
+            conn("gnd_net",  {pin("L1", "primary_end"), pin("Q2", "source"), pin("D2", "anode"), prt("gnd")}),
+            conn("node_x",   {pin("Cc", "2"), pin("Q2", "drain"), pin("D2", "cathode"), pin("L2", "primary_start")}),
+            conn("vout_net", {pin("L2", "primary_end"), prt("vout")}),
+            conn("gate_net", {pin("Q1", "gate"), prt("gate")}),
+            conn("gate2_net",{pin("Q2", "gate"), prt("gate2")})});
+    } else {
+        cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate")});
+        cell["components"] = json::array({comp("Q1", mq), comp("L1", L1), comp("Cc", cc),
+                                          comp("D1", md), comp("L2", L2)});
+        cell["connections"] = json::array({
+            conn("vin_net",  {pin("Q1", "drain"), prt("vin")}),
+            // node_SW: switch -> L1 (to gnd) + coupling cap
+            conn("node_sw",  {pin("Q1", "source"), pin("L1", "primary_start"), pin("Cc", "1")}),
+            conn("gnd_net",  {pin("L1", "primary_end"), pin("D1", "anode"), prt("gnd")}),
+            // node_X: coupling cap -> catch-diode cathode + output inductor
+            conn("node_x",   {pin("Cc", "2"), pin("D1", "cathode"), pin("L2", "primary_start")}),
+            conn("vout_net", {pin("L2", "primary_end"), prt("vout")}),
+            conn("gate_net", {pin("Q1", "gate"), prt("gate")})});
+    }
 
     json filt; filt["name"] = "output-filter";
     filt["ports"] = json::array({port("in"), port("rtn")});
@@ -171,6 +199,14 @@ json build_zeta_tas(const ZetaDesign& d) {
     st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;
     st["waveform"]["dutyCycle"] = d.dutyCycle;
     tas["simulation"]["stimulus"] = json::array({st});
+    if (d.synchronousRectifier) {
+        const double dt = d.deadFraction;
+        json st2; st2["stage"] = "zetaCell"; st2["component"] = "Q2"; st2["signal"] = "gate";
+        st2["waveform"]["type"] = "pwm"; st2["waveform"]["frequency"] = d.switchingFrequency;
+        st2["waveform"]["dutyCycle"] = std::max(0.0, (1.0 - d.dutyCycle) - 2.0 * dt);
+        st2["waveform"]["phase"] = (d.dutyCycle + dt) * 360.0;
+        tas["simulation"]["stimulus"].push_back(st2);
+    }
     req::finalize_control_seeds(tas, Topology::ZETA_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }

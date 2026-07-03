@@ -243,3 +243,26 @@ TEST_CASE("PtP: DAB EPS/DPS deliver spec through inner phase shift", "[ptp][dab]
         CHECK(s.vout == Catch::Approx(Vout).epsilon(0.12));   // open-loop within 12% of the 24 V target
     }
 }
+
+TEST_CASE("PtP: Sepic synchronous rectifier delivers spec", "[ptp][sepic][syncrect]") {
+    // MKF Sepic V4 variant: config.rectifier="synchronous" swaps D1 for a low-side sync MOSFET Q2 driven
+    // complementary to Q1. Verify the emitted deck converges and lands on the target output (proves the Q2
+    // orientation + complementary gate timing are correct), and that a diode-rectifier build still works.
+    if (!Kirchhoff::ngspice_in_process_available()) { WARN("no libngspice — skipping"); return; }
+    for (const char* rect : {"diode", "synchronous"}) {
+        INFO("rectifier=" << rect);
+        json sepicSpec = spec_for(12, 5, 5, 500000);
+        sepicSpec["config"]["rectifier"] = rect;
+        SimResult sp = run_spice(Kirchhoff::build_sepic_tas(Kirchhoff::design_sepic(sepicSpec)), 500000, (5.0 * 5.0 / 5.0) * 1e-4);
+        INFO("sepic Vout=" << sp.vout);
+        REQUIRE(sp.ok);
+        CHECK(sp.vout == Catch::Approx(5.0).epsilon(0.12));
+
+        json zetaSpec = spec_for(12, 5, 5, 500000);
+        zetaSpec["config"]["rectifier"] = rect;
+        SimResult zt = run_spice(Kirchhoff::build_zeta_tas(Kirchhoff::design_zeta(zetaSpec)), 500000, (5.0 * 5.0 / 5.0) * 1e-4);
+        INFO("zeta Vout=" << zt.vout);
+        REQUIRE(zt.ok);
+        CHECK(zt.vout == Catch::Approx(5.0).epsilon(0.12));
+    }
+}

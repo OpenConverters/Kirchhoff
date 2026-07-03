@@ -18,6 +18,8 @@ struct ZetaDesign {
     double couplingCapacitance;  // Cc (F), holds ~Vo
     double loadResistance;
     double outputCapacitance;
+    bool synchronousRectifier = false;   // config.rectifier=="synchronous": swap catch diode D1 for a MOSFET
+    double deadFraction = 0.01;
     nlohmann::json config;
 };
 

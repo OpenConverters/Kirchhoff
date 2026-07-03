@@ -4,6 +4,7 @@
 #include "ConverterAnalytical.hpp"   // single FHA source: analytical_sepic + excitations_processed/winding_current
 #include "KirchhoffConfig.hpp"
 #include <cmath>
+#include <algorithm>
 #include <vector>
 
 namespace Kirchhoff {
@@ -42,7 +43,12 @@ SepicDesign design_sepic(const json& tasInputs) {
     d.inputVoltageMax = vinMax;
 
     const double iout = d.outputPower / d.outputVoltage, fsw = d.switchingFrequency;
-    d.diodeDrop = req::dideal_diode_drop(d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
+    // MKF Sepic variant: synchronous rectifier (low-side MOSFET replacing D1), driven complementary to Q1.
+    d.synchronousRectifier = (cfg::get_str(d.config, "rectifier", "diode") == std::string("synchronous"));
+    d.deadFraction = cfg::get(d.config, "deadTimeFraction", 0.01);
+    // A synchronous MOSFET rectifier has no forward drop, so the duty (and hence Vout) must be sized with
+    // Vd=0 — otherwise the open-loop deck over-delivers by ~Vd/Vout (Buck does the same).
+    d.diodeDrop = d.synchronousRectifier ? 0.0 : req::dideal_diode_drop(d.outputPower / d.outputVoltage);
     // Operating duty (deck/stimulus) at the nominal input.
     d.dutyCycle = duty(d.inputVoltage, d.outputVoltage, d.diodeDrop, d.efficiency);
 
@@ -123,20 +129,43 @@ json build_sepic_tas(const SepicDesign& d) {
     json md = diode();
     md["inputs"]["designRequirements"] = req::diode(vSwingRating / cfg::v_derate_diode(d.config), iout / 0.7,
                                                     (vSwingRating < 100.0) ? 0.6 : 1.2, 0.05 / fsw);
+    // Synchronous rectifier: a MOSFET Q2 (channel nodeB->vout) + its body diode D2, driven complementary
+    // to Q1. Carries the rectifier current through I^2*Rds instead of a diode's I*Vf (MKF Sepic V4).
+    json syncFet = mosfet();
+    syncFet["inputs"]["designRequirements"] = req::mosfet("synchronousRectifier",
+        vSwingRating / cfg::v_derate_mosfet(d.config), iout + IL1avg,
+        cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IswRms * IswRms), 125.0);
+    json bodyD = diode();
+    bodyD["inputs"]["designRequirements"] = req::body_diode(vSwingRating / cfg::v_derate_diode(d.config), iout / 0.7);
 
     json cell; cell["name"] = "sepic-cell";
-    cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate")});
-    cell["components"] = json::array({comp("L1", L1), comp("Q1", mq), comp("Cs", cs),
-                                      comp("L2", L2), comp("D1", md)});
-    cell["connections"] = json::array({
-        conn("vin_net", {pin("L1", "primary_start"), prt("vin")}),
-        // node A: L1 -> switch + coupling cap
-        conn("nodeA",   {pin("L1", "primary_end"), pin("Q1", "drain"), pin("Cs", "1")}),
-        // node B: coupling cap -> L2 + rectifier
-        conn("nodeB",   {pin("Cs", "2"), pin("L2", "primary_end"), pin("D1", "anode")}),
-        conn("gnd_net", {pin("Q1", "source"), pin("L2", "primary_start"), prt("gnd")}),
-        conn("vout_net",{pin("D1", "cathode"), prt("vout")}),
-        conn("gate_net",{pin("Q1", "gate"), prt("gate")})});
+    if (d.synchronousRectifier) {
+        cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate"), port("gate2")});
+        cell["components"] = json::array({comp("L1", L1), comp("Q1", mq), comp("Cs", cs),
+                                          comp("L2", L2), comp("Q2", syncFet), comp("D2", bodyD)});
+        cell["connections"] = json::array({
+            conn("vin_net", {pin("L1", "primary_start"), prt("vin")}),
+            conn("nodeA",   {pin("L1", "primary_end"), pin("Q1", "drain"), pin("Cs", "1")}),
+            // node B: coupling cap -> L2 + sync rectifier source (+ body-diode anode)
+            conn("nodeB",   {pin("Cs", "2"), pin("L2", "primary_end"), pin("Q2", "source"), pin("D2", "anode")}),
+            conn("gnd_net", {pin("Q1", "source"), pin("L2", "primary_start"), prt("gnd")}),
+            conn("vout_net",{pin("Q2", "drain"), pin("D2", "cathode"), prt("vout")}),
+            conn("gate_net",{pin("Q1", "gate"), prt("gate")}),
+            conn("gate2_net",{pin("Q2", "gate"), prt("gate2")})});
+    } else {
+        cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate")});
+        cell["components"] = json::array({comp("L1", L1), comp("Q1", mq), comp("Cs", cs),
+                                          comp("L2", L2), comp("D1", md)});
+        cell["connections"] = json::array({
+            conn("vin_net", {pin("L1", "primary_start"), prt("vin")}),
+            // node A: L1 -> switch + coupling cap
+            conn("nodeA",   {pin("L1", "primary_end"), pin("Q1", "drain"), pin("Cs", "1")}),
+            // node B: coupling cap -> L2 + rectifier
+            conn("nodeB",   {pin("Cs", "2"), pin("L2", "primary_end"), pin("D1", "anode")}),
+            conn("gnd_net", {pin("Q1", "source"), pin("L2", "primary_start"), prt("gnd")}),
+            conn("vout_net",{pin("D1", "cathode"), prt("vout")}),
+            conn("gate_net",{pin("Q1", "gate"), prt("gate")})});
+    }
 
     json filt; filt["name"] = "output-filter";
     filt["ports"] = json::array({port("in"), port("rtn")});
@@ -172,6 +201,16 @@ json build_sepic_tas(const SepicDesign& d) {
     st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;
     st["waveform"]["dutyCycle"] = d.dutyCycle;
     tas["simulation"]["stimulus"] = json::array({st});
+    if (d.synchronousRectifier) {
+        // Q2 (sync rectifier) drives complementary to Q1 with a dead band on each edge; body diode D2 carries
+        // the current across the dead time. duty = (1-D) - 2*dt, phased to start after Q1 turns off.
+        const double dt = d.deadFraction;
+        json st2; st2["stage"] = "sepicCell"; st2["component"] = "Q2"; st2["signal"] = "gate";
+        st2["waveform"]["type"] = "pwm"; st2["waveform"]["frequency"] = d.switchingFrequency;
+        st2["waveform"]["dutyCycle"] = std::max(0.0, (1.0 - d.dutyCycle) - 2.0 * dt);
+        st2["waveform"]["phase"] = (d.dutyCycle + dt) * 360.0;
+        tas["simulation"]["stimulus"].push_back(st2);
+    }
     req::finalize_control_seeds(tas, Topology::SEPIC_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }

@@ -18,6 +18,8 @@ struct SepicDesign {
     double couplingCapacitance;  // Cs (F)
     double loadResistance;
     double outputCapacitance;
+    bool synchronousRectifier = false;   // config.rectifier=="synchronous": swap D1 for a low-side sync MOSFET
+    double deadFraction = 0.01;          // dead-time fraction of the period for the complementary drive
     nlohmann::json config;
 };
 
