@@ -30,7 +30,7 @@ export function extractBom(tas) {
       rows.push({
         ref: comp.name,
         kind,
-        stage: stage.name,
+        stage: sectionOf(kind, req, comp.name),
         role: stage.role ?? '',
         value: headlineValue(kind, req),
         rating: headlineRating(kind, req),
@@ -40,6 +40,57 @@ export function extractBom(tas) {
     }
   }
   return rows
+}
+
+// Display-only functional section for the BOM "Stage" column (ABT #82). The single-cell topologies
+// (llc/src/cllc/clllc/dab) build ONE monolithic switching-cell stage, so tas.topology.stages[].name lumps
+// every power component under the same "*Cell" name. Rather than re-partition the (delicate) resonant
+// decks, we derive the section per-component from its authoritative req.role, falling back to a refdes
+// heuristic for the components the engine leaves un-roled (rectifier diodes, resonant Lr/Cr, output cap,
+// numerical snubber caps, split caps). This is purely cosmetic — the TAS itself is untouched.
+const ROLE_SECTION = {
+  mainSwitch: 'Switch',
+  synchronousRectifier: 'Rectifier',
+  resonant: 'Tank',
+  snubber: 'Snubber',
+  damping: 'Snubber',
+  balancing: 'Balancing',
+  bleed: 'Bias',
+  control: 'Control',
+  isolation: 'Isolation',
+  inputFilter: 'Input filter',
+  outputFilter: 'Output filter',
+}
+function sectionOf(kind, req, ref) {
+  if (req.role && ROLE_SECTION[req.role]) return ROLE_SECTION[req.role]
+  const r = ref ?? ''
+  switch (kind) {
+    case 'Controller': return 'Control'
+    case 'Transformer': return 'Transformer'
+    case 'Inductor':
+      if (/^L[rs]/i.test(r)) return 'Tank'            // Lr/Lr1/Lr2/Ls — resonant / series inductor
+      if (/^L(o|out)/i.test(r)) return 'Output filter' // Lo/Lo1/Lo2/Lout
+      if (/^Lin/i.test(r)) return 'Input filter'
+      return 'Filter'
+    case 'MOSFET':
+      return /^SR/i.test(r) ? 'Rectifier' : 'Switch'
+    case 'Diode':
+      return 'Rectifier'
+    case 'Capacitor':
+      if (/^Cr/i.test(r)) return 'Tank'                // Cr/Cr1/Cr2 — resonant cap
+      if (/^C(sn|sw)/i.test(r)) return 'Snubber'       // Csn*/Csw* — numerical/RC snubber caps
+      if (/^Cb/i.test(r)) return 'DC block'            // half-bridge DC-blocking cap
+      if (/^(Chi|Clo|Cohi|Colo|Cs[HL]|Cp|Cn)/i.test(r)) return 'Balancing' // split / balancing caps
+      if (/^C(out|o$|o[0-9])/i.test(r)) return 'Output filter'
+      if (/^Cin/i.test(r)) return 'Input filter'
+      return 'Filter'
+    case 'Resistor':
+      if (/^R(sn|dmp|damp)/i.test(r)) return 'Snubber' // snubber / damping resistors
+      if (/^Rsense/i.test(r)) return 'Sense'
+      return 'Bias'
+    default:
+      return 'Other'
+  }
 }
 
 function nomOf(x) {
