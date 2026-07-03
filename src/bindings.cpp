@@ -10,6 +10,7 @@
 #include "Cmc.hpp"           // common-mode choke — component designer (MAS::Inputs, no TAS)
 #include "Dmc.hpp"           // differential-mode choke — component designer + LC propose
 #include "CurrentTransformer.hpp"  // current transformer — component designer
+#include "ConverterExtract.hpp"  // main_magnetic_inputs — the adviser's MAS::Inputs from a TAS
 #include "JsonUtil.hpp"      // strip_nulls — schema-valid serialization of typed MAS objects
 
 namespace py = pybind11;
@@ -88,6 +89,19 @@ assembly/simulate steps (tas_to_ngspice / tas_to_ltspice) are topology-agnostic.
           "Assemble any TAS topology document into a runnable ngspice deck (string).\n"
           "fidelity selects the component models, e.g. {\"origin\": \"REQUIREMENTS\"} for an\n"
           "ideal-component deck (other origins: \"DATASHEET\", \"MKF_MODEL\").");
+
+    // --- the adviser's magnetic inputs from an assembled TAS: MAS::Inputs (designRequirements +
+    //     operatingPoints) for the main magnetic. Feed to PyOpenMagnetics.calculate_advised_magnetics[_fast]
+    //     to get a designed core+coil. This is the KH-native replacement for MKF's deleted
+    //     design_magnetics_from_converter (design_<topo>_tas -> main_magnetic_inputs -> adviser). ---
+    m.def("main_magnetic_inputs",
+          [](const json& tas) {
+              return Kirchhoff::strip_nulls(json(Kirchhoff::main_magnetic_inputs(tas)));
+          },
+          py::arg("tas"),
+          "Extract the main magnetic's MAS Inputs (designRequirements + operatingPoints) from an\n"
+          "assembled TAS document (any design_<topo>_tas result). Pass the result to\n"
+          "PyOpenMagnetics.calculate_advised_magnetics_fast(inputs, N, mode) to design a core+coil.");
 
     // --- common-mode choke: a COMPONENT designer, not a topology (no TAS document) ---
     m.def("design_cmc_inputs",

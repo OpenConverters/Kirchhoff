@@ -185,12 +185,16 @@ def test_saturation_uses_operating_not_peak_current():
 def test_exporter_isat_mismatch_via_model():
     # The cross-check: with a REAL core, judge from calculate_saturation_current and CATCH a subcircuit whose
     # emitted Isat disagrees (the ABT #33 self-check). Needs PyOM.
+    #
+    # The magnetic seed comes from Kirchhoff's OWN magnetic-design path (design_<topo>_tas ->
+    # main_magnetic_inputs -> PyOM.calculate_advised_magnetics_fast), NOT MKF's deleted
+    # design_magnetics_from_converter (removed in the KH cutover; ABT #73/#98). KH designs the boost's main
+    # inductor inputs; PyOM turns them into a real core+coil we can compute a model Isat for.
     import pytest
     pyom = pytest.importorskip("PyOpenMagnetics")
-    conv = {"inputVoltage": {"nominal": 12.0}, "efficiency": 0.9, "diodeVoltageDrop": 0.7, "currentRippleRatio": 0.4,
-            "operatingPoints": [{"inputVoltage": 12.0, "switchingFrequency": 100000.0, "ambientTemperature": 25.0,
-                                 "currentRippleRatio": 0.4, "outputVoltages": [24.0], "outputCurrents": [1.0]}]}
-    mag = pyom.design_magnetics_from_converter("boost", conv, 1, "available cores", False, None)["data"][0]["mas"]["magnetic"]
+    boost_tas = PyKirchhoff.design_boost_tas(_BOOST_SPEC)
+    inputs = pyom.process_inputs(PyKirchhoff.main_magnetic_inputs(boost_tas))
+    mag = pyom.calculate_advised_magnetics_fast(inputs, 1, "available cores")["data"][0]["mas"]["magnetic"]
     isat = pyom.calculate_saturation_current(mag, 25.0)
     iop, bogus = 0.4 * isat, 0.1 * isat
     # subcircuit Isat ~10x low, operating below the REAL Isat -> exporter mismatch (the core is fine)
