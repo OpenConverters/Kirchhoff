@@ -58,35 +58,61 @@ AhbDesign design_ahb(const json& tasInputs) {
     const double D = cfg::get(d.config, "operatingDutyCycle", kDuty);
     d.dutyCycle = D;
     d.deadFraction = cfg::get(d.config, "deadTimeFraction", kDeadFrac);
-    // Rectifier variant (FB default; AHB's natural fourth MAS variant is AHB_FLYBACK, not voltage-doubler).
-    d.rectifierType = parse_rectifier_type(cfg::get_str(d.config, "rectifierType", "fullBridge"),
-                                           RectifierType::FullBridge);
-    if (d.rectifierType == RectifierType::VoltageDoubler)
-        throw std::runtime_error("Kirchhoff AHB: voltageDoubler rectifier not supported "
-                                 "(AHB variants: fullBridge, centerTapped, currentDoubler)");
-    // Path diodes set the drop compensation: FB stacks two (Vo+2Vd); CT/CD conduct through one (Vo+Vd).
-    const double Vdtot = rectifier_path_diodes(d.rectifierType) * req::dideal_diode_drop(Io);
+    // Rectifier variant (FB default). AHB's 4th MAS variant, AHB_FLYBACK, is an ACTIVE-CLAMP FLYBACK — not
+    // one of the shared forward-rectifier enum values (ABT #87), so it is detected here as an AHB-local flag
+    // (config.rectifierType=="ahbFlyback") and the shared enum is left as a FB placeholder for it.
+    const std::string rectStr = cfg::get_str(d.config, "rectifierType", "fullBridge");
+    { std::string t; for (char c : rectStr) if (!std::isspace(static_cast<unsigned char>(c)) && c != '_' && c != '-')
+          t += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      d.ahbFlyback = (t == "ahbflyback"); }
+    if (d.ahbFlyback) {
+        d.rectifierType = RectifierType::FullBridge;   // placeholder; the flyback path is separate
+    } else {
+        d.rectifierType = parse_rectifier_type(rectStr, RectifierType::FullBridge);
+        if (d.rectifierType == RectifierType::VoltageDoubler)
+            throw std::runtime_error("Kirchhoff AHB: voltageDoubler rectifier not supported "
+                                     "(AHB variants: fullBridge, centerTapped, currentDoubler, ahbFlyback)");
+    }
 
-    // Turns ratio sized at NOMINAL Vin (the operating point the open-loop deck runs at) so Kirchhoff
-    // delivers the target Vo there. Vo + Vdtot = 2*D*(1-D)*Vin_nom/n. (MKF sizes at Vin_min and runs the
-    // deck at Vin_nom, landing slightly under Vo — both are within the equivalence band.)
-    double n = 2.0 * D * (1.0 - D) * d.inputVoltage / (Vo + Vdtot);
-    // CURRENT_DOUBLER delivers ~half the winding-reflected voltage, so halve n to hit the same Vo.
-    if (d.rectifierType == RectifierType::CurrentDoubler)
-        n *= cfg::get(d.config, "cdOutputFactor", 0.5);
+    double n;
+    if (d.ahbFlyback) {
+        // AHB_FLYBACK transfer. The active-clamp AHB primary sees a bipolar, magnitude-reduced voltage
+        // (±(1-D)Vin / D·Vin about the Cb clamp), so the single-diode energy-transfer output follows
+        // Vo·n = Vin·D (verified against ngspice across turns ratios — NOT the textbook flyback D/(1-D)).
+        // KH turnsRatio is Np/Ns, so n = Vin·D/(Vo+Vd), one rectifier diode in the path.
+        const double Vd = req::dideal_diode_drop(Io);
+        n = d.inputVoltage * D / (Vo + Vd);
+    } else {
+        // Path diodes set the drop compensation: FB stacks two (Vo+2Vd); CT/CD conduct through one (Vo+Vd).
+        const double Vdtot = rectifier_path_diodes(d.rectifierType) * req::dideal_diode_drop(Io);
+        // Turns ratio at NOMINAL Vin so the open-loop deck delivers Vo: Vo + Vdtot = 2*D*(1-D)*Vin_nom/n.
+        n = 2.0 * D * (1.0 - D) * d.inputVoltage / (Vo + Vdtot);
+        if (d.rectifierType == RectifierType::CurrentDoubler)
+            n *= cfg::get(d.config, "cdOutputFactor", 0.5);   // CD delivers ~half the reflected voltage
+    }
     // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
     // the duty-derived value so the rest of the stage is sized around the fixed transformer.
     d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(std::round(n * 100.0) / 100.0);
     n = d.turnsRatio;
 
-    // Magnetizing inductance for ZVS assist: target Im_pk = 10% of reflected load current, sized at
-    // Vin_max. Lm = (1-D)*Vin_max*D*Tsw/(2*Im_target).
-    const double ImTarget = std::max(0.10 * Io / n, 1e-3);
-    d.magnetizingInductance = req::provided_inductance(dr).value_or(
-        (1.0 - D) * vinMax * D * Tsw / (2.0 * ImTarget));
-
-    // Output inductor (CCM): Lo = Vo*(1 - 2*D*(1-D))/(ripple*Io*Fs).
-    d.outputInductance = Vo * (1.0 - 2.0 * D * (1.0 - D)) / (cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Io * Fs);
+    if (d.ahbFlyback) {
+        // Energy-storage magnetizing inductance: the flyback stores E in Lm each cycle. Size Lm so the
+        // magnetizing ripple is a fraction of the primary average current (Ipri_avg = Pin/(Vin·D)). No
+        // output inductor — the flyback rectifier feeds Cout directly.
+        const double Pin = d.outputPower / d.efficiency;
+        const double IpriAvg = Pin / std::max(d.inputVoltage * D, 1e-6);
+        const double ripple = cfg::get(d.config, "magnetizingRippleRatio", 0.4);
+        d.magnetizingInductance = req::provided_inductance(dr).value_or(
+            d.inputVoltage * D * Tsw / std::max(ripple * IpriAvg, 1e-3));
+        d.outputInductance = 0.0;   // flyback: no output inductor
+    } else {
+        // Magnetizing inductance for ZVS assist: target Im_pk = 10% of reflected load current, at Vin_max.
+        const double ImTarget = std::max(0.10 * Io / n, 1e-3);
+        d.magnetizingInductance = req::provided_inductance(dr).value_or(
+            (1.0 - D) * vinMax * D * Tsw / (2.0 * ImTarget));
+        // Output inductor (CCM): Lo = Vo*(1 - 2*D*(1-D))/(ripple*Io*Fs).
+        d.outputInductance = Vo * (1.0 - 2.0 * D * (1.0 - D)) / (cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Io * Fs);
+    }
 
     // DC-blocking cap sized for <=5% ripple of V_Cb=(1-D)*Vin (Cb = Ipri_pk*D/(Fs*dVCb)).
     const double dILm = (1.0 - D) * vinMax * D * Tsw / d.magnetizingInductance;
@@ -185,7 +211,23 @@ json build_ahb_tas(const AhbDesign& d) {
     // sqrt(Dn) RMS factor (AHB conducts BOTH intervals — no freewheel — so RMS ~ Io); verified vs ngspice.
     namespace AN = Kirchhoff::analytical;
     std::vector<json> xwindings;
-    if (d.rectifierType == RectifierType::FullBridge || d.rectifierType == RectifierType::CenterTapped) {
+    if (d.ahbFlyback) {
+        // Active-clamp FLYBACK: the transformer is the energy store. Primary conducts during Q1-on (D) with
+        // a rising magnetizing ramp; the secondary delivers during Q1-off (1-D) through a single rectifier.
+        const double Pin = d.outputPower / d.efficiency;
+        const double IpriAvgF = Pin / std::max(d.inputVoltage * Dn, 1e-6);
+        const double dILmF = d.inputVoltage * Dn / (Lm * fsw);
+        const double IpriPkF = IpriAvgF + dILmF / 2.0;
+        const double IpriRmsF = IpriAvgF * std::sqrt(std::max(Dn, 1e-3));
+        const double IsecPkF = IpriPkF * N;
+        const double IsecRmsF = Io / std::sqrt(std::max(1.0 - Dn, 1e-3));
+        const double vPriClamp = d.inputVoltage + Vo * N;   // primary swing (Vin on / reflected Vo off)
+        xwindings.push_back(req::winding_excitation("ahbFlybackPrimary", fsw, IpriPkF, IpriRmsF, IpriAvgF,
+                                dILmF, Dn, d.inputVoltage, d.inputVoltage * std::sqrt(std::max(Dn, 1e-3)), 0.0, vPriClamp));
+        xwindings.push_back(req::winding_excitation("ahbFlybackSecondary", fsw, IsecPkF, IsecRmsF, Io,
+                                std::max(IsecPkF - Io, 0.0) * 2.0, 1.0 - Dn, Vo, Vo * std::sqrt(std::max(1.0 - Dn, 1e-3)),
+                                0.0, Vo + d.inputVoltage / std::max(N, 1e-6)));
+    } else if (d.rectifierType == RectifierType::FullBridge || d.rectifierType == RectifierType::CenterTapped) {
         const AN::SrcRectifier rect = (d.rectifierType == RectifierType::CenterTapped)
                                       ? AN::SrcRectifier::CENTER_TAPPED : AN::SrcRectifier::FULL_BRIDGE;
         const double rippleRatio = dILo / Io;   // makes the solver's compute_lo_min Lo == d.outputInductance
@@ -201,10 +243,12 @@ json build_ahb_tas(const AhbDesign& d) {
     }
     json xfmr; xfmr["magnetic"] = json::object();
     xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, turnsRatios, isoSides, std::nullopt, 25.0, xwindings,
-        /*turnsRatioIsCeiling=*/{}, /*lmIsMinimum (AHB transformer is a forward-class ENERGY-TRANSFER
-          transformer with a SEPARATE output inductor; Lm is only ZVS assist -> maximise it UNGAPPED so the
-          adviser does not gap the core and overfill the winding into a high-leakage, high-DCR degenerate
-          coil that drops the real-deck gain below target. K 0.94->0.999. Same fix as PSFB, abt #56/#58)=*/true);
+        /*turnsRatioIsCeiling=*/{},
+        // lmIsMinimum: for the FORWARD variants the transformer is an energy-TRANSFER device (separate Lo),
+        // so Lm is only ZVS assist and is maximised ungapped (K 0.94->0.999, PSFB fix abt #56/#58). For the
+        // FLYBACK variant the transformer IS the energy store — Lm is a designed, gapped value (the flyback
+        // storage inductance), NOT to be maximised — so pass false there. (ABT #87.)
+        /*lmIsMinimum=*/!d.ahbFlyback);
 
     // Output inductor Lo (single-winding magnetic, DC-biased at Io).
     json lout; lout["magnetic"] = json::object();
@@ -267,6 +311,16 @@ json build_ahb_tas(const AhbDesign& d) {
         conn("dmp_mid",  {pin("Rdmp", "2"), pin("Cdmp", "1")})};
     std::vector<json> gndEps{pin("Q2", "source"), pin("D2", "anode"), pin("Csw", "2")};
 
+    if (d.ahbFlyback) {
+        // Active-clamp FLYBACK secondary: a SINGLE rectifier diode Dr1 feeding Cout directly — NO output
+        // inductor. During Q1-off the transformer delivers its stored energy through Dr1 to the output. A
+        // small dV/dt snubber tames the diode-node ring. (ABT #87.)
+        comps.insert(comps.end(), {comp("Dr1", diodeReq), comp("CsnSA", snub())});
+        conns.push_back(conn("sec_a", {pin("T1", "secondary1_start"), pin("Dr1", "anode"), pin("CsnSA", "1")}));
+        conns.push_back(conn("vout_net", {pin("Dr1", "cathode"), prt("vout")}));
+        gndEps.insert(gndEps.end(), {pin("T1", "secondary1_end"), pin("CsnSA", "2"), prt("gnd")});
+        conns.push_back(conn("gnd_net", gndEps));
+    } else
     switch (d.rectifierType) {
     case RectifierType::FullBridge: {
         comps.insert(comps.end(), {comp("Dr1", diodeReq), comp("Dr2", diodeReq), comp("Dr3", diodeReq),

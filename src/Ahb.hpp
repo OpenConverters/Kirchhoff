@@ -32,6 +32,12 @@ struct AhbDesign {
     double loadResistance;
     double outputCapacitance;
     RectifierType rectifierType = RectifierType::FullBridge;  // FB default (MKF AHB also lists AHB_FLYBACK)
+    // AHB_FLYBACK variant (config.rectifierType=="ahbFlyback", ABT #87): the AHB's 4th MAS rectifier — an
+    // ACTIVE-CLAMP FLYBACK. The transformer becomes an ENERGY-STORAGE element (flyback: energy stored in Lm
+    // during Q1-on, delivered during Q1-off) with NO output inductor Lo and a single flyback rectifier
+    // diode. Q1 (main) + Q2/Cb form the active clamp that recycles leakage. Kept as an AHB-local flag rather
+    // than a shared-enum value so the sibling resonant/bridge topologies' rectifier switches are untouched.
+    bool ahbFlyback = false;
     nlohmann::json config;     // Cout (output filter)
 };
 

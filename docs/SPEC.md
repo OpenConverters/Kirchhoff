@@ -129,7 +129,9 @@ the two string knobs. Global (all topologies) knobs:
 
 Notable per-topology knobs (see the tables for the full list): `rectifier` (buck/boost: `"diode"` |
 `"synchronous"`), `rectifierType` (ahb/psfb/pshb/llc/src: `"fullBridge"` | `"centerTapped"` |
-`"currentDoubler"` | `"voltageDoubler"` — **SRC and voltageDoubler on ahb/psfb/pshb throw**),
+`"currentDoubler"` | `"voltageDoubler"` — **SRC and voltageDoubler on ahb/psfb/pshb throw**; **ahb** also
+accepts `"ahbFlyback"` — an active-clamp flyback: energy-storage transformer, single flyback diode, no
+output inductor, transfer Vo·n = Vin·D, ABT #87),
 `deadTimeFraction`, `commandedDuty`, `operatingDutyCycle`, `maxDutyCycle`, `dabPhaseShiftDeg`,
 `qualityFactor`, `inductanceRatio`, `gainHeadroom`.
 

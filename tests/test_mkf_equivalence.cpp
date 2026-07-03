@@ -1080,6 +1080,50 @@ double ideal_vout(const json& tas, const std::string& tag) {
 }
 }  // namespace
 
+// ABT #87: AHB_FLYBACK rectifier variant — the AHB's 4th MAS variant, an ACTIVE-CLAMP FLYBACK. Detected as
+// an AHB-local flag (config.rectifierType="ahbFlyback"); the transformer becomes the energy store with a
+// SINGLE flyback rectifier diode and NO output inductor. The active-clamp AHB primary sees a bipolar,
+// magnitude-reduced voltage, so the transfer is Vo·n = Vin·D (verified vs ngspice). Delivers Vo on target
+// across operating points, and the deck has one magnetic (the transformer) — no output inductor.
+TEST_CASE("AHB_FLYBACK: single-diode flyback secondary, no output inductor, delivers Vo (ABT #87)",
+          "[equivalence][ahb][flyback]") {
+    auto vout_of = [&](double vin, double vo, const char* rect, const std::string& tag, int& nMag) {
+        json s = json::parse(R"({ "designRequirements": { "efficiency": 0.9,
+            "switchingFrequency": { "nominal": 150000 }, "outputs": [ { "name": "out", "voltage": {} } ] },
+            "operatingPoints": [ { "inputVoltage": 0, "outputs": [ { "power": 36 } ] } ] })");
+        s["designRequirements"]["inputVoltage"] = {{"minimum", vin * 0.8}, {"nominal", vin}, {"maximum", vin * 1.2}};
+        s["designRequirements"]["outputs"][0]["voltage"]["nominal"] = vo;
+        s["operatingPoints"][0]["inputVoltage"] = vin;
+        if (rect) s["config"]["rectifierType"] = rect;
+        json tas = Kirchhoff::build_ahb_tas(Kirchhoff::design_ahb(s));
+        nMag = 0;
+        for (const auto& st : tas["topology"]["stages"])
+            if (st.contains("circuit") && st["circuit"].is_object())
+                for (const auto& c : st["circuit"]["components"])
+                    if (c["data"].is_object() && c["data"].contains("magnetic")) ++nMag;
+        std::string deck = Kirchhoff::tas_to_ngspice(tas, PEAS::Fidelity(PEAS::Fidelity::Origin::REQUIREMENTS));
+        auto cpos = deck.rfind("\n.control");
+        if (cpos != std::string::npos) deck = deck.substr(0, cpos);
+        deck += "\n.control\nrun\nmeas tran vo AVG v(Vout) from=3.0e-3 to=4.0e-3\nprint vo\n.endc\n.end\n";
+        std::string out = run_ngspice(deck, tag);
+        double v = 0; parse_meas(out, "vo", v); return v;
+    };
+    int nFly = 0, nFwd = 0;
+    // Flyback delivers Vo on target across operating points, with ONE magnetic (transformer, no Lo).
+    for (auto [vin, vo] : {std::pair{48.0, 12.0}, std::pair{36.0, 5.0}, std::pair{60.0, 24.0}}) {
+        int nm = 0;
+        const double v = vout_of(vin, vo, "ahbFlyback", "ahb_fly", nm);
+        INFO("AHB_FLYBACK " << vin << "->" << vo << " got " << v);
+        CHECK(std::fabs(v - vo) <= 0.15 * vo);
+        CHECK(nm == 1);   // just the transformer — flyback has no output inductor
+    }
+    // The default full-bridge AHB is unchanged and has TWO magnetics (transformer + output inductor).
+    const double vFwd = vout_of(48.0, 12.0, nullptr, "ahb_fwd", nFwd);
+    (void)nFly;
+    CHECK(std::fabs(vFwd - 12.0) <= 0.15 * 12.0);
+    CHECK(nFwd == 2);
+}
+
 // ABT #90: isolated Ćuk (V3). config.isolated inserts a 2-winding transformer across the coupling cap (the
 // single C1 becomes a primary coupling cap C1 + transformer + secondary coupling cap C1b), and the output
 // is referred through n = Np/Ns. The deck must converge and still deliver |Vout| on target for n != 1 (the
