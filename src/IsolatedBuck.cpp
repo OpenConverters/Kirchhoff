@@ -17,20 +17,19 @@ constexpr double kRippleRatio = 0.4;   // primary-inductor current ripple (MKF I
 
 IsolatedBuckDesign design_isolated_buck(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
-    if (dr.at("outputs").size() < 2)
-        throw std::runtime_error("isolated_buck design: needs 2 outputs (primary + isolated secondary)");
+    const size_t nOut = dr.at("outputs").size();
+    if (nOut < 2)
+        throw std::runtime_error("isolated_buck design: needs >=2 outputs (primary + >=1 isolated secondary)");
+    const json& op = tasInputs.at("operatingPoints").at(0);
     IsolatedBuckDesign d{};
     d.config = cfg::object_of(tasInputs);
     d.primaryVoltage   = nominal(dr.at("outputs").at(0).at("voltage"));
     d.secondaryVoltage = nominal(dr.at("outputs").at(1).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 1.0);
-    {
-        const json& op = tasInputs.at("operatingPoints").at(0);
-        d.inputVoltage   = op.at("inputVoltage").get<double>();
-        d.primaryPower   = op.at("outputs").at(0).at("power").get<double>();
-        d.secondaryPower = op.at("outputs").at(1).at("power").get<double>();
-    }
+    d.inputVoltage   = op.at("inputVoltage").get<double>();
+    d.primaryPower   = op.at("outputs").at(0).at("power").get<double>();
+    d.secondaryPower = op.at("outputs").at(1).at("power").get<double>();
     const json& iv = dr.at("inputVoltage");
     const double vinMax = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::MAXIMUM);
     const double vinMin = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::MINIMUM);
@@ -38,24 +37,53 @@ IsolatedBuckDesign design_isolated_buck(const json& tasInputs) {
     d.inputVoltageMax = vinMax;
 
     const double Vin = d.inputVoltage, Vpri = d.primaryVoltage, Vsec = d.secondaryVoltage, Fs = d.switchingFrequency;
-    const double Ipri = d.primaryPower / Vpri, Isec = d.secondaryPower / Vsec;
+    const double Ipri = d.primaryPower / Vpri;
 
-    // D = V_pri / (Vin·η).  N = V_pri / (V_sec + Vd), ideal Vd=0.  (MKF IsolatedBuck.)
+    // D = V_pri / (Vin·η).  N = V_pri / V_sec, ideal Vd=0.  (MKF IsolatedBuck.)
     d.dutyCycle  = Vpri / (Vin * d.efficiency);
     double N = Vpri / Vsec;  // measured output is the primary buck rail (no rectifier drop); secondary is internal
     // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
     // the duty-derived value so the rest of the stage is sized around the fixed transformer.
     d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(std::round(N * 100.0) / 100.0);
-    // Lmag = (Vin_max − V_pri)·V_pri / (Vin_max·Fs·ΔI),  ΔI = ripple·(I_pri + ΣI_sec/N) (reflected).
-    const double Imax = Ipri + Isec / d.turnsRatio;
+
+    // Per-secondary legs (multi-output: N isolated coupled secondaries, ABT #86). Each rail scales its own
+    // turns ratio and reflects Iout_sec_k/N_k into the primary. With a SINGLE isolated secondary the rail is
+    // internal (measured output is the primary buck rail) and keeps MKF's ideal-Vd ratio (== d.turnsRatio,
+    // byte-identical deck). With >1 secondary every rail is EXPOSED on its own port through a real flyback
+    // rectifier, so — like the forward family — the turns ratio compensates the diode drop:
+    // N_k = V_pri/(V_sec_k + Vd_k); otherwise the low-voltage rails droop by ~Vd under load.
+    const bool multiSecondary = (nOut > 2);
+    for (size_t k = 0; k + 1 < nOut; ++k) {
+        IsolatedBuckSecondaryLeg leg{};
+        leg.voltage = nominal(dr.at("outputs").at(k + 1).at("voltage"));
+        leg.power   = op.at("outputs").at(k + 1).at("power").get<double>();
+        if (leg.voltage <= 0.0 || leg.power <= 0.0)
+            throw std::invalid_argument("isolated_buck design: secondary output " + std::to_string(k + 1) +
+                                        " needs a positive voltage and power");
+        if (!multiSecondary && k == 0) {
+            leg.turnsRatio = d.turnsRatio;   // single internal secondary: byte-identical scalar ratio
+        } else {
+            const double Vd = req::dideal_diode_drop(leg.power / leg.voltage);   // exposed rectifier drop
+            double Nk = Vpri / (leg.voltage + Vd);
+            leg.turnsRatio = req::provided_turns_ratio(dr, k).value_or(std::round(Nk * 100.0) / 100.0);
+        }
+        leg.loadResistance = leg.voltage * leg.voltage / leg.power;
+        leg.capacitance = 100e-6;   // Cout_sec (matches MKF)
+        d.secondaries.push_back(leg);
+    }
+
+    // Lmag = (Vin_max − V_pri)·V_pri / (Vin_max·Fs·ΔI),  ΔI = ripple·(I_pri + Σ I_sec_k/N_k) (reflected).
+    double sumReflected = 0.0;
+    for (const auto& leg : d.secondaries) sumReflected += (leg.power / leg.voltage) / leg.turnsRatio;
+    const double Imax = Ipri + sumReflected;
     const double dI = cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Imax;
     d.magnetizingInductance = req::provided_inductance(dr).value_or(
         (vinMax - Vpri) * Vpri / (vinMax * Fs * dI));
 
     d.loadResistance          = Vpri * Vpri / d.primaryPower;     // primary (synthesized at output port)
-    d.secondaryLoadResistance = Vsec * Vsec / d.secondaryPower;   // secondary (explicit internal)
+    d.secondaryLoadResistance = d.secondaries[0].loadResistance;  // first secondary (== secondaries[0])
     d.outputCapacitance  = 100e-6;    // Cpri (matches MKF)
-    d.secondaryCapacitance = 100e-6;  // Cout_sec (matches MKF)
+    d.secondaryCapacitance = d.secondaries[0].capacitance;  // Cout_sec (== secondaries[0])
     return d;
 }
 
@@ -77,6 +105,146 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
     auto diode  = [](json reqs = json()) { json j; j["semiconductor"]["diode"] = json::object();
         if (!reqs.is_null()) { j["inputs"]["designRequirements"] = reqs; } return j; };
 
+    // ===== MULTI-OUTPUT PATH (N isolated secondaries, ABT #86) ==============================
+    // With more than one isolated secondary each rail becomes its OWN coupled secondary winding +
+    // flyback rectifier + output cap, exposed on an external vout<i> port (the assembler synthesizes
+    // each rail's load). The single-secondary path below stays byte-identical (secondary INTERNAL).
+    if (d.secondaries.size() > 1) {
+        namespace AN = Kirchhoff::analytical;
+        const double Lm = d.magnetizingInductance;
+        const double fsw = d.switchingFrequency, T = 1.0 / fsw;
+        const size_t nSec = d.secondaries.size();
+        const double IpriLoad = d.primaryPower / d.primaryVoltage;
+
+        std::vector<double> secV, secI, secN;
+        for (const auto& leg : d.secondaries) {
+            secV.push_back(leg.voltage);
+            secI.push_back(leg.power / leg.voltage);
+            secN.push_back(leg.turnsRatio);
+        }
+        // Coupled-inductor stresses from the SINGLE FHA source (SPICE-validated analytical solver).
+        // Worst-case corner (Vin_min → higher duty → higher magnetizing current) drives ratings; the
+        // declared nominal operating point is what the TAS embeds. (Design uses ideal Vd=0.)
+        const MAS::OperatingPoint aopWorst = AN::analytical_isolated_buck(d.inputVoltageMin, d.primaryVoltage,
+                                                IpriLoad, secV, secI, secN, fsw, Lm, 0.0, d.efficiency);
+        const MAS::OperatingPoint aopNom   = AN::analytical_isolated_buck(d.inputVoltage,    d.primaryVoltage,
+                                                IpriLoad, secV, secI, secN, fsw, Lm, 0.0, d.efficiency);
+        const double IpkPri  = AN::winding_current(aopWorst, 0, "peak");
+        const double IrmsPri = AN::winding_current(aopWorst, 0, "rms");
+
+        // Synchronous buck pair QS1/QS2 each block Vin_max and carry the primary-winding current.
+        const double ratedVds = d.inputVoltageMax / cfg::v_derate_mosfet(d.config);
+        const double maxRdsOn = cfg::rds_on_loss_fraction(d.config) * d.primaryPower / (IrmsPri * IrmsPri);
+
+        // Coupled inductor: primary winding (= buck inductor) + one secondary winding per isolated rail.
+        // turnsRatios = [N_0, N_1, …]; isolationSides = [primary, secondary, tertiary, …] (each rail on
+        // its own ground). Sourced from analytical_isolated_buck at the nominal operating point.
+        std::vector<double> xfmrRatios;  std::vector<std::string> isoSides{"primary"};
+        for (size_t k = 0; k < nSec; ++k) { xfmrRatios.push_back(d.secondaries[k].turnsRatio);
+                                            isoSides.push_back(req::isolation_side(k + 1)); }
+        json xfmr; xfmr["magnetic"] = json::object();
+        xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, xfmrRatios, isoSides, std::nullopt, 25.0,
+            AN::excitations_processed(aopNom, "T1"));
+
+        json cpri; cpri["capacitor"] = json::object();
+        cpri["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;
+        cpri["inputs"]["designRequirements"]["ratedVoltage"] = d.primaryVoltage * 2;
+
+        std::vector<json> comps{
+            comp("QS1", mosfet(req::mosfet("mainSwitch", ratedVds, IpkPri, maxRdsOn, 125.0))),
+            comp("QS2", mosfet(req::mosfet("mainSwitch", ratedVds, IpkPri, maxRdsOn, 125.0))),
+            comp("DS1", diode()), comp("DS2", diode()),
+            comp("T1", xfmr), comp("Cpri", cpri)};
+        std::vector<json> cports{port("vin"), port("gnd"), port("vout"), port("g1"), port("g2")};
+        std::vector<json> conns{
+            conn("vin_net",  {pin("QS1", "drain"), pin("DS1", "cathode"), prt("vin")}),
+            conn("sw_node",  {pin("QS1", "source"), pin("QS2", "drain"), pin("T1", "primary_start"),
+                              pin("DS1", "anode"), pin("DS2", "cathode")}),
+            conn("vpri_out", {pin("T1", "primary_end"), pin("Cpri", "1"), prt("vout")})};
+        // gnd rail accumulates the low-side switch, DS2, Cpri return, and each secondary's dot + Csec return.
+        std::vector<json> gndEps{pin("QS2", "source"), pin("DS2", "anode"), pin("Cpri", "2")};
+
+        for (size_t k = 0; k < nSec; ++k) {
+            const auto& leg = d.secondaries[k];
+            const double iSec = leg.power / leg.voltage;
+            const std::string kk = std::to_string(k);
+            const std::string dName = "Dsec" + kk, cName = "Csec" + kk;
+            const std::string wStart = "secondary" + std::to_string(k + 1) + "_start";
+            const std::string wEnd   = "secondary" + std::to_string(k + 1) + "_end";
+            const std::string voutP  = "vout" + std::to_string(k + 2);   // vout2, vout3, …
+
+            // Secondary flyback rectifier: blocks Vsec + reflected (Vin−Vpri)/N_k; carries Isec_k.
+            const double VrSec  = (leg.voltage + (d.inputVoltageMax - d.primaryVoltage) / leg.turnsRatio) / cfg::v_derate_diode(d.config);
+            const double maxVf  = (VrSec < 100.0) ? 0.6 : 1.2;
+            comps.push_back(comp(dName.c_str(), diode(req::diode(VrSec, iSec / 0.7, maxVf, 0.05 * T))));
+            json csec; csec["capacitor"] = json::object();
+            csec["inputs"]["designRequirements"]["capacitance"]["nominal"] = leg.capacitance;
+            csec["inputs"]["designRequirements"]["ratedVoltage"] = leg.voltage * 2;
+            comps.push_back(comp(cName.c_str(), csec));
+
+            cports.push_back(port(voutP.c_str()));
+            // Secondary winding (dot/start at gnd) -> flyback diode -> isolated rail -> external port.
+            conns.push_back(conn(("sec_in" + kk).c_str(),  {pin("T1", wEnd.c_str()), pin(dName.c_str(), "anode")}));
+            conns.push_back(conn((voutP + "_net").c_str(), {pin(dName.c_str(), "cathode"), pin(cName.c_str(), "1"), prt(voutP.c_str())}));
+            gndEps.push_back(pin("T1", wStart.c_str()));
+            gndEps.push_back(pin(cName.c_str(), "2"));
+        }
+        gndEps.push_back(prt("gnd"));
+        conns.push_back(conn("gnd_net", gndEps));
+        conns.push_back(conn("g1_net", {pin("QS1", "gate"), prt("g1")}));
+        conns.push_back(conn("g2_net", {pin("QS2", "gate"), prt("g2")}));
+
+        json cell; cell["name"] = "flybuck-cell";
+        cell["ports"] = cports;  cell["components"] = comps;  cell["connections"] = conns;
+
+        json tas;
+        json& dreq = tas["inputs"]["designRequirements"];
+        dreq["efficiency"] = d.efficiency;
+        dreq["inputType"] = "dc";
+        dreq["inputVoltage"] = {{"minimum", d.inputVoltageMin}, {"nominal", d.inputVoltage}, {"maximum", d.inputVoltageMax}};
+        dreq["switchingFrequency"]["nominal"] = d.switchingFrequency;
+        dreq["outputs"] = json::array();
+        json opDoc; opDoc["name"] = "full_load"; opDoc["inputVoltage"] = d.inputVoltage; opDoc["ambientTemperature"] = 25.0;
+        opDoc["outputs"] = json::array();
+        { json o; o["name"] = "vpri"; o["voltage"]["nominal"] = d.primaryVoltage; o["regulation"] = "voltage";
+          dreq["outputs"].push_back(o);
+          json oo; oo["name"] = "vpri"; oo["power"] = d.primaryPower; opDoc["outputs"].push_back(oo); }
+        for (size_t k = 0; k < nSec; ++k) {
+            const std::string on = "vsec" + std::to_string(k + 1);
+            json o; o["name"] = on; o["voltage"]["nominal"] = d.secondaries[k].voltage; o["regulation"] = "voltage";
+            dreq["outputs"].push_back(o);
+            json oo; oo["name"] = on; oo["power"] = d.secondaries[k].power; opDoc["outputs"].push_back(oo);
+        }
+        tas["inputs"]["operatingPoints"] = json::array({opDoc});
+
+        tas["topology"]["stages"] = json::array({
+            req::control_stage("pwmController"),
+            pstage("flybuckCell", "switchingCell", cell, bind("vin", "dcBus"), bind("vout", "dcOutput"))});
+        std::vector<json> iscs{
+            isc("Vin", "externalPort", "input", {sp("flybuckCell", "vin")}),
+            isc("GND", "externalPort", "input", {sp("flybuckCell", "gnd")}),
+            isc("Vout", "externalPort", "output", {sp("flybuckCell", "vout")})};
+        for (size_t k = 0; k < nSec; ++k) {
+            const std::string g = "Vout" + std::to_string(k + 2), pt = "vout" + std::to_string(k + 2);
+            iscs.push_back(isc(g.c_str(), "externalPort", "output", {sp("flybuckCell", pt.c_str())}));
+        }
+        tas["topology"]["interStageConnections"] = iscs;
+
+        json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
+        tas["simulation"]["analyses"] = json::array({an});
+        constexpr double deadFrac = 0.02;
+        auto stim = [&](const char* sw, double duty, double phaseDeg) {
+            json st; st["stage"] = "flybuckCell"; st["component"] = sw; st["signal"] = "gate";
+            st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;
+            st["waveform"]["dutyCycle"] = duty; st["waveform"]["phase"] = phaseDeg;
+            return st; };
+        tas["simulation"]["stimulus"] = json::array({
+            stim("QS1", d.dutyCycle, 0.0),
+            stim("QS2", (1.0 - d.dutyCycle) - 2.0 * deadFrac, (d.dutyCycle + deadFrac) * 360.0)});
+        req::finalize_control_seeds(tas, Topology::ISOLATED_BUCK_CONVERTER);
+        return tas;
+    }
+    // ===== single-secondary path (secondary INTERNAL — byte-identical to the legacy deck) ==========
     const double N = d.turnsRatio, Lm = d.magnetizingInductance;
     const double fsw = d.switchingFrequency, T = 1.0 / fsw;
 

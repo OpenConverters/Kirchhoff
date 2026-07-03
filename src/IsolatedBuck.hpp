@@ -19,25 +19,36 @@
 
 namespace Kirchhoff {
 
+// One isolated secondary rail (multi-output flybuck, ABT #86). Each rail is its OWN coupled secondary
+// winding (turnsRatio N_k = Np/Ns_k), flyback rectifier + output cap. secondaries[0] reproduces the scalar
+// secondary* fields byte-for-byte; extra entries add further coupled secondary windings.
+struct IsolatedBuckSecondaryLeg {
+    double voltage, power, turnsRatio, loadResistance, capacitance;
+};
+
 struct IsolatedBuckDesign {
     double inputVoltage, inputVoltageMin, inputVoltageMax;
     double primaryVoltage, primaryPower;      // primary buck rail (output[0]) — the compared output
-    double secondaryVoltage, secondaryPower;  // isolated secondary rail (output[1]) — internal
+    double secondaryVoltage, secondaryPower;  // FIRST isolated secondary rail (output[1]) — == secondaries[0]
     double switchingFrequency, efficiency;
     double dutyCycle;                 // D = V_pri/(Vin·η)
-    double turnsRatio;                // N = V_pri/(V_sec + Vd)
+    double turnsRatio;                // N = V_pri/V_sec (first secondary; == secondaries[0].turnsRatio)
     double magnetizingInductance;     // Lmag (the coupled buck inductor)
     double loadResistance;            // primary load (synthesized at the output port)
-    double secondaryLoadResistance;   // secondary load (explicit internal resistor)
+    double secondaryLoadResistance;   // first-secondary load (== secondaries[0].loadResistance)
     double outputCapacitance;
     nlohmann::json config;         // primary Cpri (sets the settling RC)
-    double secondaryCapacitance;      // secondary Cout
+    double secondaryCapacitance;      // first-secondary Cout (== secondaries[0].capacitance)
+    // Every declared isolated secondary (output[1..]). Size == outputs.size()-1 (>=1). With exactly one
+    // entry the deck keeps the legacy single-secondary-INTERNAL topology byte-for-byte; with more, every
+    // secondary is exposed on its own external vout<i> port (the assembler synthesizes each rail's load).
+    std::vector<IsolatedBuckSecondaryLeg> secondaries;
 };
 
 /**
  * @brief Design an isolated-buck (Flybuck) converter.
- * @param tasInputs Spec with TWO outputs: designRequirements.outputs[0]=primary buck rail,
- *        outputs[1]=isolated secondary; operatingPoints[0].outputs[0/1].power give the loads.
+ * @param tasInputs Spec with TWO OR MORE outputs: designRequirements.outputs[0]=primary buck rail,
+ *        outputs[1..]=isolated secondaries; operatingPoints[0].outputs[k].power give the loads.
  * @return A design struct (duty, turns ratio, coupled-inductor magnetizing inductance, both loads).
  */
 IsolatedBuckDesign design_isolated_buck(const nlohmann::json& tasInputs);

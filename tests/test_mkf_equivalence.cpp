@@ -1578,6 +1578,30 @@ TEST_CASE("Flyback multi-output: two isolated secondaries each regulate (ABT #86
     check_dual_rails(measure_multi_output(tas, 100000.0, {"Vout", "Vout2"}, "flyback_multi"));
 }
 
+TEST_CASE("IsolatedBuck multi-output: primary buck + two isolated secondaries each regulate (ABT #86)",
+          "[equivalence][isolated_buck][multi]") {
+    // 3 outputs: output[0] = primary synchronous-buck rail (24 V), output[1..] = isolated flyback secondaries
+    // (12 V, 5 V). >1 secondary triggers the multi-output deck: each secondary is its own coupled winding +
+    // flyback rectifier + Cout on an external vout<i> port (Vout=primary, Vout2/Vout3 = secondaries).
+    json spec = json::parse(R"({ "designRequirements": { "efficiency": 1.0,
+        "inputVoltage": { "minimum": 46, "nominal": 48, "maximum": 50 },
+        "switchingFrequency": { "nominal": 100000 },
+        "outputs": [ { "name": "vpri", "voltage": { "nominal": 24 } },
+                     { "name": "aux1", "voltage": { "nominal": 12 } },
+                     { "name": "aux2", "voltage": { "nominal": 5 } } ] },
+        "operatingPoints": [ { "inputVoltage": 48, "outputs": [ { "power": 24 }, { "power": 12 }, { "power": 5 } ] } ] })");
+    Kirchhoff::IsolatedBuckDesign d = Kirchhoff::design_isolated_buck(spec);
+    REQUIRE(d.secondaries.size() == 2);
+    json tas = Kirchhoff::build_isolated_buck_tas(d);
+    // coupled inductor: primary winding + 2 secondary windings -> 2 secondary-side turnsRatios.
+    CHECK(transformer_secondary_windings(tas, "flybuckCell", "T1") == 2);
+    auto v = measure_multi_output(tas, 100000.0, {"Vout", "Vout2", "Vout3"}, "isolated_buck_multi");
+    INFO("Vpri=" << v.at(0) << " (t24) Vsec1=" << v.at(1) << " (t12) Vsec2=" << v.at(2) << " (t5)");
+    CHECK(v.at(0) > 0.85 * 24); CHECK(v.at(0) < 1.15 * 24);
+    CHECK(v.at(1) > 0.85 * 12); CHECK(v.at(1) < 1.15 * 12);
+    CHECK(v.at(2) > 0.85 * 5);  CHECK(v.at(2) < 1.15 * 5);
+}
+
 TEST_CASE("Push-pull multi-output: two isolated center-tapped secondaries each regulate (ABT #86)",
           "[equivalence][pushpull][multi]") {
     Kirchhoff::PushPullDesign d = Kirchhoff::design_push_pull(two_output_forward_spec());

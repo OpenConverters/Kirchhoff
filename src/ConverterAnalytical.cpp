@@ -1020,24 +1020,37 @@ MAS::OperatingPoint analytical_fsbb(double inputVoltage, double outputVoltage,
 }
 
 // Ported from MKF converter_models/IsolatedBuck.cpp:41 (fly-buck; D = Vpri/Vin·η, calculate_duty_cycle:10).
+// Multi-secondary form (ABT #86): every isolated secondary is coupled into the primary/magnetizing winding.
 MAS::OperatingPoint analytical_isolated_buck(double inputVoltage, double primaryOutputVoltage,
-                                             double primaryOutputCurrent, double secondaryOutputVoltage,
-                                             double secondaryOutputCurrent, double switchingFrequency,
-                                             double inductance, double turnsRatio,
+                                             double primaryOutputCurrent,
+                                             const std::vector<double>& secondaryOutputVoltages,
+                                             const std::vector<double>& secondaryOutputCurrents,
+                                             const std::vector<double>& turnsRatios,
+                                             double switchingFrequency, double inductance,
                                              double diodeVoltageDrop, double efficiency) {
     using Lbl = MAS::WaveformLabel;
-    (void)secondaryOutputVoltage;  // structural (2 outputs); the flyback secondary winding voltage is set by Vpri/n.
+    const size_t nSec = secondaryOutputCurrents.size();
+    if (nSec == 0)
+        throw std::invalid_argument("analytical_isolated_buck: needs at least one isolated secondary");
+    if (secondaryOutputVoltages.size() != nSec || turnsRatios.size() != nSec)
+        throw std::invalid_argument("analytical_isolated_buck: secondary voltage/current/turnsRatio vectors "
+                                    "must be the same length");
+    (void)secondaryOutputVoltages;  // structural; the flyback secondary winding voltage is set by Vpri/n.
     double dutyCycle = primaryOutputVoltage / inputVoltage * efficiency;
     if (dutyCycle >= 1) throw std::invalid_argument("analytical_isolated_buck: duty cycle must be smaller than 1");
     const double period = 1.0 / switchingFrequency;
     double tOn = dutyCycle * period;
 
-    double totalReflectedSecondaryCurrent = secondaryOutputCurrent / turnsRatio;
+    // Σ Iout_sec_k / N_k reflected into the primary (average) and the OFF-window step (Cout charge balance).
+    double totalReflectedSecondaryCurrent = 0.0, reflectedSecondaryOffsetOff = 0.0;
+    for (size_t k = 0; k < nSec; ++k) {
+        totalReflectedSecondaryCurrent += secondaryOutputCurrents[k] / turnsRatios[k];
+        reflectedSecondaryOffsetOff += (secondaryOutputCurrents[k] / (1.0 - dutyCycle)) / turnsRatios[k];
+    }
     double magnetizingCurrentRipple = (inputVoltage - primaryOutputVoltage) * tOn / inductance;
     double magnetizingCurrentAverage = primaryOutputCurrent + totalReflectedSecondaryCurrent;
     double magnetizingCurrentMax = magnetizingCurrentAverage + magnetizingCurrentRipple / 2;
     double magnetizingCurrentMin = magnetizingCurrentAverage - magnetizingCurrentRipple / 2;
-    double reflectedSecondaryOffsetOff = (secondaryOutputCurrent / (1.0 - dutyCycle)) / turnsRatio;
 
     double primaryVoltageMaximum = inputVoltage - primaryOutputVoltage;
     double primaryVoltageMinimum = -primaryOutputVoltage;
@@ -1058,8 +1071,10 @@ MAS::OperatingPoint analytical_isolated_buck(double inputVoltage, double primary
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Primary"));
     }
-    // Secondary (single isolated output)
-    {
+    // Secondaries (one coupled flyback winding per isolated output).
+    for (size_t k = 0; k < nSec; ++k) {
+        const double secondaryOutputCurrent = secondaryOutputCurrents[k];
+        const double turnsRatio = turnsRatios[k];
         double secondaryCurrentMaximum = (1 + dutyCycle) / (1 - dutyCycle) * secondaryOutputCurrent - secondaryOutputCurrent;
         double secondaryCurrentMinimum = 0;
         double secondaryVoltageMinimum = -(inputVoltage - primaryOutputVoltage) / turnsRatio;
@@ -1074,9 +1089,23 @@ MAS::OperatingPoint analytical_isolated_buck(double inputVoltage, double primary
         voltageWaveform.set_time(std::vector<double>{0, tOn, tOn, period});
         voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
         operatingPoint.get_mutable_excitations_per_winding().push_back(
-            WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Secondary 0"));
+            WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency,
+                                    "Secondary " + std::to_string(k)));
     }
     return operatingPoint;
+}
+
+// Scalar (single-secondary) overload — forwards a 1-element vector so single-output output is byte-identical.
+MAS::OperatingPoint analytical_isolated_buck(double inputVoltage, double primaryOutputVoltage,
+                                             double primaryOutputCurrent, double secondaryOutputVoltage,
+                                             double secondaryOutputCurrent, double switchingFrequency,
+                                             double inductance, double turnsRatio,
+                                             double diodeVoltageDrop, double efficiency) {
+    return analytical_isolated_buck(inputVoltage, primaryOutputVoltage, primaryOutputCurrent,
+                                    std::vector<double>{secondaryOutputVoltage},
+                                    std::vector<double>{secondaryOutputCurrent},
+                                    std::vector<double>{turnsRatio}, switchingFrequency, inductance,
+                                    diodeVoltageDrop, efficiency);
 }
 
 // Ported from MKF converter_models/IsolatedBuckBoost.cpp:47 (fly-buck-boost; D = Vpri/(Vin+Vpri)·η, calculate_duty_cycle:16).

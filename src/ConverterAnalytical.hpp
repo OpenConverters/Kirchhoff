@@ -239,6 +239,21 @@ MAS::OperatingPoint analytical_isolated_buck(double inputVoltage, double primary
                                              double inductance, double turnsRatio,
                                              double diodeVoltageDrop = 0.0, double efficiency = 1.0);
 
+// Multi-output isolated buck (N isolated secondaries, ABT #86). Same fly-buck model as the scalar overload
+// but every declared isolated secondary is coupled into the primary/magnetizing winding: the primary
+// current carries the SUMMED reflected-secondary offset Σ Iout_sec_k/N_k, and one "Secondary k" excitation
+// is pushed per rail (winding voltage set by Vpri/N_k, current the flyback freewheel pulse). `turnsRatios`
+// is [N_0, N_1, …] (one Np/Ns per secondary); the three secondary vectors must be equal length and
+// non-empty. The scalar overload forwards a 1-element vector, so single-secondary output is byte-identical.
+// Ported from MKF IsolatedBuck.cpp (multi-secondary loop). Throws if the duty ≥ 1 or the vectors mismatch.
+MAS::OperatingPoint analytical_isolated_buck(double inputVoltage, double primaryOutputVoltage,
+                                             double primaryOutputCurrent,
+                                             const std::vector<double>& secondaryOutputVoltages,
+                                             const std::vector<double>& secondaryOutputCurrents,
+                                             const std::vector<double>& turnsRatios,
+                                             double switchingFrequency, double inductance,
+                                             double diodeVoltageDrop = 0.0, double efficiency = 1.0);
+
 // Isolated buck-boost (fly-buck-boost). Two outputs (primary rail + isolated secondary).
 // `inductance` is primary/magnetizing, `turnsRatio` Np/Ns. Pushes Primary (TRIANGULAR current
 // around (Ipri + Isec/n)/(1−D)) + Secondary (FLYBACK_PRIMARY current). Ported from MKF
