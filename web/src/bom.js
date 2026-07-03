@@ -18,11 +18,15 @@ export function extractBom(tas) {
   for (const stage of tas?.topology?.stages ?? []) {
     for (const comp of stage.circuit?.components ?? []) {
       const d = comp.data ?? {}
+      const req = d.inputs?.designRequirements ?? {}
+      // FET body diodes (role:"bodyDiode") are intrinsic to their MOSFET, not a separate part — they
+      // are drawn inside the switch symbol, so keep them out of the BOM (and thus the waveform list)
+      // to match the schematic.
+      if (req.role === 'bodyDiode') continue
       let kind = 'Component'
       for (const [key, name] of KINDS) {
         if (key in d) { kind = name(d); break }
       }
-      const req = d.inputs?.designRequirements ?? {}
       rows.push({
         ref: comp.name,
         kind,

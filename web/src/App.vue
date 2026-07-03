@@ -171,7 +171,12 @@ async function fetchComponentWaves() {
   try {
     const cw = await componentWaveforms(simTas.value)
     if (gen !== cwGen) return                // superseded by a newer solve — discard
-    componentWaves.value = cw?.success === false ? null : cw
+    // Keep the waveform list consistent with the BOM: drop anything not in the BOM (FET body diodes,
+    // which are intrinsic to their MOSFET, are excluded from the BOM) so waveforms ⊆ BOM ⊆ schematic.
+    const keep = new Set(bomRows.value.map((r) => r.ref))
+    const filtered = cw && Array.isArray(cw.components)
+      ? { ...cw, components: cw.components.filter((c) => keep.has(c.ref)) } : cw
+    componentWaves.value = cw?.success === false ? null : filtered
   } catch (e) {
     if (gen === cwGen) runError.value = e.message
   } finally {
@@ -201,7 +206,7 @@ function enrichBom(rows, analyticalWaveforms) {
 
 // ── schematic ──────────────────────────────────────────────────────────────
 const schematicSvg = computed(() =>
-  result.value ? renderSchematic(topoId.value, bomRows.value) : null
+  result.value ? renderSchematic(topoId.value, bomRows.value, form.variant) : null
 )
 const selectedPart = ref(null)
 // The simulated V/I for the open part, as an excitation WavePane can render (non-magnetics only;

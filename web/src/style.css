@@ -650,6 +650,12 @@ details.adv .adv-body { margin-top: 0.75rem; }
 .sch-val { font-family: var(--mono); font-size: 10px; fill: var(--ink-dim); }
 .sch-port { font-family: var(--mono); font-size: 11px; fill: var(--cyan); letter-spacing: 0.05em; }
 
+/* Auxiliary-components strip (snubbers, balancing, control — in the BOM, off the power-path sketch). */
+.sch-aux-head { font-family: var(--mono); font-size: 10px; fill: var(--ink-dim); letter-spacing: 0.04em; text-transform: uppercase; }
+.sch-aux-chip { fill: none; stroke: var(--amber-deep); stroke-width: 1.1; }
+.sch-aux-tag { font-family: var(--mono); font-size: 9px; fill: var(--amber); text-anchor: middle; }
+.sch-hot:hover .sch-aux-chip, .sch-hot.selected .sch-aux-chip { stroke: var(--amber-hi); filter: drop-shadow(0 0 5px rgba(255, 179, 71, 0.9)); }
+
 .sch-hot { cursor: pointer; }
 .sch-hot .sch-hitbox { fill: transparent; stroke: none; }
 .sch-hot:hover .sch-sym, .sch-hot.selected .sch-sym { stroke: var(--amber-hi); filter: drop-shadow(0 0 5px rgba(255, 179, 71, 0.9)); }

@@ -171,18 +171,38 @@ json build_push_pull_tas(const PushPullDesign& d) {
         c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) * 3;
         return c; };
 
+    // Series-RC leakage damper across the primary (drain-to-drain), mirroring the AHB Rdmp/Cdmp fix
+    // (src/Ahb.cpp). The push-pull transformer is tightly coupled (K=0.9999), so its leakage (~Lm(1-K^2))
+    // is tiny and rings (a few MHz) against the switch Coss / the node-snubber caps at every dead-time
+    // commutation; with ideal zero-DCR windings nothing damps it, so ngspice keeps shrinking dt to track
+    // the ring and the transient crawls / hangs ("Timestep too small") — worst under datasheet models and
+    // many settle cycles (ABT #79). This RC damps that ring — R ~ tank Z0 = sqrt(Lleak/Coss) — while the
+    // series C is high-impedance at fsw (~1.6 kohm at 100 kHz for 1 nF), so it barely loads the switching
+    // fundamental (loss ~ mW) and leaves the open-loop Vout on the analytical target. NOT a dV/dt node
+    // snubber -> the "dmp" name keeps it out of the fidelity snubber strip so it survives the real deck.
+    auto dampR = [&]() { json c; c["resistor"] = json::object();
+        auto& dr = c["inputs"]["designRequirements"]; dr["deviceType"] = "resistor";
+        dr["resistance"]["nominal"] = cfg::get(d.config, "leakDampR", 10.0);
+        dr["powerRating"] = 1.0; dr["role"] = "damping"; return c; };
+    auto dampC = [&]() { json c; c["capacitor"] = json::object();
+        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::get(d.config, "leakDampC", 1.0e-9);
+        c["inputs"]["designRequirements"]["ratedVoltage"] = 2.0 * d.inputVoltage * 3; return c; };
+
     json cell; cell["name"] = "push-pull-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate1"), port("gate2")});
     cell["components"] = json::array({comp("T1", xfmr), comp("Q1", mosfetReq()), comp("Q2", mosfetReq()),
                                       comp("Dtop", rectDiode()), comp("Dbot", rectDiode()), comp("Lout", lout),
                                       comp("Csn1", snub()), comp("Csn2", snub()),
-                                      comp("Csn3", snub()), comp("Csn4", snub())});
+                                      comp("Csn3", snub()), comp("Csn4", snub()),
+                                      comp("Rdmp", dampR()), comp("Cdmp", dampC())});
     cell["connections"] = json::array({
         // center tap (= Vin) shared by both primary halves
         conn("vin_net",   {pin("T1", "primary_end"), pin("T1", "secondary1_start"), prt("vin")}),
-        // primary half tops -> low-side switches (+ snubber cap to gnd)
-        conn("pri_top",   {pin("T1", "primary_start"), pin("Q1", "drain"), pin("Csn1", "1")}),
-        conn("pri_bot",   {pin("T1", "secondary1_end"), pin("Q2", "drain"), pin("Csn2", "1")}),
+        // primary half tops -> low-side switches (+ snubber cap to gnd + leakage-damper R)
+        conn("pri_top",   {pin("T1", "primary_start"), pin("Q1", "drain"), pin("Csn1", "1"), pin("Rdmp", "1")}),
+        // bottom half -> Q2 (+ snubber cap to gnd + leakage-damper C); Rdmp–Cdmp bridge the two drains
+        conn("pri_bot",   {pin("T1", "secondary1_end"), pin("Q2", "drain"), pin("Csn2", "1"), pin("Cdmp", "2")}),
+        conn("dmp_mid",   {pin("Rdmp", "2"), pin("Cdmp", "1")}),
         // secondary halves -> full-wave rectifier diodes (center tap = gnd) (+ snubber cap to gnd)
         conn("sec_top",   {pin("T1", "secondary2_start"), pin("Dtop", "anode"), pin("Csn3", "1")}),
         conn("sec_bot",   {pin("T1", "secondary3_end"), pin("Dbot", "anode"), pin("Csn4", "1")}),

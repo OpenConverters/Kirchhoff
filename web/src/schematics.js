@@ -385,27 +385,88 @@ function pushPull(bom) {
   ].join(''))
 }
 
-function llc(bom) {
-  return svg(800, 340, [
+// ── secondary rectifier variants (rectifierType: centerTapped | fullBridge | currentDoubler) ──
+// Each draws a complete secondary — rectifier + output cap + load + VOUT — to the RIGHT of a
+// transformer at (tx, ty, h). They emit the exact refdes the TAS builders use per variant, so the
+// hotspots map to BOM rows. The host also sets the transformer's winding shape to match (a
+// center-tapped winding for CT, a single winding for FB / CD).
+
+// Center-tapped full-wave: two half-windings (transformer drawn ct:'right'), D1/D2, tap → return.
+function secCT(bom, tx, ty, h) {
+  const yT = ty - h / 2, yB = ty + h / 2, aT = yT - 18, aB = yB + 18, retY = yB + 90
+  const dX = tx + 100, jX = tx + 180, cX = tx + 230, lX = tx + 288, pX = tx + 344
+  return [
+    wire(tx + 10, yT, tx + 10, aT, tx + 80, aT),
+    diode('D1', bom, dX, aT, 'right'), wire(dX + 20, aT, jX, aT), dot(jX, aT),
+    wire(tx + 10, yB, tx + 10, aB, tx + 80, aB),
+    diode('D2', bom, dX, aB, 'right', 'below'), wire(dX + 20, aB, jX, aB), wire(jX, aB, jX, aT),
+    wire(tx + 24, ty, tx + 35, ty, tx + 35, retY, lX, retY),
+    wire(jX, aT, cX + 90, aT), dot(cX, aT),
+    capV('Cout', bom, cX, (aT + retY) / 2), wire(cX, aT, cX, (aT + retY) / 2 - 10), wire(cX, (aT + retY) / 2 + 10, cX, retY), dot(cX, retY),
+    loadR(lX, (aT + retY) / 2, aT, retY), dot(lX, aT), dot(lX, retY),
+    port(pX, aT, 'VOUT'), wire(cX + 90, aT, pX, aT),
+  ]
+}
+
+// Single-winding full-bridge (4 diodes Dr1..Dr4). Resonant output has no filter inductor → straight
+// to Cout. The winding's two ends drive the two bridge leg-mids.
+function secFB(bom, tx, ty, h) {
+  const yM = ty, yP = ty - h / 2 - 30, yN = ty + h / 2 + 90
+  const xA = tx + 90, xB = tx + 160, cX = xB + 80, lX = cX + 70
+  return [
+    wire(tx + 10, ty - h / 2, tx + 10, yM, xA, yM), dot(xA, yM),
+    wire(tx + 10, ty + h / 2, tx + 40, ty + h / 2, tx + 40, yN + 34, xB + 44, yN + 34, xB + 44, yM, xB, yM), dot(xB, yM),
+    diode('Dh1', bom, xA, (yP + yM) / 2, 'up'), wire(xA, (yP + yM) / 2 - 20, xA, yP), wire(xA, (yP + yM) / 2 + 20, xA, yM),
+    diode('Dl1', bom, xA, (yN + yM) / 2, 'up', 'left'), wire(xA, (yN + yM) / 2 - 20, xA, yM), wire(xA, (yN + yM) / 2 + 20, xA, yN),
+    diode('Dh2', bom, xB, (yP + yM) / 2, 'up'), wire(xB, (yP + yM) / 2 - 20, xB, yP), wire(xB, (yP + yM) / 2 + 20, xB, yM),
+    diode('Dl2', bom, xB, (yN + yM) / 2, 'up'), wire(xB, (yN + yM) / 2 - 20, xB, yM), wire(xB, (yN + yM) / 2 + 20, xB, yN),
+    dot(xA, yP), dot(xB, yP), wire(xA, yP, xB, yP),
+    wire(xA, yN, lX, yN), gnd(xA + 20, yN),
+    wire(xB, yP, cX + 70, yP), dot(cX, yP),
+    capV('Cout', bom, cX, (yP + yN) / 2), wire(cX, yP, cX, (yP + yN) / 2 - 10), wire(cX, (yP + yN) / 2 + 10, cX, yN), dot(cX, yN),
+    loadR(lX, (yP + yN) / 2, yP, yN), dot(lX, yP), dot(lX, yN),
+    port(cX + 70, yP, 'VOUT'), wire(cX, yP, cX + 70, yP),
+  ]
+}
+
+// Current-doubler: single winding, two output inductors Lo1/Lo2, two catch diodes D1/D2.
+function secCD(bom, tx, ty, h) {
+  const yT = ty - h / 2, yB = ty + h / 2, retY = yB + 90, voX = tx + 150, cX = tx + 210, lX = cX + 70
+  return [
+    indH('Lo1', bom, tx + 90, yT), wire(tx + 10, yT, tx + 62, yT), wire(tx + 118, yT, voX, yT), dot(voX, yT),
+    indH('Lo2', bom, tx + 90, yB), wire(tx + 10, yB, tx + 62, yB), wire(tx + 118, yB, voX, yB),
+    wire(voX, yT, voX, yB),
+    diode('D1', bom, tx + 40, (yT + retY) / 2, 'up', 'left'), wire(tx + 40, (yT + retY) / 2 - 20, tx + 40, yT), wire(tx + 40, (yT + retY) / 2 + 20, tx + 40, retY),
+    diode('D2', bom, tx + 90, (yB + retY) / 2, 'up'), wire(tx + 90, (yB + retY) / 2 - 20, tx + 90, yB), wire(tx + 90, (yB + retY) / 2 + 20, tx + 90, retY),
+    wire(tx + 40, retY, lX, retY), gnd(tx + 60, retY),
+    wire(voX, yT, cX + 70, yT), dot(cX, yT),
+    capV('Cout', bom, cX, (yT + retY) / 2), wire(cX, yT, cX, (yT + retY) / 2 - 10), wire(cX, (yT + retY) / 2 + 10, cX, retY), dot(cX, retY),
+    loadR(lX, (yT + retY) / 2, yT, retY), dot(lX, yT), dot(lX, retY),
+    port(cX + 70, yT, 'VOUT'), wire(cX, yT, cX + 70, yT),
+  ]
+}
+
+// Pick the secondary drawer + the matching transformer center-tap option for a rectifier variant.
+function resonantSecondary(bom, tx, ty, h, variant) {
+  if (variant === 'fullBridge') return secFB(bom, tx, ty, h)
+  if (variant === 'currentDoubler') return secCD(bom, tx, ty, h)
+  return secCT(bom, tx, ty, h)
+}
+const ctOpt = (variant) => (variant === 'centerTapped' ? 'right' : undefined)
+
+function llc(bom, variant = 'centerTapped') {
+  const tx = 380, ty = 170, h = 80
+  return svg(860, 340, [
     srcDC(60, 165), wire(60, 150, 60, 80, 170, 80), wire(60, 180, 60, 280, 345, 280),
     mosfetV('Q1', bom, 170, 118, 'left'), wire(170, 80, 170, 92), wire(170, 144, 170, 165), dot(170, 165),
     mosfetV('Q2', bom, 170, 212, 'left'), wire(170, 165, 170, 186), wire(170, 238, 170, 280), dot(170, 280),
     gnd(120, 280),
     // resonant tank into the primary — winding terminals are entered/left VERTICALLY
     capH('Cr', bom, 225, 165), wire(170, 165, 205, 165),
-    indH('Lr', bom, 300, 165), wire(245, 165, 272, 165), wire(328, 165, 345, 165, 345, 105, 370, 105, 370, 130),
-    xfmr('T1', bom, 380, 170, { h: 80, ct: 'right', labelDx: -40 }),
-    wire(370, 210, 370, 235, 345, 235, 345, 280),
-    // center-tapped secondary, full-wave
-    wire(390, 130, 390, 112, 460, 112),
-    diode('D1', bom, 480, 112, 'right'), wire(500, 112, 560, 112), dot(560, 112),
-    wire(390, 210, 390, 228, 460, 228),
-    diode('D2', bom, 480, 228, 'right', 'below'), wire(500, 228, 560, 228), wire(560, 228, 560, 112),
-    wire(404, 170, 415, 170, 415, 300, 668, 300),
-    wire(560, 112, 700, 112), dot(610, 112),
-    capV('Cout', bom, 610, 200), wire(610, 112, 610, 180), wire(610, 220, 610, 300), dot(610, 300),
-    loadR(668, 200, 112, 300), dot(668, 112), dot(668, 300),
-    port(724, 112, 'VOUT'), wire(700, 112, 724, 112),
+    indH('Lr', bom, 300, 165), wire(245, 165, 272, 165), wire(328, 165, 345, 165, 345, 105, tx - 10, 105, tx - 10, ty - h / 2),
+    xfmr('T1', bom, tx, ty, { h, ct: ctOpt(variant), labelDx: -40 }),
+    wire(tx - 10, ty + h / 2, tx - 10, 235, 345, 235, 345, 280),
+    ...resonantSecondary(bom, tx, ty, h, variant),
   ].join(''))
 }
 
@@ -629,8 +690,9 @@ function pshb(bom) {
 }
 
 // ── series-resonant (SRC): half bridge + split bus + series Cr–Lr tank + CT secondary ───
-function src(bom) {
-  return svg(840, 360, [
+function src(bom, variant = 'centerTapped') {
+  const tx = 390, ty = 170, h = 80
+  return svg(880, 360, [
     srcDC(60, 175), wire(60, 160, 60, 80, 170, 80), wire(60, 190, 60, 300, 170, 300),
     mosfetV('Q1', bom, 170, 118, 'left'), wire(170, 92, 170, 80), dot(170, 80), wire(170, 144, 170, 165), dot(170, 165),
     mosfetV('Q2', bom, 170, 212, 'left'), wire(170, 186, 170, 165), wire(170, 238, 170, 300), dot(170, 300),
@@ -639,17 +701,10 @@ function src(bom) {
     capV('Clo', bom, 240, 250, 'right'), wire(240, 190, 240, 230), wire(240, 270, 240, 300), dot(240, 300), gnd(200, 300),
     // series tank Cr → Lr off the switch node into the primary
     capH('Cr', bom, 210, 165), wire(170, 165, 190, 165), indH('Lr', bom, 300, 165), wire(230, 165, 272, 165),
-    wire(328, 165, 355, 165, 355, 110, 380, 110, 380, 130),
-    xfmr('T1', bom, 390, 170, { h: 80, ct: 'right', labelDx: -40 }),
-    wire(380, 210, 380, 235, 355, 235, 355, 190, 240, 190), // primary return → mid bus
-    // center-tapped full-wave secondary
-    wire(400, 130, 400, 112, 470, 112), diode('D1', bom, 490, 112, 'right'), wire(510, 112, 570, 112), dot(570, 112),
-    wire(400, 210, 400, 228, 470, 228), diode('D2', bom, 490, 228, 'right', 'below'), wire(510, 228, 570, 228), wire(570, 228, 570, 112),
-    wire(414, 170, 425, 170, 425, 300, 700, 300),
-    wire(570, 112, 720, 112), dot(620, 112),
-    capV('Cout', bom, 620, 205), wire(620, 112, 620, 185), wire(620, 225, 620, 300), dot(620, 300),
-    loadR(700, 205, 112, 300), dot(700, 112), dot(700, 300),
-    port(756, 112, 'VOUT'), wire(720, 112, 756, 112),
+    wire(328, 165, 355, 165, 355, 110, tx - 10, 110, tx - 10, ty - h / 2),
+    xfmr('T1', bom, tx, ty, { h, ct: ctOpt(variant), labelDx: -40 }),
+    wire(tx - 10, ty + h / 2, tx - 10, 235, 355, 235, 355, 190, 240, 190), // primary return → mid bus
+    ...resonantSecondary(bom, tx, ty, h, variant),
   ].join(''))
 }
 
@@ -776,9 +831,51 @@ export function hasSchematic(topologyId) {
   return topologyId in LAYOUTS
 }
 
-export function renderSchematic(topologyId, bomRows) {
+// A small chip for an auxiliary component (drawn in the completeness strip, not on the power path).
+const KIND_TAG = { Capacitor: 'C', Resistor: 'R', Diode: 'D', MOSFET: 'Q', Controller: 'IC', Inductor: 'L', Transformer: 'T' }
+function auxChip(row, cx, cy, w) {
+  const tag = KIND_TAG[row.kind] ?? '·'
+  const val = row.value && row.value !== '—' ? row.value : ''
+  return `<g class="sch-hot" data-ref="${row.ref}">
+    <rect class="sch-hitbox" x="${cx - w / 2 + 4}" y="${cy - 15}" width="${w - 8}" height="34" rx="3"/>
+    <rect class="sch-aux-chip" x="${cx - w / 2 + 8}" y="${cy - 11}" width="18" height="14" rx="2"/>
+    ${txt(cx - w / 2 + 17, cy, tag, 'sch-aux-tag')}
+    ${txt(cx - w / 2 + 30, cy - 1, row.ref, 'sch-ref', 'start')}
+    ${val ? txt(cx - w / 2 + 30, cy + 11, val, 'sch-val', 'start') : ''}
+  </g>`
+}
+
+// Append every BOM component the hand-drawn layout did not place (snubbers, dampers, balancing /
+// bias resistors, controllers) as a labelled auxiliary strip, so the schematic and the BOM carry
+// the SAME components — nothing shows up in the waveform/BOM lists that is absent from the drawing.
+function withAux(mainSvg, missing) {
+  if (!missing.length) return mainSvg
+  const m = mainSvg.match(/viewBox="0 0 ([\d.]+) ([\d.]+)"/)
+  const W = m ? parseFloat(m[1]) : 820, H = m ? parseFloat(m[2]) : 360
+  const perRow = Math.max(3, Math.floor((W - 32) / 165))
+  const colW = (W - 32) / perRow
+  const rowsN = Math.ceil(missing.length / perRow)
+  const y0 = H + 14
+  const chips = missing.map((r, i) => {
+    const cx = 16 + (i % perRow) * colW + colW / 2
+    const cy = y0 + 34 + Math.floor(i / perRow) * 40
+    return auxChip(r, cx, cy, colW)
+  }).join('')
+  const header = txt(16, y0 + 16, 'AUXILIARY — in the BOM, off the power-path sketch (snubbers · balancing · control)', 'sch-aux-head', 'start')
+  const divider = P(`M 12 ${y0} H ${W - 12}`, 'sch-wire')
+  const newH = y0 + 34 + rowsN * 40 + 6
+  return mainSvg
+    .replace(/viewBox="0 0 [\d.]+ [\d.]+"/, `viewBox="0 0 ${W} ${newH}"`)
+    .replace(/<\/svg>\s*$/, `${divider}${header}${chips}</svg>`)
+}
+
+export function renderSchematic(topologyId, bomRows, variant) {
   const fn = LAYOUTS[topologyId]
   if (!fn) return null
-  const bom = new Map((bomRows ?? []).map((r) => [r.ref, r]))
-  return fn(bom)
+  const rows = bomRows ?? []
+  const bom = new Map(rows.map((r) => [r.ref, r]))
+  const main = fn(bom, variant)
+  const drawn = new Set([...main.matchAll(/data-ref="([^"]+)"/g)].map((mm) => mm[1]))
+  const missing = rows.filter((r) => !drawn.has(r.ref))
+  return withAux(main, missing)
 }
