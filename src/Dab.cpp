@@ -220,6 +220,15 @@ json build_dab_tas(const DabDesign& d) {
         c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) * 3;
         return c; };
 
+    // REAL series-RC EMI/ring snubber across the primary bridge output (midA↔midC, i.e. across Lr + the
+    // transformer primary). A genuine board part (sourced + rendered), distinct from the numerical, stripped
+    // Csn* per-switch dV/dt caps and the FUNCTIONAL Rbias midpoint-bias resistors. Sized from the same energy
+    // budget as the Csn caps (cfg::snubber_cap at V_block=Vin) + cfg::snubber_res, so it stores « throughput
+    // and does not detune the phase-shift power transfer. REAL refdes (Crc_pri/Rrc_pri) -> not stripped.
+    const auto rcSnub = req::snubber(snubCval, cfg::snubber_res(d.config), d.inputVoltage, d.switchingFrequency);
+    const json& rcCap = rcSnub.first;
+    const json& rcRes = rcSnub.second;
+
     json cell; cell["name"] = "dab-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"),
                                  port("gateA"), port("gateB"), port("gateC"), port("gateD"),
@@ -238,7 +247,9 @@ json build_dab_tas(const DabDesign& d) {
         comp("RbiasA_hi", biasR()), comp("CsnA_hi", snubC()), comp("RbiasA_lo", biasR()), comp("CsnA_lo", snubC()),
         comp("RbiasC_hi", biasR()), comp("CsnC_hi", snubC()), comp("RbiasC_lo", biasR()), comp("CsnC_lo", snubC()),
         comp("RbiasE_hi", biasR()), comp("CsnE_hi", snubC()), comp("RbiasE_lo", biasR()), comp("CsnE_lo", snubC()),
-        comp("RbiasG_hi", biasR()), comp("CsnG_hi", snubC()), comp("RbiasG_lo", biasR()), comp("CsnG_lo", snubC())});
+        comp("RbiasG_hi", biasR()), comp("CsnG_hi", snubC()), comp("RbiasG_lo", biasR()), comp("CsnG_lo", snubC()),
+        // REAL series-RC EMI snubber across the primary bridge output (sourced + rendered).
+        comp("Crc_pri", rcCap), comp("Rrc_pri", rcRes)});
     cell["connections"] = json::array({
         // ── Primary full bridge. QA/QC high-side (vin->mid), QB/QD low-side (mid->gnd); anti-parallel
         // body diodes DA..DD freewheel/clamp the floating midpoints during the leg dead time.
@@ -249,11 +260,12 @@ json build_dab_tas(const DabDesign& d) {
         conn("midA_net", {pin("QA", "source"), pin("QB", "drain"),
                           pin("DA", "anode"), pin("DB", "cathode"), pin("Lr", "primary_start"),
                           pin("RbiasA_hi", "2"), pin("CsnA_hi", "2"),
-                          pin("RbiasA_lo", "1"), pin("CsnA_lo", "1")}),
+                          pin("RbiasA_lo", "1"), pin("CsnA_lo", "1"), pin("Crc_pri", "1")}),
         conn("midC_net", {pin("QC", "source"), pin("QD", "drain"),
                           pin("DC", "anode"), pin("DD", "cathode"), pin("T1", "primary_end"),
                           pin("RbiasC_hi", "2"), pin("CsnC_hi", "2"),
-                          pin("RbiasC_lo", "1"), pin("CsnC_lo", "1")}),
+                          pin("RbiasC_lo", "1"), pin("CsnC_lo", "1"), pin("Rrc_pri", "2")}),
+        conn("rc_pri_mid", {pin("Crc_pri", "2"), pin("Rrc_pri", "1")}),
         conn("pri_x",    {pin("Lr", "primary_end"), pin("T1", "primary_start")}),
         // ── Secondary active bridge. QE/QG high-side (vout->sec), QF/QH low-side (sec->gnd); body
         // diodes DE..DH freewheel during the secondary leg dead time. The bridge is driven (not a

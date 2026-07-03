@@ -214,6 +214,14 @@ json build_pshb_tas(const PshbDesign& d) {
     json csplit = cap(d.splitCapacitance, d.inputVoltage * 2);
     json capd   = cap(d.outputCapacitance, d.outputVoltage * 2);
     json snub   = cap(cfg::node_snubber_cap(d.config), (d.inputVoltage + d.outputVoltage) * 3);
+    // REAL series-RC EMI/ring snubber across the transformer primary (sourced + rendered, distinct from the
+    // numerical Csn* node caps). The primary swings ±Vhb and rings at each NPC commutation; a damper across
+    // the winding tames it. Sized from the ENERGY BUDGET (cfg::snubber_cap = eps·P/(Vhb²·fsw)) +
+    // cfg::snubber_res so it stores « throughput. REAL refdes (Crc_pri/Rrc_pri) -> not matched by the strip.
+    const double rcSnubC = cfg::snubber_cap(d.config, d.outputPower, Vhb, fsw);
+    const auto rcSnub = req::snubber(rcSnubC, cfg::snubber_res(d.config), Vhb, fsw);
+    const json& rcCap = rcSnub.first;
+    const json& rcRes = rcSnub.second;
     // CURRENT_DOUBLER second output inductor + loop-breaker.
     auto outInductor2 = [&]() { json m; m["magnetic"] = json::object();
         m["inputs"] = req::magnetic_inputs(d.outputInductance, 0.2, {}, {"primary"}, std::nullopt, 25.0, {
@@ -234,18 +242,20 @@ json build_pshb_tas(const PshbDesign& d) {
         comp("S1",mosfetReq), comp("S2",mosfetReq), comp("S3",mosfetReq), comp("S4",mosfetReq),
         comp("Db1",diode()), comp("Db2",diode()), comp("Db3",diode()), comp("Db4",diode()),
         comp("DC1",clampDiodeReq), comp("DC2",clampDiodeReq),
-        comp("Lr",lr), comp("T1",xfmr), comp("CsnB",snub)};
+        comp("Lr",lr), comp("T1",xfmr), comp("CsnB",snub),
+        comp("Crc_pri", rcCap), comp("Rrc_pri", rcRes)};   // REAL series-RC snubber across the primary
     std::vector<json> conns{
         conn("vin_net",  {pin("CsHi","1"), pin("S1","drain"), pin("Db1","cathode"), prt("vin")}),
         conn("mid_cap",  {pin("CsHi","2"), pin("CsLo","1"), pin("DC1","anode"), pin("DC2","cathode"),
-                          pin("T1","primary_end")}),
+                          pin("T1","primary_end"), pin("Rrc_pri","2")}),
         conn("nH",       {pin("S1","source"), pin("S2","drain"), pin("Db1","anode"), pin("Db2","cathode"),
                           pin("DC1","cathode")}),
         conn("bridge_a", {pin("S2","source"), pin("S3","drain"), pin("Db2","anode"), pin("Db3","cathode"),
                           pin("Lr","primary_start"), pin("CsnB","1")}),
         conn("nL",       {pin("S3","source"), pin("S4","drain"), pin("Db3","anode"), pin("Db4","cathode"),
                           pin("DC2","anode")}),
-        conn("pri_x",    {pin("Lr","primary_end"), pin("T1","primary_start")})};
+        conn("pri_x",    {pin("Lr","primary_end"), pin("T1","primary_start"), pin("Crc_pri","1")}),
+        conn("rc_pri_mid", {pin("Crc_pri","2"), pin("Rrc_pri","1")})};
     std::vector<json> gndEps{pin("CsLo","2"), pin("S4","source"), pin("Db4","anode"), pin("CsnB","2")};
 
     switch (d.rectifierType) {

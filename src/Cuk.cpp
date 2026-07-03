@@ -130,11 +130,13 @@ json build_cuk_tas(const CukDesign& d) {
     md["inputs"]["designRequirements"] = req::diode(vSwingRating / cfg::v_derate_diode(d.config), iout / 0.7,
                                                     (vSwingRating < 100.0) ? 0.6 : 1.2, 0.05 / fsw);
 
-    // RC snubber across the freewheel diode — a REAL component (the DAB cell snubs its switches the same
-    // way). It damps the ideal-diode commutation dV/dt so the Cuk's resonant coupling loop converges in
-    // ngspice (otherwise "timestep too small" at startup). 100 Ω · 1 nF is negligible at the power-stage
-    // scale (RC = 100 ns « the switching period; bleed « the amperes of inductor current), so it does not
-    // shift the operating point — it just makes the emitted deck simulable for any consumer.
+    // RC snubber across the freewheel diode / sync-FET node — a REAL, sourced + rendered component. The Cuk
+    // is HARD-switched, so this series R–C is a genuine board damper (it also lets the resonant coupling loop
+    // converge in ngspice — otherwise "timestep too small" at startup). 100 Ω · 1 nF is negligible at the
+    // power-stage scale (RC = 100 ns « the switching period; bleed « the amperes of inductor current), so it
+    // does not shift the operating point. REAL refdes Crc_sw/Rrc_sw (role "snubber") — deliberately NOT the
+    // Csn*/Rsn*/Csw* numerical-aid prefixes, so the fidelity snubber-strip keeps it in the REAL deck too
+    // (the earlier "Csnub"/"Rsnub" names collided with that prefix and were wrongly stripped).
     json rsnub; rsnub["resistor"] = json::object();
     rsnub["inputs"]["designRequirements"]["deviceType"] = "resistor";
     rsnub["inputs"]["designRequirements"]["resistance"]["nominal"] = cfg::snubber_res(d.config);
@@ -160,14 +162,14 @@ json build_cuk_tas(const CukDesign& d) {
         cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate"), port("gate2")});
         cell["components"] = json::array({comp("L1", L1), comp("Q1", mq), comp("C1", c1),
                                           comp("Q2", syncFet), comp("D2", bodyD), comp("L2", L2),
-                                          comp("Rsnub", rsnub), comp("Csnub", csnub)});
+                                          comp("Rrc_sw", rsnub), comp("Crc_sw", csnub)});
         cell["connections"] = json::array({
             conn("vin_net", {pin("L1", "primary_start"), prt("vin")}),
             conn("nodeA",   {pin("L1", "primary_end"), pin("Q1", "drain"), pin("C1", "1")}),
             // node B: coupling cap -> sync MOSFET drain (+ body-diode anode) + output inductor + RC snubber
-            conn("nodeB",   {pin("C1", "2"), pin("Q2", "drain"), pin("D2", "anode"), pin("L2", "primary_start"), pin("Rsnub", "1")}),
-            conn("snub",    {pin("Rsnub", "2"), pin("Csnub", "1")}),
-            conn("gnd_net", {pin("Q1", "source"), pin("Q2", "source"), pin("D2", "cathode"), pin("Csnub", "2"), prt("gnd")}),
+            conn("nodeB",   {pin("C1", "2"), pin("Q2", "drain"), pin("D2", "anode"), pin("L2", "primary_start"), pin("Rrc_sw", "1")}),
+            conn("snub",    {pin("Rrc_sw", "2"), pin("Crc_sw", "1")}),
+            conn("gnd_net", {pin("Q1", "source"), pin("Q2", "source"), pin("D2", "cathode"), pin("Crc_sw", "2"), prt("gnd")}),
             conn("vout_net",{pin("L2", "primary_end"), prt("vout")}),
             conn("gate_net",{pin("Q1", "gate"), prt("gate")}),
             conn("gate2_net",{pin("Q2", "gate"), prt("gate2")})});
@@ -175,14 +177,14 @@ json build_cuk_tas(const CukDesign& d) {
         cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate")});
         cell["components"] = json::array({comp("L1", L1), comp("Q1", mq), comp("C1", c1),
                                           comp("D1", md), comp("L2", L2),
-                                          comp("Rsnub", rsnub), comp("Csnub", csnub)});
+                                          comp("Rrc_sw", rsnub), comp("Crc_sw", csnub)});
         cell["connections"] = json::array({
             conn("vin_net", {pin("L1", "primary_start"), prt("vin")}),
             conn("nodeA",   {pin("L1", "primary_end"), pin("Q1", "drain"), pin("C1", "1")}),
             // node B: coupling cap -> freewheel diode (anode) + output inductor + diode RC snubber
-            conn("nodeB",   {pin("C1", "2"), pin("D1", "anode"), pin("L2", "primary_start"), pin("Rsnub", "1")}),
-            conn("snub",    {pin("Rsnub", "2"), pin("Csnub", "1")}),
-            conn("gnd_net", {pin("Q1", "source"), pin("D1", "cathode"), pin("Csnub", "2"), prt("gnd")}),
+            conn("nodeB",   {pin("C1", "2"), pin("D1", "anode"), pin("L2", "primary_start"), pin("Rrc_sw", "1")}),
+            conn("snub",    {pin("Rrc_sw", "2"), pin("Crc_sw", "1")}),
+            conn("gnd_net", {pin("Q1", "source"), pin("D1", "cathode"), pin("Crc_sw", "2"), prt("gnd")}),
             conn("vout_net",{pin("L2", "primary_end"), prt("vout")}),     // negative output
             conn("gate_net",{pin("Q1", "gate"), prt("gate")})});
     }

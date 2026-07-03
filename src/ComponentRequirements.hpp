@@ -18,6 +18,8 @@
 #include <string>
 #include <vector>
 #include <optional>
+#include <utility>
+#include <stdexcept>
 #include <cmath>
 #include <algorithm>
 #include "SasConverter.hpp"   // SAS::ideal_diode_drop — single source for the DIDEAL forward drop
@@ -240,6 +242,41 @@ inline json resistor(double resistance, double powerRating, const std::string& r
     r["powerRating"] = powerRating;
     r["role"] = role;
     return r;
+}
+
+// --- REAL RC snubber across a hard-switched device (EMI / ring damper) ---
+// Distinct from the NUMERICAL convergence snubbers (Csn*/Rsn*/Csw*, which only give an IDEAL switch a
+// finite dV/dt so ngspice converges and are STRIPPED once a real device's Coss does that physically):
+// this is a sourced power-path part — real refdes (NOT Csn*/Rsn*/Csw*), real requirements, RENDERED and
+// sourced by the assembler/fill. It is a series R–C damper wired ACROSS a hard-switched node (a bridge
+// leg, a flyback drain clamp, the Cuk coupling node).
+//
+// Returns {capData, resData}: full component `data` objects (family wrapper + inputs.designRequirements
+// seed) ready to hand to comp("Crc…", …) / comp("Rrc…", …). The CALLER sizes the capacitance (via
+// cfg::snubber_cap — the eps·P/(V²·f) energy budget) and the damping resistance (via cfg::snubber_res) so
+// the ONE sizing rule stays in KirchhoffConfig; this helper only turns those into sourceable ratings:
+//   * cap: rated to blockingVoltage / V_DERATE (IPC-9592 80 %); ripple = the charge·f_sw it cycles; its
+//     ESR must stay well below the discrete series R so the R (not the cap's parasitic) sets the damping.
+//   * resistor: dissipates the cap's per-cycle charge+discharge energy P_R = C·V_block²·f_sw, ×2 margin.
+// Throws (no silent default, per the no-fallbacks rule) if any input is non-positive — a missing stress
+// is a bug in the caller, not something to paper over with a "typical" value.
+inline std::pair<json, json> snubber(double capacitance, double resistance,
+                                     double blockingVoltage, double switchingFrequency,
+                                     const std::string& role = "snubber") {
+    if (!(capacitance > 0.0) || !(resistance > 0.0) ||
+        !(blockingVoltage > 0.0) || !(switchingFrequency > 0.0))
+        throw std::invalid_argument(
+            "req::snubber: capacitance, resistance, blockingVoltage and switchingFrequency must all be "
+            "> 0 (no default snubber sizing)");
+    const double ratedVoltage = blockingVoltage / V_DERATE;                        // 80 % derating (IPC-9592)
+    const double rippleRms     = capacitance * blockingVoltage * switchingFrequency; // ~charge·f_sw the cap cycles
+    const double maxEsr        = 0.1 * resistance;   // the discrete series R must dominate the damping, not the ESR
+    json cap; cap["capacitor"] = json::object();
+    cap["inputs"]["designRequirements"] = capacitor(capacitance, ratedVoltage, rippleRms, maxEsr, role);
+    const double powerRating = 2.0 * capacitance * blockingVoltage * blockingVoltage * switchingFrequency;
+    json res; res["resistor"] = json::object();
+    res["inputs"]["designRequirements"] = resistor(resistance, powerRating, role);
+    return {cap, res};
 }
 
 // One winding's excitation: current (peak drives saturation, rms drives heating) AND voltage (the

@@ -142,6 +142,18 @@ json build_fsbb_tas(const FsbbDesign& d) {
         c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) * 3;
         return c; };
 
+    // REAL EMI/ring-damper RC snubber across each hard-switched node (sw1, sw2) to ground. The 4SBB is a
+    // HARD-switched H-bridge (no ZVS): each leg's node rings at turn-off against the switch Coss + layout
+    // inductance, so a real series R–C damper is a genuine board part here (unlike the sim-only Csw* node
+    // caps). Sized from the ENERGY BUDGET (cfg::snubber_cap = eps·P/(Vblock²·fsw)) + cfg::snubber_res so it
+    // stores « throughput and does not move the operating point. REAL refdes (Crc*/Rrc*, role "snubber")
+    // -> rendered + sourced, and NOT matched by the numerical-aid strip (Csn*/Rsn*/Csw*).
+    const double rcSnubC = cfg::snubber_cap(d.config, d.outputPower, Vblock, fsw);
+    const double rcSnubR = cfg::snubber_res(d.config);
+    const auto rcSnub = req::snubber(rcSnubC, rcSnubR, Vblock, fsw);
+    const json& rcCap = rcSnub.first;
+    const json& rcRes = rcSnub.second;
+
     // H-bridge buck-boost cell. Buck leg Q1(vin->sw1)/Q2(sw1->gnd); inductor sw1->sw2; boost leg
     // Q3(vout->sw2)/Q4(sw2->gnd). Body diodes anti-parallel to each switch (Q3 oriented drain=vout so
     // its body diode sw2->vout is the boost freewheel path). Snubber caps at sw1/sw2 for dead-time dV/dt.
@@ -155,20 +167,27 @@ json build_fsbb_tas(const FsbbDesign& d) {
         comp("Q4", mosfet(req::mosfet("mainSwitch", ratedVds, IpkL, maxRdsOn, 125.0))),
         // D1..D4 are anti-parallel BODY diodes across Q1..Q4 -> requirement-less (carried by the FET).
         comp("D1", diode()),  comp("D2", diode()),  comp("D3", diode()),  comp("D4", diode()),
-        comp("L", lind), comp("Csw1", snub()), comp("Csw2", snub())});
+        comp("L", lind), comp("Csw1", snub()), comp("Csw2", snub()),
+        // REAL series-RC EMI snubbers (sourced, rendered) across each switching node.
+        comp("Crc_sw1", rcCap), comp("Rrc_sw1", rcRes),
+        comp("Crc_sw2", rcCap), comp("Rrc_sw2", rcRes)});
     cell["connections"] = json::array({
         conn("vin_net",  {pin("Q1", "drain"), pin("D1", "cathode"), prt("vin")}),
         conn("sw1_net",  {pin("Q1", "source"), pin("Q2", "drain"),
                           pin("D1", "anode"), pin("D2", "cathode"),
-                          pin("L", "primary_start"), pin("Csw1", "1")}),
+                          pin("L", "primary_start"), pin("Csw1", "1"), pin("Crc_sw1", "1")}),
         conn("sw2_net",  {pin("Q4", "drain"), pin("Q3", "source"),
                           pin("D4", "cathode"), pin("D3", "anode"),
-                          pin("L", "primary_end"), pin("Csw2", "1")}),
+                          pin("L", "primary_end"), pin("Csw2", "1"), pin("Crc_sw2", "1")}),
+        // series-RC snubber midpoints: cap top plate at the sw node, damping R to ground.
+        conn("rc_sw1_mid", {pin("Crc_sw1", "2"), pin("Rrc_sw1", "1")}),
+        conn("rc_sw2_mid", {pin("Crc_sw2", "2"), pin("Rrc_sw2", "1")}),
         // Q3 high-side to the output: drain=vout (body diode D3 sw2->vout = boost freewheel).
         conn("vout_net", {pin("Q3", "drain"), pin("D3", "cathode"), prt("vout")}),
         conn("gnd_net",  {pin("Q2", "source"), pin("Q4", "source"),
                           pin("D2", "anode"), pin("D4", "anode"),
-                          pin("Csw1", "2"), pin("Csw2", "2"), prt("gnd")}),
+                          pin("Csw1", "2"), pin("Csw2", "2"),
+                          pin("Rrc_sw1", "2"), pin("Rrc_sw2", "2"), prt("gnd")}),
         conn("g1_net", {pin("Q1", "gate"), prt("g1")}),
         conn("g2_net", {pin("Q2", "gate"), prt("g2")}),
         conn("g3_net", {pin("Q3", "gate"), prt("g3")}),

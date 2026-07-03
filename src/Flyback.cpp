@@ -289,13 +289,26 @@ json build_flyback_tas(const FlybackDesign& d) {
     capCout["inputs"]["designRequirements"] = req::capacitor(
         d.outputCapacitance, d.outputVoltage / cfg::v_derate_capacitor(d.config), IcoutRms,
         req::ESR_RIPPLE_FRACTION * d.outputVoltage / IpkSec, "outputFilter");
+    // REAL RC clamp/snubber across the primary winding (dc+ ↔ sw = the primary, since primary_start=VIN and
+    // primary_end=drain). The flyback is HARD-switched: at turn-off the leakage energy rings the drain up
+    // past Vin+n·Vout, so a real RC clamp is a genuine board part here (an RCD clamp's damping network),
+    // sourced + rendered — NOT a sim-only numerical aid. Sized from the ENERGY BUDGET (cfg::snubber_cap =
+    // eps·P/(Vds²·fsw)) + cfg::snubber_res, rated to the drain stress. REAL refdes (Cclmp/Rclmp, role
+    // "snubber") -> not matched by the numerical-aid strip (Csn*/Rsn*/Csw*).
+    const double clampSnubC = cfg::snubber_cap(d.config, d.outputPower, VdsStress, fsw);
+    const auto clampSnub = req::snubber(clampSnubC, cfg::snubber_res(d.config), VdsStress, fsw);
+    const json& clampCap = clampSnub.first;
+    const json& clampRes = clampSnub.second;
+
     // --- stage bricks ---
     json inv; inv["name"] = "primary-switch";
     inv["ports"] = json::array({port("dc+"), port("sw"), port("gate"), port("dc-")});
-    inv["components"] = json::array({comp("Q1", mosfet), comp("Cin", capCin)});
+    inv["components"] = json::array({comp("Q1", mosfet), comp("Cin", capCin),
+                                     comp("Cclmp", clampCap), comp("Rclmp", clampRes)});
     inv["connections"] = json::array({
-        conn("dc_pos", {pin("Cin", "1"), prt("dc+")}),
-        conn("sw",     {pin("Q1", "drain"), prt("sw")}),
+        conn("dc_pos", {pin("Cin", "1"), pin("Cclmp", "1"), prt("dc+")}),
+        conn("sw",     {pin("Q1", "drain"), pin("Rclmp", "2"), prt("sw")}),
+        conn("clmp_mid", {pin("Cclmp", "2"), pin("Rclmp", "1")}),
         conn("gate",   {pin("Q1", "gate"), prt("gate")}),
         conn("dc_neg", {pin("Q1", "source"), pin("Cin", "2"), prt("dc-")})});
 

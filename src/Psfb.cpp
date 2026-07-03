@@ -247,6 +247,17 @@ json build_psfb_tas(const PsfbDesign& d) {
         c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) * 3;
         return c; };
 
+    // REAL series-RC EMI/ring snubber across the transformer primary (a genuine board part, sourced +
+    // rendered — distinct from the numerical Csn* node caps). The primary square-wave node rings at each
+    // leg commutation against the leakage/Lr and switch Coss; a damper across the winding tames that ring.
+    // Sized from the ENERGY BUDGET (cfg::snubber_cap = eps·P/(Vin²·fsw)) + cfg::snubber_res so it stores «
+    // throughput and does not detune the phase-shift power transfer. REAL refdes (Crc_pri/Rrc_pri, role
+    // "snubber") -> NOT matched by the numerical-aid strip (Csn*/Rsn*/Csw*).
+    const double rcSnubC = cfg::snubber_cap(d.config, d.outputPower, Vin, fsw);
+    const auto rcSnub = req::snubber(rcSnubC, cfg::snubber_res(d.config), Vin, fsw);
+    const json& rcCap = rcSnub.first;
+    const json& rcRes = rcSnub.second;
+
     // CURRENT_DOUBLER second output inductor + loop-breaker (CD uses Lout as Lo1 plus a second Lo2).
     auto outInductor2 = [&]() { json m; m["magnetic"] = json::object();
         m["inputs"] = req::magnetic_inputs(d.outputInductance, 0.2, {}, {"primary"}, std::nullopt, 25.0, {
@@ -280,16 +291,18 @@ json build_psfb_tas(const PsfbDesign& d) {
     std::vector<json> comps{
         comp("QA", mosfetReq), comp("QB", mosfetReq), comp("QC", mosfetReq), comp("QD", mosfetReq),
         comp("DA", diode()),  comp("DB", diode()),  comp("DC", diode()),  comp("DD", diode()),
-        comp("Lr", lr), comp("T1", xfmr)};
+        comp("Lr", lr), comp("T1", xfmr),
+        comp("Crc_pri", rcCap), comp("Rrc_pri", rcRes)};   // REAL series-RC snubber across the primary
     std::vector<json> conns{
         conn("vin_net",  {pin("QA", "drain"), pin("QC", "drain"),
                           pin("DA", "cathode"), pin("DC", "cathode"), prt("vin")}),
         conn("midA_net", {pin("QA", "source"), pin("QB", "drain"),
                           pin("DA", "anode"), pin("DB", "cathode"),
-                          pin("Lr", "primary_start"), pin("CsnA", "1")}),
+                          pin("Lr", "primary_start"), pin("CsnA", "1"), pin("Crc_pri", "1")}),
         conn("midC_net", {pin("QC", "source"), pin("QD", "drain"),
                           pin("DC", "anode"), pin("DD", "cathode"),
-                          pin("T1", "primary_end"), pin("CsnC", "1")}),
+                          pin("T1", "primary_end"), pin("CsnC", "1"), pin("Rrc_pri", "2")}),
+        conn("rc_pri_mid", {pin("Crc_pri", "2"), pin("Rrc_pri", "1")}),
         conn("pri_x",    {pin("Lr", "primary_end"), pin("T1", "primary_start")})};
     // gnd_net base: low-side switch sources + body-diode anodes + bridge-midpoint snubber returns. Each
     // rectifier variant appends its own secondary returns before the net is emitted.
