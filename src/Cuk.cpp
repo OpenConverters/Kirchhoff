@@ -4,6 +4,7 @@
 #include "ComponentRequirements.hpp"
 #include "ConverterAnalytical.hpp"   // single FHA source: analytical_cuk + excitations_processed/winding_current
 #include <cmath>
+#include <algorithm>
 #include <vector>
 
 namespace Kirchhoff {
@@ -43,7 +44,11 @@ CukDesign design_cuk(const json& tasInputs) {
     d.inputVoltageMax = vinMax;
 
     const double iout = d.outputPower / d.outputVoltageMag, fsw = d.switchingFrequency;
-    d.diodeDrop = req::dideal_diode_drop(iout);  // DIDEAL Vf at the operating rectifier current
+    // MKF Cuk variant: synchronous rectifier (MOSFET replacing the catch diode D1), complementary to Q1.
+    d.synchronousRectifier = (cfg::get_str(d.config, "rectifier", "diode") == std::string("synchronous"));
+    d.deadFraction = cfg::get(d.config, "deadTimeFraction", 0.01);
+    // Sync MOSFET has no forward drop → size duty with Vd=0 so the open-loop deck lands on target.
+    d.diodeDrop = d.synchronousRectifier ? 0.0 : req::dideal_diode_drop(iout);
     d.dutyCycle = duty(d.inputVoltage, d.outputVoltageMag, d.diodeDrop, d.efficiency);
 
     // L1 sized at the worst corner (max Vin) for its current-ripple target (MKF).
@@ -141,21 +146,46 @@ json build_cuk_tas(const CukDesign& d) {
     csnub["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::diode_snubber_cap(d.config);
     csnub["inputs"]["designRequirements"]["ratedVoltage"] = vSwing / cfg::v_derate_capacitor(d.config);
 
+    // Synchronous rectifier: a MOSFET Q2 (channel nodeB->gnd, mirroring the catch diode) + body diode D2.
+    json syncFet = mosfet();
+    syncFet["inputs"]["designRequirements"] = req::mosfet("synchronousRectifier",
+        vSwingRating / cfg::v_derate_mosfet(d.config), iout + IL1avg,
+        cfg::rds_on_loss_fraction(d.config) * d.outputPower / (IswRms * IswRms), 125.0);
+    json bodyD = diode();
+    bodyD["inputs"]["designRequirements"] = req::body_diode(vSwingRating / cfg::v_derate_diode(d.config), iout / 0.7);
+
     // Cuk cell — inverting. Dot/orientation mirror MKF: D1 anode at nodeB, cathode at gnd; L2 nodeB->vout(neg).
     json cell; cell["name"] = "cuk-cell";
-    cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate")});
-    cell["components"] = json::array({comp("L1", L1), comp("Q1", mq), comp("C1", c1),
-                                      comp("D1", md), comp("L2", L2),
-                                      comp("Rsnub", rsnub), comp("Csnub", csnub)});
-    cell["connections"] = json::array({
-        conn("vin_net", {pin("L1", "primary_start"), prt("vin")}),
-        conn("nodeA",   {pin("L1", "primary_end"), pin("Q1", "drain"), pin("C1", "1")}),
-        // node B: coupling cap -> freewheel diode (anode) + output inductor + diode RC snubber
-        conn("nodeB",   {pin("C1", "2"), pin("D1", "anode"), pin("L2", "primary_start"), pin("Rsnub", "1")}),
-        conn("snub",    {pin("Rsnub", "2"), pin("Csnub", "1")}),
-        conn("gnd_net", {pin("Q1", "source"), pin("D1", "cathode"), pin("Csnub", "2"), prt("gnd")}),
-        conn("vout_net",{pin("L2", "primary_end"), prt("vout")}),     // negative output
-        conn("gate_net",{pin("Q1", "gate"), prt("gate")})});
+    if (d.synchronousRectifier) {
+        cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate"), port("gate2")});
+        cell["components"] = json::array({comp("L1", L1), comp("Q1", mq), comp("C1", c1),
+                                          comp("Q2", syncFet), comp("D2", bodyD), comp("L2", L2),
+                                          comp("Rsnub", rsnub), comp("Csnub", csnub)});
+        cell["connections"] = json::array({
+            conn("vin_net", {pin("L1", "primary_start"), prt("vin")}),
+            conn("nodeA",   {pin("L1", "primary_end"), pin("Q1", "drain"), pin("C1", "1")}),
+            // node B: coupling cap -> sync MOSFET drain (+ body-diode anode) + output inductor + RC snubber
+            conn("nodeB",   {pin("C1", "2"), pin("Q2", "drain"), pin("D2", "anode"), pin("L2", "primary_start"), pin("Rsnub", "1")}),
+            conn("snub",    {pin("Rsnub", "2"), pin("Csnub", "1")}),
+            conn("gnd_net", {pin("Q1", "source"), pin("Q2", "source"), pin("D2", "cathode"), pin("Csnub", "2"), prt("gnd")}),
+            conn("vout_net",{pin("L2", "primary_end"), prt("vout")}),
+            conn("gate_net",{pin("Q1", "gate"), prt("gate")}),
+            conn("gate2_net",{pin("Q2", "gate"), prt("gate2")})});
+    } else {
+        cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate")});
+        cell["components"] = json::array({comp("L1", L1), comp("Q1", mq), comp("C1", c1),
+                                          comp("D1", md), comp("L2", L2),
+                                          comp("Rsnub", rsnub), comp("Csnub", csnub)});
+        cell["connections"] = json::array({
+            conn("vin_net", {pin("L1", "primary_start"), prt("vin")}),
+            conn("nodeA",   {pin("L1", "primary_end"), pin("Q1", "drain"), pin("C1", "1")}),
+            // node B: coupling cap -> freewheel diode (anode) + output inductor + diode RC snubber
+            conn("nodeB",   {pin("C1", "2"), pin("D1", "anode"), pin("L2", "primary_start"), pin("Rsnub", "1")}),
+            conn("snub",    {pin("Rsnub", "2"), pin("Csnub", "1")}),
+            conn("gnd_net", {pin("Q1", "source"), pin("D1", "cathode"), pin("Csnub", "2"), prt("gnd")}),
+            conn("vout_net",{pin("L2", "primary_end"), prt("vout")}),     // negative output
+            conn("gate_net",{pin("Q1", "gate"), prt("gate")})});
+    }
 
     json filt; filt["name"] = "output-filter";
     filt["ports"] = json::array({port("in"), port("rtn")});
@@ -192,6 +222,14 @@ json build_cuk_tas(const CukDesign& d) {
     st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;
     st["waveform"]["dutyCycle"] = d.dutyCycle;
     tas["simulation"]["stimulus"] = json::array({st});
+    if (d.synchronousRectifier) {
+        const double dt = d.deadFraction;
+        json st2; st2["stage"] = "cukCell"; st2["component"] = "Q2"; st2["signal"] = "gate";
+        st2["waveform"]["type"] = "pwm"; st2["waveform"]["frequency"] = d.switchingFrequency;
+        st2["waveform"]["dutyCycle"] = std::max(0.0, (1.0 - d.dutyCycle) - 2.0 * dt);
+        st2["waveform"]["phase"] = (d.dutyCycle + dt) * 360.0;
+        tas["simulation"]["stimulus"].push_back(st2);
+    }
     req::finalize_control_seeds(tas, Topology::CUK_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }

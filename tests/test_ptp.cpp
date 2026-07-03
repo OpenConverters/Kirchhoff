@@ -264,5 +264,13 @@ TEST_CASE("PtP: Sepic synchronous rectifier delivers spec", "[ptp][sepic][syncre
         INFO("zeta Vout=" << zt.vout);
         REQUIRE(zt.ok);
         CHECK(zt.vout == Catch::Approx(5.0).epsilon(0.12));
+
+        // Cuk is inverting → |Vout| ~ target.
+        json cukSpec = spec_for(12, 12, 24, 100000);
+        cukSpec["config"]["rectifier"] = rect;
+        SimResult ck = run_spice(Kirchhoff::build_cuk_tas(Kirchhoff::design_cuk(cukSpec)), 100000, (12.0 * 12.0 / 24.0) * 1e-4);
+        INFO("cuk Vout=" << ck.vout);
+        REQUIRE(ck.ok);
+        CHECK(std::abs(ck.vout) == Catch::Approx(12.0).epsilon(0.12));
     }
 }

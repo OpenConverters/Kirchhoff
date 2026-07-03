@@ -19,6 +19,8 @@ struct CukDesign {
     double couplingCapacitance;  // C1 (F), holds ~Vin+|Vo|
     double loadResistance;       // |Vo|^2 / Pout
     double outputCapacitance;
+    bool synchronousRectifier = false;   // config.rectifier=="synchronous": swap catch diode D1 for a MOSFET
+    double deadFraction = 0.01;
     nlohmann::json config;
 };
 

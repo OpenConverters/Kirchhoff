@@ -37,7 +37,7 @@ Status legend: ✅ parity/superset · ⚠️ partial · ❌ missing. "both" = mi
 
 **P1-done (this sweep):**
 - ✅ DAB SPS/EPS/DPS/TPS modulation (analytical + deck).
-- ✅ Sepic + Zeta synchronous rectifier.
+- ✅ Sepic + Zeta + Ćuk synchronous rectifier.
 
 **P2 — sizing/diagnostic parity (no waveform/topology impact):**
 - `maximumDutyCycle` configurable gate (most solvers hardcode 0.95; Boost doesn't even guard < 1).
@@ -66,7 +66,8 @@ Status legend: ✅ parity/superset · ⚠️ partial · ❌ missing. "both" = mi
 | FSBB | bidirectional, phaseCount (interleaved), outputVoltageRippleRatio→Co | both | FSBB.h:326,334; FSBB.cpp:239,374,493 | P1/P2 |
 | Sepic | coupled-inductor (mutual K) | both | Sepic.cpp:301-315,590-600 | P1 |
 | Sepic | synchronous rectifier | — | Sepic.cpp:494,567-578 | ✅ done (00b872f) |
-| Cuk | isolated (V3: transformer+turnsRatio), bidirectional (V5), coupled-inductor (V2), synchronous (V4) | both | Cuk.cpp:182,199-320,549,815-1015 | P1 |
+| Cuk | isolated (V3: transformer+turnsRatio), bidirectional (V5), coupled-inductor (V2) | both | Cuk.cpp:182,199-320,549,815-1015 | P1 |
+| Cuk | synchronous rectifier (V4) | — | Cuk.cpp:816,961-990 | ✅ done (this sweep) |
 | Zeta | coupled-inductor (mutual K) | both | Zeta.cpp:303-313,603-612 | P1 |
 | Zeta | synchronous rectifier | — | Zeta.cpp:503,570-591 | ✅ done (00b872f) |
 | Buck/Boost | maximumSwitchCurrent sizing, configurable maxDuty (Boost unguarded < 1), multi-OP | mixed | Buck.cpp:176; Boost.cpp:179 | P2 |
