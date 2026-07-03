@@ -38,6 +38,11 @@ struct FsbbDesign {
     // (mirror of the Ćuk/CLLC pattern). All four devices are already synchronous MOSFETs, so the H-bridge
     // conducts both ways; only the source/load direction, the duty target, and the gate mapping flip.
     bool reverse;
+    // Interleaved multi-phase (ABT #94): config.phaseCount = N (2,3,…) builds N phase-shifted 4-switch
+    // buck-boost legs sharing the input/output bus, interleaved by 360/N degrees. Each leg carries Iout/N,
+    // so its inductor is sized for Pout/N (⇒ N× the single-phase L). The staggered legs cancel most of the
+    // net input/output ripple. N=1 (the default) is the ordinary single-phase converter (byte-identical).
+    int phaseCount;
     nlohmann::json config;
 };
 

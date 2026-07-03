@@ -1423,8 +1423,17 @@ TEST_CASE("Bidirectional FSBB: reverse power flow, Vout side sources (ABT #94)",
     CHECK_THROWS(Kirchhoff::design_fsbb(badDir));
     json badSplit = in; badSplit["config"]["fsbbSplitRatio"] = 0.0;
     CHECK_THROWS(Kirchhoff::design_fsbb(badSplit));
+    // Interleaved multi-phase is now implemented (ABT #94 cont): phaseCount=2 builds a valid 2-leg deck
+    // (composing with the reverse direction here); only a non-integer / out-of-range count throws.
     json interleaved = in; interleaved["config"]["phaseCount"] = 2;
-    CHECK_THROWS(Kirchhoff::design_fsbb(interleaved));   // interleaved not implemented — rejected, not silent
+    Kirchhoff::FsbbDesign di = Kirchhoff::design_fsbb(interleaved);
+    CHECK(di.phaseCount == 2);
+    CHECK(di.reverse);
+    CHECK_NOTHROW(Kirchhoff::build_fsbb_tas(di));
+    json badN = in; badN["config"]["phaseCount"] = 2.5;    // non-integer → throws
+    CHECK_THROWS(Kirchhoff::design_fsbb(badN));
+    json bigN = in; bigN["config"]["phaseCount"] = 9;      // out of [1,6] → throws
+    CHECK_THROWS(Kirchhoff::design_fsbb(bigN));
 }
 
 TEST_CASE("Coupled-inductor SEPIC/Cuk/Zeta: one 2-winding magnetic, delivers spec (ABT #89)",

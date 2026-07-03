@@ -357,3 +357,76 @@ TEST_CASE("PtP: FSBB split-PWM lowers inductor ripple vs simultaneous (ABT #94)"
     CHECK(s.iLpp < m.iLpp * 0.9);                           // split PWM measurably cuts the ripple
 }
 
+// ── ABT #94 (cont): interleaved multi-phase FSBB lowers the NET output ripple ─────────────────────
+// N phase-shifted 4-switch buck-boost legs share the input/output bus, each carrying Iout/N and staggered
+// by 360/N degrees. In the buck-boost band the output current is pulsating, so the staggered legs cancel
+// most of the net output ripple: the settled Vout stays on target while its peak-to-peak ripple drops
+// sharply as N grows. Measure v(Vout) peak-to-peak over a few settled periods for N = 1, 2, 3.
+namespace {
+struct FsbbVout { double vavg; double vpp; bool ok; };
+FsbbVout measure_fsbb_vout(const json& tas, double fsw) {
+    PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
+    std::string deck = Kirchhoff::tas_to_ngspice(tas, ideal);
+    const double period = 1.0 / fsw;
+    const double tstop = 500.0 * period, tstep = period / 800.0;
+    deck = std::regex_replace(deck, std::regex(R"(\.tran\s+\S+\s+\S+\s+\S+\s+\S+)"),
+                              ".tran " + num(tstep) + " " + num(tstop) + " 0 " + num(tstep));
+    Kirchhoff::NgspiceRunResult r = Kirchhoff::run_ngspice_in_process(deck);
+    if (!r.success) return {0, 0, false};
+    const double from = tstop - 3.0 * period, to = tstop;
+    auto v = r.average("v(Vout)", from, to);
+    // Raw Vout node samples (key contains "vout", excluding any branch-current vector).
+    const std::vector<double>* vv = nullptr;
+    for (const auto& kv : r.vectors) {
+        std::string key = kv.first;
+        std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c){ return std::tolower(c); });
+        if (key.find("vout") != std::string::npos && key.find("#branch") == std::string::npos) { vv = &kv.second; break; }
+    }
+    if (!vv || !v) return {v.value_or(0.0), 0.0, false};
+    double lo = 1e300, hi = -1e300;
+    for (size_t i = 0; i < r.time.size() && i < vv->size(); ++i) {
+        if (r.time[i] < from || r.time[i] > to) continue;
+        lo = std::min(lo, (*vv)[i]); hi = std::max(hi, (*vv)[i]);
+    }
+    return {*v, hi - lo, hi >= lo};
+}
+}  // namespace
+
+TEST_CASE("PtP: interleaved multi-phase FSBB lowers net output ripple (ABT #94)", "[ptp][fsbb][interleaved]") {
+    if (!Kirchhoff::ngspice_in_process_available()) { WARN("no libngspice — skipping"); return; }
+    const double fsw = 100000;
+    // 12 V -> 12 V buck-boost band: pulsating output current, so interleaving cancels the net output ripple.
+    json base = spec_for(12, 12, 24, fsw);
+    json s1 = base;                                     // single-phase (default)
+    json s2 = base; s2["config"]["phaseCount"] = 2;     // 2 interleaved legs
+    json s3 = base; s3["config"]["phaseCount"] = 3;     // 3 interleaved legs
+    Kirchhoff::FsbbDesign d1 = Kirchhoff::design_fsbb(s1);
+    Kirchhoff::FsbbDesign d2 = Kirchhoff::design_fsbb(s2);
+    Kirchhoff::FsbbDesign d3 = Kirchhoff::design_fsbb(s3);
+    CHECK(d1.phaseCount == 1);
+    CHECK(d2.phaseCount == 2);
+    // Each leg carries Iout/N, so its inductor is N× the single-phase value (same ripple ratio).
+    CHECK(d2.inductance == Catch::Approx(2.0 * d1.inductance).epsilon(1e-9));
+    CHECK(d3.inductance == Catch::Approx(3.0 * d1.inductance).epsilon(1e-9));
+
+    FsbbVout m1 = measure_fsbb_vout(Kirchhoff::build_fsbb_tas(d1), fsw);
+    FsbbVout m2 = measure_fsbb_vout(Kirchhoff::build_fsbb_tas(d2), fsw);
+    FsbbVout m3 = measure_fsbb_vout(Kirchhoff::build_fsbb_tas(d3), fsw);
+    REQUIRE(m1.ok); REQUIRE(m2.ok); REQUIRE(m3.ok);
+    INFO("Vout/ripple  N1=" << m1.vavg << "/" << m1.vpp
+         << "  N2=" << m2.vavg << "/" << m2.vpp << "  N3=" << m3.vavg << "/" << m3.vpp);
+    CHECK(m1.vavg == Catch::Approx(12.0).epsilon(0.12));   // all land on target
+    CHECK(m2.vavg == Catch::Approx(12.0).epsilon(0.12));
+    CHECK(m3.vavg == Catch::Approx(12.0).epsilon(0.12));
+    CHECK(m2.vpp < m1.vpp * 0.5);                          // 2 phases: net output ripple at least halved
+    CHECK(m3.vpp < m2.vpp);                                // 3 phases: lower still
+}
+
+TEST_CASE("PtP: interleaved FSBB config guards (ABT #94)", "[ptp][fsbb][interleaved]") {
+    json base = spec_for(12, 12, 24, 100000);
+    json bad = base;  bad["config"]["phaseCount"] = 2.5;   // non-integer
+    CHECK_THROWS_AS(Kirchhoff::design_fsbb(bad), std::invalid_argument);
+    json big = base;  big["config"]["phaseCount"] = 7;     // out of [1,6]
+    CHECK_THROWS_AS(Kirchhoff::design_fsbb(big), std::invalid_argument);
+}
+
