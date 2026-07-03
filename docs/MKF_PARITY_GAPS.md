@@ -16,10 +16,11 @@ Status legend: ✅ parity/superset · ⚠️ partial · ❌ missing. "both" = mi
 
 ## Executive summary — priority order
 
-**P0 — wrong output today (structural collapse):**
-- **FSBB** emits a single always-on SIMULTANEOUS 4-switch scheme for every operating point; MKF
-  classifies BUCK / BOOST / BUCK_BOOST regions and defaults to SPLIT_PWM (LM5176/LT8390). Buck- and
-  boost-dominant points get the wrong gate drive; the ported `BUCK_BOOST_AUTO` analytical branch is dead code.
+**P0 — ✅ DONE this sweep:**
+- **FSBB region gate drive** — `design_fsbb` now classifies BUCK / BOOST / BUCK_BOOST at nominal Vin and
+  `build_fsbb_tas` emits the region-appropriate drive (buck leg only / boost leg only / all four), embedding
+  the matching per-region analytical waveform. (SPLIT_PWM sub-mode of the buck-boost band is still a
+  refinement TODO.) TasAssembler gained constant-DC gates for statically-held switches.
 
 **P1 — real variants/modes MKF had, KH lacks:**
 - **Multi-output** (N secondaries): Flyback, Forward, TwoSwitchForward, ACF, PushPull, IsolatedBuck,
@@ -62,7 +63,8 @@ Status legend: ✅ parity/superset · ⚠️ partial · ❌ missing. "both" = mi
 ### Non-isolated DC-DC
 | Topology | Gap | Where | MKF ref | Prio |
 |---|---|---|---|---|
-| FSBB | BUCK/BOOST/BUCK_BOOST region classification + SIMULTANEOUS/**SPLIT_PWM** | both | FSBB.cpp:20-347,799-889; FSBB.h:154,276 | P0 |
+| FSBB | BUCK/BOOST/BUCK_BOOST region classification + gate drive | — | FSBB.cpp:20-347,799-889 | ✅ done (this sweep) |
+| FSBB | SPLIT_PWM sub-mode within the buck-boost band (vs SIMULTANEOUS) | both | FSBB.cpp:96-160,331-347 | P2 |
 | FSBB | bidirectional, phaseCount (interleaved), outputVoltageRippleRatio→Co | both | FSBB.h:326,334; FSBB.cpp:239,374,493 | P1/P2 |
 | Sepic | coupled-inductor (mutual K) | both | Sepic.cpp:301-315,590-600 | P1 |
 | Sepic | synchronous rectifier | — | Sepic.cpp:494,567-578 | ✅ done (00b872f) |
