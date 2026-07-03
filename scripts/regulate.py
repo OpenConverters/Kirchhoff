@@ -197,29 +197,41 @@ def _stash_fsbb_modulation(tas):
 _GND = {"0", "gnd", "GND", "Gnd"}
 
 
-def _parse_deck(deck):
-    """Pull what the operating-point measurement needs: the input DC source, EVERY output load, and the
-    largest bulk capacitance. A load is identified structurally as an element from an output node (name
-    contains 'out') to ground — this catches the primary `Rload Vout 0` AND a multi-output topology's internal
-    secondary load (e.g. `RRsec vout_sec gnd`), while excluding an output-cap ESR (which goes to the cap node).
+def _sanitize(s):
+    """ngspice identifier-safe form of a TAS name — MUST mirror TasAssembler::sanitize / ngnodes::sanitize
+    (alnum/'_' kept, '+'->'p', '-'->'n', everything else '_'), so a reconstructed element/node token equals
+    the deck's."""
+    out = []
+    for c in s:
+        if c.isalnum() or c == "_":
+            out.append(c)
+        elif c == "+":
+            out.append("p")
+        elif c == "-":
+            out.append("n")
+        else:
+            out.append("_")
+    return "".join(out)
 
-    The assembler renders every stage as its OWN `.subckt` instantiated by an `X` line, so a load that lives
-    INSIDE a subckt (the flybuck secondary) has nodes that aren't visible at the top level. We resolve each
-    node to a top-level-measurable reference: a subckt PORT maps to the X-line's top node (e.g. gnd->0), an
-    internal node becomes the hierarchical `xinst.node`. Returns (vin_name, vin, loads, cmax) with loads a
-    list of (out_ref, gnd_ref, kind, value) where the refs are ready to drop into v(...)."""
+
+def _deck_hierarchy(deck):
+    """Parse the assembler's per-stage `.subckt`/`X` structure ONCE and return (lines, line_sub, inst,
+    resolve). `line_sub[i]` is the subckt name that line i sits in (None at top level); `inst[sub]` is
+    (hierarchical_prefix, {port: top_level_node}) from that subckt's X instantiation; `resolve(node, sub)`
+    maps a subckt-local node to a top-level-measurable reference (a port -> the X-line's top node, an internal
+    net -> the hierarchical `xinst.node`). This is the shared node-naming rule both _parse_deck (loads) and the
+    per-component excitation attachment reuse, so there is exactly one copy of the convention."""
     lines = deck.splitlines()
-    # subckt name -> port list; and which subckt (if any) each line sits in
     subckt_ports, line_sub, cur = {}, [], None
     for ln in lines:
         ms = re.match(r"^\.subckt\s+(\S+)\s+(.*)", ln, re.I)
         me = re.match(r"^\.ends", ln, re.I)
         line_sub.append(cur)
         if ms:
-            cur = ms.group(1); subckt_ports[cur] = ms.group(2).split()
+            cur = ms.group(1)
+            subckt_ports[cur] = ms.group(2).split()
         elif me:
             cur = None
-    # subckt name -> (hierarchical prefix, {port: top-level node}) from its X instantiation
     inst = {}
     for ln in lines:
         mx = re.match(r"^([Xx]\S+)\s+(.*)", ln)
@@ -234,6 +246,22 @@ def _parse_deck(deck):
             return node                                   # already a top-level node
         prefix, pmap = inst.get(sub, ("", {}))
         return pmap.get(node, f"{prefix}.{node}")         # port -> top node, else hierarchical internal node
+
+    return lines, line_sub, inst, resolve
+
+
+def _parse_deck(deck):
+    """Pull what the operating-point measurement needs: the input DC source, EVERY output load, and the
+    largest bulk capacitance. A load is identified structurally as an element from an output node (name
+    contains 'out') to ground — this catches the primary `Rload Vout 0` AND a multi-output topology's internal
+    secondary load (e.g. `RRsec vout_sec gnd`), while excluding an output-cap ESR (which goes to the cap node).
+
+    The assembler renders every stage as its OWN `.subckt` instantiated by an `X` line, so a load that lives
+    INSIDE a subckt (the flybuck secondary) has nodes that aren't visible at the top level. We resolve each
+    node to a top-level-measurable reference: a subckt PORT maps to the X-line's top node (e.g. gnd->0), an
+    internal node becomes the hierarchical `xinst.node`. Returns (vin_name, vin, loads, cmax) with loads a
+    list of (out_ref, gnd_ref, kind, value) where the refs are ready to drop into v(...)."""
+    lines, line_sub, inst, resolve = _deck_hierarchy(deck)
 
     vin = vin_name = None
     loads = []
@@ -267,6 +295,195 @@ def _parse_deck(deck):
         if m and not re.search(r"flux", m.group(1), re.I):
             cmax = max(cmax, float(m.group(2)))
     return vin_name, vin, loads, cmax
+
+
+# ── per-component SIMULATED excitation attachment ─────────────────────────────────────────────────────────
+# After the regulated operating point is found, re-run the deck ONCE and attach the SIMULATED waveform (one
+# operating point, summarised peak/rms/avg/pp) to every PASSIVE component, so the realism gate + BOM read REAL
+# per-component stresses instead of only the magnetic's design excitation.
+#
+# What we emit (the reliable subset — every quantity is directly MEASURED, never a placeholder):
+#   * VOLTAGE for every passive (capacitor / resistor / inductor): `.meas tran RMS|PP|MAX|MIN|AVG v(n1,n2)` —
+#     fully reliable for any node pair.
+#   * CURRENT for INDUCTORS/magnetic windings only: the winding current is continuous (no displacement spikes),
+#     so `.meas` on the savecurrents device vector `@l.<xinst>.<elem>[i]` gives a trustworthy RMS/AVG/peak.
+# What we deliberately OMIT (per the no-silent-wrong-value rule):
+#   * capacitor / resistor CURRENT. The instantaneous device current through a cap/resistor is dominated by
+#     switching-edge DISPLACEMENT spikes (measured e.g. 682 A peak-to-peak on a boost output cap whose real
+#     ripple RMS is ~4.8 A): the RMS/AVG are actually sane, but the PEAK/PP are numerical artefacts. Rather than
+#     emit a half-trustworthy current (a valid processedWaveform needs a peak), we emit NO current for these —
+#     never a 0 or a placeholder. (A series 0 V current sense per passive, or a rawfile parse, would give a
+#     clean full current; left as future work — see abt #35 path (b).)
+_LETTER_OF = {"magnetic": "L", "capacitor": "C", "resistor": "R"}
+
+
+def _passive_elements(deck):
+    """Every top-level/subckt PASSIVE element line (R/L/C) with its two nodes resolved to top-level-measurable
+    references and its savecurrents device-current vector. Returns [{name, letter, body, n1, n2, dev_i}], where
+    `name` is the full ngspice element token (e.g. 'LL1_pri'), `body` is that minus the type letter (the token
+    the assembler built from the TAS component name, e.g. 'L1_pri'), and `dev_i` is the `@<type>.<xinst>.<elem>[i]`
+    (hierarchical) or `@<elem>[i]` (top-level) savecurrents vector for its current."""
+    lines, line_sub, inst, resolve = _deck_hierarchy(deck)
+    out = []
+    for i, ln in enumerate(lines):
+        m = re.match(r"^([RLCrlc])(\w*)\s+(\S+)\s+(\S+)\s+", ln)
+        if not m:
+            continue
+        letter = m.group(1).upper()
+        body = m.group(2)
+        name = m.group(1) + body
+        sub = line_sub[i]
+        r1, r2 = resolve(m.group(3), sub), resolve(m.group(4), sub)
+        if r1 in _GND and r2 not in _GND:                 # orient so a ground reference is the second node
+            r1, r2 = r2, r1
+        if sub is not None:
+            prefix = inst.get(sub, ("", {}))[0]
+            dev_i = f"@{letter.lower()}.{prefix}.{name.lower()}[i]"
+        else:
+            dev_i = f"@{name.lower()}[i]"
+        out.append({"name": name, "letter": letter, "body": body, "n1": r1, "n2": r2, "dev_i": dev_i})
+    return out
+
+
+def _passive_components(tas):
+    """Every PASSIVE TAS component (magnetic / capacitor / resistor) as {name: (component_dict, type_letter)}."""
+    out = {}
+    for comp in _walk_components(tas.get("topology", {})):
+        data = comp.get("data")
+        name = comp.get("name")
+        if not isinstance(data, dict) or not name:
+            continue
+        disc = next((k for k in ("magnetic", "capacitor", "resistor") if k in data), None)
+        if disc is not None:
+            out[name] = (comp, _LETTER_OF[disc])
+    return out
+
+
+def _own_element(elem, passives):
+    """The passive TAS component name that owns a deck element, or None. An element belongs to component C iff
+    their type letters match and the element body equals sanitize(C) exactly or begins with sanitize(C)+'_' (a
+    multi-atom/multi-winding suffix). The LONGEST matching name wins, so 'C1' never steals 'C10'. Elements with
+    no owner (a semiconductor's parasitic Coss/ESR atom, the external load resistor) are left unmeasured."""
+    cands = [n for n, (_c, ltr) in passives.items()
+             if ltr == elem["letter"] and (_sanitize(n) == elem["body"]
+                                            or elem["body"].startswith(_sanitize(n) + "_"))]
+    return max(cands, key=lambda n: len(_sanitize(n))) if cands else None
+
+
+def _processed(stats):
+    """A schema-valid processedWaveform from measured (rms, pp, max, min, avg). label='custom' (a real measured
+    waveform), offset/average = the measured average, peak = the measured maximum ABSOLUTE value, peakToPeak =
+    the measured pp; positive/negativePeak only when their sign constraint holds."""
+    vmax, vmin = stats["max"], stats["min"]
+    p = {"label": "custom", "offset": stats["avg"], "average": stats["avg"],
+         "rms": abs(stats["rms"]), "peak": max(abs(vmax), abs(vmin)), "peakToPeak": abs(stats["pp"])}
+    if vmax >= 0.0:
+        p["positivePeak"] = vmax
+    if vmin <= 0.0:
+        p["negativePeak"] = vmin
+    return p
+
+
+def attach_simulated_excitations(tas, fidelity, tag="attach"):
+    """Re-run the (regulated) deck once and attach a SIMULATED operating point to every passive component, in
+    place on `tas`. The control field must already be set to the regulated value. Returns {component_name: op}
+    for the operating points attached (also useful for verification). Raises if a MATCHED passive element's
+    reliable voltage (or an inductor's current) can't be measured — that is a reconstruction bug to surface, not
+    to paper over."""
+    deck = PyKirchhoff.tas_to_ngspice(tas, fidelity)
+    _vin_name, _vin, loads, cmax = _parse_deck(deck)
+    fsw = _design_fsw(tas)
+    period = 1.0 / fsw
+    r_primary = next((v for n, ref, k, v in loads if k == "R" and n.lower() == "vout"), None)
+    rc = (r_primary if r_primary else 1.0) * cmax
+    settle = max(400.0 * period, 10.0 * rc)
+    tstep = period / 200.0
+    deck = re.sub(r"\.tran\s+\S+\s+\S+\s+\S+\s+\S+",
+                  f".tran {tstep:.12g} {settle:.12g} 0 {tstep:.12g}", deck)
+    cpos = deck.rfind("\n.control")
+    if cpos != -1:
+        deck = deck[:cpos]
+    if "savecurrents" not in deck:            # inductor current reads the savecurrents device vector @l[i]
+        deck += "\n.options savecurrents\n"
+
+    passives = _passive_components(tas)
+    owned = [(e, _own_element(e, passives)) for e in _passive_elements(deck)]
+    owned = [(e, o) for e, o in owned if o is not None]
+    if not owned:
+        return {}
+    frm, to = settle - period, settle
+    ctrl = ["run"]
+    # `meas ... v(a,b)` FAILS when a node is subckt-internal (hierarchical) — ngspice only accepts a single
+    # saved vector there. So materialise each component's terminal-voltage DIFFERENTIAL with a `let` first
+    # (v(n1)-v(n2), or v(n1) to ground), then meas that vector. Inductor current reads the savecurrents device
+    # vector directly (that form does accept the hierarchical @l.<xinst>.<elem>[i]).
+    for i, (e, _o) in enumerate(owned):
+        vexpr = f"v({e['n1']})" if e["n2"] in _GND else f"v({e['n1']}) - v({e['n2']})"
+        ctrl.append(f"let m_{i}_vd = {vexpr}")
+        for suf, typ in (("vrms", "rms"), ("vpp", "pp"), ("vmax", "max"), ("vmin", "min"), ("vavg", "avg")):
+            ctrl.append(f"meas tran m_{i}_{suf} {typ} m_{i}_vd from={frm:.12g} to={to:.12g}")
+        if e["letter"] == "L":                # inductor current: continuous, no displacement spikes -> reliable
+            for suf, typ in (("irms", "rms"), ("ipp", "pp"), ("imax", "max"), ("imin", "min"), ("iavg", "avg")):
+                ctrl.append(f"meas tran m_{i}_{suf} {typ} {e['dev_i']} from={frm:.12g} to={to:.12g}")
+    deck += "\n.control\n" + "\n".join(ctrl) + "\n.endc\n.end\n"
+    with tempfile.NamedTemporaryFile("w", suffix=f"_{tag}.cir", delete=False) as f:
+        f.write(deck)
+        path = f.name
+    try:
+        out = subprocess.run(["ngspice", "-b", path], capture_output=True, text=True, timeout=300)
+        text = out.stdout + out.stderr
+    finally:
+        os.unlink(path)
+
+    def grab(name):
+        m = re.search(rf"\b{name}\s*=\s*([-\d.eE+]+)", text)
+        return float(m.group(1)) if m else None
+
+    # Group measured voltage (all) + current (inductors) per element, raising on any missing MATCHED quantity.
+    per_comp = {}
+    for i, (e, owner) in enumerate(owned):
+        v = {k: grab(f"m_{i}_v{k}") for k in ("rms", "pp", "max", "min", "avg")}
+        if any(val is None for val in v.values()):
+            raise ValueError(f"attach_simulated_excitations: no simulated voltage for {e['name']} "
+                             f"(v across {e['n1']},{e['n2']}) — node reconstruction bug")
+        cur = None
+        if e["letter"] == "L":
+            cur = {k: grab(f"m_{i}_i{k}") for k in ("rms", "pp", "max", "min", "avg")}
+            if any(val is None for val in cur.values()):
+                raise ValueError(f"attach_simulated_excitations: no simulated current for inductor "
+                                 f"{e['name']} ({e['dev_i']}) — savecurrents/device-name bug")
+        per_comp.setdefault(owner, []).append((e, v, cur))
+
+    attached = {}
+    for owner, elems in per_comp.items():
+        comp, letter = passives[owner]
+        data = comp["data"]
+        data.setdefault("inputs", {})
+        prior = data["inputs"].get("operatingPoints", []) or []
+        temp = 25.0
+        for op in prior:                      # reuse the design operating point's ambient temperature
+            t = (op.get("conditions") or {}).get("ambientTemperature")
+            if isinstance(t, (int, float)):
+                temp = float(t)
+                break
+        if letter == "L":                     # magnetic: mirror excitationsPerWinding (one per winding element)
+            windings = []
+            for e, v, cur in elems:
+                we = {"frequency": fsw, "voltage": {"processed": _processed(v)}}
+                if cur is not None:
+                    we["current"] = {"processed": _processed(cur)}
+                windings.append(we)
+            op = {"name": "simulated", "conditions": {"ambientTemperature": temp},
+                  "excitationsPerWinding": windings}
+        else:                                 # two-terminal (capacitor / resistor): a single excitation
+            e, v, _cur = max(elems, key=lambda t: _sanitize(owner) == t[0]["body"])
+            op = {"name": "simulated", "conditions": {"ambientTemperature": temp},
+                  "excitation": {"frequency": fsw, "voltage": {"processed": _processed(v)}}}
+        # Simulated op-point lands at operatingPoints[0] (what the realism gate / BOM read); any DESIGN op-points
+        # are preserved after it. Re-attachment replaces a prior 'simulated' op rather than stacking duplicates.
+        data["inputs"]["operatingPoints"] = [op] + [o for o in prior if o.get("name") != "simulated"]
+        attached[owner] = op
+    return attached
 
 
 def _simulate(tas, fidelity, tag):
@@ -698,6 +915,8 @@ def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_
             return {"converged": False, "regulated": False, "steady_state": False, "topology": topology,
                     "control": "self", "target_vout": target_vout}
         vout, pin, pout, ripple, pf = r
+        # Self-regulating deck: no control to set — attach the simulated per-component excitation as-is (abt #35).
+        component_excitations = attach_simulated_excitations(tas, fidelity, f"{topology}_attach")
         return {
             "converged": True,
             "regulated": abs(abs(vout) - tmag) <= tol * tmag,
@@ -707,6 +926,7 @@ def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_
             "pin": pin, "pout": pout,
             "efficiency": (pout / pin) if (pin and pout == pout) else float("nan"),
             "power_factor": pf,
+            "component_excitations": component_excitations,
         }
     fsw = _design_fsw(tas)
     # Frequency control: stay in the ABOVE-resonance region where Vout is MONOTONIC in frequency (below
@@ -789,6 +1009,10 @@ def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_
     else:
         bx, vout, pin, pout, ripple = min(pts, key=lambda p: abs(abs(p[1]) - tmag))
     steady = ripple <= steady_ripple_frac
+    # Attach the SIMULATED per-component excitation at the regulated operating point (control set to bx), so the
+    # realism gate + BOM read REAL per-component stresses, not just the magnetic's design excitation (abt #35).
+    _set_control(tas, field, bx, topology)
+    component_excitations = attach_simulated_excitations(tas, fidelity, f"{topology}_attach")
     return {
         "converged": True,
         # Regulated on |Vout| so inverting topologies count; report the SIGNED Vout below.
@@ -803,6 +1027,7 @@ def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_
         "pin": pin,
         "pout": pout,
         "efficiency": (pout / pin) if (pin and pout == pout) else float("nan"),
+        "component_excitations": component_excitations,
     }
 
 
