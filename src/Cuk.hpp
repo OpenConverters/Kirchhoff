@@ -23,6 +23,15 @@ struct CukDesign {
     double deadFraction = 0.01;
     bool coupledInductor = false;        // config.coupledInductor: L1+L2 on one 1:1 coupled core (ABT #89)
     double couplingCoefficient = 0.999;
+    // Isolated Ćuk (V3, ABT #90): a transformer across the coupling capacitor — the single C1 becomes a
+    // PRIMARY coupling cap (C1) + transformer + SECONDARY coupling cap (C1b), and the output is referred
+    // through the turns ratio n = Ns/Np. Gives galvanic isolation + a step-up/down beyond the D/(1-D) range.
+    bool isolated = false;
+    double turnsRatio = 1.0;                  // n = Ns/Np (config.turnsRatio; also honours pinned turnsRatios[0])
+    double secondaryCouplingCapacitance = 0;  // C1b (F), on the secondary side
+    double magnetizingInductance = 0;         // transformer Lm (H)
+    // Bidirectional Ćuk (V5, ABT #90): reverse power flow (Vout side sources, Vin side receives).
+    bool bidirectional = false;
     nlohmann::json config;
 };
 

@@ -149,8 +149,18 @@ output, not input.
 | **buck** | 0.9 | inductance | `rectifier`("diode"), `deadTimeFraction`(0.01), `rippleRatio`(0.4) | L sized at Vin_MAX; `rectifier:"synchronous"` adds a low-side FET; step-down only |
 | **boost** | 0.9 | inductance | `rectifier`("diode"), `rippleRatio`(0.4) | **THROWS if dutyCycle ≤ 0** (needs Vout > Vin/η); L at Vin_MAX |
 | **sepic** | 0.9 | — | `l1RippleRatio`(0.4), `l2RippleRatio`(0.30), `couplingCapRipple`(0.05), `rectifier`("diode"), `coupledInductor`(false), `couplingCoefficient`(0.999) | non-inverting up/down; no pinning |
-| **cuk** | 0.9 | — | `l1RippleRatio`(0.4), `l2RippleRatio`(0.30), `diodeSnubberCap`(1e-9), `snubberRes`(100), `rectifier`("diode"), `coupledInductor`(false), `couplingCoefficient`(0.999) | **INVERTING** — emits `outputs[0].voltage.nominal` negative; send positive magnitude |
+| **cuk** | 0.9 | turnsRatios[0] (isolated) | `l1RippleRatio`(0.4), `l2RippleRatio`(0.30), `diodeSnubberCap`(1e-9), `snubberRes`(100), `rectifier`("diode"), `coupledInductor`(false), `couplingCoefficient`(0.999), `isolated`(false), `turnsRatio`(1.0) | **INVERTING** — emits `outputs[0].voltage.nominal` negative; send positive magnitude. `isolated:true` inserts a transformer across the coupling cap (see below) |
 | **zeta** | 0.9 | — | `l1RippleRatio`(0.4), `l2RippleRatio`(0.30), `couplingCapRipple`(0.05), `rectifier`("diode"), `coupledInductor`(false), `couplingCoefficient`(0.999) | non-inverting up/down |
+
+**Isolated Ćuk (`config.isolated`, ABT #90).** `isolated: true` inserts a 2-winding transformer across the
+coupling capacitor: the single C1 becomes a **primary** coupling cap (C1) + transformer + **secondary**
+coupling cap (C1b), and the output is referred through `turnsRatio` = n = Np/Ns (KH convention, so the
+secondary is the primary /n; also honours a pinned `designRequirements.turnsRatios[0]`). This adds galvanic
+isolation and a step-up/step-down beyond the D/(1-D) range — the design sizes the duty against the
+primary-referred output `|Vo|·n` so the transformer restores `|Vo|` on the secondary. Works with
+`rectifier: "synchronous"`. Mutually exclusive with `coupledInductor`. Bidirectional (reverse power flow, V5)
+is **not yet implemented** and throws (the inverting single-switch cell makes the source/load swap awkward,
+unlike the symmetric CLLC bridge) — the remaining ABT #90 item.
 
 **SEPIC / Ćuk / Zeta coupled inductor (`config.coupledInductor`, ABT #89).** By default L1 and L2 are two
 independent single-winding magnetics. With `coupledInductor: true` they share ONE core as a single

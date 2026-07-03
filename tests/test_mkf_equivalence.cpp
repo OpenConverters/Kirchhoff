@@ -1080,6 +1080,56 @@ double ideal_vout(const json& tas, const std::string& tag) {
 }
 }  // namespace
 
+// ABT #90: isolated Ćuk (V3). config.isolated inserts a 2-winding transformer across the coupling cap (the
+// single C1 becomes a primary coupling cap C1 + transformer + secondary coupling cap C1b), and the output
+// is referred through n = Np/Ns. The deck must converge and still deliver |Vout| on target for n != 1 (the
+// transformer's turns ratio compensates the D/(1-D) sizing), proving the transformer does real reflection.
+TEST_CASE("Isolated Ćuk (V3): transformer coupling delivers |Vout| across turns ratios (ABT #90)",
+          "[equivalence][cuk][isolated]") {
+    auto spec = [](double n, bool iso, bool sync) {
+        json s = json::parse(R"({ "designRequirements": { "efficiency": 0.9,
+            "inputVoltage": { "minimum": 18, "nominal": 24, "maximum": 30 },
+            "switchingFrequency": { "nominal": 200000 },
+            "outputs": [ { "name": "out", "voltage": { "nominal": 12 } } ] },
+            "operatingPoints": [ { "inputVoltage": 24, "outputs": [ { "power": 24 } ] } ] })");
+        if (iso) { s["config"]["isolated"] = true; s["config"]["turnsRatio"] = n; }
+        if (sync) s["config"]["rectifier"] = "synchronous";
+        return s;
+    };
+    auto vout_of = [&](const json& sp, const std::string& tag) {
+        json tas = Kirchhoff::build_cuk_tas(Kirchhoff::design_cuk(sp));
+        std::string deck = Kirchhoff::tas_to_ngspice(tas, PEAS::Fidelity(PEAS::Fidelity::Origin::REQUIREMENTS));
+        auto cpos = deck.rfind("\n.control");
+        if (cpos != std::string::npos) deck = deck.substr(0, cpos);
+        deck += "\n.control\nrun\nmeas tran vo AVG v(Vout) from=3.0e-3 to=4.0e-3\nprint vo\n.endc\n.end\n";
+        std::string out = run_ngspice(deck, tag);
+        double v = 0; parse_meas(out, "vo", v); return v;
+    };
+    // Isolated at n=1 / n=2 (step-down xfmr) / n=0.5 (step-up xfmr): each still lands on |12 V| within the
+    // open-loop band (a closed loop trims the residual). n != 1 proves the transformer reflects the output.
+    for (double n : {1.0, 2.0, 0.5}) {
+        const double v = vout_of(spec(n, true, false), "cuk_iso_" + std::to_string(n));
+        INFO("isolated Ćuk n=" << n << " -> Vout=" << v << " (target |12|)");
+        CHECK(std::fabs(v) > 9.0);
+        CHECK(std::fabs(v) < 16.0);
+    }
+    // The isolated cell carries a 2-winding transformer (KT1_01 coupling in the deck); the non-isolated
+    // cell has none.
+    const std::string isoDeck = Kirchhoff::tas_to_ngspice(
+        Kirchhoff::build_cuk_tas(Kirchhoff::design_cuk(spec(2.0, true, false))),
+        PEAS::Fidelity(PEAS::Fidelity::Origin::REQUIREMENTS));
+    const std::string plainDeck = Kirchhoff::tas_to_ngspice(
+        Kirchhoff::build_cuk_tas(Kirchhoff::design_cuk(spec(1.0, false, false))),
+        PEAS::Fidelity(PEAS::Fidelity::Origin::REQUIREMENTS));
+    CHECK(isoDeck.find("KT1_01 ") != std::string::npos);
+    CHECK(plainDeck.find("KT1_01 ") == std::string::npos);
+    // Sync isolated variant also converges + delivers.
+    const double vSync = vout_of(spec(2.0, true, true), "cuk_iso_sync");
+    INFO("isolated sync Ćuk n=2 -> Vout=" << vSync);
+    CHECK(std::fabs(vSync) > 9.0);
+    CHECK(std::fabs(vSync) < 16.0);
+}
+
 TEST_CASE("Coupled-inductor SEPIC/Cuk/Zeta: one 2-winding magnetic, delivers spec (ABT #89)",
           "[equivalence][coupled]") {
     struct Case { const char* name; json (*build)(const json&); double vout; };

@@ -53,12 +53,34 @@ CukDesign design_cuk(const json& tasInputs) {
     if (d.coupledInductor && !(d.couplingCoefficient > 0.0 && d.couplingCoefficient < 1.0))
         throw std::invalid_argument("design_cuk: couplingCoefficient must be in (0,1), got "
                                     + std::to_string(d.couplingCoefficient));
+    // Isolated Ćuk (V3, ABT #90): a transformer across the coupling cap. turnsRatio is the KH-convention
+    // n = Np/Ns (primary:secondary, as everywhere else), so the secondary is the primary /n and the D/(1-D)
+    // transfer sizes against the PRIMARY-referred output |Vo|·n. Bidirectional (V5): reverse power flow.
+    // Isolation and the 1:1 coupled-inductor variant are mutually exclusive (the isolated cell already splits
+    // the two inductors onto opposite sides of the transformer).
+    d.isolated = cfg::get_bool(d.config, "isolated", false);
+    d.bidirectional = cfg::get_bool(d.config, "bidirectional", false);
+    // Bidirectional Ćuk (V5) — reverse power flow — is not yet wired (the inverting single-switch cell makes
+    // the LV/HV source-load swap sign-awkward, unlike the symmetric CLLC bridge). Reject it loudly rather
+    // than silently building a forward deck (no-silent-shortcuts). Tracked as the remaining ABT #90 item.
+    if (d.bidirectional)
+        throw std::invalid_argument("design_cuk: bidirectional (reverse power flow) Ćuk is not yet "
+                                    "implemented (ABT #90 V5 follow-up); only forward flow is supported");
+    if (d.isolated && d.coupledInductor)
+        throw std::invalid_argument("design_cuk: 'isolated' and 'coupledInductor' are mutually exclusive");
+    d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(cfg::get(d.config, "turnsRatio", 1.0));
+    if (d.isolated && !(d.turnsRatio > 0.0))
+        throw std::invalid_argument("design_cuk: isolated turnsRatio must be > 0");
+    const double n = d.isolated ? d.turnsRatio : 1.0;
     // Sync MOSFET has no forward drop → size duty with Vd=0 so the open-loop deck lands on target.
     d.diodeDrop = d.synchronousRectifier ? 0.0 : req::dideal_diode_drop(iout);
-    d.dutyCycle = duty(d.inputVoltage, d.outputVoltageMag, d.diodeDrop, d.efficiency);
+    // Isolated: reflect the output to the primary (|Vo|·n, since n = Np/Ns) for the D/(1-D) sizing; the
+    // transformer steps it back down by n to |Vo| on the secondary.
+    const double voRefDuty = d.outputVoltageMag * n;
+    d.dutyCycle = duty(d.inputVoltage, voRefDuty, d.diodeDrop, d.efficiency);
 
     // L1 sized at the worst corner (max Vin) for its current-ripple target (MKF).
-    const double dMax = duty(vinMax, d.outputVoltageMag, d.diodeDrop, d.efficiency);
+    const double dMax = duty(vinMax, voRefDuty, d.diodeDrop, d.efficiency);
     const double iL1avg = iout * dMax / (1.0 - dMax);
     const double dIL1 = cfg::get(d.config, "l1RippleRatio", kRippleRatioL1) * iL1avg;
     d.inductanceL1 = vinMax * dMax / (dIL1 * fsw);
@@ -71,6 +93,18 @@ CukDesign design_cuk(const json& tasInputs) {
     const double dVo = cfg::get(d.config, "outputCapRipple", kCoRipplePct) * d.outputVoltageMag;
     d.outputCapacitance = dIL2 / (8.0 * fsw * dVo);
     d.loadResistance = d.outputVoltageMag * d.outputVoltageMag / d.outputPower;
+    if (d.isolated) {
+        // Secondary coupling cap C1b (holds ~|Vo|/D on the secondary side) — same ripple fraction as C1.
+        const double VC1b = d.outputVoltageMag / std::max(d.dutyCycle, 1e-3);
+        const double dVC1b = cfg::get(d.config, "couplingCapRipple", kC1RipplePct) * VC1b;
+        d.secondaryCouplingCapacitance = iout * (1.0 - d.dutyCycle) / (dVC1b * fsw);
+        // Transformer magnetizing inductance: large enough that the magnetizing current is a small fraction
+        // of the reflected load current (the transformer stores no net power — the Ćuk moves energy through
+        // the coupling caps). ΔIm = VC1·D·T/Lm ≤ ImagFrac·(iout/n).
+        const double ImagFrac = cfg::get(d.config, "magnetizingCurrentFraction", 0.10);
+        const double IrefLoad = iout / n;
+        d.magnetizingInductance = VC1 * d.dutyCycle / (std::max(ImagFrac * IrefLoad, 1e-3) * fsw);
+    }
     return d;
 }
 
@@ -194,9 +228,65 @@ json build_cuk_tas(const CukDesign& d) {
     json bodyD = diode();
     bodyD["inputs"]["designRequirements"] = req::body_diode(vSwingRating / cfg::v_derate_diode(d.config), iout / 0.7);
 
+    // Isolated Ćuk (V3, ABT #90): a 2-winding transformer bridges the two coupling caps. C1 (primary) sits
+    // between nodeA and the transformer primary; C1b (secondary) between the transformer secondary and nodeB;
+    // the secondary rectifier + L2 deliver the output referred through n = Ns/Np. The two windings share the
+    // system reference for the ideal-deck DC operating point (the transformer still provides the n transfer;
+    // real galvanic isolation is a board property). Magnetizing Lm is sized large so it stores no net power.
+    const double N = d.turnsRatio;   // = 1.0 for the non-isolated cell
+    json t1, c1b;
+    if (d.isolated) {
+        const double vPri = d.inputVoltage / (1.0 - d.dutyCycle);         // primary coupling-node AC swing
+        const double IprimAvg = iout / N, IsecAvg = iout;
+        const double dIm = vPri * d.dutyCycle / (d.magnetizingInductance * fsw);   // magnetizing pk-pk
+        std::vector<json> tw = {
+            req::winding_excitation("triangular", fsw, IprimAvg + dIm / 2.0, IprimAvg, IprimAvg, dIm,
+                                    d.dutyCycle, vPri, vPri / std::sqrt(2.0), 0.0, vPri),
+            req::winding_excitation("triangular", fsw, IsecAvg * 1.3, IsecAvg, IsecAvg, IsecAvg * 0.3,
+                                    d.dutyCycle, vPri * N, vPri * N / std::sqrt(2.0), 0.0, vPri * N)};
+        t1["magnetic"] = json::object();
+        t1["inputs"] = req::magnetic_inputs(d.magnetizingInductance, 0.2, {N}, {"primary", "secondary"},
+            std::nullopt, 25.0, tw);
+        c1b["capacitor"] = json::object();
+        c1b["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.secondaryCouplingCapacitance;
+        c1b["inputs"]["designRequirements"]["ratedVoltage"] =
+            (d.outputVoltageMag / std::max(d.dutyCycle, 1e-3)) * 2.0 / cfg::v_derate_capacitor(d.config);
+    }
+
     // Cuk cell — inverting. Dot/orientation mirror MKF: D1 anode at nodeB, cathode at gnd; L2 nodeB->vout(neg).
     json cell; cell["name"] = "cuk-cell";
-    if (d.synchronousRectifier) {
+    if (d.isolated) {
+        const bool sync = d.synchronousRectifier;
+        std::vector<json> comps = {comp("L1", L1), comp("Q1", mq), comp("C1", c1), comp("T1", t1),
+                                   comp("C1b", c1b), comp("L2", L2), comp("Rrc_sw", rsnub), comp("Crc_sw", csnub)};
+        std::vector<json> gnd = {pin("Q1", "source"), pin("T1", "primary_end"), pin("T1", "secondary1_end"),
+                                 pin("Crc_sw", "2"), prt("gnd")};
+        std::vector<json> nodeB = {pin("C1b", "2"), l2s(), pin("Rrc_sw", "1")};
+        std::vector<json> ports = {port("vin"), port("gnd"), port("vout"), port("gate")};
+        if (sync) {
+            comps.push_back(comp("Q2", syncFet)); comps.push_back(comp("D2", bodyD));
+            nodeB.push_back(pin("Q2", "drain")); nodeB.push_back(pin("D2", "anode"));
+            gnd.push_back(pin("Q2", "source")); gnd.push_back(pin("D2", "cathode"));
+            ports.push_back(port("gate2"));
+        } else {
+            comps.push_back(comp("D1", md));
+            nodeB.push_back(pin("D1", "anode")); gnd.push_back(pin("D1", "cathode"));
+        }
+        cell["ports"] = ports;
+        cell["components"] = comps;
+        std::vector<json> conns = {
+            conn("vin_net", {l1s(), prt("vin")}),
+            conn("nodeA",   {l1e(), pin("Q1", "drain"), pin("C1", "1")}),
+            conn("nodeP",   {pin("C1", "2"), pin("T1", "primary_start")}),          // primary coupling -> xfmr pri
+            conn("nodeS",   {pin("T1", "secondary1_start"), pin("C1b", "1")}),       // xfmr sec -> secondary coupling
+            conn("nodeB",   nodeB),
+            conn("snub",    {pin("Rrc_sw", "2"), pin("Crc_sw", "1")}),
+            conn("gnd_net", gnd),
+            conn("vout_net",{l2e(), prt("vout")}),
+            conn("gate_net",{pin("Q1", "gate"), prt("gate")})};
+        if (sync) conns.push_back(conn("gate2_net", {pin("Q2", "gate"), prt("gate2")}));
+        cell["connections"] = conns;
+    } else if (d.synchronousRectifier) {
         cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate"), port("gate2")});
         cell["components"] = magComps({comp("Q1", mq), comp("C1", c1), comp("Q2", syncFet), comp("D2", bodyD),
                                        comp("Rrc_sw", rsnub), comp("Crc_sw", csnub)});
