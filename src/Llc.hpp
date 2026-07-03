@@ -35,6 +35,8 @@ struct LlcDesign {
     double outputCapacitance;
     RectifierType rectifierType = RectifierType::CenterTapped;  // CT default (matches MKF Llc + the fixture)
     double outputInductance;          // CURRENT_DOUBLER only: each of the two output inductors Lo1/Lo2
+    bool fullBridge = false;          // false = split-cap half-bridge (±Vin/2, MKF default); true = 4-MOSFET
+                                      // full-bridge primary (±Vin, bridge factor 1.0) — config.bridgeType (ABT #91)
     nlohmann::json config;
 };
 

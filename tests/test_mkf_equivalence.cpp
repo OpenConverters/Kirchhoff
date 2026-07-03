@@ -898,6 +898,87 @@ TEST_CASE("LLC voltage-doubler rectifier variant settles to spec Vout", "[equiva
     CHECK(r.eff <= 1.05);
 }
 
+TEST_CASE("LLC full-bridge primary settles to spec Vout (ABT #91)", "[equivalence][llc][fullbridge]") {
+    // config.bridgeType="fullBridge": a 4-MOSFET primary drives the tank at ±Vin (bridge factor 1.0) instead
+    // of the split-cap half-bridge's ±Vin/2 (0.5). Default sizing DOUBLES the turns ratio (n = 1.0·Vin/Vo vs
+    // 0.5·Vin/Vo), so the converter still settles to its 48 V spec at fr. No MKF fixture (MKF defaults to a
+    // half-bridge); validate STANDALONE that the 4-switch deck converges + delivers spec.
+    json fx = load_fixture("llc");
+    const json& in = fx.at("inputs");
+    json di = kirchhoff_inputs(in);
+    di["simStimulusFsw"] = json::array({in.at("switchingFrequency").get<double>()});
+    di["config"]["bridgeType"] = "fullBridge";
+    Kirchhoff::LlcDesign d = Kirchhoff::design_llc(di);
+    REQUIRE(d.fullBridge);
+    json tas = Kirchhoff::build_llc_tas(d);
+    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "llc_fbprim");
+    INFO("LLC full-bridge primary: Vout=" << r.vout << " Iout=" << r.iout << " eff=" << r.eff);
+    check_close("Vout (full-bridge primary)", r.vout, in.at("outputVoltage").get<double>(), kSpecTol);
+    CHECK(r.eff <= 1.05);
+}
+
+TEST_CASE("LLC full-bridge delivers ~2x the half-bridge for the same turns ratio (ABT #91)",
+          "[equivalence][llc][fullbridge]") {
+    // The defining full-bridge property: for the SAME transformer turns ratio the full bridge (±Vin) delivers
+    // ~2x the half-bridge (±Vin/2). Pin the half-bridge's derived turns ratio on BOTH designs and compare the
+    // open-loop outputs at fr — the ratio must be ~2.0 (bridge factor 1.0 vs 0.5).
+    json fx = load_fixture("llc");
+    const json& in = fx.at("inputs");
+
+    json diHb = kirchhoff_inputs(in);
+    diHb["simStimulusFsw"] = json::array({in.at("switchingFrequency").get<double>()});
+    const double nPin = Kirchhoff::design_llc(diHb).turnsRatio;   // the half-bridge's own derived ratio
+    diHb["designRequirements"]["turnsRatios"] = json::array({nPin});
+    Kirchhoff::LlcDesign dHb = Kirchhoff::design_llc(diHb);
+    REQUIRE_FALSE(dHb.fullBridge);
+    json tasHb = Kirchhoff::build_llc_tas(dHb);
+    KirchhoffResult rHb = run_kirchhoff(diHb, tasHb, dHb.loadResistance, dHb.outputCapacitance, dHb.inputVoltage, "llc_hb_pin");
+
+    json diFb = kirchhoff_inputs(in);
+    diFb["simStimulusFsw"] = json::array({in.at("switchingFrequency").get<double>()});
+    diFb["designRequirements"]["turnsRatios"] = json::array({nPin});   // SAME ratio as the half-bridge
+    diFb["config"]["bridgeType"] = "fullBridge";
+    Kirchhoff::LlcDesign dFb = Kirchhoff::design_llc(diFb);
+    REQUIRE(dFb.fullBridge);
+    CHECK(std::fabs(dFb.turnsRatio - dHb.turnsRatio) < 1e-9);   // pinned identical
+    json tasFb = Kirchhoff::build_llc_tas(dFb);
+    KirchhoffResult rFb = run_kirchhoff(diFb, tasFb, dFb.loadResistance, dFb.outputCapacitance, dFb.inputVoltage, "llc_fb_pin");
+
+    INFO("LLC half-bridge Vout=" << rHb.vout << " full-bridge Vout=" << rFb.vout
+         << " ratio=" << (rHb.vout > 1e-9 ? rFb.vout / rHb.vout : 0.0));
+    check_close("full/half Vout ratio", rFb.vout / rHb.vout, 2.0, 0.05);
+    CHECK(rFb.eff <= 1.05);
+}
+
+TEST_CASE("LLC off-resonance produces above/below-resonance operating points (ABT #91)",
+          "[equivalence][llc][offresonance]") {
+    // By default KH pins the LLC drive to the tank resonance fr (M=1 -> spec). config.driveAtSwitchingFrequency
+    // instead drives at the REQUESTED switchingFrequency and embeds the FHA gain there, so the gain curve is
+    // exercised: BELOW fr the LLC boosts (M>1, Vout > spec), ABOVE fr it bucks (M<1, Vout < spec). fr =
+    // √(80k·200k) ≈ 126.5 kHz. Assert both points converge and land on the correct side of the 48 V spec.
+    json fx = load_fixture("llc");
+    const json& in = fx.at("inputs");
+    const double Vspec = in.at("outputVoltage").get<double>();
+
+    auto runAt = [&](double fsw, const char* tag) {
+        json di = kirchhoff_inputs(in);
+        di["designRequirements"]["switchingFrequency"]["nominal"] = fsw;
+        di["simStimulusFsw"] = json::array({fsw});
+        di["config"]["driveAtSwitchingFrequency"] = true;
+        Kirchhoff::LlcDesign d = Kirchhoff::design_llc(di);
+        json tas = Kirchhoff::build_llc_tas(d);
+        return run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, tag);
+    };
+    KirchhoffResult below = runAt(100000.0, "llc_below");   // fsw < fr -> boost
+    KirchhoffResult above = runAt(160000.0, "llc_above");   // fsw > fr -> buck
+    INFO("LLC off-resonance: below-fr(100k) Vout=" << below.vout << ", above-fr(160k) Vout=" << above.vout
+         << " (spec " << Vspec << ")");
+    CHECK(below.vout > Vspec * 1.02);   // clearly boosting below resonance
+    CHECK(above.vout < Vspec * 0.98);   // clearly bucking above resonance
+    CHECK(below.vout > above.vout);     // monotonic: gain falls with frequency across fr
+    CHECK(below.eff <= 1.05); CHECK(above.eff <= 1.05);
+}
+
 TEST_CASE("SRC: Kirchhoff design+simulation matches MKF ideal reference", "[equivalence][src]") {
     // Series resonant converter (half-bridge, center-tapped rectifier): a two-element Lr+Cr series tank
     // (no resonant Lm — the transformer magnetizing is made large) operated at fsw=fr (series
@@ -967,6 +1048,25 @@ TEST_CASE("SRC current-doubler rectifier variant settles to headroom target", "[
     KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "src_cd", 64);
     INFO("SRC current-doubler: Vout=" << r.vout << " (target " << sim.at("voutMean").get<double>()*kGainHeadroom << ")");
     check_close("Vout (current-doubler)", r.vout, sim.at("voutMean").get<double>() * kGainHeadroom, kSpecTol);
+    CHECK(r.eff <= 1.05);
+}
+
+TEST_CASE("SRC full-bridge primary settles to headroom target (ABT #91)", "[equivalence][src][fullbridge]") {
+    // config.bridgeType="fullBridge": a 4-MOSFET primary drives the tank at ±Vin (bridge factor 1.0). Default
+    // sizing doubles the turns ratio, so the converter tracks the SAME ~1.08·Vo gain-headroom target as the
+    // half-bridge (the SRC operates at series resonance fr=fsw, unity tank gain). No MKF fixture — standalone.
+    constexpr double kGainHeadroom = 1.08;
+    json fx = load_fixture("src");
+    const json& in = fx.at("inputs"); const json& sim = fx.at("sim");
+    json di = kirchhoff_inputs(in);
+    di["simStimulusFsw"] = json::array({in.at("switchingFrequency").get<double>()});
+    di["config"]["bridgeType"] = "fullBridge";
+    Kirchhoff::SrcDesign d = Kirchhoff::design_src(di);
+    REQUIRE(d.fullBridge);
+    json tas = Kirchhoff::build_src_tas(d);
+    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "src_fbprim");
+    INFO("SRC full-bridge primary: Vout=" << r.vout << " (target " << sim.at("voutMean").get<double>()*kGainHeadroom << ")");
+    check_close("Vout (full-bridge primary)", r.vout, sim.at("voutMean").get<double>() * kGainHeadroom, kSpecTol);
     CHECK(r.eff <= 1.05);
 }
 

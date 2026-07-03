@@ -20,6 +20,8 @@
 #include <nlohmann/json.hpp>
 #include <cmath>
 #include <algorithm>
+#include <cctype>
+#include <stdexcept>
 #include <string>
 
 namespace Kirchhoff {
@@ -56,6 +58,24 @@ inline bool get_bool(const json& config, const char* key, bool fallback) {
     if (config.is_object() && config.contains(key) && config.at(key).is_boolean())
         return config.at(key).get<bool>();
     return fallback;
+}
+
+// Primary-bridge topology flag (ABT #91). Parses config[key] = "halfBridge" (default) | "fullBridge"
+// (case/space/underscore/hyphen-insensitive) into "is it a full bridge?". Half-bridge is a split-cap leg
+// driving the tank at ±Vin/2 (bridge factor 0.5); full-bridge is a 4-MOSFET primary driving at ±Vin
+// (factor 1.0). An ABSENT/empty value keeps the topology's principled default (half-bridge for LLC/SRC); a
+// PRESENT but unrecognized string is malformed input and THROWS (no silent default — that would build a
+// different primary than the user asked for, mirroring parse_rectifier_type).
+inline bool full_bridge_selected(const json& config, const char* key = "bridgeType",
+                                 bool fallback = false) {
+    std::string s = get_str(config, key, fallback ? "fullBridge" : "halfBridge"), t;
+    for (char c : s)
+        if (!std::isspace(static_cast<unsigned char>(c)) && c != '_' && c != '-')
+            t += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (t.empty()) return fallback;
+    if (t == "halfbridge" || t == "hb") return false;
+    if (t == "fullbridge" || t == "fb") return true;
+    throw std::invalid_argument("Kirchhoff: unknown bridgeType '" + s + "'");
 }
 
 // ── Documented, overridable dimensionless design-parameter defaults ──────────────────────────────────

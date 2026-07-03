@@ -55,13 +55,18 @@ SrcDesign design_src(const json& tasInputs) {
     // Rectifier variant (CT default, matching MKF Src + the fixture). SRC has no voltage-doubler.
     d.rectifierType = parse_rectifier_type(cfg::get_str(d.config, "rectifierType", "centerTapped"),
                                            RectifierType::CenterTapped);
+    // Primary bridge topology (MKF SrcBridgeType HALF_BRIDGE | FULL_BRIDGE; the FULL_BRIDGE_PHASE_SHIFT
+    // variant is a P2 nuance not modelled here). Half-bridge (default, matching the MKF Src fixture) drives
+    // the tank at ±Vin/2 (bridge factor 0.5); full-bridge at ±Vin (1.0), so n doubles to hold spec (ABT #91).
+    d.fullBridge = cfg::full_bridge_selected(d.config);
     const double Vd = req::dideal_diode_drop(Iout);
     // Gain headroom: the SRC tank peaks at M=1 at fr and can only step DOWN. Sizing n for the fr peak to
     // deliver gainHeadroom·(Vo+Vd) lets the regulator hit Vo just ABOVE fr (efficient, monotonic) instead of
     // pinning the nominal point at the M=1 peak where any loss sags Vout below target (abt #62). Per variant:
     // CT one diode drop (Vo+Vd); FB two (Vo+2Vd); CD delivers ~0.465·Vsec (cdOutputFactor). All keep the
     // headroom divisor.
-    const double Vbridge = cfg::get(d.config, "bridgeFactor", kBridgeFactor) * Vin;
+    const double kBridge = d.fullBridge ? 1.0 : kBridgeFactor;   // half-bridge ±Vin/2 (0.5) | full-bridge ±Vin (1.0)
+    const double Vbridge = cfg::get(d.config, "bridgeFactor", kBridge) * Vin;
     const double Ghr = cfg::get(d.config, "gainHeadroom", kGainHeadroom);
     double n;
     switch (d.rectifierType) {
@@ -124,15 +129,17 @@ json build_src_tas(const SrcDesign& d) {
 
     // --- resonant-tank stresses (FHA, evaluated at the nominal point, operated AT series resonance fr) ---
     // The SRC tank is SINUSOIDAL at fr, so every magnetic excitation is a sine (label "sinusoidal",
-    // vRms=vPk/√2, vPkPk=2·vPk, offset 0). Half-bridge: the tank sees a ±Vin/2 square (fund. rms √2·Vin/π).
-    // Unlike LLC the magnetizing Lm is large (10·Lr) and kept out of the resonance, so the tank current is
-    // essentially the real load current (Pin/Vtank1_rms); the small magnetizing component is added too.
+    // vRms=vPk/√2, vPkPk=2·vPk, offset 0). The bridge presents a ±Vdrive square (Vdrive = Vin/2 half-bridge,
+    // Vin full-bridge — ABT #91; fund. rms 2√2·Vdrive/π). Unlike LLC the magnetizing Lm is large (10·Lr) and
+    // kept out of the resonance, so the tank current is essentially the real load current (Pin/Vtank1_rms);
+    // the small magnetizing component is added too.
     const double fr   = d.resonantFrequency, Tfr = 1.0 / fr;
+    const double Vdrive = d.fullBridge ? d.inputVoltage : d.inputVoltage / 2.0;   // bridge-leg amplitude
     const double Pin  = d.outputPower / d.efficiency;
     const double Iout = d.outputPower / d.outputVoltage;
-    const double Vtank1Rms = std::sqrt(2.0) * d.inputVoltage / M_PI;     // fund. rms of ±Vin/2 square
+    const double Vtank1Rms = 2.0 * std::sqrt(2.0) * Vdrive / M_PI;       // fund. rms of the ±Vdrive square
     const double IloadRms  = Pin / Vtank1Rms;                            // real (in-phase) tank current
-    const double ImagPk    = (d.inputVoltage / 2.0) * (Tfr / 4.0) / d.magnetizingInductance;  // Lm triangle pk
+    const double ImagPk    = Vdrive * (Tfr / 4.0) / d.magnetizingInductance;  // Lm triangle pk
     const double ImagRms   = ImagPk / std::sqrt(3.0);
     const double ItankRms  = std::sqrt(IloadRms * IloadRms + ImagRms * ImagRms);  // primary winding current
     const double ItankPk   = std::sqrt(2.0) * ItankRms;                 // sinusoidal peak
@@ -183,8 +190,8 @@ json build_src_tas(const SrcDesign& d) {
     std::vector<double> turnsRatios;
     for (int w = 0; w < wpo; ++w) { isoSides.push_back("secondary"); turnsRatios.push_back(n); }
     // Transformer (T1) EMBEDDED excitations from the SINGLE FHA source (the SPICE-validated analytical SRC
-    // solver). SRC is a HALF-bridge (bridgeVoltageFactor=0.5, not analytical_src's full-bridge 1.0 default);
-    // turnsRatios is PER OUTPUT (the CENTER_TAPPED rectifier splits it into primary + 2 secondary windings).
+    // solver). bridgeVoltageFactor = 0.5 half-bridge | 1.0 full-bridge (ABT #91; analytical_src's own default
+    // is the full-bridge 1.0); turnsRatios is PER OUTPUT (CENTER_TAPPED splits it into primary + 2 secondary).
     // The resonant inductor Lr and the switch/diode ratings keep the inline tank FHA.
     namespace AN = Kirchhoff::analytical;
     const AN::SrcRectifier rect = (d.rectifierType == RectifierType::CenterTapped)
@@ -200,7 +207,8 @@ json build_src_tas(const SrcDesign& d) {
         vEmbed = d.outputVoltage / cdF; iEmbed = cdF * Iout;
     }
     const MAS::OperatingPoint aopT1 = AN::analytical_src(d.inputVoltage, {vEmbed}, {iEmbed}, {n}, fr,
-                                                         d.resonantInductance, d.resonantCapacitance, 0.5, rect);
+                                                         d.resonantInductance, d.resonantCapacitance,
+                                                         d.fullBridge ? 1.0 : 0.5, rect);
     const std::vector<json> windings = AN::excitations_processed(aopT1, "T1");
     json t1; t1["magnetic"] = json::object();
     t1["inputs"] = req::magnetic_inputs(d.magnetizingInductance, 0.1, turnsRatios, isoSides,
@@ -264,26 +272,57 @@ json build_src_tas(const SrcDesign& d) {
     json cell; cell["name"] = "src-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("g1"), port("g2")});
 
-    // Primary side: half-bridge leg + bus split + series resonant tank, identical for every variant.
-    // The CT branch reproduces the original validated card ORDER exactly (this split-cap resonant deck is
+    // Primary side: series resonant tank + either a split-cap half-bridge or a 4-MOSFET full bridge
+    // (config.bridgeType, ABT #91), identical secondary rectifier for both. The half-bridge branch + the CT
+    // rectifier reproduce the original validated card ORDER exactly (this split-cap resonant deck is
     // order-sensitive in ngspice, abt #54): Csw1 between Cout and the snubbers; gate nets last.
-    std::vector<json> comps{
-        comp("Q1", mosfetReq(reqQ)), comp("Q2", mosfetReq(reqQ)),
-        comp("Dq1", diode()), comp("Dq2", diode()),   // Dq1/Dq2 = Q1/Q2 body diodes -> bare seed (deferred)
-        comp("Chi", busCap()), comp("Clo", busCap()),
-        comp("Rbal_hi", balR()), comp("Rbal_lo", balR()),   // define bus-split midpoint at DC (abt #54)
-        comp("Cr", cr), comp("Lr", lr), comp("T1", t1)};
-    std::vector<json> conns{
-        conn("vin_net",  {pin("Q1", "drain"), pin("Dq1", "cathode"), pin("Chi", "1"),
-                          pin("Rbal_hi", "1"), prt("vin")}),
-        conn("sw_node",  {pin("Q1", "source"), pin("Q2", "drain"),
-                          pin("Dq1", "anode"), pin("Dq2", "cathode"), pin("Cr", "1"), pin("Csw1", "1")}),
-        conn("msplit",   {pin("Chi", "2"), pin("Clo", "1"), pin("T1", "primary_end"),
-                          pin("Rbal_hi", "2"), pin("Rbal_lo", "1")}),
-        conn("cr_mid",   {pin("Cr", "2"), pin("Lr", "primary_start")}),
-        conn("pri_top",  {pin("Lr", "primary_end"), pin("T1", "primary_start")})};
-    const std::vector<json> gndPrimary{pin("Q2", "source"), pin("Dq2", "anode"), pin("Clo", "2"),
-                                       pin("Rbal_lo", "2"), pin("Csw1", "2")};
+    std::vector<json> comps;
+    std::vector<json> conns;
+    std::vector<json> gndPrimary;
+    if (!d.fullBridge) {
+        // Half-bridge: Q1 (vbus->sw), Q2 (sw->gnd); Dq1/Dq2 body diodes; split caps Chi/Clo set the midpoint
+        // msplit (= Vbus/2): sw_node -> Cr -> Lr -> Lpri(=Lm) -> msplit. Csw1 declared with the rectifier below.
+        comps = {
+            comp("Q1", mosfetReq(reqQ)), comp("Q2", mosfetReq(reqQ)),
+            comp("Dq1", diode()), comp("Dq2", diode()),   // Dq1/Dq2 = Q1/Q2 body diodes -> bare seed (deferred)
+            comp("Chi", busCap()), comp("Clo", busCap()),
+            comp("Rbal_hi", balR()), comp("Rbal_lo", balR()),   // define bus-split midpoint at DC (abt #54)
+            comp("Cr", cr), comp("Lr", lr), comp("T1", t1)};
+        conns = {
+            conn("vin_net",  {pin("Q1", "drain"), pin("Dq1", "cathode"), pin("Chi", "1"),
+                              pin("Rbal_hi", "1"), prt("vin")}),
+            conn("sw_node",  {pin("Q1", "source"), pin("Q2", "drain"),
+                              pin("Dq1", "anode"), pin("Dq2", "cathode"), pin("Cr", "1"), pin("Csw1", "1")}),
+            conn("msplit",   {pin("Chi", "2"), pin("Clo", "1"), pin("T1", "primary_end"),
+                              pin("Rbal_hi", "2"), pin("Rbal_lo", "1")}),
+            conn("cr_mid",   {pin("Cr", "2"), pin("Lr", "primary_start")}),
+            conn("pri_top",  {pin("Lr", "primary_end"), pin("T1", "primary_start")})};
+        gndPrimary = {pin("Q2", "source"), pin("Dq2", "anode"), pin("Clo", "2"),
+                      pin("Rbal_lo", "2"), pin("Csw1", "2")};
+    } else {
+        // Full bridge (ABT #91): 4 MOSFETs Q1..Q4 + ZVS body diodes drive the tank at ±Vin between the leg
+        // midpoints node_a/node_b — no split cap. Diagonal pairs (Q1,Q4) on g1, (Q2,Q3) on g2 -> ±Vin (bridge
+        // factor 1.0). Tank: node_a -> Cr -> Lr -> Lpri(=Lm) -> node_b. Csw1 on node_a (declared with the
+        // rectifier below to keep the shared card order), Csw2 on node_b (declared here).
+        comps = {
+            comp("Q1", mosfetReq(reqQ)), comp("Q2", mosfetReq(reqQ)),
+            comp("Q3", mosfetReq(reqQ)), comp("Q4", mosfetReq(reqQ)),
+            comp("Dq1", diode()), comp("Dq2", diode()), comp("Dq3", diode()), comp("Dq4", diode()),
+            comp("Csw2", swSnub()),
+            comp("Cr", cr), comp("Lr", lr), comp("T1", t1)};
+        conns = {
+            conn("vin_net",  {pin("Q1", "drain"), pin("Q3", "drain"),
+                              pin("Dq1", "cathode"), pin("Dq3", "cathode"), prt("vin")}),
+            conn("node_a",   {pin("Q1", "source"), pin("Q2", "drain"),
+                              pin("Dq1", "anode"), pin("Dq2", "cathode"), pin("Cr", "1"), pin("Csw1", "1")}),
+            conn("node_b",   {pin("Q3", "source"), pin("Q4", "drain"),
+                              pin("Dq3", "anode"), pin("Dq4", "cathode"), pin("T1", "primary_end"),
+                              pin("Csw2", "1")}),
+            conn("cr_mid",   {pin("Cr", "2"), pin("Lr", "primary_start")}),
+            conn("pri_top",  {pin("Lr", "primary_end"), pin("T1", "primary_start")})};
+        gndPrimary = {pin("Q2", "source"), pin("Dq2", "anode"), pin("Q4", "source"), pin("Dq4", "anode"),
+                      pin("Csw1", "2"), pin("Csw2", "2")};
+    }
 
     switch (d.rectifierType) {
     case RectifierType::CenterTapped: {
@@ -334,8 +373,14 @@ json build_src_tas(const SrcDesign& d) {
     case RectifierType::VoltageDoubler:
         throw std::runtime_error("Kirchhoff SRC: voltageDoubler rectifier not supported");
     }
-    conns.push_back(conn("g1_net", {pin("Q1", "gate"), prt("g1")}));
-    conns.push_back(conn("g2_net", {pin("Q2", "gate"), prt("g2")}));
+    // Gate nets: half-bridge Q1->g1, Q2->g2; full-bridge diagonal pairs (Q1,Q4)->g1, (Q2,Q3)->g2 (ABT #91).
+    if (!d.fullBridge) {
+        conns.push_back(conn("g1_net", {pin("Q1", "gate"), prt("g1")}));
+        conns.push_back(conn("g2_net", {pin("Q2", "gate"), prt("g2")}));
+    } else {
+        conns.push_back(conn("g1_net", {pin("Q1", "gate"), pin("Q4", "gate"), prt("g1")}));
+        conns.push_back(conn("g2_net", {pin("Q2", "gate"), pin("Q3", "gate"), prt("g2")}));
+    }
     cell["components"] = comps;
     cell["connections"] = conns;
 

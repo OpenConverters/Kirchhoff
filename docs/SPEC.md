@@ -132,8 +132,10 @@ Notable per-topology knobs (see the tables for the full list): `rectifier` (buck
 `"currentDoubler"` | `"voltageDoubler"` — **SRC and voltageDoubler on ahb/psfb/pshb throw**; **ahb** also
 accepts `"ahbFlyback"` — an active-clamp flyback: energy-storage transformer, single flyback diode, no
 output inductor, transfer Vo·n = Vin·D, ABT #87),
+`bridgeType` (llc/src: `"halfBridge"` | `"fullBridge"` — full = 4-MOSFET primary driving the tank at ±Vin,
+bridge factor 1.0, vs the half-bridge's split-cap ±Vin/2, 0.5; **any other value throws**, ABT #91),
 `deadTimeFraction`, `commandedDuty`, `operatingDutyCycle`, `maxDutyCycle`, `dabPhaseShiftDeg`,
-`qualityFactor`, `inductanceRatio`, `gainHeadroom`.
+`qualityFactor`, `inductanceRatio`, `gainHeadroom`, `driveAtSwitchingFrequency`.
 
 ---
 
@@ -228,8 +230,8 @@ commutate the ideal rectifier stiffly); SPS converges at full power. This limits
 
 | topology | efficiency default | pinning | key config (default) | quirks |
 |---|---|---|---|---|
-| **llc** | 1.0 | inductance(+tank), turnsRatios[0], resonant Lr/Cr | `rectifierType`("centerTapped"), `resonantBandMin`(80e3)/`Max`(200e3), `qualityFactor`(0.4), `inductanceRatio`(5.0) | tank at `fr=√(fmin·fmax)`; **stimulus runs at fr, not switchingFrequency**; leakage emitted |
-| **src** (series resonant) | 1.0 | turnsRatios[0], inductance(no tank re-size) | `gainHeadroom`(1.08), `qualityFactor`(0.8), `inductanceRatio`(10.0), `rectifierType`("centerTapped") | `fr = switchingFrequency`; step-down only; **voltageDoubler throws** |
+| **llc** | 1.0 | inductance(+tank), turnsRatios[0], resonant Lr/Cr | `rectifierType`("centerTapped"), `bridgeType`("halfBridge"), `driveAtSwitchingFrequency`(false), `resonantBandMin`(80e3)/`Max`(200e3), `qualityFactor`(0.4), `inductanceRatio`(5.0) | tank at `fr=√(fmin·fmax)`; **stimulus runs at fr, not switchingFrequency, unless `driveAtSwitchingFrequency`** (ABT #91); `bridgeType="fullBridge"` = 4-MOSFET primary at ±Vin (factor 1.0); leakage emitted |
+| **src** (series resonant) | 1.0 | turnsRatios[0], inductance(no tank re-size) | `gainHeadroom`(1.08), `qualityFactor`(0.8), `inductanceRatio`(10.0), `rectifierType`("centerTapped"), `bridgeType`("halfBridge") | `fr = switchingFrequency`; step-down only; `bridgeType="fullBridge"` = 4-MOSFET primary at ±Vin (factor 1.0, ABT #91); **voltageDoubler throws** |
 | **cllc** | 1.0 | inductance(+tank), turnsRatios[0] | `gainHeadroom`(1.08), `qualityFactor`(0.3), `inductanceRatio`(4.45), `powerFlowDirection`("forward") | full-bridge both sides; active SR; precharges the delivered bus; **bidirectional** (see below) |
 | **clllc** | 1.0 | inductance(+tank), turnsRatios[0] | `qualityFactor`(0.4), `inductanceRatio`(6.0), `senseResistance`(0.01), `powerFlowDirection`("forward") | CLLC + discrete secondary Lr; adds an SR-control stage; **bidirectional** (see below) |
 
@@ -242,6 +244,17 @@ actively gated, so reverse is the same cell with the source/load swapped: the DC
 the HV rail carries the delivered load and is precharged, and the embedded transformer excitations are
 reflected about the tank (driver = the LV winding). The reverse open-loop gain at `fr` differs from forward
 (the reflected-load Q differs); a closed-loop regulator trims frequency to hit the target on the driven side.
+
+**LLC / SRC full-bridge primary + LLC off-resonance (`config.bridgeType` / `driveAtSwitchingFrequency`, ABT
+#91).** Both LLC and SRC default to a split-cap **half-bridge** primary (tank driven at ±Vin/2, bridge factor
+0.5). `bridgeType="fullBridge"` emits a **4-MOSFET** primary (Q1..Q4, diagonal pairs (Q1,Q4)/(Q2,Q3) on the
+two gate nets) that drives the tank at ±Vin (factor 1.0); the embedded FHA excitation and the turns-ratio
+sizing both switch to 1.0, so for the same turns ratio the full bridge delivers ~2× the output, and with the
+default (doubled) turns ratio it still meets spec. Separately, LLC pins its drive to the tank resonance `fr`
+by default (M(fn=1)=1 → exactly spec, the KH improvement over MKF's off-resonance rectifier-test config);
+`driveAtSwitchingFrequency=true` instead drives at the requested `switchingFrequency` and embeds the FHA gain
+at that frequency, so above/below-resonance operating points are produced (below `fr` boosts, M>1; above
+`fr` bucks, M<1). SRC already operates at series resonance (`fr = switchingFrequency`), so it has no such flag.
 
 ### PFC (AC input) — `inputVoltage` is LINE RMS, emitted `{nominal}` only
 
