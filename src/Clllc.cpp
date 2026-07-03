@@ -73,6 +73,12 @@ ClllcDesign design_clllc(const json& tasInputs) {
     d.switchDuty = cfg::get(d.config, "switchDutyFraction", kSwitchDuty);
     d.loadResistance = Rload;
     d.outputCapacitance = 100e-6;
+    // Power-flow direction (ABT #85). "reverse" makes the Vout side the source and delivers to the Vin side;
+    // the symmetric tank/turns-ratio sizing is unchanged, only the deck wiring flips.
+    const std::string dir = cfg::get_str(d.config, "powerFlowDirection", "forward");
+    if (dir != "forward" && dir != "reverse")
+        throw std::invalid_argument("design_clllc: config.powerFlowDirection must be 'forward' or 'reverse', got '" + dir + "'");
+    d.reverse = (dir == "reverse");
     return d;
 }
 
@@ -126,13 +132,20 @@ json build_clllc_tas(const ClllcDesign& d) {
     // (n=Vin/Vo>1). The third "L" (Lr2 secondary resonant inductor) is its own single-winding magnetic.
     const double fr   = d.resonantFrequency, Tfr = 1.0 / fr;
     const double Pin  = d.outputPower / d.efficiency;
-    const double Vtank1Rms = 2.0 * std::sqrt(2.0) * d.inputVoltage / M_PI;  // fund. rms of ±Vin square
-    const double IloadRms  = Pin / Vtank1Rms;                               // real primary tank current
-    const double ImagPk    = d.inputVoltage * (Tfr / 4.0) / d.magnetizingInductance;  // Lm triangle pk
-    const double ImagRms   = ImagPk / std::sqrt(3.0);
-    const double ItankRms  = std::sqrt(IloadRms * IloadRms + ImagRms * ImagRms);  // primary winding current
+    // The DRIVING bus sets the tank fundamental: forward drives Vin, reverse drives Vout (ABT #85). Symmetric
+    // tank => identical sizing; only WHICH winding is the driver (real load + magnetizing current) vs the
+    // receiver (reflected real load current) flips. ItankX = Vin-side winding + Lr1; IsecX = Vout-side + Lr2.
+    const double Vdrive        = d.reverse ? d.outputVoltage : d.inputVoltage;
+    const double VtankDriveRms = 2.0 * std::sqrt(2.0) * Vdrive / M_PI;      // fund. rms of the ±Vdrive square
+    const double IloadRms      = Pin / VtankDriveRms;                       // real current in the driving winding
+    const double LmDrive       = d.reverse ? d.magnetizingInductance / (n * n) : d.magnetizingInductance;  // Lm ref. to driver
+    const double ImagPk        = Vdrive * (Tfr / 4.0) / LmDrive;            // Lm triangle pk (driver side)
+    const double ImagRms       = ImagPk / std::sqrt(3.0);
+    const double IdriveRms     = std::sqrt(IloadRms * IloadRms + ImagRms * ImagRms);  // driving winding total
+    const double IrecvRms      = IloadRms * (d.reverse ? 1.0 / n : n);      // reflected to the receiving winding
+    const double ItankRms  = d.reverse ? IrecvRms : IdriveRms;             // Vin-side winding (Lr1 + Q1..Q4)
     const double ItankPk   = std::sqrt(2.0) * ItankRms, ItankPkPk = 2.0 * ItankPk;
-    const double IsecRms   = IloadRms * n;                                  // reflected to the secondary
+    const double IsecRms   = d.reverse ? IdriveRms : IrecvRms;             // Vout-side winding (Lr2 + QE..QH)
     const double IsecPk    = std::sqrt(2.0) * IsecRms, IsecPkPk = 2.0 * IsecPk;
     const double Zr1    = 2.0 * M_PI * fr * d.primaryResonantInductance;
     const double Zr2    = 2.0 * M_PI * fr * d.secondaryResonantInductance;
@@ -172,11 +185,32 @@ json build_clllc_tas(const ClllcDesign& d) {
     // matching. Lr1/Lr2 (primary/secondary resonant inductors) and the switch/diode ratings keep the inline
     // tank FHA (they are not transformer windings). (CLLLC FHA is exact at unity gain — 0.024 NRMSE.)
     namespace AN = Kirchhoff::analytical;
-    const double IoutT = d.outputPower / d.outputVoltage;
-    const MAS::OperatingPoint aopT1 = AN::analytical_clllc(d.inputVoltage, {d.outputVoltage}, {IoutT}, {n}, fr,
-        d.magnetizingInductance, d.primaryResonantInductance, d.primaryResonantCapacitance,
-        d.secondaryResonantInductance, d.secondaryResonantCapacitance, 1.0, AN::SrcRectifier::FULL_BRIDGE);
     std::vector<std::string> isoSides{"primary", "secondary"};
+    MAS::OperatingPoint aopT1;
+    if (!d.reverse) {
+        const double IoutT = d.outputPower / d.outputVoltage;
+        aopT1 = AN::analytical_clllc(d.inputVoltage, {d.outputVoltage}, {IoutT}, {n}, fr,
+            d.magnetizingInductance, d.primaryResonantInductance, d.primaryResonantCapacitance,
+            d.secondaryResonantInductance, d.secondaryResonantCapacitance, 1.0, AN::SrcRectifier::FULL_BRIDGE);
+    } else {
+        // Reverse (ABT #85): the Vout (LV) side drives, power flows to Vin (HV). Reflect the FHA about the
+        // symmetric tank — driving tank = Vout-side tank (Lr2/Cr2), Lm referred to the Vout winding (Lm/n²),
+        // turns ratio Vout->Vin = 1/n. analytical_clllc returns [Primary(driver=Vout), Secondary(receiver=
+        // Vin)]; reorder to T1's physical winding order [primary(Vin), secondary(Vout)] before capture.
+        const double IinT = d.outputPower / d.inputVoltage;
+        MAS::OperatingPoint raw = AN::analytical_clllc(d.outputVoltage, {d.inputVoltage}, {IinT}, {1.0 / n}, fr,
+            d.magnetizingInductance / (n * n), d.secondaryResonantInductance, d.secondaryResonantCapacitance,
+            d.primaryResonantInductance, d.primaryResonantCapacitance, 1.0, AN::SrcRectifier::FULL_BRIDGE);
+        auto& ex = raw.get_mutable_excitations_per_winding();
+        if (ex.size() >= 2) {
+            MAS::OperatingPointExcitation vinW = ex[1];   vinW.set_name(std::string("Primary"));       // Vin = receiver
+            MAS::OperatingPointExcitation voutW = ex[0];  voutW.set_name(std::string("Secondary 0"));  // Vout = driver
+            aopT1.get_mutable_excitations_per_winding().push_back(vinW);
+            aopT1.get_mutable_excitations_per_winding().push_back(voutW);
+        } else {
+            aopT1 = raw;
+        }
+    }
     json t1; t1["magnetic"] = json::object();
     t1["inputs"] = req::magnetic_inputs(d.magnetizingInductance, 0.1, {n}, isoSides,
         std::nullopt, 25.0, AN::excitations_processed(aopT1, "T1"));
@@ -252,15 +286,23 @@ json build_clllc_tas(const ClllcDesign& d) {
         conn("senseM", {pin("SR","senseM"), prt("senseM")}),
         conn("gA", {pin("SR","gA"), prt("gA")}), conn("gB", {pin("SR","gB"), prt("gB")})});
 
+    // Source/delivered rails (ABT #85). Forward: source Vin, deliver Vout. Reverse: source Vout (LV),
+    // deliver Vin (HV). The assembler drives the DC source on the "input" external port at inputVoltage and
+    // sizes the load on the "output" port from outputs[0]; flipping these + the isc directions below gives
+    // reverse power flow.
+    const double srcV    = d.reverse ? d.outputVoltage : d.inputVoltage;
+    const double srcVmin = d.reverse ? d.outputVoltage : d.inputVoltageMin;
+    const double srcVmax = d.reverse ? d.outputVoltage : d.inputVoltageMax;
+    const double deliverV = d.reverse ? d.inputVoltage : d.outputVoltage;
     json tas;
     json& dreq = tas["inputs"]["designRequirements"];
     dreq["efficiency"] = d.efficiency;
     dreq["inputType"] = "dc";
-    dreq["inputVoltage"] = {{"minimum", d.inputVoltageMin}, {"nominal", d.inputVoltage}, {"maximum", d.inputVoltageMax}};
+    dreq["inputVoltage"] = {{"minimum", srcVmin}, {"nominal", srcV}, {"maximum", srcVmax}};
     dreq["switchingFrequency"]["nominal"] = d.switchingFrequency;
-    { json o; o["name"] = "out"; o["voltage"]["nominal"] = d.outputVoltage; o["regulation"] = "voltage";
+    { json o; o["name"] = "out"; o["voltage"]["nominal"] = deliverV; o["regulation"] = "voltage";
       dreq["outputs"] = json::array({o}); }
-    { json op; op["name"] = "full_load"; op["inputVoltage"] = d.inputVoltage; op["ambientTemperature"] = 25.0;
+    { json op; op["name"] = "full_load"; op["inputVoltage"] = srcV; op["ambientTemperature"] = 25.0;
       json o; o["name"] = "out"; o["power"] = d.outputPower; op["outputs"] = json::array({o});
       tas["inputs"]["operatingPoints"] = json::array({op}); }
 
@@ -268,15 +310,23 @@ json build_clllc_tas(const ClllcDesign& d) {
         req::control_stage("llcController"),
         pstage("clllcPower", "switchingCell", pcell, bind("vin", "dcBus"), bind("vout", "dcOutput")),
         pstage("srControl", "control", ccell, bind("senseP", "sense"), bind("gA", "drive"))});
-    tas["topology"]["interStageConnections"] = json::array({
-        isc("Vin", "externalPort", "input", {sp("clllcPower", "vin")}),
-        isc("GND", "externalPort", "input", {sp("clllcPower", "gnd")}),
-        isc("Vout", "externalPort", "output", {sp("clllcPower", "vout")}),
-        // tank-current sense: power -> control (the SR controller IC is sourced for the BOM and reads the
-        // sense resistor; the SR power gates themselves are driven in lock-step off g1/g2 in the power cell
-        // above, so no driveA/driveB gate nets are wired — they would float, abt #60).
-        isc("senseP", "wire", "", {sp("clllcPower", "senseP"), sp("srControl", "senseP")}),
-        isc("senseM", "wire", "", {sp("clllcPower", "senseM"), sp("srControl", "senseM")})});
+    // Node names stay tied to the physical rails (Vin = HV port, Vout = LV port); only the source/load
+    // DIRECTION flips for reverse power flow (ABT #85). The sense wires (power->control) are unaffected.
+    json powerRails = d.reverse
+        ? json::array({
+            isc("Vout", "externalPort", "input",  {sp("clllcPower", "vout")}),   // LV rail sources
+            isc("GND",  "externalPort", "input",  {sp("clllcPower", "gnd")}),
+            isc("Vin",  "externalPort", "output", {sp("clllcPower", "vin")})})    // HV rail delivered
+        : json::array({
+            isc("Vin",  "externalPort", "input",  {sp("clllcPower", "vin")}),
+            isc("GND",  "externalPort", "input",  {sp("clllcPower", "gnd")}),
+            isc("Vout", "externalPort", "output", {sp("clllcPower", "vout")})});
+    // tank-current sense: power -> control (the SR controller IC is sourced for the BOM and reads the sense
+    // resistor; the SR power gates are driven in lock-step off g1/g2 in the power cell, so no driveA/driveB
+    // gate nets are wired — they would float, abt #60).
+    powerRails.push_back(isc("senseP", "wire", "", {sp("clllcPower", "senseP"), sp("srControl", "senseP")}));
+    powerRails.push_back(isc("senseM", "wire", "", {sp("clllcPower", "senseM"), sp("srControl", "senseM")}));
+    tas["topology"]["interStageConnections"] = std::move(powerRails);
 
     json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
     tas["simulation"]["analyses"] = json::array({an});
@@ -287,7 +337,8 @@ json build_clllc_tas(const ClllcDesign& d) {
         st["waveform"]["dutyCycle"] = d.switchDuty; st["waveform"]["phase"] = phaseDeg;
         return st; };
     tas["simulation"]["stimulus"] = json::array({stim("Q1", 0.0), stim("Q2", 180.0)});
-    { json ic; ic["node"] = "Vout"; ic["voltage"] = d.outputVoltage;
+    // Precharge the DELIVERED bus so the active SR can start; forward precharges Vout, reverse Vin (ABT #85).
+    { json ic; ic["node"] = d.reverse ? "Vin" : "Vout"; ic["voltage"] = deliverV;
       tas["simulation"]["initialConditions"] = json::array({ic}); }
     req::finalize_control_seeds(tas, Topology::CLLLC_RESONANT_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;

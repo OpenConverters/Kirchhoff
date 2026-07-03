@@ -33,6 +33,13 @@ struct CllcDesign {
     double switchDuty;                 // per-switch on-fraction (~0.47, complementary with dead time)
     double loadResistance;
     double outputCapacitance;
+    // Reverse power flow (config.powerFlowDirection == "reverse", ABT #85). CLLC is a bidirectional
+    // (dual-active-bridge) resonant converter — its whole purpose (V2G / on-board chargers). Forward: the
+    // Vin-side full bridge drives, the Vout-side SR rectifies, power flows Vin->Vout. Reverse: the Vout side
+    // sources power and the Vin side receives, power flows Vout->Vin. The tank is symmetric and both bridges
+    // are already actively gated, so reverse is the SAME cell with the source/load swapped: the deck sources
+    // the LV (Vout) bus and delivers to (and precharges) the HV (Vin) bus.
+    bool reverse;
     nlohmann::json config;
 };
 

@@ -38,6 +38,8 @@ struct ClllcDesign {
     double switchDuty;                 // primary per-switch on-fraction
     double loadResistance;
     double outputCapacitance;
+    bool reverse;                      // config.powerFlowDirection == "reverse": Vout side sources, HV
+                                       // (Vin) side receives — bidirectional CLLLC (V2G / OBC), ABT #85.
     nlohmann::json config;
 };
 

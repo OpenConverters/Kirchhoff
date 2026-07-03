@@ -39,6 +39,7 @@
 #include "Llc.hpp"
 #include "Src.hpp"
 #include "Cllc.hpp"
+#include "Clllc.hpp"
 #include "Flyback.hpp"
 #include "TasAssembler.hpp"
 #include "Fidelity.hpp"
@@ -1006,6 +1007,88 @@ TEST_CASE("CLLC: Kirchhoff design+simulation matches MKF ideal reference", "[equ
     INFO("cllc efficiency: Kirchhoff=" << r.eff << " vs MKF=" << mkfEff);
     CHECK(r.eff >= mkfEff * 0.97);
     CHECK(r.eff <= 1.05);
+}
+
+// ABT #85: CLLC / CLLLC REVERSE power flow. These are dual-active-bridge resonant converters whose entire
+// purpose (V2G / on-board chargers) is bidirectional operation. With config.powerFlowDirection="reverse" the
+// Vout (LV) side sources power and the Vin (HV) side receives it: the deck drives a DC source on the LV bus
+// and delivers to (and precharges) the HV bus. The symmetric tank means the same cell runs both directions,
+// so this gates the reverse WIRING: the source lands on the LV rail, the HV rail carries a real delivered
+// load, power flows LV->HV, and energy is conserved (the open-loop gain at fr differs from forward because
+// the reflected load Q differs — a closed-loop regulator trims frequency to hit target; here we assert
+// genuine reverse delivery + no manufactured energy, not a pinned setpoint).
+namespace {
+// Build the reverse deck, settle it, and measure the DELIVERED HV rail v(Vin) and the LV source current
+// i(VVout). Returns {vDelivered, pSource, pLoad}. Mirrors run_kirchhoff but for the reversed node names.
+struct ReverseResult { double vDelivered, pSource, pLoad; };
+ReverseResult run_reverse(const json& tas, double srcV, double deliverV, double power, const std::string& tag) {
+    const double loadR = deliverV * deliverV / power;         // the HV-side delivered load
+    PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
+    std::string deck = Kirchhoff::tas_to_ngspice(tas, ideal);
+    const double fsw = 100000.0, period = 1.0 / fsw;
+    const double settleTime = 600.0 * period, tstep = period / 200.0;    // no big HV-side cap -> settle fast
+    deck = std::regex_replace(deck, std::regex(R"(\.tran\s+\S+\s+\S+\s+\S+\s+\S+)"),
+                              ".tran " + fmt(tstep) + " " + fmt(settleTime) + " 0 " + fmt(tstep));
+    const double from = settleTime - period;
+    auto cpos = deck.rfind("\n.control");
+    if (cpos != std::string::npos) deck = deck.substr(0, cpos);
+    deck += "\n.control\nrun\n"
+            "meas tran vdel AVG v(Vin) from=" + fmt(from) + " to=" + fmt(settleTime) + "\n"
+            "meas tran isrc AVG i(VVout) from=" + fmt(from) + " to=" + fmt(settleTime) + "\n"
+            "print vdel isrc\n.endc\n.end\n";
+    std::string out = run_ngspice(deck, "kirchhoff_" + tag);
+    double vdel = 0, isrc = 0;
+    if (!parse_meas(out, "vdel", vdel)) { std::cerr << out << "\n"; throw std::runtime_error("reverse " + tag + " no Vout"); }
+    parse_meas(out, "isrc", isrc);
+    ReverseResult r;
+    r.vDelivered = std::fabs(vdel);
+    r.pSource = std::fabs(isrc) * srcV;                       // power drawn from the LV source
+    r.pLoad = r.vDelivered * r.vDelivered / loadR;            // power delivered into the HV load
+    return r;
+}
+}  // namespace
+
+TEST_CASE("CLLC reverse power flow: LV side sources, HV side delivered (ABT #85)", "[equivalence][cllc][reverse]") {
+    json in = json::parse(R"({ "efficiency": 1.0, "inputVoltage": 400, "outputVoltage": 48,
+        "outputPower": 480, "switchingFrequency": 100000 })");
+    json di = kirchhoff_inputs(in);
+    di["config"]["powerFlowDirection"] = "reverse";
+    di["simStimulusFsw"] = json::array({100000.0});
+    Kirchhoff::CllcDesign d = Kirchhoff::design_cllc(di);
+    CHECK(d.reverse);
+    json tas = Kirchhoff::build_cllc_tas(d);
+    // The DC source is on the LV rail, the delivered load on the HV rail.
+    const std::string deck = Kirchhoff::tas_to_ngspice(tas, PEAS::Fidelity(PEAS::Fidelity::Origin::REQUIREMENTS));
+    CHECK(deck.find("VVout Vout 0 DC") != std::string::npos);  // LV rail sources (48 V)
+    CHECK(deck.find("VVin ") == std::string::npos);            // HV rail is NOT a source (it is the load)
+
+    ReverseResult r = run_reverse(tas, 48.0, 400.0, 480.0, "cllc_rev");
+    INFO("CLLC reverse: v(Vin)=" << r.vDelivered << " pSource=" << r.pSource << " pLoad=" << r.pLoad);
+    CHECK(r.vDelivered > 0.6 * 400.0);        // genuine reverse delivery to the HV rail (open-loop droop OK)
+    CHECK(r.vDelivered < 1.15 * 400.0);       // and not runaway
+    CHECK(r.pLoad > 50.0);                     // real power flows LV->HV
+    CHECK(r.pSource >= r.pLoad * 0.9);         // energy conservation: source supplies the delivered power
+}
+
+TEST_CASE("CLLLC reverse power flow: LV side sources, HV side delivered (ABT #85)", "[equivalence][clllc][reverse]") {
+    json in = json::parse(R"({ "efficiency": 1.0, "inputVoltage": 400, "outputVoltage": 48,
+        "outputPower": 480, "switchingFrequency": 100000 })");
+    json di = kirchhoff_inputs(in);
+    di["config"]["powerFlowDirection"] = "reverse";
+    di["simStimulusFsw"] = json::array({100000.0});
+    Kirchhoff::ClllcDesign d = Kirchhoff::design_clllc(di);
+    CHECK(d.reverse);
+    json tas = Kirchhoff::build_clllc_tas(d);
+    const std::string deck = Kirchhoff::tas_to_ngspice(tas, PEAS::Fidelity(PEAS::Fidelity::Origin::REQUIREMENTS));
+    CHECK(deck.find("VVout Vout 0 DC") != std::string::npos);  // LV rail sources (48 V)
+    CHECK(deck.find("VVin ") == std::string::npos);            // HV rail is the load, not a source
+
+    ReverseResult r = run_reverse(tas, 48.0, 400.0, 480.0, "clllc_rev");
+    INFO("CLLLC reverse: v(Vin)=" << r.vDelivered << " pSource=" << r.pSource << " pLoad=" << r.pLoad);
+    CHECK(r.vDelivered > 0.6 * 400.0);
+    CHECK(r.vDelivered < 1.15 * 400.0);
+    CHECK(r.pLoad > 50.0);
+    CHECK(r.pSource >= r.pLoad * 0.9);
 }
 
 }  // namespace

@@ -205,8 +205,18 @@ commutate the ideal rectifier stiffly); SPS converges at full power. This limits
 |---|---|---|---|---|
 | **llc** | 1.0 | inductance(+tank), turnsRatios[0], resonant Lr/Cr | `rectifierType`("centerTapped"), `resonantBandMin`(80e3)/`Max`(200e3), `qualityFactor`(0.4), `inductanceRatio`(5.0) | tank at `fr=√(fmin·fmax)`; **stimulus runs at fr, not switchingFrequency**; leakage emitted |
 | **src** (series resonant) | 1.0 | turnsRatios[0], inductance(no tank re-size) | `gainHeadroom`(1.08), `qualityFactor`(0.8), `inductanceRatio`(10.0), `rectifierType`("centerTapped") | `fr = switchingFrequency`; step-down only; **voltageDoubler throws** |
-| **cllc** | 1.0 | inductance(+tank), turnsRatios[0] | `gainHeadroom`(1.08), `qualityFactor`(0.3), `inductanceRatio`(4.45) | full-bridge both sides; active SR; precharges Vout |
-| **clllc** | 1.0 | inductance(+tank), turnsRatios[0] | `qualityFactor`(0.4), `inductanceRatio`(6.0), `senseResistance`(0.01) | CLLC + discrete secondary Lr; adds an SR-control stage |
+| **cllc** | 1.0 | inductance(+tank), turnsRatios[0] | `gainHeadroom`(1.08), `qualityFactor`(0.3), `inductanceRatio`(4.45), `powerFlowDirection`("forward") | full-bridge both sides; active SR; precharges the delivered bus; **bidirectional** (see below) |
+| **clllc** | 1.0 | inductance(+tank), turnsRatios[0] | `qualityFactor`(0.4), `inductanceRatio`(6.0), `senseResistance`(0.01), `powerFlowDirection`("forward") | CLLC + discrete secondary Lr; adds an SR-control stage; **bidirectional** (see below) |
+
+**CLLC / CLLLC power-flow direction (`config.powerFlowDirection`, ABT #85).** These are dual-active-bridge
+resonant converters whose defining feature is **bidirectional** power flow (V2G / on-board chargers).
+`"forward"` (default) drives the Vin (HV) full bridge and rectifies on the Vout (LV) side — power flows
+Vin→Vout. `"reverse"` makes the Vout side source power and the Vin side receive it — power flows Vout→Vin.
+The tank/turns-ratio sizing is identical (symmetric bidirectional design) and both bridges are already
+actively gated, so reverse is the same cell with the source/load swapped: the DC source drives the LV rail,
+the HV rail carries the delivered load and is precharged, and the embedded transformer excitations are
+reflected about the tank (driver = the LV winding). The reverse open-loop gain at `fr` differs from forward
+(the reflected-load Q differs); a closed-loop regulator trims frequency to hit the target on the driven side.
 
 ### PFC (AC input) — `inputVoltage` is LINE RMS, emitted `{nominal}` only
 
