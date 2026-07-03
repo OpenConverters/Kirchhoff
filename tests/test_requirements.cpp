@@ -503,6 +503,33 @@ void check_magnetic_completeness(const std::string& name) {
     }
 }
 
+// ABT #49: a step-down transformer ratio sized from the topology's MAXIMUM duty is a CEILING and must be
+// emitted as {maximum} (so the magnetic adviser rejects integer-turn realizations whose realized ratio
+// overshoots it — which would need D beyond the max duty and short the transformer). Structural ratios
+// (demag/reset 1:1, second-primary half) stay {nominal}. push_pull is the reference (secondaries marked).
+// The transformer magnetic is identified by its turnsRatios length (the output inductor has none).
+void check_turns_ratio_ceiling(const std::string& name, const std::vector<bool>& expectCeiling) {
+    json fx = load_fixture(name);
+    json di = kirchhoff_inputs(fx.at("inputs"));
+    Built b; bool built = false;
+    for (const auto& t : topologies()) if (t.name == name) { b = t.build(di); built = true; break; }
+    REQUIRE(built);
+    std::vector<json> mags; collect_magnetics(b.tas, mags);
+    const json* xfmr = nullptr;
+    for (const auto& m : mags) {
+        const json& dr = m.at("inputs").at("designRequirements");
+        if (dr.contains("turnsRatios") && dr.at("turnsRatios").size() == expectCeiling.size()) { xfmr = &m; break; }
+    }
+    INFO(name << ": transformer with " << expectCeiling.size() << " turns ratios");
+    REQUIRE(xfmr != nullptr);
+    const json& tr = xfmr->at("inputs").at("designRequirements").at("turnsRatios");
+    for (size_t i = 0; i < expectCeiling.size(); ++i) {
+        INFO(name << " turnsRatios[" << i << "] = " << tr.at(i).dump());
+        if (expectCeiling[i]) CHECK(tr.at(i).contains("maximum"));
+        else                  CHECK(tr.at(i).contains("nominal"));
+    }
+}
+
 }  // namespace
 
 // One TEST_CASE per topology (each tagged) so a failure names the offending converter directly.
@@ -533,6 +560,24 @@ TEST_CASE("magnetic seed complete: all topologies", "[magseed]") {
     for (const auto& t : topologies()) {
         DYNAMIC_SECTION(t.name) { check_magnetic_completeness(t.name); }
     }
+}
+
+// ABT #49: duty-derived secondary turns ratios emitted as {maximum} ceilings across the forward family +
+// Weinberg; structural ratios (forward demag 1:1, push-pull/Weinberg second-primary 1:1) stay {nominal}.
+TEST_CASE("Forward marks secondary turns ratio ceiling (abt #49)", "[requirements][ceiling][forward]") {
+    check_turns_ratio_ceiling("forward", {false, true});             // [1:1 demag, n secondary]
+}
+TEST_CASE("Two-switch forward marks secondary turns ratio ceiling (abt #49)", "[requirements][ceiling][tsf]") {
+    check_turns_ratio_ceiling("two_switch_forward", {true});          // [n secondary] (no demag)
+}
+TEST_CASE("ACF marks secondary turns ratio ceiling (abt #49)", "[requirements][ceiling][acf]") {
+    check_turns_ratio_ceiling("acf", {true});                         // [n secondary] (active clamp reset)
+}
+TEST_CASE("Weinberg marks secondary turns ratios ceiling (abt #49)", "[requirements][ceiling][weinberg]") {
+    check_turns_ratio_ceiling("weinberg", {false, true, true});       // [1:1 2nd primary, n, n secondaries]
+}
+TEST_CASE("Push-pull marks secondary turns ratios ceiling (abt #49 reference)", "[requirements][ceiling][pushpull]") {
+    check_turns_ratio_ceiling("push_pull", {false, true, true});      // reference: [1:1 2nd primary, n, n]
 }
 
 // Multi-point: each topology at its MKF PtP reference-design operating points (validated our way).

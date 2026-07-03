@@ -176,7 +176,10 @@ json build_weinberg_tas(const WeinbergDesign& d) {
     // isolationVoltage -> nullopt.
     json t1; t1["magnetic"] = json::object();
     t1["inputs"] = req::magnetic_inputs(d.magnetizingInductance, 0.1, {1.0, n, n},
-        {"primary", "primary", "secondary", "secondary"}, std::nullopt, 25.0, wT1);
+        {"primary", "primary", "secondary", "secondary"}, std::nullopt, 25.0, wT1,
+        // n = 1/(2·M·(1−D_target)) is the boost-regime duty-derived ratio -> emit the two secondary ratios
+        // as {maximum}; the 1.0 second-primary half is a structural 1:1 and stays {nominal}. (abt #49)
+        /*turnsRatioIsCeiling=*/{false, true, true});
 
     json cout; cout["capacitor"] = json::object();
     cout["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;

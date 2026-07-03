@@ -160,7 +160,10 @@ json build_acf_tas(const AcfDesign& d) {
     std::vector<std::string> xfmrIso{"primary", "secondary"};
     json xfmr; xfmr["magnetic"] = json::object();
     xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, {n}, xfmrIso, std::nullopt, 25.0,
-        AN::excitations_processed(aopNom, "T1"));
+        AN::excitations_processed(aopNom, "T1"),
+        // n = Vin_min·Dmax/(Vout+Vd) is a duty CEILING; active clamp resets (no demag winding), so the
+        // sole secondary ratio is emitted as {maximum}. (abt #49)
+        /*turnsRatioIsCeiling=*/{true});
     // Output filter inductor: single winding (turnsRatios = []) -> 1 excitation, DC-biased at Iout.
     json lout; lout["magnetic"] = json::object();
     lout["inputs"] = req::magnetic_inputs(d.outputInductance, 0.2, {}, {"primary"}, std::nullopt, 25.0, {
