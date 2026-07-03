@@ -128,16 +128,14 @@ json build_pshb_tas(const PshbDesign& d) {
 
     // Transformer: the primary swings +-Vhb (= +-Vin/2, the split-cap half bus). PRIMARY carries the
     // reflected output current (Io/N) plus magnetizing; SECONDARY carries Io. Magnetizing ramp from
-    // Vhb*Deff over the active half (same volt-seconds that sized Lm). vRms = sqrt(Deff)*Von.
+    // Vhb*Deff over the active half (same volt-seconds that sized Lm). The transformer WINDING
+    // excitations themselves now come from the analytical solver below (single FHA source for every
+    // rectifier variant); these primary-current stresses still feed the switch/diode ratings + Lr.
     const double dILm = Vhb * Deff * Tsw / (2.0 * Lm);   // magnetizing pk-pk
     const double IpriCtr = Io / N;
     const double IpriPk  = IpriCtr + dILm / 2.0;
     const double IpriRms = std::sqrt(Deff) * std::sqrt(IpriCtr * IpriCtr + dILm * dILm / 12.0);
-    const double IsecPk  = Io + dILo / 2.0;             // secondary feeds Lout
-    const double IsecRms = std::sqrt(Deff) * std::sqrt(Io * Io + dILo * dILo / 12.0);
-    const double Vs = Vhb / N;
-    const double vPriPk = Vhb, vPriPkPk = 2.0 * Vhb, vPriRms = std::sqrt(Deff) * Vhb;
-    const double vSecPk = Vs,  vSecPkPk = 2.0 * Vs,  vSecRms = std::sqrt(Deff) * Vs;
+    const double vSecPk = Vhb / N;                       // one-winding secondary peak (rectifier Vr stress)
 
     // --- semiconductor ratings (sourceable requirements) ---
     // 3-level NPC stack switches S1..S4: each device blocks the split-cap half bus (Vin_max/2) when
@@ -180,29 +178,30 @@ json build_pshb_tas(const PshbDesign& d) {
 
     // Transformer excitations from the SINGLE FHA source — the SPICE-validated analytical PSHB solver
     // (it takes the FULL Vin and halves it internally to the split-cap bus). FULL_BRIDGE (default) emits
-    // Primary + ONE bipolar secondary; CENTER_TAPPED emits Primary + two half-windings; both line up with
-    // the wpo winding structure. CURRENT_DOUBLER is not modelled by the solver, so it keeps the inline
-    // model. Lr + the switch/diode ratings stay inline (Lr is not a transformer winding).
+    // Primary + ONE bipolar secondary (centered at Io); CENTER_TAPPED emits Primary + two half-windings;
+    // CURRENT_DOUBLER emits Primary + ONE bipolar secondary centered at Io/2 (the load splits across the
+    // two output inductors) — all line up with the wpo winding structure. Lr + the switch/diode ratings
+    // stay inline (Lr is not a transformer winding). VoltageDoubler was rejected in design_pshb.
     namespace AN = Kirchhoff::analytical;
     std::vector<json> xwindings;
-    if (d.rectifierType == RectifierType::FullBridge || d.rectifierType == RectifierType::CenterTapped) {
-        const AN::SrcRectifier rect = (d.rectifierType == RectifierType::CenterTapped)
-                                      ? AN::SrcRectifier::CENTER_TAPPED : AN::SrcRectifier::FULL_BRIDGE;
-        const MAS::OperatingPoint aopT1 = AN::analytical_pshb(d.inputVoltage, {Vo}, {Io}, {N}, fsw, Lm,
-                                                              d.seriesInductance, d.outputInductance,
-                                                              d.phaseDeg, 0.0, rect);
-        xwindings = AN::excitations_processed(aopT1, "T1");
-    } else {
-        xwindings.push_back(req::winding_excitation("pshbPrimary", fsw, IpriPk, IpriRms, 0.0, dILm, Deff,
-                                vPriPk, vPriRms, 0.0, vPriPkPk));
-        for (int w = 0; w < wpo; ++w)
-            xwindings.push_back(req::winding_excitation("pshbSecondary", fsw, IsecPk, IsecRms, 0.0, dILo, Deff,
-                                    vSecPk, vSecRms, 0.0, vSecPkPk));
+    AN::SrcRectifier rect;
+    switch (d.rectifierType) {
+    case RectifierType::CenterTapped:   rect = AN::SrcRectifier::CENTER_TAPPED;   break;
+    case RectifierType::CurrentDoubler: rect = AN::SrcRectifier::CURRENT_DOUBLER; break;
+    case RectifierType::FullBridge:     rect = AN::SrcRectifier::FULL_BRIDGE;      break;
+    default:
+        throw std::invalid_argument("Kirchhoff PSHB: rectifier variant not supported by the analytical "
+                                    "solver (only fullBridge, centerTapped, currentDoubler)");
     }
+    const MAS::OperatingPoint aopT1 = AN::analytical_pshb(d.inputVoltage, {Vo}, {Io}, {N}, fsw, Lm,
+                                                          d.seriesInductance, d.outputInductance,
+                                                          d.phaseDeg, 0.0, rect);
+    xwindings = AN::excitations_processed(aopT1, "T1");
     json xfmr; xfmr["magnetic"]=json::object();
     xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, turnsRatios, isoSides, std::nullopt, 25.0, xwindings);
 
-    // Output inductor Lo (single-winding magnetic, DC-biased at Io).
+    // Output inductor Lo (single-winding magnetic). FULL_BRIDGE / CENTER_TAPPED carry the whole Io;
+    // CURRENT_DOUBLER splits the load across TWO inductors, so each is DC-biased at Io/2 (below).
     json lout; lout["magnetic"]=json::object();
     lout["inputs"] = req::magnetic_inputs(d.outputInductance, 0.2, {}, {"primary"},
         std::nullopt, 25.0, {
@@ -223,10 +222,14 @@ json build_pshb_tas(const PshbDesign& d) {
     const auto rcSnub = req::snubber(rcSnubC, cfg::snubber_res(d.config), Vhb, fsw);
     const json& rcCap = rcSnub.first;
     const json& rcRes = rcSnub.second;
-    // CURRENT_DOUBLER second output inductor + loop-breaker.
-    auto outInductor2 = [&]() { json m; m["magnetic"] = json::object();
+    // CURRENT_DOUBLER: the load current splits between the two output inductors, so EACH carries a
+    // DC bias of Io/2 (same per-inductor ripple dILo). Used for both Lout and Lo2 in the CD branch.
+    const double IloCd    = Io / 2.0;
+    const double IloPkCd  = IloCd + dILo / 2.0;
+    const double IloRmsCd = std::sqrt(IloCd * IloCd + dILo * dILo / 12.0);
+    auto outInductorCd = [&]() { json m; m["magnetic"] = json::object();
         m["inputs"] = req::magnetic_inputs(d.outputInductance, 0.2, {}, {"primary"}, std::nullopt, 25.0, {
-            req::winding_excitation("triangular", fsw, IloPk, IloRms, Io, dILo, std::nullopt,
+            req::winding_excitation("triangular", fsw, IloPkCd, IloRmsCd, IloCd, dILo, std::nullopt,
                                     vLoPk, vLoRms, 0.0, vLoPkPk)});
         return m; };
     auto loopBreakR = [&]() { json c; c["resistor"] = json::object();
@@ -284,7 +287,7 @@ json build_pshb_tas(const PshbDesign& d) {
         break; }
     case RectifierType::CurrentDoubler: {
         comps.insert(comps.end(), {comp("Dr1",diodeReq), comp("Dr2",diodeReq),
-            comp("Lout",lout), comp("Lo2",outInductor2()), comp("Rlb",loopBreakR()),
+            comp("Lout",outInductorCd()), comp("Lo2",outInductorCd()), comp("Rlb",loopBreakR()),
             comp("CsnSA",snub), comp("CsnSB",snub)});
         conns.push_back(conn("node_a", {pin("T1","secondary1_start"), pin("Dr1","cathode"),
                                         pin("Lout","primary_start"), pin("CsnSA","1")}));

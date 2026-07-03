@@ -9,6 +9,7 @@
 #include "Buck.hpp"    // design_buck — ABT #95 maximumSwitchCurrent sizing tests
 #include "Boost.hpp"   // design_boost
 #include "Zeta.hpp"    // design_zeta
+#include "Pshb.hpp"    // design_pshb / build_pshb_tas — CURRENT_DOUBLER output-inductor split
 
 #include <nlohmann/json.hpp>
 #include <cmath>
@@ -417,6 +418,61 @@ TEST_CASE("analytical_pshb FULL_BRIDGE: one bipolar secondary, 2 windings", "[an
     CHECK(*processed_current(op, 1).get_average() == Catch::Approx(0.0).margin(1.0));
     CHECK(*processed_current(op, 1).get_rms() > 12.0);   // sqrt(Deff)*Io, full-wave with freewheel gaps
     CHECK(*processed_current(op, 1).get_rms() < 20.5);
+}
+
+TEST_CASE("analytical_pshb CURRENT_DOUBLER: one bipolar secondary carrying ~Io/2", "[analytical][pshb]") {
+    using Kirchhoff::analytical::analytical_pshb;
+    using Kirchhoff::analytical::SrcRectifier;
+    // Same operating point as the FULL_BRIDGE case (Io = 20 A). CURRENT_DOUBLER splits the load across
+    // the two output inductors, so the single bipolar transformer secondary is centered at Io/2 — its
+    // RMS is ~half the FULL_BRIDGE secondary. Winding set is Primary + ONE secondary (no half-windings).
+    MAS::OperatingPoint opFb = analytical_pshb(400, {12}, {20}, {14}, 100000, 1e-3, 5e-6, 5e-6, 144, 0.0,
+                                               SrcRectifier::FULL_BRIDGE);
+    MAS::OperatingPoint opCd = analytical_pshb(400, {12}, {20}, {14}, 100000, 1e-3, 5e-6, 5e-6, 144, 0.0,
+                                               SrcRectifier::CURRENT_DOUBLER);
+    REQUIRE(opCd.get_excitations_per_winding().size() == 2);              // Primary + ONE secondary
+    CHECK(*processed_current(opCd, 0).get_average() == Catch::Approx(0.0).margin(0.5));   // zero-mean primary
+    CHECK(*processed_current(opCd, 1).get_average() == Catch::Approx(0.0).margin(1.0));   // bipolar secondary
+    double rmsFb = *processed_current(opFb, 1).get_rms();
+    double rmsCd = *processed_current(opCd, 1).get_rms();
+    // Secondary carries ~Io/2 (the DC center halves; the ripple term is common), so its RMS is ~half
+    // the FULL_BRIDGE secondary — a little under 0.5 because the (unchanged) ripple weighs relatively
+    // more against the smaller DC. Bound it around the physical ~0.45 ratio (not tighter than the model).
+    CHECK(rmsCd > 0.40 * rmsFb);
+    CHECK(rmsCd < 0.55 * rmsFb);
+    CHECK(rmsCd > 6.0);
+    CHECK(rmsCd < 10.5);
+}
+
+TEST_CASE("build_pshb_tas CURRENT_DOUBLER: two output inductors each DC-biased at Io/2", "[analytical][pshb]") {
+    // The current doubler feeds the load through TWO output inductors, each carrying the average Io/2.
+    // Verify the built TAS has both Lout and Lo2 as magnetics with a DC bias (current offset) of Io/2.
+    nlohmann::json di;
+    di["designRequirements"]["outputs"][0]["voltage"]["nominal"] = 12.0;
+    di["designRequirements"]["outputs"][0]["power"]["nominal"]   = 600.0;    // Io = 50 A
+    di["designRequirements"]["switchingFrequency"]["nominal"]    = 100000.0;
+    di["designRequirements"]["inputVoltage"] = {{"nominal", 400.0}, {"minimum", 380.0}, {"maximum", 420.0}};
+    di["config"]["rectifierType"] = "currentDoubler";
+    Kirchhoff::PshbDesign d = Kirchhoff::design_pshb(di);
+    REQUIRE(d.rectifierType == Kirchhoff::RectifierType::CurrentDoubler);
+    const double Io = d.outputPower / d.outputVoltage;                       // 50 A
+    nlohmann::json tas = Kirchhoff::build_pshb_tas(d);
+
+    // Locate the switching-cell stage components.
+    const nlohmann::json* comps = nullptr;
+    for (const auto& st : tas.at("topology").at("stages"))
+        if (st.value("name", "") == "pshbCell") comps = &st.at("circuit").at("components");
+    REQUIRE(comps != nullptr);
+
+    auto inductor_offset = [&](const char* name) -> double {
+        for (const auto& c : *comps)
+            if (c.value("name", "") == name)
+                return c.at("data").at("inputs").at("operatingPoints").at(0)
+                        .at("excitationsPerWinding").at(0).at("current").at("processed").at("offset").get<double>();
+        throw std::runtime_error(std::string("component not found: ") + name);
+    };
+    CHECK(inductor_offset("Lout") == Catch::Approx(Io / 2.0).epsilon(0.01));   // 25 A each
+    CHECK(inductor_offset("Lo2")  == Catch::Approx(Io / 2.0).epsilon(0.01));
 }
 
 TEST_CASE("analytical_asymmetric_half_bridge: zero-mean primary (Cb blocks DC), 3 windings",
