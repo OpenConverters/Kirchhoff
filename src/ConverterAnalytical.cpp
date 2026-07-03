@@ -1280,8 +1280,12 @@ static MAS::OperatingPoint pwm_bridge_phase_shifted_core(
     // Output-inductor ripple ΔILo = Vo·(1−Deff)/(Fs·Lo) (Deff = active fraction the
     // secondary sees). Lo ≤ 0 ⇒ zero ripple (matches MKF's (Lo>0)?…:0 guard).
     double dILo = (Lo > 0) ? Vo * (1.0 - Deff) / (Fs * Lo) : 0.0;
-    double ILo_min = Io - dILo / 2.0;
-    double ILo_max = Io + dILo / 2.0;
+    // CURRENT_DOUBLER: the load current splits between the TWO output inductors, so the
+    // (per-inductor / reflected-secondary) current is centered at Io/2, not Io (MKF
+    // Io_in_inductor = Io/2). Every other rectifier feeds the whole Io through one inductor.
+    double Io_in_inductor = (rectifier == SrcRectifier::CURRENT_DOUBLER) ? Io / 2.0 : Io;
+    double ILo_min = Io_in_inductor - dILo / 2.0;
+    double ILo_max = Io_in_inductor + dILo / 2.0;
 
     auto segs = PBS::build_first_half_cycle(period, Vbus, D_cmd, dcl_duty);
 
@@ -1387,11 +1391,13 @@ static MAS::OperatingPoint pwm_bridge_phase_shifted_core(
     //   direction reversing each half-cycle (bipolar ±ILo) at the full bipolar ±Vsec square.
     // CENTER_TAPPED: two half-windings, each conducting ILo on alternate half-cycles and
     //   reverse-blocking (zero current, −Vsec) on the other.
+    // CURRENT_DOUBLER: same ONE-bipolar-winding shape as FULL_BRIDGE, but ILo is centered at
+    //   Io/2 (set above via Io_in_inductor) — the load splits across the two output inductors.
     for (size_t secIdx = 0; secIdx < turnsRatios.size(); ++secIdx) {
         double ni = turnsRatios[secIdx];
         if (ni <= 0) continue;
         double VsecPk = Vbus / ni;
-        if (rectifier == SrcRectifier::FULL_BRIDGE) {
+        if (rectifier == SrcRectifier::FULL_BRIDGE || rectifier == SrcRectifier::CURRENT_DOUBLER) {
             std::vector<double> v(totalSamples), i(totalSamples);
             for (int k = 0; k < totalSamples; ++k) {
                 double vpri = Vpri_full[k];

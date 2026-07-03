@@ -266,8 +266,12 @@ MAS::OperatingPoint analytical_active_clamp_forward(double inputVoltage,
 
 // Secondary rectifier topology shared by the phase-shifted bridge family and the
 // resonant converters: FULL_BRIDGE emits ONE secondary winding per output (bipolar,
-// full-wave); CENTER_TAPPED emits two polarity-split half-windings per output.
-enum class SrcRectifier { FULL_BRIDGE, CENTER_TAPPED };
+// full-wave); CENTER_TAPPED emits two polarity-split half-windings per output;
+// CURRENT_DOUBLER emits ONE bipolar secondary (like FULL_BRIDGE) but the load current
+// splits between TWO output inductors — so the reflected/secondary current is centered
+// at Io/2, not Io (MKF Io_in_inductor = Io/2). The two output inductors themselves are
+// separate magnetics, sized by the caller (build_*_tas), not returned as excitations here.
+enum class SrcRectifier { FULL_BRIDGE, CENTER_TAPPED, CURRENT_DOUBLER };
 
 // ── Phase 4: the phase-shifted bridge family ────────────────────────────────
 // Each function reuses the shared header-only kernel OpenMagnetics::PwmBridgeSolver
@@ -296,11 +300,14 @@ MAS::OperatingPoint analytical_psfb(double inputVoltage,
                                     double phaseShiftDegrees, double diodeVoltageDrop = 0.0,
                                     SrcRectifier rectifier = SrcRectifier::CENTER_TAPPED);
 
-// Phase-shifted half bridge (3-level NPC, CCM, center-tapped). Identical sub-interval
-// model to the PSFB but the primary swings ±Vin/2 (BRIDGE_VOLTAGE_FACTOR = 0.5) and the
-// freewheel decay is MOSFET-RON-limited rather than diode-limited. Same winding set
-// (Primary + center-tapped pairs) and same parameters as `analytical_psfb`. Ported from
-// MKF PhaseShiftedHalfBridge.cpp:318. Throws on the same non-positive conditions.
+// Phase-shifted half bridge (3-level NPC, CCM). Identical sub-interval model to the PSFB
+// but the primary swings ±Vin/2 (BRIDGE_VOLTAGE_FACTOR = 0.5) and the freewheel decay is
+// MOSFET-RON-limited rather than diode-limited. `rectifier` selects the secondary winding
+// set: CENTER_TAPPED (default) emits Primary + two half-windings; FULL_BRIDGE emits
+// Primary + ONE bipolar secondary carrying ±ILo (centered at Io); CURRENT_DOUBLER emits
+// Primary + ONE bipolar secondary but centered at ±Io/2 (the load splits between the two
+// output inductors). Same parameters as `analytical_psfb`. Ported from MKF
+// PhaseShiftedHalfBridge.cpp:318. Throws on the same non-positive conditions.
 MAS::OperatingPoint analytical_pshb(double inputVoltage,
                                     const std::vector<double>& outputVoltages,
                                     const std::vector<double>& outputCurrents,
