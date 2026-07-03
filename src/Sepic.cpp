@@ -46,6 +46,12 @@ SepicDesign design_sepic(const json& tasInputs) {
     // MKF Sepic variant: synchronous rectifier (low-side MOSFET replacing D1), driven complementary to Q1.
     d.synchronousRectifier = (cfg::get_str(d.config, "rectifier", "diode") == std::string("synchronous"));
     d.deadFraction = cfg::get(d.config, "deadTimeFraction", 0.01);
+    // Coupled-inductor variant (ABT #89): L1 + L2 on one core (1:1) with mutual coupling k.
+    d.coupledInductor = cfg::get_bool(d.config, "coupledInductor", false);
+    d.couplingCoefficient = cfg::get(d.config, "couplingCoefficient", 0.999);
+    if (d.coupledInductor && !(d.couplingCoefficient > 0.0 && d.couplingCoefficient < 1.0))
+        throw std::invalid_argument("design_sepic: couplingCoefficient must be in (0,1), got "
+                                    + std::to_string(d.couplingCoefficient));
     // A synchronous MOSFET rectifier has no forward drop, so the duty (and hence Vout) must be sized with
     // Vd=0 — otherwise the open-loop deck over-delivers by ~Vd/Vout (Buck does the same).
     d.diodeDrop = d.synchronousRectifier ? 0.0 : req::dideal_diode_drop(d.outputPower / d.outputVoltage);
@@ -113,6 +119,37 @@ json build_sepic_tas(const SepicDesign& d) {
     L1["inputs"] = req::magnetic_inputs(d.inductanceL1, 0.2, /*single winding*/ {}, {"primary"},
         std::nullopt, 25.0, AN::excitations_processed(aopNom, "L1"));
     json L2 = inductor(d.inductanceL2, iout, dIL2);
+
+    // Coupled-inductor variant (ABT #89): L1 and L2 share ONE core as a single 2-winding magnetic (1:1)
+    // with mutual coupling k — the classic zero-input-ripple SEPIC (TI SLYT411). Winding 0 (primary) = the
+    // input inductor L1 (solver excitation); winding 1 (secondary1) = L2 (inline triangular excitation). The
+    // TAS->ngspice path emits the pairwise coupling K for any multi-winding magnetic, so this is exactly how
+    // transformers are rendered. leakageInductance = Lp·(1-k²) sets the real-deck coupling from the
+    // coefficient; the ideal deck couples at its 0.9999 default (K present either way). Non-coupled default
+    // is unchanged (two independent single-winding magnetics).
+    json L12;
+    if (d.coupledInductor) {
+        std::vector<json> w12 = AN::excitations_processed(aopNom);   // winding 0 = L1 (solver, non-capturing)
+        const double iL2Pk = iout + dIL2 / 2.0, iL2Rms = std::sqrt(iout * iout + dIL2 * dIL2 / 12.0);
+        w12.push_back(req::winding_excitation("triangular", fsw, iL2Pk, iL2Rms, iout, dIL2, d.dutyCycle,
+                                              vSwing, vSwing / std::sqrt(3.0), 0.0, vSwing));   // winding 1 = L2
+        L12["magnetic"] = json::object();
+        L12["inputs"] = req::magnetic_inputs(d.inductanceL1, 0.2, /*1:1*/ {1.0}, {"primary", "secondary"},
+            std::nullopt, 25.0, w12);
+        L12["inputs"]["designRequirements"]["leakageInductance"] = json::array({
+            json{{"nominal", d.inductanceL1 * (1.0 - d.couplingCoefficient * d.couplingCoefficient)}} });
+    }
+    // Winding pins: coupled -> the two windings of L12; independent -> the two separate magnetics L1/L2.
+    auto l1s = [&]() { return d.coupledInductor ? pin("L12", "primary_start") : pin("L1", "primary_start"); };
+    auto l1e = [&]() { return d.coupledInductor ? pin("L12", "primary_end")   : pin("L1", "primary_end");   };
+    auto l2s = [&]() { return d.coupledInductor ? pin("L12", "secondary1_start") : pin("L2", "primary_start"); };
+    auto l2e = [&]() { return d.coupledInductor ? pin("L12", "secondary1_end")   : pin("L2", "primary_end");   };
+    auto magComps = [&](std::vector<json> rest) {
+        std::vector<json> v = d.coupledInductor ? std::vector<json>{comp("L12", L12)}
+                                                : std::vector<json>{comp("L1", L1), comp("L2", L2)};
+        for (auto& r : rest) v.push_back(std::move(r));
+        return json(v);
+    };
     json cs; cs["capacitor"] = json::object();
     cs["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.couplingCapacitance;
     cs["inputs"]["designRequirements"]["ratedVoltage"] = vSwingRating / cfg::v_derate_capacitor(d.config);
@@ -141,28 +178,26 @@ json build_sepic_tas(const SepicDesign& d) {
     json cell; cell["name"] = "sepic-cell";
     if (d.synchronousRectifier) {
         cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate"), port("gate2")});
-        cell["components"] = json::array({comp("L1", L1), comp("Q1", mq), comp("Cs", cs),
-                                          comp("L2", L2), comp("Q2", syncFet), comp("D2", bodyD)});
+        cell["components"] = magComps({comp("Q1", mq), comp("Cs", cs), comp("Q2", syncFet), comp("D2", bodyD)});
         cell["connections"] = json::array({
-            conn("vin_net", {pin("L1", "primary_start"), prt("vin")}),
-            conn("nodeA",   {pin("L1", "primary_end"), pin("Q1", "drain"), pin("Cs", "1")}),
+            conn("vin_net", {l1s(), prt("vin")}),
+            conn("nodeA",   {l1e(), pin("Q1", "drain"), pin("Cs", "1")}),
             // node B: coupling cap -> L2 + sync rectifier source (+ body-diode anode)
-            conn("nodeB",   {pin("Cs", "2"), pin("L2", "primary_end"), pin("Q2", "source"), pin("D2", "anode")}),
-            conn("gnd_net", {pin("Q1", "source"), pin("L2", "primary_start"), prt("gnd")}),
+            conn("nodeB",   {pin("Cs", "2"), l2e(), pin("Q2", "source"), pin("D2", "anode")}),
+            conn("gnd_net", {pin("Q1", "source"), l2s(), prt("gnd")}),
             conn("vout_net",{pin("Q2", "drain"), pin("D2", "cathode"), prt("vout")}),
             conn("gate_net",{pin("Q1", "gate"), prt("gate")}),
             conn("gate2_net",{pin("Q2", "gate"), prt("gate2")})});
     } else {
         cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate")});
-        cell["components"] = json::array({comp("L1", L1), comp("Q1", mq), comp("Cs", cs),
-                                          comp("L2", L2), comp("D1", md)});
+        cell["components"] = magComps({comp("Q1", mq), comp("Cs", cs), comp("D1", md)});
         cell["connections"] = json::array({
-            conn("vin_net", {pin("L1", "primary_start"), prt("vin")}),
+            conn("vin_net", {l1s(), prt("vin")}),
             // node A: L1 -> switch + coupling cap
-            conn("nodeA",   {pin("L1", "primary_end"), pin("Q1", "drain"), pin("Cs", "1")}),
+            conn("nodeA",   {l1e(), pin("Q1", "drain"), pin("Cs", "1")}),
             // node B: coupling cap -> L2 + rectifier
-            conn("nodeB",   {pin("Cs", "2"), pin("L2", "primary_end"), pin("D1", "anode")}),
-            conn("gnd_net", {pin("Q1", "source"), pin("L2", "primary_start"), prt("gnd")}),
+            conn("nodeB",   {pin("Cs", "2"), l2e(), pin("D1", "anode")}),
+            conn("gnd_net", {pin("Q1", "source"), l2s(), prt("gnd")}),
             conn("vout_net",{pin("D1", "cathode"), prt("vout")}),
             conn("gate_net",{pin("Q1", "gate"), prt("gate")})});
     }

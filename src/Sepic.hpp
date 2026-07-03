@@ -20,6 +20,11 @@ struct SepicDesign {
     double outputCapacitance;
     bool synchronousRectifier = false;   // config.rectifier=="synchronous": swap D1 for a low-side sync MOSFET
     double deadFraction = 0.01;          // dead-time fraction of the period for the complementary drive
+    // Coupled-inductor variant (config.coupledInductor, ABT #89). When true, L1 and L2 share one core as a
+    // single 2-winding magnetic (1:1) with mutual coupling `couplingCoefficient` — the classic zero-input-
+    // ripple SEPIC (TI SLYT411). Default: two independent magnetics.
+    bool coupledInductor = false;
+    double couplingCoefficient = 0.999;
     nlohmann::json config;
 };
 

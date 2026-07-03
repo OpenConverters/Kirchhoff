@@ -21,6 +21,8 @@ struct CukDesign {
     double outputCapacitance;
     bool synchronousRectifier = false;   // config.rectifier=="synchronous": swap catch diode D1 for a MOSFET
     double deadFraction = 0.01;
+    bool coupledInductor = false;        // config.coupledInductor: L1+L2 on one 1:1 coupled core (ABT #89)
+    double couplingCoefficient = 0.999;
     nlohmann::json config;
 };
 

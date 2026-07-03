@@ -50,6 +50,14 @@ inline std::string get_str(const json& config, const char* key, const char* fall
     return fallback;
 }
 
+// Boolean variant of get(...) — for on/off design-variant flags (e.g. "coupledInductor", "bidirectional",
+// "isolated"). Accepts a JSON boolean; anything else keeps the topology's principled default.
+inline bool get_bool(const json& config, const char* key, bool fallback) {
+    if (config.is_object() && config.contains(key) && config.at(key).is_boolean())
+        return config.at(key).get<bool>();
+    return fallback;
+}
+
 // ── Documented, overridable dimensionless design-parameter defaults ──────────────────────────────────
 // (These are the *rule* knobs. A user who wants a different policy sets them in config; nothing in a
 //  topology hardcodes them.)

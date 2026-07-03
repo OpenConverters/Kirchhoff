@@ -1048,6 +1048,78 @@ ReverseResult run_reverse(const json& tas, double srcV, double deliverV, double 
 }
 }  // namespace
 
+// ABT #89: coupled-inductor variant for SEPIC / Ćuk / Zeta. With config.coupledInductor the two inductors
+// L1 and L2 share ONE core as a single 2-winding magnetic (1:1) with mutual coupling k (the zero-input-
+// ripple design, TI SLYT411) instead of two independent single-winding magnetics. Assert, per topology:
+// (1) the coupled TAS has exactly ONE magnetic and it is 2-winding (K coupling emitted in the deck);
+// (2) the independent build has TWO single-winding magnetics (no K); (3) the coupled deck still converges
+// and delivers the SAME output as the independent build (coupling steers ripple, not the DC operating point).
+namespace {
+int magnetic_windings(const json& tas, int& count) {
+    count = 0; int wind = 0;
+    for (const auto& st : tas["topology"]["stages"]) {
+        if (!st.contains("circuit") || !st["circuit"].is_object()) continue;
+        for (const auto& c : st["circuit"]["components"]) {
+            const json& d = c["data"];
+            if (d.is_object() && d.contains("magnetic")) {
+                ++count;
+                const json& dr = d["inputs"]["designRequirements"];
+                wind = 1 + (dr.contains("turnsRatios") ? static_cast<int>(dr["turnsRatios"].size()) : 0);
+            }
+        }
+    }
+    return wind;
+}
+double ideal_vout(const json& tas, const std::string& tag) {
+    std::string deck = Kirchhoff::tas_to_ngspice(tas, PEAS::Fidelity(PEAS::Fidelity::Origin::REQUIREMENTS));
+    auto cpos = deck.rfind("\n.control");
+    if (cpos != std::string::npos) deck = deck.substr(0, cpos);
+    deck += "\n.control\nrun\nmeas tran vo AVG v(Vout) from=3.0e-3 to=4.0e-3\nprint vo\n.endc\n.end\n";
+    std::string out = run_ngspice(deck, tag);
+    double v = 0; parse_meas(out, "vo", v); return v;
+}
+}  // namespace
+
+TEST_CASE("Coupled-inductor SEPIC/Cuk/Zeta: one 2-winding magnetic, delivers spec (ABT #89)",
+          "[equivalence][coupled]") {
+    struct Case { const char* name; json (*build)(const json&); double vout; };
+    auto sepic = [](const json& s){ return Kirchhoff::build_sepic_tas(Kirchhoff::design_sepic(s)); };
+    auto zeta  = [](const json& s){ return Kirchhoff::build_zeta_tas(Kirchhoff::design_zeta(s)); };
+    auto cuk   = [](const json& s){ return Kirchhoff::build_cuk_tas(Kirchhoff::design_cuk(s)); };
+
+    json base = json::parse(R"({ "designRequirements": { "efficiency": 0.9,
+        "inputVoltage": { "minimum": 9, "nominal": 12, "maximum": 15 },
+        "switchingFrequency": { "nominal": 300000 },
+        "outputs": [ { "name": "out", "voltage": { "nominal": 12 } } ] },
+        "operatingPoints": [ { "inputVoltage": 12, "outputs": [ { "power": 12 } ] } ] })");
+
+    for (auto [name, build] : {std::pair{std::string("sepic"), +sepic},
+                               std::pair{std::string("zeta"), +zeta},
+                               std::pair{std::string("cuk"), +cuk}}) {
+        INFO("topology: " << name);
+        json coupled = base; coupled["config"]["coupledInductor"] = true;
+        coupled["config"]["couplingCoefficient"] = 0.995;
+
+        json tasInd = build(base), tasCpl = build(coupled);
+        int nInd = 0, nCpl = 0;
+        int wInd = magnetic_windings(tasInd, nInd), wCpl = magnetic_windings(tasCpl, nCpl);
+        CHECK(nInd == 2);   CHECK(wInd == 1);   // independent: two single-winding magnetics
+        CHECK(nCpl == 1);   CHECK(wCpl == 2);   // coupled: one 2-winding magnetic
+
+        // The deck emits the pairwise coupling K for the coupled magnetic, and none for the independent one.
+        const std::string deckCpl = Kirchhoff::tas_to_ngspice(tasCpl, PEAS::Fidelity(PEAS::Fidelity::Origin::REQUIREMENTS));
+        const std::string deckInd = Kirchhoff::tas_to_ngspice(tasInd, PEAS::Fidelity(PEAS::Fidelity::Origin::REQUIREMENTS));
+        CHECK(deckCpl.find("\nKL12_01 ") != std::string::npos);
+        CHECK(deckInd.find("\nK") == std::string::npos);
+
+        const double vInd = ideal_vout(tasInd, name + "_ind");
+        const double vCpl = ideal_vout(tasCpl, name + "_cpl");
+        INFO("independent Vout=" << vInd << "  coupled Vout=" << vCpl);
+        CHECK(std::fabs(vInd) > 6.0);                                  // both deliver (>50% of 12 V spec)
+        CHECK(std::fabs(vCpl - vInd) <= 0.10 * std::fabs(vInd));       // coupling steers ripple, not DC
+    }
+}
+
 TEST_CASE("CLLC reverse power flow: LV side sources, HV side delivered (ABT #85)", "[equivalence][cllc][reverse]") {
     json in = json::parse(R"({ "efficiency": 1.0, "inputVoltage": 400, "outputVoltage": 48,
         "outputPower": 480, "switchingFrequency": 100000 })");

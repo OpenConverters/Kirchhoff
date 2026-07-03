@@ -45,6 +45,12 @@ ZetaDesign design_zeta(const json& tasInputs) {
     // MKF Zeta variant: synchronous rectifier (MOSFET replacing the catch diode D1), complementary to Q1.
     d.synchronousRectifier = (cfg::get_str(d.config, "rectifier", "diode") == std::string("synchronous"));
     d.deadFraction = cfg::get(d.config, "deadTimeFraction", 0.01);
+    // Coupled-inductor variant (ABT #89): L1 + L2 on one core (1:1) with mutual coupling k.
+    d.coupledInductor = cfg::get_bool(d.config, "coupledInductor", false);
+    d.couplingCoefficient = cfg::get(d.config, "couplingCoefficient", 0.999);
+    if (d.coupledInductor && !(d.couplingCoefficient > 0.0 && d.couplingCoefficient < 1.0))
+        throw std::invalid_argument("design_zeta: couplingCoefficient must be in (0,1), got "
+                                    + std::to_string(d.couplingCoefficient));
     // Sync MOSFET has no forward drop → size duty with Vd=0 so the open-loop deck lands on target.
     d.diodeDrop = d.synchronousRectifier ? 0.0 : req::dideal_diode_drop(d.outputPower / d.outputVoltage);
     d.dutyCycle = duty(d.inputVoltage, d.outputVoltage, d.diodeDrop, d.efficiency);
@@ -110,6 +116,32 @@ json build_zeta_tas(const ZetaDesign& d) {
     L1["inputs"] = req::magnetic_inputs(d.inductanceL1, 0.2, {}, {"primary"}, std::nullopt, 25.0,
         AN::excitations_processed(aopNom, "L1"));
     json L2 = inductor(d.inductanceL2, iout, dIL2);
+
+    // Coupled-inductor variant (ABT #89): L1 and L2 share ONE core as a single 2-winding magnetic (1:1)
+    // with mutual coupling k. Winding 0 (primary) = L1 (solver excitation); winding 1 (secondary1) = L2
+    // (inline). leakageInductance = Lp·(1-k²) sets the coupling K from the coefficient in both decks.
+    json L12;
+    if (d.coupledInductor) {
+        std::vector<json> w12 = AN::excitations_processed(aopNom);   // winding 0 = L1 (non-capturing)
+        const double iL2Pk = iout + dIL2 / 2.0, iL2Rms = std::sqrt(iout * iout + dIL2 * dIL2 / 12.0);
+        w12.push_back(req::winding_excitation("triangular", fsw, iL2Pk, iL2Rms, iout, dIL2, d.dutyCycle,
+                                              vSwing, vSwing / std::sqrt(3.0), 0.0, vSwing));   // winding 1 = L2
+        L12["magnetic"] = json::object();
+        L12["inputs"] = req::magnetic_inputs(d.inductanceL1, 0.2, /*1:1*/ {1.0}, {"primary", "secondary"},
+            std::nullopt, 25.0, w12);
+        L12["inputs"]["designRequirements"]["leakageInductance"] = json::array({
+            json{{"nominal", d.inductanceL1 * (1.0 - d.couplingCoefficient * d.couplingCoefficient)}} });
+    }
+    auto l1s = [&]() { return d.coupledInductor ? pin("L12", "primary_start") : pin("L1", "primary_start"); };
+    auto l1e = [&]() { return d.coupledInductor ? pin("L12", "primary_end")   : pin("L1", "primary_end");   };
+    auto l2s = [&]() { return d.coupledInductor ? pin("L12", "secondary1_start") : pin("L2", "primary_start"); };
+    auto l2e = [&]() { return d.coupledInductor ? pin("L12", "secondary1_end")   : pin("L2", "primary_end");   };
+    auto magComps = [&](std::vector<json> rest) {   // magnetics + the rest (order is irrelevant to ngspice)
+        std::vector<json> v = d.coupledInductor ? std::vector<json>{comp("L12", L12)}
+                                                : std::vector<json>{comp("L1", L1), comp("L2", L2)};
+        for (auto& r : rest) v.push_back(std::move(r));
+        return json(v);
+    };
     json cc; cc["capacitor"] = json::object();
     cc["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.couplingCapacitance;
     cc["inputs"]["designRequirements"]["ratedVoltage"] = vSwingRating / cfg::v_derate_capacitor(d.config);
@@ -139,29 +171,27 @@ json build_zeta_tas(const ZetaDesign& d) {
     json cell; cell["name"] = "zeta-cell";
     if (d.synchronousRectifier) {
         cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate"), port("gate2")});
-        cell["components"] = json::array({comp("Q1", mq), comp("L1", L1), comp("Cc", cc),
-                                          comp("Q2", syncFet), comp("D2", bodyD), comp("L2", L2)});
+        cell["components"] = magComps({comp("Q1", mq), comp("Cc", cc), comp("Q2", syncFet), comp("D2", bodyD)});
         cell["connections"] = json::array({
             conn("vin_net",  {pin("Q1", "drain"), prt("vin")}),
-            conn("node_sw",  {pin("Q1", "source"), pin("L1", "primary_start"), pin("Cc", "1")}),
+            conn("node_sw",  {pin("Q1", "source"), l1s(), pin("Cc", "1")}),
             // catch node -> gnd: sync MOSFET drain at node_X, source at gnd (body-diode anode=gnd,cathode=node_X)
-            conn("gnd_net",  {pin("L1", "primary_end"), pin("Q2", "source"), pin("D2", "anode"), prt("gnd")}),
-            conn("node_x",   {pin("Cc", "2"), pin("Q2", "drain"), pin("D2", "cathode"), pin("L2", "primary_start")}),
-            conn("vout_net", {pin("L2", "primary_end"), prt("vout")}),
+            conn("gnd_net",  {l1e(), pin("Q2", "source"), pin("D2", "anode"), prt("gnd")}),
+            conn("node_x",   {pin("Cc", "2"), pin("Q2", "drain"), pin("D2", "cathode"), l2s()}),
+            conn("vout_net", {l2e(), prt("vout")}),
             conn("gate_net", {pin("Q1", "gate"), prt("gate")}),
             conn("gate2_net",{pin("Q2", "gate"), prt("gate2")})});
     } else {
         cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate")});
-        cell["components"] = json::array({comp("Q1", mq), comp("L1", L1), comp("Cc", cc),
-                                          comp("D1", md), comp("L2", L2)});
+        cell["components"] = magComps({comp("Q1", mq), comp("Cc", cc), comp("D1", md)});
         cell["connections"] = json::array({
             conn("vin_net",  {pin("Q1", "drain"), prt("vin")}),
             // node_SW: switch -> L1 (to gnd) + coupling cap
-            conn("node_sw",  {pin("Q1", "source"), pin("L1", "primary_start"), pin("Cc", "1")}),
-            conn("gnd_net",  {pin("L1", "primary_end"), pin("D1", "anode"), prt("gnd")}),
+            conn("node_sw",  {pin("Q1", "source"), l1s(), pin("Cc", "1")}),
+            conn("gnd_net",  {l1e(), pin("D1", "anode"), prt("gnd")}),
             // node_X: coupling cap -> catch-diode cathode + output inductor
-            conn("node_x",   {pin("Cc", "2"), pin("D1", "cathode"), pin("L2", "primary_start")}),
-            conn("vout_net", {pin("L2", "primary_end"), prt("vout")}),
+            conn("node_x",   {pin("Cc", "2"), pin("D1", "cathode"), l2s()}),
+            conn("vout_net", {l2e(), prt("vout")}),
             conn("gate_net", {pin("Q1", "gate"), prt("gate")})});
     }
 

@@ -47,6 +47,12 @@ CukDesign design_cuk(const json& tasInputs) {
     // MKF Cuk variant: synchronous rectifier (MOSFET replacing the catch diode D1), complementary to Q1.
     d.synchronousRectifier = (cfg::get_str(d.config, "rectifier", "diode") == std::string("synchronous"));
     d.deadFraction = cfg::get(d.config, "deadTimeFraction", 0.01);
+    // Coupled-inductor variant (ABT #89): L1 + L2 on one core (1:1) with mutual coupling k.
+    d.coupledInductor = cfg::get_bool(d.config, "coupledInductor", false);
+    d.couplingCoefficient = cfg::get(d.config, "couplingCoefficient", 0.999);
+    if (d.coupledInductor && !(d.couplingCoefficient > 0.0 && d.couplingCoefficient < 1.0))
+        throw std::invalid_argument("design_cuk: couplingCoefficient must be in (0,1), got "
+                                    + std::to_string(d.couplingCoefficient));
     // Sync MOSFET has no forward drop → size duty with Vd=0 so the open-loop deck lands on target.
     d.diodeDrop = d.synchronousRectifier ? 0.0 : req::dideal_diode_drop(iout);
     d.dutyCycle = duty(d.inputVoltage, d.outputVoltageMag, d.diodeDrop, d.efficiency);
@@ -113,6 +119,38 @@ json build_cuk_tas(const CukDesign& d) {
     L1["inputs"] = req::magnetic_inputs(d.inductanceL1, 0.2, {}, {"primary"}, std::nullopt, 25.0,
         AN::excitations_processed(aopNom, "L1"));
     json L2 = inductor(d.inductanceL2, iout, dIL2);
+
+    // Coupled-inductor variant (ABT #89): L1 and L2 share ONE core as a single 2-winding magnetic (1:1)
+    // with mutual coupling k. Winding 0 (primary) = L1 (solver excitation); winding 1 (secondary1) = L2
+    // (inline). leakageInductance = Lp·(1-k²) sets the coupling K from the coefficient in both decks.
+    json L12;
+    if (d.coupledInductor) {
+        std::vector<json> w12 = AN::excitations_processed(aopNom);   // winding 0 = L1 (non-capturing)
+        const double iL2Pk = iout + dIL2 / 2.0, iL2Rms = std::sqrt(iout * iout + dIL2 * dIL2 / 12.0);
+        w12.push_back(req::winding_excitation("triangular", fsw, iL2Pk, iL2Rms, iout, dIL2, d.dutyCycle,
+                                              vSwing, vSwing / std::sqrt(3.0), 0.0, vSwing));   // winding 1 = L2
+        L12["magnetic"] = json::object();
+        L12["inputs"] = req::magnetic_inputs(d.inductanceL1, 0.2, /*1:1*/ {1.0}, {"primary", "secondary"},
+            std::nullopt, 25.0, w12);
+        L12["inputs"]["designRequirements"]["leakageInductance"] = json::array({
+            json{{"nominal", d.inductanceL1 * (1.0 - d.couplingCoefficient * d.couplingCoefficient)}} });
+    }
+    // Winding pins. For the coupled magnetic the two windings share a core with a POSITIVE mutual coupling
+    // K (dot at each winding's *_start). The Ćuk is INVERTING, so its L2 must be wound with the opposite
+    // dot orientation vs L1 for the flux to steer ripple without altering the DC operating point — the
+    // secondary winding is entered from its *_end (nodeB) so the dot lands on the vout side. (SEPIC/Zeta are
+    // non-inverting and use the natural start=first-node orientation.) Getting this wrong drives a
+    // transformer action that shifts Vout far off target.
+    auto l1s = [&]() { return d.coupledInductor ? pin("L12", "primary_start") : pin("L1", "primary_start"); };
+    auto l1e = [&]() { return d.coupledInductor ? pin("L12", "primary_end")   : pin("L1", "primary_end");   };
+    auto l2s = [&]() { return d.coupledInductor ? pin("L12", "secondary1_end")   : pin("L2", "primary_start"); };
+    auto l2e = [&]() { return d.coupledInductor ? pin("L12", "secondary1_start") : pin("L2", "primary_end");   };
+    auto magComps = [&](std::vector<json> rest) {   // magnetics + the rest (order is irrelevant to ngspice)
+        std::vector<json> v = d.coupledInductor ? std::vector<json>{comp("L12", L12)}
+                                                : std::vector<json>{comp("L1", L1), comp("L2", L2)};
+        for (auto& r : rest) v.push_back(std::move(r));
+        return json(v);
+    };
     json c1; c1["capacitor"] = json::object();
     c1["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.couplingCapacitance;
     c1["inputs"]["designRequirements"]["ratedVoltage"] = vSwingRating / cfg::v_derate_capacitor(d.config);
@@ -160,32 +198,30 @@ json build_cuk_tas(const CukDesign& d) {
     json cell; cell["name"] = "cuk-cell";
     if (d.synchronousRectifier) {
         cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate"), port("gate2")});
-        cell["components"] = json::array({comp("L1", L1), comp("Q1", mq), comp("C1", c1),
-                                          comp("Q2", syncFet), comp("D2", bodyD), comp("L2", L2),
-                                          comp("Rrc_sw", rsnub), comp("Crc_sw", csnub)});
+        cell["components"] = magComps({comp("Q1", mq), comp("C1", c1), comp("Q2", syncFet), comp("D2", bodyD),
+                                       comp("Rrc_sw", rsnub), comp("Crc_sw", csnub)});
         cell["connections"] = json::array({
-            conn("vin_net", {pin("L1", "primary_start"), prt("vin")}),
-            conn("nodeA",   {pin("L1", "primary_end"), pin("Q1", "drain"), pin("C1", "1")}),
+            conn("vin_net", {l1s(), prt("vin")}),
+            conn("nodeA",   {l1e(), pin("Q1", "drain"), pin("C1", "1")}),
             // node B: coupling cap -> sync MOSFET drain (+ body-diode anode) + output inductor + RC snubber
-            conn("nodeB",   {pin("C1", "2"), pin("Q2", "drain"), pin("D2", "anode"), pin("L2", "primary_start"), pin("Rrc_sw", "1")}),
+            conn("nodeB",   {pin("C1", "2"), pin("Q2", "drain"), pin("D2", "anode"), l2s(), pin("Rrc_sw", "1")}),
             conn("snub",    {pin("Rrc_sw", "2"), pin("Crc_sw", "1")}),
             conn("gnd_net", {pin("Q1", "source"), pin("Q2", "source"), pin("D2", "cathode"), pin("Crc_sw", "2"), prt("gnd")}),
-            conn("vout_net",{pin("L2", "primary_end"), prt("vout")}),
+            conn("vout_net",{l2e(), prt("vout")}),
             conn("gate_net",{pin("Q1", "gate"), prt("gate")}),
             conn("gate2_net",{pin("Q2", "gate"), prt("gate2")})});
     } else {
         cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate")});
-        cell["components"] = json::array({comp("L1", L1), comp("Q1", mq), comp("C1", c1),
-                                          comp("D1", md), comp("L2", L2),
-                                          comp("Rrc_sw", rsnub), comp("Crc_sw", csnub)});
+        cell["components"] = magComps({comp("Q1", mq), comp("C1", c1), comp("D1", md),
+                                       comp("Rrc_sw", rsnub), comp("Crc_sw", csnub)});
         cell["connections"] = json::array({
-            conn("vin_net", {pin("L1", "primary_start"), prt("vin")}),
-            conn("nodeA",   {pin("L1", "primary_end"), pin("Q1", "drain"), pin("C1", "1")}),
+            conn("vin_net", {l1s(), prt("vin")}),
+            conn("nodeA",   {l1e(), pin("Q1", "drain"), pin("C1", "1")}),
             // node B: coupling cap -> freewheel diode (anode) + output inductor + diode RC snubber
-            conn("nodeB",   {pin("C1", "2"), pin("D1", "anode"), pin("L2", "primary_start"), pin("Rrc_sw", "1")}),
+            conn("nodeB",   {pin("C1", "2"), pin("D1", "anode"), l2s(), pin("Rrc_sw", "1")}),
             conn("snub",    {pin("Rrc_sw", "2"), pin("Crc_sw", "1")}),
             conn("gnd_net", {pin("Q1", "source"), pin("D1", "cathode"), pin("Crc_sw", "2"), prt("gnd")}),
-            conn("vout_net",{pin("L2", "primary_end"), prt("vout")}),     // negative output
+            conn("vout_net",{l2e(), prt("vout")}),     // negative output
             conn("gate_net",{pin("Q1", "gate"), prt("gate")})});
     }
 

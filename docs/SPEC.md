@@ -148,9 +148,17 @@ output, not input.
 |---|---|---|---|---|
 | **buck** | 0.9 | inductance | `rectifier`("diode"), `deadTimeFraction`(0.01), `rippleRatio`(0.4) | L sized at Vin_MAX; `rectifier:"synchronous"` adds a low-side FET; step-down only |
 | **boost** | 0.9 | inductance | `rectifier`("diode"), `rippleRatio`(0.4) | **THROWS if dutyCycle ≤ 0** (needs Vout > Vin/η); L at Vin_MAX |
-| **sepic** | 0.9 | — | `l1RippleRatio`(0.4), `l2RippleRatio`(0.30), `couplingCapRipple`(0.05) | non-inverting up/down; no pinning |
-| **cuk** | 0.9 | — | `l1RippleRatio`(0.4), `l2RippleRatio`(0.30), `diodeSnubberCap`(1e-9), `snubberRes`(100) | **INVERTING** — emits `outputs[0].voltage.nominal` negative; send positive magnitude |
-| **zeta** | 0.9 | — | `l1RippleRatio`(0.4), `l2RippleRatio`(0.30), `couplingCapRipple`(0.05) | non-inverting up/down |
+| **sepic** | 0.9 | — | `l1RippleRatio`(0.4), `l2RippleRatio`(0.30), `couplingCapRipple`(0.05), `rectifier`("diode"), `coupledInductor`(false), `couplingCoefficient`(0.999) | non-inverting up/down; no pinning |
+| **cuk** | 0.9 | — | `l1RippleRatio`(0.4), `l2RippleRatio`(0.30), `diodeSnubberCap`(1e-9), `snubberRes`(100), `rectifier`("diode"), `coupledInductor`(false), `couplingCoefficient`(0.999) | **INVERTING** — emits `outputs[0].voltage.nominal` negative; send positive magnitude |
+| **zeta** | 0.9 | — | `l1RippleRatio`(0.4), `l2RippleRatio`(0.30), `couplingCapRipple`(0.05), `rectifier`("diode"), `coupledInductor`(false), `couplingCoefficient`(0.999) | non-inverting up/down |
+
+**SEPIC / Ćuk / Zeta coupled inductor (`config.coupledInductor`, ABT #89).** By default L1 and L2 are two
+independent single-winding magnetics. With `coupledInductor: true` they share ONE core as a single
+2-winding magnetic (1:1) with mutual coupling `couplingCoefficient` (default 0.999, must be in (0,1)) — the
+classic zero-input-ripple design (TI SLYT411). The TAS emits it as one magnetic with `turnsRatios: [1]` and
+a `leakageInductance` of `L1·(1-k²)`, so the ngspice path renders the pairwise coupling `K` exactly as it
+does for a transformer. Coupling steers the ripple between windings without changing the DC transfer; the
+inverting Ćuk uses the opposite winding-dot orientation so the coupling does not shift its operating point.
 | **fsbb** (4-switch buck-boost) | 0.9 | inductance | `deadTimeFraction`(0.01), `inductorRippleRatio`(0.4), `outputCapacitance`(100e-6) | L = worst of buck@Vin_max / boost@Vin_min; unity fallback if Vin_min==Vin_max==Vo |
 
 ### Flyback & isolated buck
