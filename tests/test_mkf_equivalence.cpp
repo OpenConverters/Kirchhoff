@@ -849,6 +849,49 @@ TEST_CASE("Weinberg: Kirchhoff design+simulation matches MKF ideal reference", "
     CHECK(r.eff <= 1.05);
 }
 
+TEST_CASE("Weinberg variants: H-bridge primary + synchronous rectifier deliver spec", "[equivalence][weinberg][variants]") {
+    // ABT #88: the BRIDGE (4-switch H-bridge primary, diagonal PWM) and synchronousRectifier (SR MOSFETs
+    // replacing the CT-FW diodes) config variants must both CONVERGE and land on the boost-regime setpoint.
+    // Reference operating point: the Weinberg-Schreuders current-fed boost (50 V -> 150 V, 1.5 kW, 50 kHz),
+    // the same design the classic push-pull path uses; only the primary drive / rectifier device change.
+    auto specFor = [](const json& config) {
+        json d;
+        d["designRequirements"]["efficiency"] = 0.95;
+        d["designRequirements"]["inputVoltage"] = {{"minimum", 45.0}, {"nominal", 50.0}, {"maximum", 55.0}};
+        d["designRequirements"]["switchingFrequency"]["nominal"] = 50000.0;
+        json o; o["name"] = "out"; o["voltage"]["nominal"] = 150.0; o["regulation"] = "voltage";
+        d["designRequirements"]["outputs"] = json::array({o});
+        json op; op["name"] = "f"; op["inputVoltage"] = 50.0; op["ambientTemperature"] = 25.0;
+        json po; po["name"] = "out"; po["power"] = 1500.0; op["outputs"] = json::array({po});
+        d["operatingPoints"] = json::array({op});
+        d["config"] = config;
+        d["simStimulusFsw"] = json::array({50000.0});
+        return d;
+    };
+    const double target = 150.0, settleCap = 200e-6, vin = 50.0;
+    struct Case { std::string name; json config; };
+    std::vector<Case> cases = {
+        {"bridge",     {{"variant", "bridge"}}},
+        {"classic_SR", {{"variant", "classic"}, {"synchronousRectifier", true}}},
+        {"bridge_SR",  {{"variant", "bridge"}, {"synchronousRectifier", true}}},
+    };
+    for (auto& c : cases) {
+        INFO("variant: " << c.name);
+        json di = specFor(c.config);
+        Kirchhoff::WeinbergDesign d = Kirchhoff::design_weinberg(di);
+        json tas = Kirchhoff::build_weinberg_tas(d);
+        KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, settleCap, vin, "weinberg_" + c.name);
+        INFO("Vout=" << r.vout << " eff=" << r.eff);
+        // Delivers spec: within ±8% of the setpoint. The current-fed boost carries the same ~+4% open-loop
+        // droop-compensation offset as the classic path (design η folded into the boost duty); SR raises it
+        // ~1% more by removing the rectifier conduction loss. A short (bad SR/bridge gating) or a collapse
+        // (wrong turns) lands far outside this band, so it is a decisive delivers-spec + converges gate.
+        check_close("Vout vs spec (" + c.name + ")", r.vout, target, 0.08);
+        CHECK(r.eff > 0.5);      // no gross energy-balance / short (a shoot-through drives eff -> ~0)
+        CHECK(r.eff <= 1.05);
+    }
+}
+
 TEST_CASE("LLC: Kirchhoff design+simulation matches MKF ideal reference", "[equivalence][llc]") {
     // LLC resonant (half-bridge, center-tapped rectifier): a half-bridge drives a series Lr-Cr tank in
     // series with the transformer magnetizing Lm; gain is set by fsw vs the tank resonance fr. New

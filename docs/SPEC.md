@@ -203,7 +203,7 @@ inverting Ćuk uses the opposite winding-dot orientation so the coupling does no
 | **two_switch_forward** | 0.9 | inductance, turnsRatios[i] | `maxDutyCycle`(0.5), `inductorRippleRatio`(0.4) | 2-winding; each switch blocks only Vin_max; **multi-output** (N secondaries, ABT #86; adds a tagged clamp-node snubber when >1 output) |
 | **acf** (active-clamp forward) | 0.9 | inductance, turnsRatios[i] | `operatingDutyCycle`(0.45), `deadTimeFraction`(0.01), `nodeSnubberCap`(2.2e-9) | synchronous rectifiers (MOSFETs, not diodes); active clamp resets core; **multi-output** (N secondaries, ABT #86) |
 | **push_pull** | 0.9 | inductance, **turnsRatios[1]** | `maxDutyCycle`(0.48), `outputCapacitance`(100e-6) | center-tapped primary; secondary ratios emitted as **{maximum}** ceilings |
-| **weinberg** | **1.0** | inductance, **turnsRatios[1]** | `boostDutyTarget`(0.55), `l1RippleRatio`(0.30), `transformerCoupling`(0.999) | current-fed push-pull; **operatingPoints[0] mandatory**; boost regime (D>0.5) |
+| **weinberg** | **1.0** | inductance, **turnsRatios[1]** | `variant`("classic"), `synchronousRectifier`(false), `boostDutyTarget`(0.55), `l1RippleRatio`(0.30), `transformerCoupling`(0.999), `bridgeTurnsScale`(0.5), `deadTimeFraction`(0.02) | current-fed push-pull; **operatingPoints[0] mandatory**; boost regime (D>0.5); `variant="bridge"` = 4-switch H-bridge primary (diagonal PWM, halves primary switch Vds, `bridgeTurnsScale` rescales the shared transformer); `synchronousRectifier=true` swaps the CT-FW diodes for SR MOSFETs + body diodes (ABT #88) |
 
 ### Bridge & phase-shift
 

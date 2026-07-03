@@ -114,5 +114,19 @@ check("forward-2out", PyKirchhoff.design_forward_tas(MULTI_IN))
 check("tsf-2out", PyKirchhoff.design_two_switch_forward_tas(MULTI_IN))
 check("acf-2out", PyKirchhoff.design_acf_tas(MULTI_IN))
 
+# Weinberg + its config-gated variants (ABT #88): the classic push-pull, the 4-switch H-bridge primary,
+# and the synchronous-rectifier secondary must all emit schema-valid TAS documents.
+def weinberg_in(config):
+    d = {"designRequirements": {"efficiency": 0.95, "inputType": "dc",
+        "inputVoltage": {"minimum": 45, "nominal": 50, "maximum": 55}, "switchingFrequency": {"nominal": 50000},
+        "outputs": [{"name": "150V", "voltage": {"nominal": 150}, "regulation": "voltage"}]},
+        "operatingPoints": [{"name": "f", "inputVoltage": 50, "ambientTemperature": 25, "outputs": [{"name": "150V", "power": 1500}]}]}
+    d["config"] = config
+    return d
+check("weinberg-classic", PyKirchhoff.design_weinberg_tas(weinberg_in({"variant": "classic"})))
+check("weinberg-bridge", PyKirchhoff.design_weinberg_tas(weinberg_in({"variant": "bridge"})))
+check("weinberg-classic-SR", PyKirchhoff.design_weinberg_tas(weinberg_in({"variant": "classic", "synchronousRectifier": True})))
+check("weinberg-bridge-SR", PyKirchhoff.design_weinberg_tas(weinberg_in({"variant": "bridge", "synchronousRectifier": True})))
+
 print("\n" + ("ALL KIRCHHOFF TAS CHECKS PASSED" if failures == 0 else f"{failures} CHECK(S) FAILED"))
 sys.exit(1 if failures else 0)

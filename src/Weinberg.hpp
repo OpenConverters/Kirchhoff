@@ -6,6 +6,10 @@
 // when D>0.5); a 4-winding main transformer (CT primary + CT secondary) drives a center-tapped
 // full-wave rectifier into the output cap. Port of MKF Weinberg (V1 "classic", CT-FW diodes).
 //
+// Config-gated variants (ABT #88): `config.variant = "bridge"` swaps the 2-switch push-pull primary
+// for a 4-switch H-bridge (diagonal PWM; halves the primary switch voltage); `config.synchronousRectifier
+// = true` swaps the two center-tapped freewheel diodes for SR MOSFETs (complementary drive + body diode).
+//
 // New pieces vs push-pull: the current-fed INPUT coupled inductor L1 (the converter's defining
 // feature), and the boost-capable conversion ratio M = 1/(2·n·(1−D)) in the D>0.5 regime. Like MKF's
 // V1 the energy-recovery D3 diodes are omitted (RC snubbers tame the leakage spike instead).
@@ -21,6 +25,12 @@
 
 namespace Kirchhoff {
 
+// Primary-drive variant (ABT #88; MKF Weinberg `variant` enum). CLASSIC = the 2-switch current-fed
+// center-tapped push-pull (V1); BRIDGE = a 4-switch H-bridge primary (V2) that drives the two primary
+// halves in series (diagonal PWM + boost-overlap freewheel). The bridge halves the primary switch
+// blocking voltage (n·Vout per device vs the push-pull's 2·n·Vout) — used on high-bus spacecraft rails.
+enum class WeinbergVariant { Classic, Bridge };
+
 struct WeinbergDesign {
     double inputVoltage, inputVoltageMin, inputVoltageMax;
     double outputVoltage, outputPower, switchingFrequency, efficiency;
@@ -31,6 +41,9 @@ struct WeinbergDesign {
     double magnetizingInductance;     // Lpri_half (each primary-half winding of the main transformer)
     double loadResistance;
     double outputCapacitance;
+    WeinbergVariant variant;          // primary drive: classic push-pull (default) or H-bridge (ABT #88)
+    bool synchronousRectifier;        // secondary CT-FW: real diodes (default) or SR MOSFETs (ABT #88)
+    double deadFraction;              // SR / bridge complementary-drive dead band (fraction of the period)
     nlohmann::json config;
 };
 

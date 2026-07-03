@@ -136,10 +136,18 @@ MAS::OperatingPoint analytical_push_pull(double inputVoltage, double outputVolta
 // (bipolar-rectangular voltages; the primary current is a regime-dependent CUSTOM ramp:
 // buck/boundary pulse for D ≤ 0.5, 4-segment overlap shape for the boost regime D > 0.5).
 // Ported from MKF Weinberg.cpp:182. Throws on singular gain / D over the maximum.
+//
+// `bridgeVariant` selects the primary drive (ABT #88): the CLASSIC 2-switch center-tapped
+// push-pull (false) vs the 4-switch H-bridge (true). The variant only changes the primary
+// SWITCH stress (each bridge device blocks n·Vout, half the push-pull's 2·n·Vout) and the drive
+// — the transformer/secondary winding waveforms are shared (each primary half still reflects the
+// diode-clamped ±Vout secondary to ±n·Vout, each L1 half still carries the current-fed pulse), so
+// the six emitted excitations are identical; only their descriptions record the drive.
 MAS::OperatingPoint analytical_weinberg(double inputVoltage, double outputVoltage,
                                         double outputCurrent, double switchingFrequency,
                                         double inductance, double turnsRatio,
-                                        double diodeVoltageDrop = 0.0, double efficiency = 1.0);
+                                        double diodeVoltageDrop = 0.0, double efficiency = 1.0,
+                                        bool bridgeVariant = false);
 
 // SEPIC (single L1 winding). One "Primary" excitation: TRIANGULAR L1 current around
 // IL1avg = Iout·D/((1−D)·η), RECTANGULAR voltage (±Vin/−Vo, pp = Vin+Vo). Ported from MKF

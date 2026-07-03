@@ -716,7 +716,8 @@ static double weinberg_duty_cycle(double inputVoltage, double outputVoltage, dou
 MAS::OperatingPoint analytical_weinberg(double inputVoltage, double outputVoltage,
                                         double outputCurrent, double switchingFrequency,
                                         double inductance, double turnsRatio,
-                                        double diodeVoltageDrop, double efficiency) {
+                                        double diodeVoltageDrop, double efficiency,
+                                        bool bridgeVariant) {
     using Lbl = MAS::WaveformLabel;
     double dutyCycle = weinberg_duty_cycle(inputVoltage, outputVoltage, turnsRatio, diodeVoltageDrop, efficiency, 0.95);
     int regime = weinberg_detect_operating_regime(dutyCycle);
@@ -794,9 +795,13 @@ MAS::OperatingPoint analytical_weinberg(double inputVoltage, double outputVoltag
     exc.push_back(WP::complete_excitation(customCurrent(iPriB), vL1, switchingFrequency, "L1 primary b"));
     // [2,3] T1 push-pull primary halves (opposite-wound → opposite DC sign), voltage ±n·Vout
     // (n = Np/Ns; the secondary is diode-clamped to ±Vout, so the primary reflects to n·Vout).
+    // The bridge variant (ABT #88) drives the same two halves in SERIES from a 4-switch H-bridge; the
+    // per-half reflected voltage and current are unchanged (only the switch that carries them differs),
+    // so the excitations are shared and only the description records the drive.
+    const char* priDrive = bridgeVariant ? "bridge" : "push-pull";
     MAS::Waveform vPri = WP::create_waveform(Lbl::BIPOLAR_RECTANGULAR, 2.0 * outputVoltage * turnsRatio, switchingFrequency, 0.5, 0.0, 0);
-    exc.push_back(WP::complete_excitation(customCurrent(iPriA),    vPri, switchingFrequency, "T1 primary a"));
-    exc.push_back(WP::complete_excitation(customCurrent(iPriBneg), vPri, switchingFrequency, "T1 primary b"));
+    exc.push_back(WP::complete_excitation(customCurrent(iPriA),    vPri, switchingFrequency, std::string("T1 ") + priDrive + " primary a"));
+    exc.push_back(WP::complete_excitation(customCurrent(iPriBneg), vPri, switchingFrequency, std::string("T1 ") + priDrive + " primary b"));
     // [4,5] T1 push-pull secondary halves (opposite-wound), voltage ±Vout.
     MAS::Waveform vSec = WP::create_waveform(Lbl::BIPOLAR_RECTANGULAR, 2.0 * outputVoltage, switchingFrequency, 0.5, 0.0, 0);
     exc.push_back(WP::complete_excitation(customCurrent(iSecA),    vSec, switchingFrequency, "T1 secondary a"));
