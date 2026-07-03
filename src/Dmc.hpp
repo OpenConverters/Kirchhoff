@@ -20,6 +20,7 @@
 
 #include <nlohmann/json.hpp>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace Kirchhoff {
@@ -31,7 +32,11 @@ struct DmcDesign {
     double lineFrequency = 0.0;        // [Hz]
     double switchingFrequency = 0.0;   // ripple (noise) frequency [Hz]; 0 = not supplied
     double ambientTemperature = 0.0;   // [°C]
-    MAS::Configuration configuration = MAS::Configuration::SINGLE_PHASE;
+    // Raw schema configuration string (singlePhase|singlePhaseBalanced|threePhase|threePhaseWithNeutral).
+    // Kept as the plain string — NOT a MAS enum — so DMC never depends on a MAS type that the
+    // Inputs-rooted MAS.hpp generation may or may not emit (CMC likewise takes numberOfWindings as a
+    // plain int). Validated on parse; the winding count / analytical model are derived from it.
+    std::string configuration = "singlePhase";
     int numberOfWindings = 1;          // derived from configuration (1/2/3/4)
     std::optional<double> peakCurrent; // explicit winding peak; else derived from operatingCurrent
     std::vector<MAS::ImpedanceAtFrequency> impedancePoints;  // resolved Z(f) requirements (may be empty)

@@ -24,8 +24,12 @@ endif()
 set(PSMA_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/deps" CACHE PATH "Directory holding the PSMA-org sibling repos (submodules)")
 
 # Pull in the per-family converter libs + the CIAS circuit converter (tests/pybind off here).
+# CTAS_BUILD_TESTS / AAS_BUILD_TESTS must be OFF: the latest CTAS builds its round-trip tests by
+# add_subdirectory("../CIAS"), which would define the CIAS target a SECOND time (Kirchhoff adds CIAS
+# itself below) → "target CIAS already exists". Kirchhoff doesn't run the sibling repos' own test suites.
 foreach(opt RAS_BUILD_TESTS RAS_BUILD_PYBIND CAS_BUILD_TESTS CAS_BUILD_PYBIND
-            SAS_BUILD_TESTS SAS_BUILD_PYBIND MAS_BUILD_PYBIND CIAS_BUILD_TESTS CIAS_BUILD_PYBIND)
+            SAS_BUILD_TESTS SAS_BUILD_PYBIND MAS_BUILD_PYBIND CIAS_BUILD_TESTS CIAS_BUILD_PYBIND
+            AAS_BUILD_TESTS CTAS_BUILD_TESTS)
     set(${opt} OFF CACHE BOOL "" FORCE)
 endforeach()
 
@@ -96,6 +100,11 @@ target_include_directories(kirchhoff SYSTEM PUBLIC
 # binaries (no risk of an MKF header shadowing a Kirchhoff one).
 target_include_directories(kirchhoff SYSTEM PRIVATE "${MKF_DIR}/src")
 target_link_libraries(kirchhoff PUBLIC RAS CAS SAS AAS CTAS MAS_kirchhoff CIAS nlohmann_json::nlohmann_json)
+# MSVC's <cmath> only defines M_PI et al. when _USE_MATH_DEFINES is set. Define it PUBLICly (harmless /
+# ignored on GCC/Clang) so every TU that includes <cmath> — here and in anything linking kirchhoff — sees
+# the math constants, instead of sprinkling fragile per-file `#define _USE_MATH_DEFINES` that must precede
+# every include of <cmath>.
+target_compile_definitions(kirchhoff PUBLIC _USE_MATH_DEFINES)
 # Compile Kirchhoff's OWN sources with -Wall -Wextra (dep headers are SYSTEM above, so this flags only our
 # code). The vendored MKF WaveformProcessor is not ours to clean — suppress its warnings with a trailing -w.
 if (NOT MSVC)

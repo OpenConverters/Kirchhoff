@@ -88,9 +88,10 @@ namespace {
 // are atomic and the sample buffers are mutex-guarded. The state is heap-allocated and kept alive past the
 // function return (see g_activeCapture) so a lingering background thread can never write freed memory.
 struct Capture {
-    std::mutex mtx;                                            // guards time / vectors / errorMessage
+    std::mutex mtx;                                            // guards time / vectors / errorMessage / console
     std::vector<double> time;
     std::map<std::string, std::vector<double>> vectors;
+    std::string console;                                       // full SendChar text (for .meas parsing)
     std::atomic<bool> complete{false};
     std::atomic<bool> error{false};
     std::string errorMessage;
@@ -110,9 +111,16 @@ bool line_is_fatal(const char* out) {
 
 extern "C" int kh_send_char(char* out, int /*id*/, void* ud) {
     if (!out || !ud) return 0;
+    auto* c = static_cast<Capture*>(ud);
+    std::lock_guard<std::mutex> lk(c->mtx);
+    // Capture the full console stream so run_ngspice_console can return the `.meas`
+    // results (libngspice strips a leading "stdout "/"stderr " tag from each line).
+    const char* text = out;
+    if (std::strncmp(out, "stdout ", 7) == 0) text = out + 7;
+    else if (std::strncmp(out, "stderr ", 7) == 0) text = out + 7;
+    c->console.append(text);
+    c->console.push_back('\n');
     if (line_is_fatal(out)) {
-        auto* c = static_cast<Capture*>(ud);
-        std::lock_guard<std::mutex> lk(c->mtx);
         c->error = true;
         if (c->errorMessage.empty()) c->errorMessage = out;
     }
@@ -265,6 +273,61 @@ NgspiceRunResult run_ngspice_in_process(const std::string& deck, double timeoutS
     return result;
 }
 
+std::string run_ngspice_console(const std::string& deck, double timeoutSeconds) {
+    // In-process replacement for `ngspice -b <deck>`: load the deck INCLUDING its
+    // `.control … .endc` block, which libngspice executes on load (run/meas/wrdata),
+    // and return the captured console text so the caller can parse `.meas` results.
+    auto cap = std::make_shared<Capture>();
+    g_activeCapture = cap;
+
+    if (ngSpice_Init(kh_send_char, kh_send_stat, kh_controlled_exit,
+                     kh_send_data, kh_send_initdata, kh_bg_running, cap.get()) != 0)
+        throw std::runtime_error("libngspice: ngSpice_Init failed");
+    ngSpice_Command(const_cast<char*>("set no_mem_check"));
+
+    // Keep the .control block (do NOT strip it) — that is what runs the sim + meas.
+    std::vector<std::string> lines;
+    lines.emplace_back("* kirchhoff in-process console run");
+    std::istringstream in(deck);
+    std::string line;
+    while (std::getline(in, line)) lines.push_back(line);
+
+    std::vector<char*> cir;
+    cir.reserve(lines.size() + 1);
+    for (auto& l : lines) cir.push_back(const_cast<char*>(l.c_str()));
+    cir.push_back(nullptr);
+
+    // ngSpice_Circ runs the .control block's foreground `run` synchronously, so by the
+    // time it returns the sim + meas + wrdata have completed. Guard with a watchdog
+    // thread that halts a runaway sim after the timeout (best-effort).
+    std::atomic<bool> done{false};
+    std::thread watchdog([&] {
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(static_cast<long>(timeoutSeconds * 1000.0));
+        while (!done) {
+            if (std::chrono::steady_clock::now() > deadline) {
+                ngSpice_Command(const_cast<char*>("bg_halt"));
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    });
+
+    if (ngSpice_Circ(cir.data()) != 0) {
+        done = true;
+        watchdog.join();
+        ngSpice_Command(const_cast<char*>("remcirc"));
+        throw std::runtime_error("libngspice: ngSpice_Circ failed to load the deck");
+    }
+    done = true;
+    watchdog.join();
+
+    ngSpice_Command(const_cast<char*>("remcirc"));
+
+    std::lock_guard<std::mutex> lk(cap->mtx);
+    return cap->console;
+}
+
 } // namespace Kirchhoff
 
 #else  // ENABLE_NGSPICE not defined
@@ -274,6 +337,10 @@ bool ngspice_in_process_available() { return false; }
 NgspiceRunResult run_ngspice_in_process(const std::string&, double) {
     throw std::runtime_error("Kirchhoff was built without libngspice (ENABLE_NGSPICE off); "
                              "use the ngspice CLI or rebuild with -DENABLE_NGSPICE=ON");
+}
+std::string run_ngspice_console(const std::string&, double) {
+    throw std::runtime_error("Kirchhoff was built without libngspice (ENABLE_NGSPICE off); "
+                             "rebuild with -DENABLE_NGSPICE=ON");
 }
 } // namespace Kirchhoff
 

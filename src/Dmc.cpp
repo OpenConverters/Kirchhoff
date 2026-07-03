@@ -12,36 +12,37 @@ using nlohmann::json;
 
 namespace {
 
-// configuration string → winding count (MKF DifferentialModeChoke::get_number_of_windings).
-int windings_for(MAS::Configuration cfg) {
-    switch (cfg) {
-        case MAS::Configuration::SINGLE_PHASE:            return 1;
-        case MAS::Configuration::SINGLE_PHASE_BALANCED:   return 2;
-        case MAS::Configuration::THREE_PHASE:             return 3;
-        case MAS::Configuration::THREE_PHASE_WITH_NEUTRAL:return 4;
-    }
-    return 1;
+// configuration string → winding count (MKF DifferentialModeChoke::get_number_of_windings). Doubles as
+// the validator for the raw schema string: an unknown value throws (no silent fallback), so every other
+// helper below can assume the string is one of the four canonical values.
+int windings_for(const std::string& cfg) {
+    if (cfg == "singlePhase")            return 1;
+    if (cfg == "singlePhaseBalanced")   return 2;
+    if (cfg == "threePhase")            return 3;
+    if (cfg == "threePhaseWithNeutral") return 4;
+    throw std::invalid_argument(
+        "DMC configuration '" + cfg + "' is not one of "
+        "singlePhase|singlePhaseBalanced|threePhase|threePhaseWithNeutral");
 }
 
-// MAS::Configuration → the analytical excitation enum (same order/meaning).
-analytical::DmcConfiguration analytical_config(MAS::Configuration cfg) {
-    switch (cfg) {
-        case MAS::Configuration::SINGLE_PHASE:            return analytical::DmcConfiguration::SINGLE_PHASE;
-        case MAS::Configuration::SINGLE_PHASE_BALANCED:   return analytical::DmcConfiguration::SINGLE_PHASE_BALANCED;
-        case MAS::Configuration::THREE_PHASE:             return analytical::DmcConfiguration::THREE_PHASE;
-        case MAS::Configuration::THREE_PHASE_WITH_NEUTRAL:return analytical::DmcConfiguration::THREE_PHASE_WITH_NEUTRAL;
-    }
-    return analytical::DmcConfiguration::SINGLE_PHASE;
+// configuration string → the analytical excitation enum (Kirchhoff-owned; same order/meaning).
+analytical::DmcConfiguration analytical_config(const std::string& cfg) {
+    if (cfg == "singlePhase")            return analytical::DmcConfiguration::SINGLE_PHASE;
+    if (cfg == "singlePhaseBalanced")   return analytical::DmcConfiguration::SINGLE_PHASE_BALANCED;
+    if (cfg == "threePhase")            return analytical::DmcConfiguration::THREE_PHASE;
+    if (cfg == "threePhaseWithNeutral") return analytical::DmcConfiguration::THREE_PHASE_WITH_NEUTRAL;
+    throw std::invalid_argument(
+        "DMC configuration '" + cfg + "' is not one of "
+        "singlePhase|singlePhaseBalanced|threePhase|threePhaseWithNeutral");
 }
 
-const char* config_name(MAS::Configuration cfg) {
-    switch (cfg) {
-        case MAS::Configuration::SINGLE_PHASE:            return "singlePhase";
-        case MAS::Configuration::SINGLE_PHASE_BALANCED:   return "singlePhaseBalanced";
-        case MAS::Configuration::THREE_PHASE:             return "threePhase";
-        case MAS::Configuration::THREE_PHASE_WITH_NEUTRAL:return "threePhaseWithNeutral";
-    }
-    return "singlePhase";
+// Parse the optional `configuration` field. Absent → the schema's documented default "singlePhase";
+// present → validated via windings_for (throws on an unknown string).
+std::string parse_configuration(const json& spec) {
+    std::string cfg = spec.contains("configuration")
+        ? spec.at("configuration").get<std::string>() : std::string("singlePhase");
+    windings_for(cfg);  // validate (throws on unknown)
+    return cfg;
 }
 
 // The single most demanding DM attenuation requirement: the impedance point forcing the lowest LC
@@ -102,9 +103,7 @@ DmcDesign design_dmc(const json& spec) {
     d.ambientTemperature = spec.at("ambientTemperature").get<double>();
     if (spec.contains("switchingFrequency"))
         d.switchingFrequency = spec.at("switchingFrequency").get<double>();
-    d.configuration = spec.contains("configuration")
-        ? spec.at("configuration").get<MAS::Configuration>()   // MAS from_json maps the schema strings
-        : MAS::Configuration::SINGLE_PHASE;
+    d.configuration = parse_configuration(spec);           // raw schema string, validated
     d.numberOfWindings = windings_for(d.configuration);
     if (spec.contains("peakCurrent")) d.peakCurrent = spec.at("peakCurrent").get<double>();
 
@@ -224,8 +223,7 @@ json propose_dmc_design(const json& spec) {
         r.lineFrequency = spec.at("lineFrequency").get<double>();
         r.ambientTemperature = spec.at("ambientTemperature").get<double>();
         if (spec.contains("switchingFrequency")) r.switchingFrequency = spec.at("switchingFrequency").get<double>();
-        r.configuration = spec.contains("configuration")
-            ? spec.at("configuration").get<MAS::Configuration>() : MAS::Configuration::SINGLE_PHASE;
+        r.configuration = parse_configuration(spec);       // raw schema string, validated
         r.numberOfWindings = windings_for(r.configuration);
         if (spec.contains("peakCurrent")) r.peakCurrent = spec.at("peakCurrent").get<double>();
         if (spec.contains("minimumImpedance"))
@@ -282,7 +280,7 @@ json propose_dmc_design(const json& spec) {
         {"targetAttenuation_dB", targetAttenuation},
         {"peakCurrent", peakCurrent},
         {"energyStorage_mJ", energyStorage * 1e3},
-        {"configuration", config_name(d.configuration)},
+        {"configuration", d.configuration},
         {"numberOfWindings", d.numberOfWindings},
     };
 }

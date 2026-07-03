@@ -18,9 +18,22 @@
 // (MKF's convergence/damping snubbers, which also set the conduction droop).
 
 #include <nlohmann/json.hpp>
+#include <vector>
 #include "Fidelity.hpp"
 
 namespace Kirchhoff {
+
+// One isolated output rail (ABT #86, multi-output DAB). Each rail is its own actively-driven full bridge
+// tapped off its own transformer secondary winding + output cap; every rail shares the SINGLE primary
+// bridge, series inductor Lr and D3 phase shift. outputs[0] reproduces the scalar (outputVoltage/…/
+// turnsRatio) single-output design byte-for-byte.
+struct DabOutputLeg {
+    double voltage;                // Vout_i
+    double power;                  // P_i at the operating point
+    double turnsRatio;             // N_i = V1_nom : V2_i (primary-to-this-secondary)
+    double outputCapacitance;      // Cout_i
+    double loadResistance;         // Vout_i^2 / P_i
+};
 
 struct DabDesign {
     double inputVoltage, inputVoltageMin, inputVoltageMax;
@@ -34,6 +47,11 @@ struct DabDesign {
     double magnetizingInductance;  // Lm
     double loadResistance;
     double outputCapacitance;
+    bool seriesInductancePinned;   // true if Lr came from a config/designRequirements pin (ABT #95) rather
+                                   // than being derived from the SPS power-transfer sizing (diagnostic only)
+    bool useLeakageInductance;     // true -> fold Lr into the transformer leakage (K = sqrt(1 - Lr/Lm)) and
+                                   // emit NO discrete series inductor; false -> discrete Lr in series (ABT #95)
+    std::vector<DabOutputLeg> outputs;  // one entry per designRequirements.outputs[] (>=1)
     nlohmann::json config;         // tasInputs["config"] — user overrides for otherwise-derived values
 };
 

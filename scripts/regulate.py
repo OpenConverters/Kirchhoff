@@ -31,7 +31,6 @@ be an off-target point. Known limits (both report regulated=False / a caveat, ne
 """
 import os
 import re
-import subprocess
 import sys
 import tempfile
 
@@ -495,14 +494,10 @@ def attach_simulated_excitations(tas, fidelity, tag="attach"):
         wf_path = wf.name
         ctrl.append("wrdata " + wf_path + " " + " ".join(e["dev_i"] for _i, e in cr_index))
     deck += "\n.control\n" + "\n".join(ctrl) + "\n.endc\n.end\n"
-    with tempfile.NamedTemporaryFile("w", suffix=f"_{tag}.cir", delete=False) as f:
-        f.write(deck)
-        path = f.name
-    try:
-        out = subprocess.run(["ngspice", "-b", path], capture_output=True, text=True, timeout=300)
-        text = out.stdout + out.stderr
-    finally:
-        os.unlink(path)
+    # In-process via Kirchhoff's integrated libngspice — NEVER the external `ngspice`
+    # CLI (see the global rule). Same console output as `ngspice -b`, so the `.meas`
+    # parsing below is unchanged; wrdata still writes its file for the caller to read.
+    text = PyKirchhoff.run_ngspice_console(deck, 300.0)
 
     # Stream the wrdata window into per-element current time-series {element_index: [(t, i), ...]} then discard.
     cr_curves = {}
@@ -642,14 +637,10 @@ def _simulate(tas, fidelity, tag):
         vexpr = f"v({node})" if ref == "0" else f"v({node},{ref})"
         ctrl.append(f"meas tran m_vld{i} avg {vexpr} from={frm:.12g} to={to:.12g}")
     deck += "\n.control\n" + "\n".join(ctrl) + "\nprint v(Vout) i(" + vin_name + ")\n.endc\n.end\n"
-    with tempfile.NamedTemporaryFile("w", suffix=f"_{tag}.cir", delete=False) as f:
-        f.write(deck)
-        path = f.name
-    try:
-        out = subprocess.run(["ngspice", "-b", path], capture_output=True, text=True, timeout=300)
-        text = out.stdout + out.stderr
-    finally:
-        os.unlink(path)
+    # In-process via Kirchhoff's integrated libngspice — NEVER the external `ngspice`
+    # CLI (see the global rule). Same console output as `ngspice -b`, so the `.meas`
+    # parsing below is unchanged; wrdata still writes its file for the caller to read.
+    text = PyKirchhoff.run_ngspice_console(deck, 300.0)
     if "Timestep too small" in text or "simulation(s) aborted" in text:
         return None
     def grab(name):
@@ -765,14 +756,8 @@ def _simulate_self_regulated(tas, fidelity, line_freq, tag):
     for i in range(len(loads)):
         ctrl.append(f"meas tran m_vld{i} avg m_vldv{i} from={frm:.12g} to={to:.12g}")
     deck += "\n.control\n" + "\n".join(ctrl) + "\n.endc\n.end\n"
-    with tempfile.NamedTemporaryFile("w", suffix=f"_{tag}.cir", delete=False) as f:
-        f.write(deck)
-        path = f.name
-    try:
-        out = subprocess.run(["ngspice", "-b", path], capture_output=True, text=True, timeout=600)
-        text = out.stdout + out.stderr
-    finally:
-        os.unlink(path)
+    # In-process via Kirchhoff's integrated libngspice — NEVER the external CLI.
+    text = PyKirchhoff.run_ngspice_console(deck, 600.0)
     if "Timestep too small" in text or "simulation(s) aborted" in text:
         return None
 

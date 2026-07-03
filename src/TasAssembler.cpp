@@ -220,7 +220,11 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
     // netlist (one subcircuit per stage) instead of flattening every atom into one circuit. The
     // subcircuit's formal nodes are the stage's ports (in order); the X line wires them to the
     // global nodes from the inter-stage connections.
-    CIAS::CiasToNgspiceConverter conv;
+    // CIAS moved the dialect from a per-call arg to converter state: the simulator target is chosen at
+    // construction (CircuitSimulator), and to_subckt() renders in that dialect. Build the converter once
+    // for this deck's dialect.
+    CIAS::CiasCircuitConverter conv(lt ? CIAS::CircuitSimulator::Ltspice
+                                       : CIAS::CircuitSimulator::Ngspice);
     std::ostringstream subckts, instances;
     // Real-magnetic ngspice subcircuits (MKF export) are GLOBAL defs hoisted to the deck top level
     // (deduplicated by reference); stage bodies only instantiate them via an X line. They can't be
@@ -417,7 +421,7 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
             if (!c.at("endpoints").empty()) sub["connections"].push_back(c);
         }
 
-        subckts << conv.to_subckt(CIAS::CiasCircuit::from_json(sub), dialect) << "\n";
+        subckts << conv.to_subckt(CIAS::CiasCircuit::from_json(sub)) << "\n";
 
         // instance: X<stage> <node per port, in declaration order> <subcktName>
         instances << "X" << sanitize(sname);

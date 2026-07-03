@@ -7,6 +7,7 @@
 #include "Clllc.hpp"
 #include "Pfc.hpp"
 #include "Vienna.hpp"
+#include "NgspiceRunner.hpp" // in-process libngspice runner (run_ngspice_console)
 #include "Cmc.hpp"           // common-mode choke — component designer (MAS::Inputs, no TAS)
 #include "Dmc.hpp"           // differential-mode choke — component designer + LC propose
 #include "CurrentTransformer.hpp"  // current transformer — component designer
@@ -89,6 +90,16 @@ assembly/simulate steps (tas_to_ngspice / tas_to_ltspice) are topology-agnostic.
           "Assemble any TAS topology document into a runnable ngspice deck (string).\n"
           "fidelity selects the component models, e.g. {\"origin\": \"REQUIREMENTS\"} for an\n"
           "ideal-component deck (other origins: \"DATASHEET\", \"MKF_MODEL\").");
+
+    m.def("run_ngspice_console",
+          [](const std::string& deck, double timeout) {
+              return Kirchhoff::run_ngspice_console(deck, timeout);
+          },
+          py::arg("deck"), py::arg("timeout") = 600.0,
+          "Run an ngspice deck IN-PROCESS via the integrated libngspice, executing its\n"
+          "`.control … .endc` block (run/meas/wrdata), and return the captured console\n"
+          "output. The in-process replacement for `ngspice -b <deck>` — no external\n"
+          "binary. Parse `.meas` results from the returned text.");
 
     // --- the adviser's magnetic inputs from an assembled TAS: MAS::Inputs (designRequirements +
     //     operatingPoints) for the main magnetic. Feed to PyOpenMagnetics.calculate_advised_magnetics[_fast]

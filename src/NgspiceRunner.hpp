@@ -48,4 +48,11 @@ bool ngspice_in_process_available();
 // for the background simulation thread. Throws std::runtime_error if libngspice is unavailable.
 NgspiceRunResult run_ngspice_in_process(const std::string& deck, double timeoutSeconds = 300.0);
 
+// In-process replacement for `ngspice -b <deck>`: run the deck INCLUDING its
+// `.control … .endc` block (libngspice executes run/meas/wrdata on load) and return
+// the captured console text — so callers that parse `.meas` results (e.g.
+// Kirchhoff/scripts/regulate.py) work unchanged without the external CLI. Throws if
+// libngspice is unavailable.
+std::string run_ngspice_console(const std::string& deck, double timeoutSeconds = 600.0);
+
 } // namespace Kirchhoff

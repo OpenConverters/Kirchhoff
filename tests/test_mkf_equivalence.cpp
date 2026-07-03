@@ -1684,4 +1684,115 @@ TEST_CASE("IsolatedBuckBoost multi-output: inverting primary rail + two isolated
     CHECK(v.at(2) > 0.85 * 8.0);   CHECK(v.at(2) < 1.15 * 8.0);     // isolated secondary 2
 }
 
+// ── DAB multi-output + pinned Lr / leakage-fold (ABT #86 + #95) ────────────────
+// A DAB now reads every designRequirements.outputs[] and builds ONE primary bridge + series inductor Lr and
+// N secondary ACTIVE bridges — one per rail, each on its own transformer winding (N_i = V1_nom/V2_i) — and
+// feeds the full per-rail {Vout_i}/{Iout_i}/{N_i} to analytical_dab (which returns 1 primary + N secondary
+// windings). The per-rail DESIGN and the analytical winding excitations are accurate and mirror MKF.
+//
+// KNOWN LIMITATION (ABT #86, verified): the emitted OPEN-LOOP ngspice deck regulates only the PRIMARY rail.
+// An SPS DAB has a single control DoF (the outer phase shift D3) for one output, so on a shared series tank
+// the auxiliary rails cannot be independently regulated open-loop (a real multi-output DAB needs closed-loop
+// per-output phase control — DPS/TPS). This mirrors MKF, which treats multi-output DAB as analytical-only and
+// never SPICE-validates it. build_dab_tas warns on stderr. Therefore this test asserts the SOUND, TRUE facts
+// (per-rail design, N secondary windings, both active bridges present, and that the PRIMARY rail regulates)
+// and does NOT assert auxiliary-rail regulation (which is physically unachievable open-loop — not faked).
+json two_output_dab_spec() {
+    return json::parse(R"({ "designRequirements": { "efficiency": 1.0,
+        "inputVoltage": { "minimum": 46, "nominal": 48, "maximum": 50 },
+        "switchingFrequency": { "nominal": 100000 },
+        "outputs": [ { "name": "out", "voltage": { "nominal": 12 } },
+                     { "name": "aux", "voltage": { "nominal": 24 } } ] },
+        "operatingPoints": [ { "inputVoltage": 48, "outputs": [ { "power": 24 }, { "power": 24 } ] } ] })");
+}
+json single_output_dab_spec() {
+    return json::parse(R"({ "designRequirements": { "efficiency": 1.0,
+        "inputVoltage": { "minimum": 46, "nominal": 48, "maximum": 50 },
+        "switchingFrequency": { "nominal": 100000 },
+        "outputs": [ { "name": "out", "voltage": { "nominal": 12 } } ] },
+        "operatingPoints": [ { "inputVoltage": 48, "outputs": [ { "power": 24 } ] } ] })");
+}
+// Locate a named component's node inside a stage's circuit; nullptr if absent.
+const json* find_cell_component(const json& tas, const std::string& stage, const std::string& comp) {
+    for (const auto& st : tas.at("topology").at("stages")) {
+        if (st.value("name", "") != stage || !st.contains("circuit")) continue;
+        for (const auto& c : st.at("circuit").at("components"))
+            if (c.value("name", "") == comp) return &c;
+    }
+    return nullptr;
+}
+
+TEST_CASE("DAB multi-output: per-rail design + N secondary bridges; primary rail regulates (ABT #86)",
+          "[equivalence][dab][multi]") {
+    Kirchhoff::DabDesign d = Kirchhoff::design_dab(two_output_dab_spec());
+    // Per-rail design: two output legs, each with its own duty-derived turns ratio N_i = V1_nom/V2_i.
+    REQUIRE(d.outputs.size() == 2);
+    check_close("rail-0 turns ratio N0 = 48/12", d.outputs.at(0).turnsRatio, 4.0, 1e-6);
+    check_close("rail-1 turns ratio N1 = 48/24", d.outputs.at(1).turnsRatio, 2.0, 1e-6);
+
+    json tas = Kirchhoff::build_dab_tas(d);
+    // Transformer carries primary + 2 secondaries -> 2 secondary-side windings.
+    CHECK(transformer_secondary_windings(tas, "dabCell", "T1") == 2);
+    // Both secondary ACTIVE bridges are present (rail 1's switches carry the "2" suffix).
+    CHECK(find_cell_component(tas, "dabCell", "QE")  != nullptr);
+    CHECK(find_cell_component(tas, "dabCell", "QH")  != nullptr);
+    CHECK(find_cell_component(tas, "dabCell", "QE2") != nullptr);
+    CHECK(find_cell_component(tas, "dabCell", "QH2") != nullptr);
+    // The transformer's embedded excitations come from analytical_dab fed the full per-rail vectors: it
+    // returns 1 primary + 2 secondary windings -> 3 per-winding excitations on T1.
+    const json* t1 = find_cell_component(tas, "dabCell", "T1");
+    REQUIRE(t1 != nullptr);
+    CHECK(t1->at("data").at("inputs").at("operatingPoints").at(0).at("excitationsPerWinding").size() == 3);
+
+    // The emitted deck is runnable and the PRIMARY rail regulates. Auxiliary-rail regulation is a documented
+    // open-loop limitation (see the block comment above) and is intentionally NOT asserted here.
+    auto v = measure_multi_output(tas, 100000.0, {"Vout"}, "dab_multi");
+    INFO("primary rail Vout=" << v.at(0) << " (target 12)");
+    CHECK(v.at(0) > 0.85 * 12.0); CHECK(v.at(0) < 1.15 * 12.0);
+}
+
+TEST_CASE("DAB pinned series inductance flows to design + deck (ABT #95)",
+          "[equivalence][dab][pinned]") {
+    // Baseline (unpinned) single-output DAB derives Lr from the SPS power transfer and keeps a discrete Lr.
+    Kirchhoff::DabDesign base = Kirchhoff::design_dab(single_output_dab_spec());
+    CHECK_FALSE(base.seriesInductancePinned);
+    json baseTas = Kirchhoff::build_dab_tas(base);
+    REQUIRE(find_cell_component(baseTas, "dabCell", "Lr") != nullptr);   // discrete series inductor present
+
+    // Pin Lr to a DISTINCT value; the design must adopt it and the discrete Lr magnetic must carry it.
+    json pinnedSpec = single_output_dab_spec();
+    const double Lpin = 2.0 * base.seriesInductance;   // clearly different from the derived value
+    pinnedSpec["designRequirements"]["desiredSeriesInductance"] = Lpin;
+    Kirchhoff::DabDesign d = Kirchhoff::design_dab(pinnedSpec);
+    CHECK(d.seriesInductancePinned);
+    check_close("pinned Lr adopted by design", d.seriesInductance, Lpin, 1e-9);
+    json tas = Kirchhoff::build_dab_tas(d);
+    const json* lr = find_cell_component(tas, "dabCell", "Lr");
+    REQUIRE(lr != nullptr);
+    const double lrH = lr->at("data").at("inputs").at("designRequirements")
+                          .at("magnetizingInductance").at("nominal").get<double>();
+    check_close("pinned Lr in the deck inductor", lrH, Lpin, 1e-9);
+}
+
+TEST_CASE("DAB useLeakageInductance folds Lr into the transformer leakage (ABT #95)",
+          "[equivalence][dab][leakage]") {
+    json spec = single_output_dab_spec();
+    spec["config"]["useLeakageInductance"] = true;
+    Kirchhoff::DabDesign d = Kirchhoff::design_dab(spec);
+    REQUIRE(d.useLeakageInductance);
+    json tas = Kirchhoff::build_dab_tas(d);
+    // discrete series inductor GONE; transformer leakage carries Lr (L_leak == Lr, i.e. K = sqrt(1-Lr/Lm)).
+    CHECK(find_cell_component(tas, "dabCell", "Lr") == nullptr);
+    const json* t1 = find_cell_component(tas, "dabCell", "T1");
+    REQUIRE(t1 != nullptr);
+    const auto& t1dr = t1->at("data").at("inputs").at("designRequirements");
+    REQUIRE(t1dr.contains("leakageInductance"));
+    const double lk = t1dr.at("leakageInductance").at(0).at("nominal").get<double>();
+    check_close("transformer leakage == Lr", lk, d.seriesInductance, 1e-9);
+    // deck still regulates the single rail with the folded tank inductance.
+    auto v = measure_multi_output(tas, 100000.0, {"Vout"}, "dab_leak");
+    INFO("useLeakageInductance rail Vout=" << v.at(0) << " (target 12)");
+    CHECK(v.at(0) > 0.85 * 12.0); CHECK(v.at(0) < 1.15 * 12.0);
+}
+
 }  // namespace

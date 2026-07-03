@@ -95,6 +95,20 @@ inline std::optional<double> provided_resonant_inductance(const json& designRequ
                 return PEAS::resolve_dimensional_values(designRequirements.at(k));
     return std::nullopt;
 }
+// "Design around a pinned series inductance" (the DAB Advanced flow, mirroring MKF's AdvancedDab which
+// takes desiredSeriesInductance). For a dual-active-bridge the SERIES (resonant/leakage) inductance Lr is
+// the tank element the SPS power transfer is sized around; pinning it fixes the tank and the rest of the
+// stage (Lm floor, switch ratings) is sized around THAT value instead of the D3-derived one. Reads
+// designRequirements.desiredSeriesInductance / seriesInductance (number or {nominal/…}). Returns nullopt
+// if unpinned (derive from the modulation as before). Kept separate from provided_resonant_inductance
+// because the two are semantically distinct pins in MKF (AdvancedDab vs AdvancedLlc/Cllc).
+inline std::optional<double> provided_series_inductance(const json& designRequirements) {
+    if (designRequirements.is_object())
+        for (const char* k : {"desiredSeriesInductance", "seriesInductance"})
+            if (designRequirements.contains(k))
+                return PEAS::resolve_dimensional_values(designRequirements.at(k));
+    return std::nullopt;
+}
 inline std::optional<double> provided_resonant_capacitance(const json& designRequirements) {
     if (designRequirements.is_object())
         for (const char* k : {"desiredResonantCapacitance", "resonantCapacitance"})
