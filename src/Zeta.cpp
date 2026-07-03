@@ -58,7 +58,10 @@ ZetaDesign design_zeta(const json& tasInputs) {
     // L1 sized at the worst corner (max Vin) for its current-ripple target (MKF).
     const double dMax = duty(vinMax, d.outputVoltage, d.diodeDrop, d.efficiency);
     const double iL1avg = iout * dMax / (1.0 - dMax);
-    const double dIL1 = cfg::get(d.config, "l1RippleRatio", kRippleRatioL1) * iL1avg;
+    // Ripple-ratio rule by default; config "maximumSwitchCurrent" instead sizes L1 so the peak primary
+    // inductor current (iL1avg + ΔIL1/2) lands exactly on the cap (ABT #95).
+    const double dIL1 = cfg::max_current_ripple(d.config, cfg::get(d.config, "l1RippleRatio", kRippleRatioL1),
+                                                iL1avg, iL1avg, "design_zeta");
     d.inductanceL1 = vinMax * dMax / (dIL1 * fsw);
     // L2, Cc, Cout at the operating point (both inductors see Vin·D during ON).
     const double dIL2 = cfg::get(d.config, "l2RippleRatio", kL2RipplePct) * iout;
@@ -97,10 +100,12 @@ json build_zeta_tas(const ZetaDesign& d) {
     const double dIL2 = cfg::get(d.config, "l2RippleRatio", kL2RipplePct) * iout;
     const double vSwing = d.inputVoltage + d.outputVoltage;   // nominal operating swing (L2 excitation embed)
     const double vSwingRating = d.inputVoltageMax + d.outputVoltage;   // worst-case corner for VOLTAGE ratings
+    // maximumDutyCycle gate (ABT #95): default 0.95 matches the analytical solver's historical cap.
+    const double maxDuty = cfg::get(d.config, "maximumDutyCycle", 0.95);
     const MAS::OperatingPoint aopWorst = AN::analytical_zeta(d.inputVoltageMin, d.outputVoltage, iout, fsw,
-                                                            d.inductanceL1, d.diodeDrop, d.efficiency);
+                                                            d.inductanceL1, d.diodeDrop, d.efficiency, maxDuty);
     const MAS::OperatingPoint aopNom   = AN::analytical_zeta(d.inputVoltage,    d.outputVoltage, iout, fsw,
-                                                            d.inductanceL1, d.diodeDrop, d.efficiency);
+                                                            d.inductanceL1, d.diodeDrop, d.efficiency, maxDuty);
     const double IL1avg = AN::winding_current(aopWorst, 0, "offset");   // L1 average (input current) at the worst corner
 
     // L2 (secondary coupled inductor) — inline single-winding excitation (not one of the solver's windings).

@@ -6,7 +6,11 @@
 #include <catch2/catch_approx.hpp>
 
 #include "ConverterAnalytical.hpp"
+#include "Buck.hpp"    // design_buck — ABT #95 maximumSwitchCurrent sizing tests
+#include "Boost.hpp"   // design_boost
+#include "Zeta.hpp"    // design_zeta
 
+#include <nlohmann/json.hpp>
 #include <cmath>
 #include <vector>
 
@@ -1093,4 +1097,118 @@ TEST_CASE("all solvers scale with load (no load-blind regression)", "[analytical
         double hi = rms0(analytical_differential_mode_choke(10,230,50,100000));
         CHECK(hi > 1.8 * lo);
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ABT #95 — configurable maximumDutyCycle gate (item 1) + maximumSwitchCurrent
+// alternative inductance sizing (item 2).
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE("analytical maximumDutyCycle gate throws when exceeded, byte-identical at default",
+          "[analytical][solver][maxduty][abt95]") {
+    using Kirchhoff::analytical::analytical_boost;
+    using Kirchhoff::analytical::analytical_zeta;
+    using Kirchhoff::analytical::analytical_fsbb;
+    using Kirchhoff::analytical::analytical_weinberg;
+
+    // Buck 12->5 (D=0.4167). Default (1.0) preserves the historical singularity-only guard: no throw.
+    CHECK_NOTHROW(analytical_buck(12, 5, 2, 100000, 10e-6));                       // default maxDuty = 1.0
+    CHECK_NOTHROW(analytical_buck(12, 5, 2, 100000, 10e-6, 0.0, 1.0, 0.5));        // 0.4167 < 0.5 → ok
+    CHECK_THROWS(analytical_buck(12, 5, 2, 100000, 10e-6, 0.0, 1.0, 0.3));         // 0.4167 > 0.3 → throw
+
+    // Boost 12->24 (D=0.5).
+    CHECK_NOTHROW(analytical_boost(12, 24, 1, 100000, 20e-6));                     // default 1.0
+    CHECK_THROWS(analytical_boost(12, 24, 1, 100000, 20e-6, 0.0, 1.0, 0.4));       // 0.5 > 0.4 → throw
+
+    // Zeta 12->24 (D = 24/(24+12) = 0.667); default cap 0.95 lets it through, 0.6 rejects it.
+    CHECK_NOTHROW(analytical_zeta(12, 24, 1, 100000, 47e-6));                      // default 0.95
+    CHECK_THROWS(analytical_zeta(12, 24, 1, 100000, 47e-6, 0.0, 1.0, 0.6));        // 0.667 > 0.606 → throw
+
+    // FSBB buck region 12->5 (D_buck=0.4167); throw fires at D >= maxDuty-0.01.
+    CHECK_NOTHROW(analytical_fsbb(12, 5, 2, 100000, 10e-6));                       // default 0.95
+    CHECK_THROWS(analytical_fsbb(12, 5, 2, 100000, 10e-6, 1.0,
+                                 Kirchhoff::analytical::FsbbMode::BUCK_BOOST_AUTO, 0.5, 0.4));  // 0.4167 >= 0.39
+
+    // Weinberg boost regime 24->72 (D=0.833); default 0.95 ok, 0.8 rejects.
+    CHECK_NOTHROW(analytical_weinberg(24, 72, 2, 100000, 50e-6, 1));               // default 0.95
+    CHECK_THROWS(analytical_weinberg(24, 72, 2, 100000, 50e-6, 1, 0.0, 1.0, false, 0.8));  // 0.833 >= 0.79
+}
+
+namespace {
+// Minimal Kirchhoff design-input doc (η=1 ideal, ±5% Vin) for the sizing tests.
+static nlohmann::json sizing_inputs(double vin, double vout, double pout, double fsw,
+                                    const nlohmann::json& config = nlohmann::json::object()) {
+    nlohmann::json d;
+    d["designRequirements"]["efficiency"] = 1.0;
+    d["designRequirements"]["inputVoltage"]["nominal"] = vin;
+    d["designRequirements"]["inputVoltage"]["minimum"] = vin * 0.95;
+    d["designRequirements"]["inputVoltage"]["maximum"] = vin * 1.05;
+    d["designRequirements"]["switchingFrequency"]["nominal"] = fsw;
+    nlohmann::json o; o["name"] = "out"; o["voltage"]["nominal"] = vout;
+    d["designRequirements"]["outputs"] = nlohmann::json::array({o});
+    nlohmann::json op; op["inputVoltage"] = vin;
+    nlohmann::json oo; oo["power"] = pout;
+    op["outputs"] = nlohmann::json::array({oo});
+    d["operatingPoints"] = nlohmann::json::array({op});
+    if (!config.empty()) d["config"] = config;
+    return d;
+}
+}  // namespace
+
+TEST_CASE("design_buck maximumSwitchCurrent sizes L so the peak inductor current hits the cap (ABT #95)",
+          "[requirements][buck][maxswitch][abt95]") {
+    const double vin = 24, vout = 12, pout = 24, fsw = 100000;   // iout = 2 A
+    const double iout = pout / vout, vinMax = vin * 1.05;
+
+    // No config → the ripple-ratio rule (byte-identical to before): ΔIL = 0.4·iout.
+    auto dRef = Kirchhoff::design_buck(sizing_inputs(vin, vout, pout, fsw));
+    const double refRipple = vout * (vinMax - vout) / (dRef.inductance * fsw * vinMax);
+    CHECK(refRipple == Catch::Approx(0.4 * iout).epsilon(1e-6));
+
+    // With the cap → L sized so peak = iout + ΔIL/2 lands exactly on maximumSwitchCurrent.
+    const double cap = 3.0;   // > iout (2 A)
+    auto dCap = Kirchhoff::design_buck(sizing_inputs(vin, vout, pout, fsw, {{"maximumSwitchCurrent", cap}}));
+    const double capRipple = vout * (vinMax - vout) / (dCap.inductance * fsw * vinMax);
+    CHECK(iout + capRipple / 2.0 == Catch::Approx(cap).epsilon(1e-6));   // the peak hits the cap
+    CHECK(dCap.inductance != Catch::Approx(dRef.inductance));            // and differs from the ripple rule
+
+    // A cap at/below the DC current is unreachable → loud throw (no silent fallback).
+    CHECK_THROWS(Kirchhoff::design_buck(sizing_inputs(vin, vout, pout, fsw, {{"maximumSwitchCurrent", 1.5}})));
+}
+
+TEST_CASE("design_boost maximumSwitchCurrent sizes L so the peak inductor current hits the cap (ABT #95)",
+          "[requirements][boost][maxswitch][abt95]") {
+    const double vin = 12, vout = 24, pout = 24, fsw = 100000;   // step-up
+    const double vinMax = vin * 1.05;
+    const double iLavg = pout / (1.0 * vinMax);                  // input-inductor avg at the sizing corner (η=1)
+
+    const double cap = 3.0;   // > iLavg (~1.905 A)
+    auto dCap = Kirchhoff::design_boost(sizing_inputs(vin, vout, pout, fsw, {{"maximumSwitchCurrent", cap}}));
+    const double capRipple = vinMax * (vout - vinMax) / (dCap.inductance * fsw * vout);
+    CHECK(iLavg + capRipple / 2.0 == Catch::Approx(cap).epsilon(1e-6));
+
+    // Ripple-ratio path unchanged when the cap is absent.
+    auto dRef = Kirchhoff::design_boost(sizing_inputs(vin, vout, pout, fsw));
+    const double refRipple = vinMax * (vout - vinMax) / (dRef.inductance * fsw * vout);
+    CHECK(refRipple == Catch::Approx(0.4 * (pout / vout)).epsilon(1e-6));   // rippleRatio·Iout, as before
+
+    CHECK_THROWS(Kirchhoff::design_boost(sizing_inputs(vin, vout, pout, fsw, {{"maximumSwitchCurrent", 1.0}})));
+}
+
+TEST_CASE("design_zeta maximumSwitchCurrent sizes L1 so its peak current hits the cap (ABT #95)",
+          "[requirements][zeta][maxswitch][abt95]") {
+    const double vin = 12, vout = 12, pout = 12, fsw = 100000;   // iout = 1 A
+    const double iout = pout / vout, vinMax = vin * 1.05;
+    // Synchronous rectifier → diodeDrop = 0, so the duty is the clean D = Vo/(Vin+Vo).
+    nlohmann::json cfg = {{"rectifier", "synchronous"}, {"maximumSwitchCurrent", 2.0}};
+    auto dCap = Kirchhoff::design_zeta(sizing_inputs(vin, vout, pout, fsw, cfg));
+    const double dMax = vout / (vinMax + vout);
+    const double iL1avg = iout * dMax / (1.0 - dMax);
+    const double capRipple = vinMax * dMax / (dCap.inductanceL1 * fsw);
+    CHECK(iL1avg + capRipple / 2.0 == Catch::Approx(2.0).epsilon(1e-6));
+
+    // Without the cap, the L1 ripple follows the l1RippleRatio rule (0.4·iL1avg) — byte-identical.
+    auto dRef = Kirchhoff::design_zeta(sizing_inputs(vin, vout, pout, fsw, {{"rectifier", "synchronous"}}));
+    const double refRipple = vinMax * dMax / (dRef.inductanceL1 * fsw);
+    CHECK(refRipple == Catch::Approx(0.4 * iL1avg).epsilon(1e-6));
 }

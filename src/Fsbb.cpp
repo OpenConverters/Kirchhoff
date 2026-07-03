@@ -169,8 +169,9 @@ json build_fsbb_tas(const FsbbDesign& d) {
     const AN::FsbbMode kMode = (d.region == "buckBoost")
         ? (splitBand ? AN::FsbbMode::SPLIT_PWM : AN::FsbbMode::SIMULTANEOUS)
         : AN::FsbbMode::BUCK_BOOST_AUTO;
-    const MAS::OperatingPoint aopWorst = AN::analytical_fsbb(srcWorst, delV, Idel, fsw, L_H, d.efficiency, kMode, d.splitRatio);
-    const MAS::OperatingPoint aopNom   = AN::analytical_fsbb(srcNom,   delV, Idel, fsw, L_H, d.efficiency, kMode, d.splitRatio);
+    const double maxDuty = cfg::get(d.config, "maximumDutyCycle", 0.95);   // ABT #95: configurable (default matches solver)
+    const MAS::OperatingPoint aopWorst = AN::analytical_fsbb(srcWorst, delV, Idel, fsw, L_H, d.efficiency, kMode, d.splitRatio, maxDuty);
+    const MAS::OperatingPoint aopNom   = AN::analytical_fsbb(srcNom,   delV, Idel, fsw, L_H, d.efficiency, kMode, d.splitRatio, maxDuty);
     const double IpkL  = AN::winding_current(aopWorst, 0, "peak");
     const double IrmsL = AN::winding_current(aopWorst, 0, "rms");
     json lind; lind["magnetic"] = json::object();

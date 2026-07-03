@@ -182,7 +182,8 @@ json build_weinberg_tas(const WeinbergDesign& d) {
     // CURRENTS it records match the deck; the bridge's halved primary-referred turns only rescale the
     // reflected VOLTAGE (captured via nXfmr in the transformer ratios + switch rating below).
     const MAS::OperatingPoint wOp = AN::analytical_weinberg(
-        Vin, Vout, Iout, fsw, d.inputInductance, n, 0.0, d.efficiency, bridge);
+        Vin, Vout, Iout, fsw, d.inputInductance, n, 0.0, d.efficiency, bridge,
+        cfg::get(d.config, "maximumDutyCycle", 0.95));   // ABT #95: configurable maxDuty (default matches solver)
     const auto& allExc = wOp.get_excitations_per_winding();
     if (allExc.size() != 6)
         throw std::runtime_error("build_weinberg_tas: analytical_weinberg must emit 6 windings (L1 x2 + T1 x4), got "

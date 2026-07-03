@@ -66,7 +66,11 @@ BoostDesign design_boost(const json& tasInputs) {
     d.inputVoltageMax = vinMax;
     const double rippleRatio = cfg::ripple_ratio(d.config, 0.4);
     const double iout = d.outputPower / d.outputVoltage;
-    const double maxCurrentRipple = rippleRatio * iout;
+    // Ripple-ratio rule by default; config "maximumSwitchCurrent" instead sizes L so the peak inductor/
+    // switch current (Iin + ΔIL/2) lands exactly on the cap (ABT #95). The boost inductor is the INPUT
+    // inductor: its average at the vinMax sizing corner is Iin = Pout/(η·vinMax).
+    const double iLavg = d.outputPower / (d.efficiency * vinMax);
+    const double maxCurrentRipple = cfg::max_current_ripple(d.config, rippleRatio, iout, iLavg, "design_boost");
     d.inductance = req::provided_inductance(dr).value_or(
         vinMax * (d.outputVoltage - vinMax) / (maxCurrentRipple * d.switchingFrequency * d.outputVoltage));
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
@@ -89,10 +93,13 @@ json build_boost_tas(const BoostDesign& d) {
     namespace AN = Kirchhoff::analytical;
     const double fsw = d.switchingFrequency, T = 1.0 / fsw, L_H = d.inductance;
     const double Iout = d.outputPower / d.outputVoltage;
+    // maximumDutyCycle gate (ABT #95): default 1.0 preserves the historical guard (boost already throws at
+    // D>=1 and D<=0); a user tightens it via config to get a loud throw before the worst-case duty runs away.
+    const double maxDuty = cfg::get(d.config, "maximumDutyCycle", 1.0);
     const MAS::OperatingPoint aopWorst = AN::analytical_boost(d.inputVoltageMin, d.outputVoltage, Iout, fsw,
-                                                              L_H, 0.0, d.efficiency);
+                                                              L_H, 0.0, d.efficiency, maxDuty);
     const MAS::OperatingPoint aopNom   = AN::analytical_boost(d.inputVoltage,    d.outputVoltage, Iout, fsw,
-                                                              L_H, 0.0, d.efficiency);
+                                                              L_H, 0.0, d.efficiency, maxDuty);
     const double Dmax  = AN::winding_current(aopWorst, 0, "dutyCycle");
     const double IpkL  = AN::winding_current(aopWorst, 0, "peak");
     const double IrmsL = AN::winding_current(aopWorst, 0, "rms");

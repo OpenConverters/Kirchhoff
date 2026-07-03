@@ -63,18 +63,24 @@ double winding_voltage(const MAS::OperatingPoint& op, std::size_t w, const std::
 // Buck (synchronous/diode, CCM + DCM). Returns an OperatingPoint with one winding excitation (the output
 // inductor): TRIANGULAR current (average = outputCurrent, ripple from the inductance) and RECTANGULAR
 // voltage in CCM; the DCM branch recomputes tOn and emits the discontinuous waveforms. Ported from MKF
-// Buck::process_operating_points_for_input_voltage. Throws if the required duty cycle >= 1.
+// Buck::process_operating_points_for_input_voltage. Throws if the required duty cycle >= 1, or if it
+// exceeds `maximumDutyCycle` (config-gated; defaults to 1.0 so the historical singularity-only guard is
+// preserved byte-for-byte — a caller passes a tighter cfg::get(config,"maximumDutyCycle",…) to enforce it).
 MAS::OperatingPoint analytical_buck(double inputVoltage, double outputVoltage, double outputCurrent,
                                     double switchingFrequency, double inductance,
-                                    double diodeVoltageDrop = 0.0, double efficiency = 1.0);
+                                    double diodeVoltageDrop = 0.0, double efficiency = 1.0,
+                                    double maximumDutyCycle = 1.0);
 
 // Boost (CCM + DCM). One winding excitation (the input inductor): TRIANGULAR current whose AVERAGE is the
 // input current Iout·(Vout+Vd)/Vin (not the load current), ripple from the inductance; RECTANGULAR
 // voltage (Vin during on, Vin-Vout-Vd during off). Ported from MKF Boost::process_operating_points_for_
-// input_voltage. Throws if the duty (1 - Vin·η/(Vout+Vd)) is <= 0 (Vin above Vout) or >= 1.
+// input_voltage. Throws if the duty (1 - Vin·η/(Vout+Vd)) is <= 0 (Vin above Vout) or >= 1, or if it
+// exceeds `maximumDutyCycle` (config-gated; defaults to 1.0 to preserve the historical singularity-only
+// guard byte-for-byte — a caller passes a tighter cfg::get(config,"maximumDutyCycle",…) to enforce it).
 MAS::OperatingPoint analytical_boost(double inputVoltage, double outputVoltage, double outputCurrent,
                                      double switchingFrequency, double inductance,
-                                     double diodeVoltageDrop = 0.0, double efficiency = 1.0);
+                                     double diodeVoltageDrop = 0.0, double efficiency = 1.0,
+                                     double maximumDutyCycle = 1.0);
 
 // ── Phase 3: the PWM converter family ───────────────────────────────────────
 // Each function below is the ideal-coupling `process_operating_points_for_input_voltage`
@@ -147,7 +153,7 @@ MAS::OperatingPoint analytical_weinberg(double inputVoltage, double outputVoltag
                                         double outputCurrent, double switchingFrequency,
                                         double inductance, double turnsRatio,
                                         double diodeVoltageDrop = 0.0, double efficiency = 1.0,
-                                        bool bridgeVariant = false);
+                                        bool bridgeVariant = false, double maximumDutyCycle = 0.95);
 
 // SEPIC (single L1 winding). One "Primary" excitation: TRIANGULAR L1 current around
 // IL1avg = Iout·D/((1−D)·η), RECTANGULAR voltage (±Vin/−Vo, pp = Vin+Vo). Ported from MKF
@@ -155,21 +161,21 @@ MAS::OperatingPoint analytical_weinberg(double inputVoltage, double outputVoltag
 MAS::OperatingPoint analytical_sepic(double inputVoltage, double outputVoltage,
                                      double outputCurrent, double switchingFrequency,
                                      double inductanceL1, double diodeVoltageDrop = 0.0,
-                                     double efficiency = 1.0);
+                                     double efficiency = 1.0, double maximumDutyCycle = 0.95);
 
 // Cuk (non-isolated, single L1 winding). Like SEPIC but the L1 voltage swing is VC1 = Vin/(1−D).
 // Ported from MKF Cuk.cpp:174 (the V1/V2 non-isolated path). Throws if the duty exceeds the max.
 MAS::OperatingPoint analytical_cuk(double inputVoltage, double outputVoltage,
                                    double outputCurrent, double switchingFrequency,
                                    double inductanceL1, double diodeVoltageDrop = 0.0,
-                                   double efficiency = 1.0);
+                                   double efficiency = 1.0, double maximumDutyCycle = 0.95);
 
 // Zeta (single L1 winding). Same primary excitation form as SEPIC. Ported from MKF Zeta.cpp:100.
 // Throws if the duty exceeds the maximum.
 MAS::OperatingPoint analytical_zeta(double inputVoltage, double outputVoltage,
                                     double outputCurrent, double switchingFrequency,
                                     double inductanceL1, double diodeVoltageDrop = 0.0,
-                                    double efficiency = 1.0);
+                                    double efficiency = 1.0, double maximumDutyCycle = 0.95);
 
 // Four-switch buck-boost mode selector. BUCK_BOOST_AUTO reproduces MKF's separate BUCK/BOOST
 // region models (throws in the Vo==Vin transition). SIMULTANEOUS is the 4-switch simultaneous
@@ -198,7 +204,7 @@ MAS::OperatingPoint analytical_fsbb(double inputVoltage, double outputVoltage,
                                     double outputCurrent, double switchingFrequency,
                                     double inductance, double efficiency = 1.0,
                                     FsbbMode mode = FsbbMode::BUCK_BOOST_AUTO,
-                                    double splitRatio = 0.5);
+                                    double splitRatio = 0.5, double maximumDutyCycle = 0.95);
 
 // Isolated buck (fly-buck). Two outputs: the primary buck rail (Vpri, Ipri) and one isolated
 // secondary (Vsec, Isec). `inductance` is the primary/magnetizing inductance, `turnsRatio` the

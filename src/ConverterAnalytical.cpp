@@ -118,12 +118,15 @@ double winding_voltage(const MAS::OperatingPoint& op, std::size_t w, const std::
 // Ported from MKF converter_models/Buck.cpp (calculate_duty_cycle + process_operating_points_for_input_voltage).
 MAS::OperatingPoint analytical_buck(double inputVoltage, double outputVoltage, double outputCurrent,
                                     double switchingFrequency, double inductance,
-                                    double diodeVoltageDrop, double efficiency) {
+                                    double diodeVoltageDrop, double efficiency, double maximumDutyCycle) {
     using Lbl = MAS::WaveformLabel;
 
     double dutyCycle = (outputVoltage + diodeVoltageDrop) / ((inputVoltage + diodeVoltageDrop) * efficiency);
     if (dutyCycle >= 1.0)
         throw std::invalid_argument("analytical_buck: required duty cycle >= 1 (Vout too close to Vin)");
+    if (dutyCycle > maximumDutyCycle)
+        throw std::invalid_argument("analytical_buck: required duty cycle " + std::to_string(dutyCycle)
+                                    + " exceeds maximumDutyCycle " + std::to_string(maximumDutyCycle));
 
     const double period = 1.0 / switchingFrequency;
     double tOn = dutyCycle / switchingFrequency;
@@ -165,7 +168,7 @@ MAS::OperatingPoint analytical_buck(double inputVoltage, double outputVoltage, d
 // Ported from MKF converter_models/Boost.cpp.
 MAS::OperatingPoint analytical_boost(double inputVoltage, double outputVoltage, double outputCurrent,
                                      double switchingFrequency, double inductance,
-                                     double diodeVoltageDrop, double efficiency) {
+                                     double diodeVoltageDrop, double efficiency, double maximumDutyCycle) {
     using Lbl = MAS::WaveformLabel;
 
     double dutyCycle = 1.0 - inputVoltage * efficiency / (outputVoltage + diodeVoltageDrop);
@@ -173,6 +176,9 @@ MAS::OperatingPoint analytical_boost(double inputVoltage, double outputVoltage, 
         throw std::invalid_argument("analytical_boost: required duty cycle >= 1");
     if (dutyCycle <= 0.0)
         throw std::invalid_argument("analytical_boost: duty cycle <= 0 (input voltage above output)");
+    if (dutyCycle > maximumDutyCycle)
+        throw std::invalid_argument("analytical_boost: required duty cycle " + std::to_string(dutyCycle)
+                                    + " exceeds maximumDutyCycle " + std::to_string(maximumDutyCycle));
 
     const double period = 1.0 / switchingFrequency;
     double tOn = dutyCycle / switchingFrequency;
@@ -717,9 +723,9 @@ MAS::OperatingPoint analytical_weinberg(double inputVoltage, double outputVoltag
                                         double outputCurrent, double switchingFrequency,
                                         double inductance, double turnsRatio,
                                         double diodeVoltageDrop, double efficiency,
-                                        bool bridgeVariant) {
+                                        bool bridgeVariant, double maximumDutyCycle) {
     using Lbl = MAS::WaveformLabel;
-    double dutyCycle = weinberg_duty_cycle(inputVoltage, outputVoltage, turnsRatio, diodeVoltageDrop, efficiency, 0.95);
+    double dutyCycle = weinberg_duty_cycle(inputVoltage, outputVoltage, turnsRatio, diodeVoltageDrop, efficiency, maximumDutyCycle);
     int regime = weinberg_detect_operating_regime(dutyCycle);
     double overlap = std::max(0.0, 2.0 * dutyCycle - 1.0);
     double M = (regime == 2) ? weinberg_conversion_ratio_boost(dutyCycle, turnsRatio)
@@ -825,9 +831,10 @@ static double single_inductor_duty_cycle(double inputVoltage, double outputVolta
 // Ported from MKF converter_models/Sepic.cpp:97.
 MAS::OperatingPoint analytical_sepic(double inputVoltage, double outputVoltage,
                                      double outputCurrent, double switchingFrequency,
-                                     double inductanceL1, double diodeVoltageDrop, double efficiency) {
+                                     double inductanceL1, double diodeVoltageDrop, double efficiency,
+                                     double maximumDutyCycle) {
     using Lbl = MAS::WaveformLabel;
-    double dutyCycle = single_inductor_duty_cycle(inputVoltage, outputVoltage, diodeVoltageDrop, efficiency, 1.0, 0.95, "analytical_sepic");
+    double dutyCycle = single_inductor_duty_cycle(inputVoltage, outputVoltage, diodeVoltageDrop, efficiency, 1.0, maximumDutyCycle, "analytical_sepic");
     double IL1avg = outputCurrent * dutyCycle / ((1.0 - dutyCycle) * efficiency);
     double deltaIL1 = inductanceL1 > 0 ? (inputVoltage * dutyCycle) / (inductanceL1 * switchingFrequency) : 0.0;
     double primaryVoltagePeakToPeak = inputVoltage + outputVoltage;
@@ -843,10 +850,11 @@ MAS::OperatingPoint analytical_sepic(double inputVoltage, double outputVoltage,
 // Ported from MKF converter_models/Cuk.cpp:174 (V1/V2 non-isolated path).
 MAS::OperatingPoint analytical_cuk(double inputVoltage, double outputVoltage,
                                    double outputCurrent, double switchingFrequency,
-                                   double inductanceL1, double diodeVoltageDrop, double efficiency) {
+                                   double inductanceL1, double diodeVoltageDrop, double efficiency,
+                                   double maximumDutyCycle) {
     using Lbl = MAS::WaveformLabel;
     double outputVoltageMag = std::abs(outputVoltage);
-    double dutyCycle = single_inductor_duty_cycle(inputVoltage, outputVoltageMag, diodeVoltageDrop, efficiency, 1.0, 0.95, "analytical_cuk");
+    double dutyCycle = single_inductor_duty_cycle(inputVoltage, outputVoltageMag, diodeVoltageDrop, efficiency, 1.0, maximumDutyCycle, "analytical_cuk");
     double IL1avg = outputCurrent * dutyCycle / ((1.0 - dutyCycle) * 1.0 * efficiency);
     double VC1 = inputVoltage / (1.0 - dutyCycle);
     double deltaIL1 = inductanceL1 > 0 ? (inputVoltage * dutyCycle) / (inductanceL1 * switchingFrequency) : 0.0;
@@ -863,9 +871,10 @@ MAS::OperatingPoint analytical_cuk(double inputVoltage, double outputVoltage,
 // Ported from MKF converter_models/Zeta.cpp:100.
 MAS::OperatingPoint analytical_zeta(double inputVoltage, double outputVoltage,
                                     double outputCurrent, double switchingFrequency,
-                                    double inductanceL1, double diodeVoltageDrop, double efficiency) {
+                                    double inductanceL1, double diodeVoltageDrop, double efficiency,
+                                    double maximumDutyCycle) {
     using Lbl = MAS::WaveformLabel;
-    double dutyCycle = single_inductor_duty_cycle(inputVoltage, outputVoltage, diodeVoltageDrop, efficiency, 1.0, 0.95, "analytical_zeta");
+    double dutyCycle = single_inductor_duty_cycle(inputVoltage, outputVoltage, diodeVoltageDrop, efficiency, 1.0, maximumDutyCycle, "analytical_zeta");
     double IL1avg = outputCurrent * dutyCycle / ((1.0 - dutyCycle) * efficiency);
     double deltaIL1 = inductanceL1 > 0 ? (inputVoltage * dutyCycle) / (inductanceL1 * switchingFrequency) : 0.0;
     double primaryVoltagePeakToPeak = inputVoltage + outputVoltage;
@@ -883,10 +892,9 @@ MAS::OperatingPoint analytical_zeta(double inputVoltage, double outputVoltage,
 MAS::OperatingPoint analytical_fsbb(double inputVoltage, double outputVoltage,
                                     double outputCurrent, double switchingFrequency,
                                     double inductance, double efficiency, FsbbMode mode,
-                                    double splitRatio) {
+                                    double splitRatio, double maximumDutyCycle) {
     using Lbl = MAS::WaveformLabel;
     const double period = 1.0 / switchingFrequency;
-    const double maximumDutyCycle = 0.95;
     if (inputVoltage <= 0) throw std::invalid_argument("analytical_fsbb: input voltage must be > 0");
     if (outputVoltage <= 0) throw std::invalid_argument("analytical_fsbb: output voltage must be > 0");
     if (inductance <= 0) throw std::invalid_argument("analytical_fsbb: inductance must be > 0");

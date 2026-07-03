@@ -206,6 +206,28 @@ inline double v_derate_capacitor(const json& in) { return get(in, "vDerateCapaci
 // (buck/boost/forward 0.4, push/half-bridge 0.3), passed in as `dflt`; config "rippleRatio" overrides.
 inline double ripple_ratio(const json& in, double dflt) { return get(in, "rippleRatio", dflt); }
 
+// Alternative inductor sizing (ABT #95): cap the PEAK switch/inductor current at config "maximumSwitchCurrent"
+// instead of the ripple-ratio rule. Returns the target inductor-current ripple ΔI_L (peak-to-peak) to feed into
+// the topology's L = …/(ΔI_L · fsw · …) sizing formula.
+//   - If the user did NOT set "maximumSwitchCurrent": returns rippleRatio · rippleReferenceCurrent — BYTE-
+//     IDENTICAL to the historical ripple-ratio sizing (the caller passes its existing reference current).
+//   - If set: returns 2·(maximumSwitchCurrent − averageInductorCurrent), so sizing L to this ripple lands the
+//     peak inductor current (Iavg + ΔI_L/2) EXACTLY on maximumSwitchCurrent at the topology's sizing corner.
+// THROWS (no silent fallback, per the no-defaults rule) if the cap is <= the average inductor current — the DC
+// current alone already exceeds the requested peak, so no finite L can satisfy it.
+inline double max_current_ripple(const json& in, double rippleRatio, double rippleReferenceCurrent,
+                                 double averageInductorCurrent, const char* who) {
+    if (in.is_object() && in.contains("maximumSwitchCurrent") && in.at("maximumSwitchCurrent").is_number()) {
+        const double cap = in.at("maximumSwitchCurrent").get<double>();
+        if (cap <= averageInductorCurrent)
+            throw std::invalid_argument(std::string(who) + ": maximumSwitchCurrent (" + std::to_string(cap)
+                + " A) <= average inductor current (" + std::to_string(averageInductorCurrent)
+                + " A) — no finite inductance can cap the peak that low");
+        return 2.0 * (cap - averageInductorCurrent);
+    }
+    return rippleRatio * rippleReferenceCurrent;
+}
+
 // Output-voltage ripple as a fraction of Vout (sizes the output capacitor). config "outputRippleFraction".
 inline double output_ripple_fraction(const json& in, double dflt = 0.01) { return get(in, "outputRippleFraction", dflt); }
 

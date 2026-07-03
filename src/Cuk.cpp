@@ -144,10 +144,12 @@ json build_cuk_tas(const CukDesign& d) {
     const double dIL2 = cfg::get(d.config, "l2RippleRatio", kL2RipplePct) * iout;
     const double vSwing = d.inputVoltage + d.outputVoltageMag;   // nominal operating swing (L2 excitation embed)
     const double vSwingRating = d.inputVoltageMax + d.outputVoltageMag;   // worst-case corner for VOLTAGE ratings
+    // maximumDutyCycle gate (ABT #95): default 0.95 matches the analytical solver's historical cap.
+    const double maxDuty = cfg::get(d.config, "maximumDutyCycle", 0.95);
     const MAS::OperatingPoint aopWorst = AN::analytical_cuk(d.inputVoltageMin, d.outputVoltageMag, iout, fsw,
-                                                           d.inductanceL1, d.diodeDrop, d.efficiency);
+                                                           d.inductanceL1, d.diodeDrop, d.efficiency, maxDuty);
     const MAS::OperatingPoint aopNom   = AN::analytical_cuk(d.inputVoltage,    d.outputVoltageMag, iout, fsw,
-                                                           d.inductanceL1, d.diodeDrop, d.efficiency);
+                                                           d.inductanceL1, d.diodeDrop, d.efficiency, maxDuty);
     const double IL1avg = AN::winding_current(aopWorst, 0, "offset");   // L1 average (input current) at the worst corner
 
     // L2 (secondary coupled inductor) — inline single-winding excitation (not one of the solver's windings).

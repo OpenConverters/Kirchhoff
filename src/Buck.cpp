@@ -56,7 +56,9 @@ BuckDesign design_buck(const json& tasInputs) {
     //   L = Vout*(Vin_max - Vout) / (maximumCurrentRiple * fsw * Vin_max)
     const double rippleRatio = cfg::ripple_ratio(d.config, 0.4);
     const double iout = d.outputPower / d.outputVoltage;
-    const double maxCurrentRipple = rippleRatio * iout;
+    // Ripple-ratio rule by default; config "maximumSwitchCurrent" instead sizes L so the peak inductor/
+    // switch current (Iout + ΔIL/2) lands exactly on the cap (ABT #95). The buck inductor average is Iout.
+    const double maxCurrentRipple = cfg::max_current_ripple(d.config, rippleRatio, iout, iout, "design_buck");
     d.inductance = req::provided_inductance(dr).value_or(
         d.outputVoltage * (vinMax - d.outputVoltage) / (maxCurrentRipple * d.switchingFrequency * vinMax));
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
@@ -86,10 +88,13 @@ json build_buck_tas(const BuckDesign& d) {
     namespace AN = Kirchhoff::analytical;
     const double fsw = d.switchingFrequency, T = 1.0 / fsw, L = d.inductance;
     const double iout = d.outputPower / d.outputVoltage;
+    // maximumDutyCycle gate (ABT #95): default 1.0 preserves the historical singularity-only behavior;
+    // a user tightens it via config to get a loud throw before the worst-case (Vin_min) duty runs away.
+    const double maxDuty = cfg::get(d.config, "maximumDutyCycle", 1.0);
     const MAS::OperatingPoint aopWorst = AN::analytical_buck(d.inputVoltageMin, d.outputVoltage, iout, fsw, L,
-                                                             d.diodeDrop, d.efficiency);
+                                                             d.diodeDrop, d.efficiency, maxDuty);
     const MAS::OperatingPoint aopNom   = AN::analytical_buck(d.inputVoltage,    d.outputVoltage, iout, fsw, L,
-                                                             d.diodeDrop, d.efficiency);
+                                                             d.diodeDrop, d.efficiency, maxDuty);
     const double Dmax   = AN::winding_current(aopWorst, 0, "dutyCycle");
     const double dIL    = AN::winding_current(aopWorst, 0, "peakToPeak");
     const double IpkL   = AN::winding_current(aopWorst, 0, "peak");
