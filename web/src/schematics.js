@@ -26,6 +26,14 @@ const dot = (x, y) => `<circle class="sch-node" cx="${x}" cy="${y}" r="3"/>`
 const txt = (x, y, s, cls = 'sch-val', anchor = 'middle') =>
   `<text class="${cls}" x="${x}" y="${y}" text-anchor="${anchor}">${s}</text>`
 
+// Verification hook: symbols register their electrical terminals here (ref, pin-name, coord) ONLY while
+// a connectivity check is running (`collectPins`). In normal rendering `_rec` is false, so this is a
+// single boolean test per terminal — no output change, negligible cost. The netlist-vs-drawing checker
+// (scripts/checkNets) reads these to confirm every net's drawn pins are actually wired together.
+const _pins = []
+let _rec = false
+const regPin = (ref, pin, x, y) => { if (_rec) _pins.push({ ref, pin, x: Math.round(x), y: Math.round(y) }) }
+
 function hot(ref, bom, box, body, labelPos) {
   const [bx, by, bw, bh] = box
   const row = bom?.get(ref)
@@ -59,6 +67,7 @@ function mosfetV(ref, bom, x, y, labelSide = 'right', noVal = false) {
     P(`M ${x} ${y + 8.7} L ${x - 13} ${y + 8.7}`) +
     `<polygon class="sch-fill" points="${x - 10.8},${y} ${x - 4.3},${y - 4.3} ${x - 4.3},${y + 4.3}"/>`
   const lab = labelSide === 'right' ? [x + 12, y - 2, 'start', noVal] : [x - 29, y - 2, 'end', noVal]
+  regPin(ref, 'drain', x, y - 26); regPin(ref, 'source', x, y + 26); regPin(ref, 'gate', x - 26, y)
   return hot(ref, bom, [x - 27, y - 26, 46, 52], body, lab)
 }
 
@@ -76,6 +85,7 @@ function mosfetH(ref, bom, x, y, noVal = false) {
     P(`M ${x + 26} ${y} L ${x} ${y} L ${x} ${y + 13}`) +
     P(`M ${x + 8.7} ${y} L ${x + 8.7} ${y + 13}`) +
     `<polygon class="sch-fill" points="${x},${y + 10.8} ${x - 4.3},${y + 4.3} ${x + 4.3},${y + 4.3}"/>`
+  regPin(ref, 'drain', x - 26, y); regPin(ref, 'source', x + 26, y); regPin(ref, 'gate', x, y + 26)
   return hot(ref, bom, [x - 26, y - 12, 52, 40], body, [x, y - 26, 'middle', noVal])
 }
 
@@ -103,6 +113,9 @@ function diode(ref, bom, x, y, dir, labelSide = 'above', noVal = false) {
     dir === 'right' || dir === 'left'
       ? labelSide === 'above' ? [x, y - 26, 'middle', noVal] : [x, y + 24, 'middle', noVal]
       : labelSide === 'left' ? [x - 14, y - 2, 'end', noVal] : [x + 14, y - 2, 'start', noVal]
+  // anode = triangle base (current-source end), cathode = bar end, per `dir` (anode→cathode flow)
+  const ends = { right: [[-20, 0], [20, 0]], left: [[20, 0], [-20, 0]], down: [[0, -20], [0, 20]], up: [[0, 20], [0, -20]] }[dir]
+  regPin(ref, 'anode', x + ends[0][0], y + ends[0][1]); regPin(ref, 'cathode', x + ends[1][0], y + ends[1][1])
   return hot(ref, bom, [x - 20, y - 20, 40, 40], body, lab)
 }
 
@@ -261,6 +274,7 @@ function srcAC(x, y, label = 'VAC') {
 // Ground-COM-General: short stem + three bars (8:4:1), hanging BELOW the rail
 // it connects to so the top bar never overlaps the rail line.
 function gnd(x, y) {
+  regPin('@gnd', 'gnd', x, y)   // all ground symbols are the same net by convention
   return P(
     `M ${x} ${y} L ${x} ${y + 6}` +
     ` M ${x - 10} ${y + 6} H ${x + 10} M ${x - 5} ${y + 11} H ${x + 5} M ${x - 1.25} ${y + 16} H ${x + 1.25}`
@@ -276,6 +290,7 @@ function loadR(x, y, top, bot) {
 }
 
 function port(x, y, label, anchor = 'start') {
+  regPin('@port', label, x, y)   // external port; label maps to a netlist @-node (VOUT→@vout, …)
   return `<circle class="sch-sym" cx="${x}" cy="${y}" r="3"/>` + txt(anchor === 'start' ? x + 8 : x - 8, y + 4, label, 'sch-port', anchor)
 }
 
@@ -947,6 +962,7 @@ function srBridgeOut(bom, nx, ny, ny2, refs) {
     dot(cx, yP), capV('Cout', bom, cx, 190), wire(cx, yP, cx, 170), wire(cx, 210, cx, yN), dot(cx, yN),
     loadR(lx, 190, yP, yN), dot(lx, yP), dot(lx, yN),
     port(lx + 60, yP, 'VOUT'), wire(lx, yP, lx + 60, yP),
+    gnd(nx + 140, yN),   // isolated secondary return reference
   ]
 }
 
@@ -1117,4 +1133,15 @@ export function renderSchematic(topologyId, bomRows, variant) {
   if (missing.length)
     console.warn(`schematic '${topologyId}': BOM components not drawn: ${missing.join(', ')}`)
   return main
+}
+
+// Verification hook: render once with terminal recording on, returning { svg, pins } where pins is a
+// list of { ref, pin, x, y } for every registered electrical terminal (MOSFET drain/source/gate, diode
+// anode/cathode, ground symbols, external ports). Used by the netlist-vs-drawing connectivity checker.
+export function collectPins(topologyId, bomRows, variant) {
+  _pins.length = 0
+  _rec = true
+  let svg
+  try { svg = renderSchematic(topologyId, bomRows, variant) } finally { _rec = false }
+  return { svg, pins: _pins.slice() }
 }
