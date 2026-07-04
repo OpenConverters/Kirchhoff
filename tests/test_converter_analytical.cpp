@@ -10,6 +10,7 @@
 #include "Boost.hpp"   // design_boost
 #include "Zeta.hpp"    // design_zeta
 #include "Pshb.hpp"    // design_pshb / build_pshb_tas — CURRENT_DOUBLER output-inductor split
+#include "KirchhoffApi.hpp"  // design_tas_full — ABT #102 AHB RMS repro
 
 #include <nlohmann/json.hpp>
 #include <cmath>
@@ -485,6 +486,40 @@ TEST_CASE("analytical_asymmetric_half_bridge: zero-mean primary (Cb blocks DC), 
     // ((1-D)*Vin during D*T, -D*Vin during (1-D)*T).
     CHECK(*processed_current(op, 0).get_average() == Catch::Approx(0.0).margin(0.3));
     CHECK(voltage_average(op, 0) == Catch::Approx(0.0).margin(0.5));
+}
+
+TEST_CASE("AHB GUI preset: primary current stored-waveform RMS == processed.rms",
+          "[analytical][solver][ahb]") {
+    // Regression for the time-weighted-RMS fix: the AHB primary current is non-uniformly sampled
+    // (interval A denser than C, plus a coincident-time discontinuity), so an equal-weight mean of
+    // squares over-reads its RMS (~1.78) vs the true time-weighted value (~1.51). processed.rms must
+    // match the stored (resampled) waveform's RMS.
+    // Exactly the spec the web GUI sends for the AHB preset (Vin=400, Vout=12, Po=240).
+    const std::string spec = R"({
+      "designRequirements": {
+        "efficiency": 0.9, "inputType": "dc",
+        "inputVoltage": {"nominal": 400},
+        "switchingFrequency": {"nominal": 100000},
+        "outputs": [{"name":"out","voltage":{"nominal":12},"regulation":"voltage"}],
+        "isolationVoltage": 3000
+      },
+      "operatingPoints": [{"name":"full_load","inputVoltage":400,"ambientTemperature":25,
+        "outputs":[{"name":"out","power":240}]}]
+    })";
+    const nlohmann::json out = nlohmann::json::parse(Kirchhoff::api::design_tas_full("ahb", spec));
+    const nlohmann::json& awf = out.at("analyticalWaveforms");
+    // main magnetic is "T1"
+    const nlohmann::json& cur = awf.at("T1").at("excitationsPerWinding").at(0).at("current");
+    double processedRms = cur.at("processed").at("rms");
+    std::vector<double> d = cur.at("waveform").at("data");
+    std::vector<double> t = cur.at("waveform").at("time");
+    double integ = 0, T = t.back() - t.front();
+    for (size_t i = 0; i + 1 < d.size(); ++i) {
+        double a = d[i], b = d[i+1], dt = t[i+1] - t[i];
+        integ += (a*a + a*b + b*b) / 3.0 * dt;
+    }
+    double waveformRms = std::sqrt(integ / T);
+    CHECK(waveformRms == Catch::Approx(processedRms).epsilon(0.03));
 }
 
 TEST_CASE("analytical_asymmetric_half_bridge FULL_BRIDGE: one DC-biased secondary, 2 windings",

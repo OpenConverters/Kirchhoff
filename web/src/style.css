@@ -527,6 +527,32 @@ details.adv summary {
 details.adv summary:hover { color: var(--amber); }
 details.adv .adv-body { margin-top: 0.75rem; }
 
+/* ── advanced per-topology knobs ─────────────────────────────────────────────── */
+.knob-group { margin-bottom: 0.9rem; }
+.knob-row {
+  display: grid;
+  grid-template-columns: 1fr 8.5rem;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.22rem 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.knob-toggle { display: flex; align-items: baseline; gap: 0.4rem; cursor: pointer; font-size: 0.72rem; }
+.knob-toggle input[type='checkbox'] { accent-color: var(--amber); cursor: pointer; }
+.knob-name { color: var(--ink); }
+.knob-sym { font-family: var(--mono); font-size: 0.62rem; color: var(--ink-dim); }
+.knob-ctl { display: flex; justify-content: flex-end; }
+.knob-ctl .fld-in { width: 100%; }
+.knob-auto {
+  font-family: var(--mono);
+  font-size: 0.64rem;
+  color: var(--ink-dim);
+  opacity: 0.72;
+  font-style: italic;
+}
+.knob-bool { display: flex; align-items: center; gap: 0.35rem; font-size: 0.68rem; color: var(--ink-dim); }
+.knob-bool input[type='checkbox'] { accent-color: var(--amber); }
+
 /* ── buttons ────────────────────────────────────────────────────────────── */
 
 .btn {

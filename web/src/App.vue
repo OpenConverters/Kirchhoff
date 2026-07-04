@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, provide, reactive, ref, watch } from 'vue'
-import { FAMILIES, FAMILY_SHORT, PLANNED, TOPOLOGIES, buildSpec, topologyById, variantAxis, defaultVariant } from './topologies.js'
+import { FAMILIES, FAMILY_SHORT, PLANNED, TOPOLOGIES, buildSpec, topologyById, variantAxis, defaultVariant, knobsFor, knobGroups } from './topologies.js'
 import { loadEngine, processConverter, topologyWaveforms, extractOperatingPoint, componentWaveforms, realizeTas, generateNetlist } from './kh.js'
 import { extractBom } from './bom.js'
 import { hasSchematic, renderSchematic } from './schematics.js'
@@ -43,6 +43,9 @@ function selectTopology(id) {
     minOutputs: p.minOutputs, maxOutputs: p.maxOutputs,
     outputs: p.outputs.map((o) => ({ ...o })),
     ops: [{ name: 'full_load', vin: p.vinNom, ambient: p.ambient, powers: p.outputs.map((o) => o.power) }],
+    // Advanced knobs: fresh per topology (no leak across a switch), seeded off with the
+    // C++ default as the starting value so toggling override on gives something to edit.
+    knobs: Object.fromEntries(knobsFor(id).map((k) => [k.key, { on: false, value: k.def }])),
   })
   result.value = null
   runError.value = null
@@ -79,6 +82,18 @@ const currentVariant = computed(() => variantOptions.value.find((o) => o.id === 
 // A single-option axis (no real variant) is trivially "chosen" — the header reads Standard.
 const hasVariantChoice = computed(() => variantOptions.value.length > 1)
 
+// Advanced per-topology knobs, grouped into tiers for the "Topology knobs" fold.
+const advGroups = computed(() => knobGroups(topoId.value))
+const hasKnobs = computed(() => knobsFor(topoId.value).length > 0)
+// The greyed placeholder shown while a knob is on auto — the C++ builder's own default.
+function knobPlaceholder(k) {
+  if (k.def === null || k.def === undefined) return 'auto'
+  if (k.type === 'bool') return k.def ? 'on' : 'off'
+  if (k.type === 'enum') return k.options.find((o) => o.id === k.def)?.name ?? String(k.def)
+  if (k.unit === 'H' || k.unit === 'F' || k.unit === 'Hz') return si(k.def, k.unit)
+  return String(k.def)
+}
+
 function pickTopology(id) {
   selectTopology(id)
   // a topology with a single canonical build has nothing to choose — skip straight to the spec
@@ -110,6 +125,7 @@ function addOp() {
 const running = ref(false)
 const runError = ref(null)
 const result = ref(null)
+const lastSpec = ref(null)   // the exact spec JSON last sent to the engine (bench/test read-back)
 const bomRows = ref([])
 const waveMagnetics = ref([])
 // the two output panes default to schematic (left) + waveforms (right)
@@ -135,6 +151,7 @@ async function solve() {
   realizedTas.value = null
   try {
     const spec = buildSpec(form, topoId.value)
+    lastSpec.value = spec
     const res = await processConverter(topoId.value, spec, form.engine)
     result.value = res
     // datasheet models: realize the design once so every ngspice re-sim uses real-conduction parts
@@ -217,6 +234,33 @@ const selectedPartWave = computed(() => {
   const f = componentWaves.value?.referencePeriod ? 1 / componentWaves.value.referencePeriod : 0
   return { name: `${c.ref} · ${c.voltage?.label ?? 'V'}`, frequency: f, current: c.current, voltage: c.voltage }
 })
+
+// ── bench/test hook ──────────────────────────────────────────────────────────
+// Read-only live view of the app's state for Playwright e2e (docs/TOPOLOGY_BENCH_PROPOSAL.md).
+// Tests DRIVE everything through the DOM; they only READ rich waveform/spec data through here
+// (getters keep the refs live). Harmless in production — pure read surface, no behaviour.
+if (typeof window !== 'undefined') {
+  window.__bench = {
+    form,
+    // Rotate the family dial programmatically (the rotary control is intentionally hard to
+    // script); topology-card selection and every knob/solve interaction still go through the DOM.
+    setFamily: (f) => { family.value = f },
+    get family() { return family.value },
+    get topologyId() { return topoId.value },
+    // The exact spec buildSpec would emit for the current form — WITHOUT solving (fast serialization
+    // assertions). solve() also stamps this into lastSpec, so the two agree.
+    previewSpec: () => buildSpec(form, topoId.value),
+    get lastSpec() { return lastSpec.value },
+    get result() { return result.value },
+    get waveMagnetics() { return waveMagnetics.value },
+    get componentWaves() { return componentWaves.value },
+    get ngspiceOps() { return ngspiceOps.value },
+    get bomRows() { return bomRows.value },
+    get running() { return running.value },
+    get runError() { return runError.value },
+    get engineState() { return engineState.value },
+  }
+}
 
 selectTopology(topoId.value)
 
@@ -518,7 +562,7 @@ provide('kh', {
         <div class="acc">
           <!-- Stage 1 — Topology -->
           <section class="acc-stage" :class="{ open: stage === 'topology' }">
-            <button class="acc-head" @click="stage = 'topology'">
+            <button class="acc-head" data-testid="stage-topology" @click="stage = 'topology'">
               <span class="idx">1</span><span class="acc-title">Topology</span>
               <span class="acc-pick">{{ topo.name }}</span><span class="acc-chev">▸</span>
             </button>
@@ -526,7 +570,7 @@ provide('kh', {
               <FamilyDial v-model="family" :families="FAMILIES" :short="FAMILY_SHORT" />
               <div class="topo-list">
                 <button
-                  v-for="t in familyTopologies" :key="t.id"
+                  v-for="t in familyTopologies" :key="t.id" :data-testid="`topo-${t.id}`"
                   class="topo-card" :class="{ active: t.id === topoId, planned: t.planned }"
                   :disabled="t.planned" @click="pickTopology(t.id)"
                 >
@@ -559,7 +603,7 @@ provide('kh', {
 
           <!-- Stage 3 — Specification & Simulation -->
           <section class="acc-stage" :class="{ open: stage === 'spec' }">
-            <button class="acc-head" @click="stage = 'spec'">
+            <button class="acc-head" data-testid="stage-spec" @click="stage = 'spec'">
               <span class="idx">{{ hasVariantChoice ? '3' : '2' }}</span><span class="acc-title">Specification &amp; Simulation</span>
               <span class="acc-chev">▸</span>
             </button>
@@ -665,15 +709,46 @@ provide('kh', {
           </div>
         </details>
 
+        <details v-if="hasKnobs" class="adv" data-testid="knobs-fold">
+          <summary>Topology knobs — override auto-designed parameters</summary>
+          <div class="adv-body">
+            <div v-for="g in advGroups" :key="g.id" class="knob-group" :data-testid="`knob-group-${g.id}`">
+              <div class="section-label">{{ g.label }}</div>
+              <div v-for="k in g.knobs" :key="k.key" class="knob-row">
+                <label class="knob-toggle" :title="k.tip">
+                  <input type="checkbox" v-model="form.knobs[k.key].on" :data-testid="`knob-${k.key}-auto`" />
+                  <span class="knob-name">{{ k.label }}</span>
+                  <span v-if="k.sym" class="knob-sym">{{ k.sym }}</span>
+                  <span v-if="k.unit" class="u">{{ k.unit }}</span>
+                </label>
+                <div class="knob-ctl">
+                  <template v-if="form.knobs[k.key].on">
+                    <select v-if="k.type === 'enum'" class="fld-in" v-model="form.knobs[k.key].value" :data-testid="`knob-${k.key}-input`">
+                      <option v-for="o in k.options" :key="o.id" :value="o.id">{{ o.name }}</option>
+                    </select>
+                    <label v-else-if="k.type === 'bool'" class="knob-bool">
+                      <input type="checkbox" v-model="form.knobs[k.key].value" :data-testid="`knob-${k.key}-input`" />
+                      <span>{{ form.knobs[k.key].value ? 'on' : 'off' }}</span>
+                    </label>
+                    <input v-else class="fld-in" type="number" :step="k.step ?? 'any'" :min="k.min" :max="k.max"
+                           v-model.number="form.knobs[k.key].value" :data-testid="`knob-${k.key}-input`" />
+                  </template>
+                  <span v-else class="knob-auto">auto · {{ knobPlaceholder(k) }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </details>
+
               <div class="solve-row">
-                <button class="btn solve-btn" :disabled="running || engineState !== 'ready'" @click="solve">
+                <button class="btn solve-btn" data-testid="solve" :disabled="running || engineState !== 'ready'" @click="solve">
                   {{ running ? (form.engine === 'ngspice' ? 'Simulating…' : 'Solving…') : 'Solve' }}
                 </button>
                 <div v-if="engineState === 'loading'" class="boot"><div class="spin"></div> loading…</div>
                 <span v-else-if="result" class="chip ok">ready</span>
                 <span v-else class="hint" style="font-size: 0.62rem">set spec ▸ solve</span>
               </div>
-              <div v-if="runError" class="err-banner" style="margin-top: 0.5rem"><b>ENGINE ▸</b> {{ runError }}</div>
+              <div v-if="runError" class="err-banner" data-testid="error-banner" style="margin-top: 0.5rem"><b>ENGINE ▸</b> {{ runError }}</div>
             </div></div></div>
           </section>
         </div>
