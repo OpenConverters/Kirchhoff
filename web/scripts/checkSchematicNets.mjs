@@ -14,9 +14,17 @@
 //    mid nodes bridged by a cap, some secondary-rectifier nets.
 //  - The drawing may be electrically equivalent to the netlist but label a node differently (e.g. a forward
 //    switch drawn low-side vs the netlist's high-side labelling) → flagged though not "broken".
-// Residual flags as of this commit have been triaged: predominantly the above false-positive categories,
-// plus a couple worth a look in the ORIGINAL secondary-rectifier / resonant-bridge code (not the layout
-// rewrite): cllc/clllc `node_b`. The ground-only rail checker (all grounds connected) passes cleanly.
+// Residual flags as of this commit (all triaged — none are the floating-rail / broken-leg class, which
+// are ALL fixed: fsbb/dab/cllc/clllc grounds, cllc/clllc node_b + VOUT rail, secFB bridge-diode refdes
+// mapping, pshb primary ground):
+//   - boost/synchronous, acf: a synchronous-rectifier MOSFET is drawn source/drain-swapped vs the netlist
+//     (mosfetH is fixed drain-left/source-right). The circuit is correct — the body diode (drawn as D2 /
+//     DS*) sets the real orientation — only the FET symbol's S/D labels differ.
+//   - forward: Q1 drawn low-side while the netlist labels it high-side (electrically equivalent forward).
+//   - pshb mid_cap/nH: NPC clamp-diode orientation + neutral bridged by unanchored split caps (original
+//     3-level code; part real-orientation, part cap-mediated false positive).
+//   - vienna csa/csb/csc: current-sense nets routed through control blocks (control-plane, not power wire).
+// The ground-only rail checker (scratch: all grounds connected) and parity both pass cleanly.
 import init from '../../build-wasm-ng/kirchhoff.js'
 import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
 import { extractBom } from '../src/bom.js'
@@ -33,7 +41,15 @@ function wireGraph(svg) {
   const idOf = (p) => { let i = pts.findIndex((q) => Math.abs(q[0] - p[0]) < 3 && Math.abs(q[1] - p[1]) < 3); if (i < 0) { i = pts.length; pts.push(p) } if (par[i] === undefined) par[i] = i; return i }
   const find = (x) => { while (par[x] !== x) { par[x] = par[par[x]]; x = par[x] } return x }
   const uni = (a, b) => { par[find(a)] = find(b) }
-  const onSeg = (p, [a, b]) => { const cr = (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]); if (Math.abs(cr) > 3) return false; const dd = (p[0] - a[0]) * (b[0] - a[0]) + (p[1] - a[1]) * (b[1] - a[1]); const l2 = (b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2; return dd >= -3 && dd <= l2 + 3 }
+  // point-on-segment with PIXEL tolerance (registered pins are rounded to int; wire coords may be .5)
+  const onSeg = (p, [a, b]) => {
+    const dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy)
+    if (len < 1e-6) return Math.hypot(p[0] - a[0], p[1] - a[1]) < 3
+    const perp = Math.abs(dx * (p[1] - a[1]) - dy * (p[0] - a[0])) / len
+    if (perp > 3) return false
+    const proj = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len
+    return proj >= -3 && proj <= len + 3
+  }
   for (const [a, b] of wires) uni(idOf(a), idOf(b))
   // T-junctions: any segment endpoint that lies on another segment's interior joins it. (Schematic
   // convention needs a dot, but our wires are authored to meet, so treat endpoint-on-segment as connected.)

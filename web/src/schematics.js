@@ -595,7 +595,9 @@ const resonantSecondary = (bom, tx, ty, h, variant) => secondaryFor(bom, tx, ty,
 const ctOpt = (variant) => (variant === 'centerTapped' ? 'right' : undefined)
 // Bridge families (ahb/psfb/pshb) name the rectifier Dr*/Lout and carry an output inductor.
 function bridgeRefs(variant) {
-  if (variant === 'fullBridge') return { diodes: ['Dr1', 'Dr2', 'Dr3', 'Dr4'], lout: 'Lout' }
+  // secFB draws diodes at [legA-top, legA-bot, legB-top, legB-bot]; the netlist pairs the sec_a leg as
+  // Dr1(top)/Dr3(bot) and the sec_b leg as Dr2(top)/Dr4(bot), so the refdes order must be Dr1,Dr3,Dr2,Dr4.
+  if (variant === 'fullBridge') return { diodes: ['Dr1', 'Dr3', 'Dr2', 'Dr4'], lout: 'Lout' }
   if (variant === 'currentDoubler') return { d1: 'Dr1', d2: 'Dr2', lo1: 'Lout', lo2: 'Lo2' }
   return { d1: 'Dr1', d2: 'Dr2', lout: 'Lout' }
 }
@@ -901,7 +903,7 @@ function psfb(bom, variant = 'fullBridge') {
 function pshb(bom, variant = 'fullBridge') {
   const tx = 540, ty = 240, h = 90
   return svg(1140, 460, [
-    srcDC(60, 180), wire(60, 165, 60, 70, 150, 70), wire(60, 195, 60, 340, 200, 340),
+    srcDC(60, 180), wire(60, 165, 60, 70, 150, 70), wire(60, 195, 60, 340, 200, 340), gnd(110, 340), // primary return
     // split input caps CsHi / CsLo about the neutral (mid)
     capV('CsHi', bom, 150, 100, 'left'), wire(150, 70, 150, 80), dot(150, 70), wire(150, 120, 150, 170), dot(150, 170),
     capV('CsLo', bom, 150, 260, 'left'), wire(150, 170, 150, 240), wire(150, 280, 150, 340), dot(150, 340),
@@ -957,7 +959,7 @@ function srBridgeOut(bom, nx, ny, ny2, refs) {
     mosfetV(refs[1], bom, xA, 250, 'right', true), wire(xA, 224, xA, ny), wire(xA, 276, xA, yN),
     mosfetV(refs[2], bom, xB, 130, 'right', true), wire(xB, 104, xB, yP), wire(xB, 156, xB, ny2),
     mosfetV(refs[3], bom, xB, 250, 'right', true), wire(xB, 224, xB, ny2), wire(xB, 276, xB, yN),
-    dot(xA, yP), dot(xB, yP), wire(xA, yP, cx + 60, yP),
+    dot(xA, yP), dot(xB, yP), wire(xA, yP, lx, yP), // VOUT+ rail spans the bridge → Cout → load
     wire(xA, yN, lx, yN),
     dot(cx, yP), capV('Cout', bom, cx, 190), wire(cx, yP, cx, 170), wire(cx, 210, cx, yN), dot(cx, yN),
     loadR(lx, 190, yP, yN), dot(lx, yP), dot(lx, yN),
@@ -972,7 +974,7 @@ function cllc(bom) {
     srcDC(60, 175), wire(60, 160, 60, 80, 300, 80), wire(60, 190, 60, 320, 280, 320), // ground rail spans both legs
     mosfetV('Q1', bom, 150, 128, 'right', true), wire(150, 102, 150, 80), dot(150, 80), wire(150, 154, 150, 205), dot(150, 205),
     mosfetV('Q2', bom, 150, 250, 'right', true), wire(150, 205, 150, 224), wire(150, 276, 150, 320), dot(150, 320),
-    mosfetV('Q3', bom, 280, 128, 'right', true), wire(280, 102, 280, 80), dot(280, 80), wire(280, 154, 280, 150),
+    mosfetV('Q3', bom, 280, 128, 'right', true), wire(280, 102, 280, 80), dot(280, 80), wire(280, 154, 280, 205), // Q3.source → node_b (leg mid / T1.primary_end)
     mosfetV('Q4', bom, 280, 250, 'right', true), wire(280, 205, 280, 224), wire(280, 276, 280, 320), dot(280, 320), gnd(110, 320),
     // node_a → Cr1 → Lr1 → primary; primary return (node_b) → leg 3/4 mid
     wire(150, 205, 175, 205), capH('Cr1', bom, 200, 205), indH('Lr1', bom, 268, 205), wire(225, 205, 240, 205),
@@ -995,7 +997,7 @@ function clllc(bom) {
     srcDC(60, 175), wire(60, 160, 60, 80, 300, 80), wire(60, 190, 60, 320, 280, 320), // ground rail spans both legs
     mosfetV('Q1', bom, 150, 128, 'right', true), wire(150, 102, 150, 80), dot(150, 80), wire(150, 154, 150, 205), dot(150, 205),
     mosfetV('Q2', bom, 150, 250, 'right', true), wire(150, 205, 150, 224), wire(150, 276, 150, 320), dot(150, 320),
-    mosfetV('Q3', bom, 280, 128, 'right', true), wire(280, 102, 280, 80), dot(280, 80), wire(280, 154, 280, 150),
+    mosfetV('Q3', bom, 280, 128, 'right', true), wire(280, 102, 280, 80), dot(280, 80), wire(280, 154, 280, 205), // Q3.source → node_b (leg mid / T1.primary_end)
     mosfetV('Q4', bom, 280, 250, 'right', true), wire(280, 205, 280, 224), wire(280, 276, 280, 320), dot(280, 320), gnd(110, 320),
     wire(150, 205, 175, 205), capH('Cr1', bom, 200, 205), indH('Lr1', bom, 268, 205), wire(225, 205, 240, 205),
     wire(296, 205, 310, 205, 310, 150),
