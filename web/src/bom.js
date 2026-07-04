@@ -23,6 +23,10 @@ export function extractBom(tas) {
       // are drawn inside the switch symbol, so keep them out of the BOM (and thus the waveform list)
       // to match the schematic.
       if (req.role === 'bodyDiode') continue
+      // Numerical convergence aids (Csn*/Csw*/Rsn*, tagged with the explicit ABT #96 marker) exist only
+      // so ngspice converges on ideal-switch decks; they are stripped at real fidelity and are NOT board
+      // parts — never list them as components.
+      if (req.name === '__kh_numerical_aid__') continue
       let kind = 'Component'
       for (const [key, name] of KINDS) {
         if (key in d) { kind = name(d); break }

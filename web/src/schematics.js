@@ -161,6 +161,54 @@ function resV(ref, bom, x, y, labelSide = 'right') {
   return hot(ref, bom, [x - 8, y - 20, 16, 40], P(zigzagV(x, y)), lab)
 }
 
+const zigzagH = (x, y) =>
+  `M ${x - 20} ${y} L ${x - 11.7} ${y} L ${x - 8.9} ${y + 6.7} L ${x - 5.4} ${y - 6.7}` +
+  ` L ${x - 1.8} ${y + 6.7} L ${x + 1.8} ${y - 6.7} L ${x + 5.4} ${y + 6.7}` +
+  ` L ${x + 8.9} ${y - 6.7} L ${x + 11.7} ${y} L ${x + 20} ${y}`
+
+function resH(ref, bom, x, y, labelSide = 'above') {
+  const lab = labelSide === 'above' ? [x, y - 26, 'middle'] : [x, y + 24, 'middle']
+  return hot(ref, bom, [x - 20, y - 10, 40, 20], P(zigzagH(x, y)), lab)
+}
+
+// ── control-plane primitives ────────────────────────────────────────────────
+// Signal net-label flag: a short dashed stub ending in a named label. Two flags carrying the same
+// label are the same control net — standard schematic net-label practice; this is how the gate-drive
+// wiring is drawn without routing dashed spaghetti across the power path.
+function sig(x, y, label, dir = 'left') {
+  const [dx, dy] = { left: [-13, 0], right: [13, 0], up: [0, -12], down: [0, 12] }[dir]
+  const lab = {
+    left: [x + dx - 3, y + 3, 'end'], right: [x + dx + 3, y + 3, 'start'],
+    up: [x, y + dy - 4, 'middle'], down: [x, y + dy + 11, 'middle'],
+  }[dir]
+  return P(`M ${x} ${y} L ${x + dx} ${y + dy}`, 'sch-ctl') + txt(lab[0], lab[1], label, 'sch-sig', lab[2])
+}
+
+// Controller / control-block IC: a rectangle with named pin stubs (left/right sides, top-to-bottom).
+// Each pin label is a signal net name matching a `sig` flag somewhere on the drawing.
+function icBox(ref, bom, x, y, w, h, pinsL = [], pinsR = [], title = '') {
+  const els = [`<rect class="sch-sym" x="${x - w / 2}" y="${y - h / 2}" width="${w}" height="${h}" rx="4"/>`]
+  const place = (pins, side) =>
+    pins.forEach((p, i) => {
+      const py = y - h / 2 + (h * (i + 1)) / (pins.length + 1)
+      const px = side === 'left' ? x - w / 2 : x + w / 2
+      const dx = side === 'left' ? -12 : 12
+      els.push(P(`M ${px} ${py} L ${px + dx} ${py}`, 'sch-ctl'))
+      els.push(txt(px + dx + (side === 'left' ? -3 : 3), py + 3, p, 'sch-sig', side === 'left' ? 'end' : 'start'))
+    })
+  place(pinsL, 'left')
+  place(pinsR, 'right')
+  if (title) els.push(txt(x, y + 4, title, 'sch-val'))
+  // noVal: the value (e.g. a controller category string) would land on the box border — the
+  // in-box title carries the function; the full value lives in the BOM row / part drawer.
+  return hot(ref, bom, [x - w / 2, y - h / 2, w, h], els.join(''), [x, y - h / 2 - 8, 'middle', true])
+}
+
+// The PWM controller IC (U1 / UDR): one gate-drive pin per driven switch, each matching a `sig`
+// flag at that switch's gate.
+const ctrlIC = (bom, x, y, gates, ref = 'U1', title = 'PWM') =>
+  icBox(ref, bom, x, y, 64, Math.max(44, gates.length * 16 + 16), [], gates, title)
+
 // Transformer at (x, y): primary terminals (x-10, y±h/2), secondary (x+10, y±h/2).
 // opts.ct adds a secondary center tap stub ending at (x+24, y).
 // opts.opp puts the secondary polarity dot at the bottom (flyback).
@@ -256,6 +304,9 @@ function buck(bom, variant) {
     capV('Cout', bom, 430, 150), wire(430, 80, 430, 130), wire(430, 170, 430, 220), dot(430, 220),
     loadR(520, 150, 80, 220), dot(520, 80), dot(520, 220),
     gnd(300, 220), port(600, 80, 'VOUT'), wire(560, 80, 600, 80),
+    sig(180, 106, 'g1', 'down'),
+    ...(variant === 'synchronous' ? [sig(214, 150, 'g2')] : []),
+    ctrlIC(bom, 640, 220, variant === 'synchronous' ? ['g1', 'g2'] : ['g1']),
   ].join(''))
 }
 
@@ -277,6 +328,9 @@ function boost(bom, variant) {
     capV('Cout', bom, 430, 150), wire(430, 80, 430, 130), wire(430, 170, 430, 220), dot(430, 220),
     loadR(520, 150, 80, 220), dot(520, 80), dot(520, 220),
     gnd(300, 220), port(600, 80, 'VOUT'), wire(560, 80, 600, 80),
+    sig(214, 150, 'g1'),
+    ...(variant === 'synchronous' ? [sig(310, 106, 'g2', 'down')] : []),
+    ctrlIC(bom, 640, 240, variant === 'synchronous' ? ['g1', 'g2'] : ['g1']),
   ].join(''))
 }
 
@@ -291,6 +345,7 @@ function sepic(bom) {
     capV('Cout', bom, 500, 150), wire(500, 80, 500, 130), wire(500, 170, 500, 220), dot(500, 220),
     loadR(580, 150, 80, 220), dot(580, 80), dot(580, 220),
     gnd(300, 220), port(660, 80, 'VOUT'), wire(620, 80, 660, 80),
+    sig(204, 150, 'g1'), ctrlIC(bom, 680, 240, ['g1']),
   ].join(''))
 }
 
@@ -299,12 +354,17 @@ function cuk(bom) {
     srcDC(70, 150), wire(70, 135, 70, 80, 122, 80), wire(70, 165, 70, 220, 580, 220),
     indH('L1', bom, 150, 80), wire(178, 80, 230, 80), dot(230, 80),
     mosfetV('Q1', bom, 230, 150), wire(230, 80, 230, 124), wire(230, 176, 230, 220), dot(230, 220),
+    // real RC snubber across Q1 (sw node → Crc_sw → Rrc_sw → gnd), per the cukCell nets
+    wire(195, 80, 230, 80), capV('Crc_sw', bom, 195, 105, 'left'), wire(195, 80, 195, 85),
+    resV('Rrc_sw', bom, 195, 150, 'left'), wire(195, 125, 195, 130),
+    wire(195, 170, 195, 220), dot(195, 220),
     capH('C1', bom, 290, 80), wire(230, 80, 270, 80), wire(310, 80, 360, 80), dot(360, 80),
     diode('D1', bom, 360, 150, 'down', 'right'), wire(360, 80, 360, 130), wire(360, 170, 360, 220), dot(360, 220),
     indH('L2', bom, 428, 80), wire(360, 80, 400, 80), wire(456, 80, 620, 80), dot(500, 80),
     capV('Cout', bom, 500, 150), wire(500, 80, 500, 130), wire(500, 170, 500, 220), dot(500, 220),
     loadR(580, 150, 80, 220), dot(580, 80), dot(580, 220),
     gnd(300, 220), port(660, 80, 'VOUT (−)'), wire(620, 80, 660, 80),
+    sig(204, 150, 'g1', 'down'), ctrlIC(bom, 680, 250, ['g1']),
   ].join(''))
 }
 
@@ -319,31 +379,50 @@ function zeta(bom) {
     capV('Cout', bom, 530, 150), wire(530, 80, 530, 130), wire(530, 170, 530, 220), dot(530, 220),
     loadR(600, 150, 80, 220), dot(600, 80), dot(600, 220),
     gnd(300, 220), port(660, 80, 'VOUT'), wire(620, 80, 660, 80),
+    sig(180, 106, 'g1', 'down'), ctrlIC(bom, 680, 250, ['g1']),
   ].join(''))
 }
 
 function fsbb(bom) {
-  return svg(760, 300, [
+  return svg(760, 330, [
     srcDC(70, 150), wire(70, 135, 70, 80, 190, 80), wire(70, 165, 70, 220, 500, 220),
     mosfetV('Q1', bom, 190, 115, 'left'), wire(190, 80, 190, 89), wire(190, 141, 190, 150), dot(190, 150),
     mosfetV('Q2', bom, 190, 185, 'left'), wire(190, 150, 190, 159), wire(190, 211, 190, 220), dot(190, 220),
+    // real RC snubbers on both switch nodes (sw1/sw2 → Crc → Rrc → gnd), per the fsbbCell nets
+    capH('Crc_sw1', bom, 120, 150), wire(140, 150, 190, 150),
+    resV('Rrc_sw1', bom, 100, 185, 'right'), wire(100, 150, 100, 165), wire(100, 205, 100, 220), dot(100, 220),
     indH('L', bom, 260, 150), wire(190, 150, 232, 150), wire(288, 150, 330, 150), dot(330, 150),
     mosfetV('Q3', bom, 330, 115), wire(330, 80, 330, 89), wire(330, 141, 330, 150),
     mosfetV('Q4', bom, 330, 185), wire(330, 150, 330, 159), wire(330, 211, 330, 220), dot(330, 220),
+    wire(330, 150, 380, 150), capH('Crc_sw2', bom, 400, 150),
+    resV('Rrc_sw2', bom, 420, 185, 'right'), wire(420, 150, 420, 165), wire(420, 205, 420, 220), dot(420, 220),
     wire(330, 80, 620, 80), dot(500, 80),
     capV('Cout', bom, 500, 150), wire(500, 80, 500, 130), wire(500, 170, 500, 220), dot(500, 220),
     wire(330, 220, 580, 220),
     loadR(580, 150, 80, 220), dot(580, 80),
     gnd(260, 220), port(660, 80, 'VOUT'), wire(620, 80, 660, 80),
+    sig(164, 115, 'g1'), sig(164, 185, 'g2'), sig(304, 115, 'g3'), sig(304, 185, 'g4'),
+    ctrlIC(bom, 650, 250, ['g1', 'g2', 'g3', 'g4']),
   ].join(''))
 }
 
 function flyback(bom) {
-  return svg(760, 320, [
+  // Quasi-resonant variant: the drain-node resonant capacitor (valley-timing element) is a real
+  // power-path part, so it IS drawn — across Q1 drain-source — whenever the design carries it.
+  const qr = bom?.get('Cres')
+  return svg(760, 350, [
     srcDC(70, 160), wire(70, 145, 70, 70, 240, 70), wire(70, 175, 70, 260, 250, 260),
     capV('Cin', bom, 150, 165, 'left'), wire(150, 70, 150, 145), wire(150, 185, 150, 260), dot(150, 70), dot(150, 260),
     xfmr('T1', bom, 260, 140, { opp: true, labelDy: -30 }), wire(240, 70, 250, 70, 250, 100), wire(250, 180, 250, 202),
     mosfetV('Q1', bom, 250, 228), wire(250, 254, 250, 260),
+    // RC clamp across the primary (dc+ → Cclmp → Rclmp → drain): the real leakage-ring damper,
+    // wired exactly as the TAS primary-switch stage (dc_pos / clmp_mid / sw).
+    dot(205, 70), capV('Cclmp', bom, 205, 90, 'left'), resV('Rclmp', bom, 205, 130, 'left'),
+    wire(205, 150, 205, 195, 250, 195), dot(250, 195),
+    ...(qr ? [
+      dot(205, 195),
+      capV('Cres', bom, 205, 215, 'left'), wire(205, 235, 205, 260), dot(205, 260),
+    ] : []),
     gnd(180, 260),
     // secondary — flyback polarity: dot at the bottom, diode from the top end
     wire(270, 100, 270, 90, 340, 90),
@@ -352,11 +431,12 @@ function flyback(bom) {
     capV('Cout', bom, 470, 180), wire(470, 90, 470, 160), wire(470, 200, 470, 268),
     loadR(560, 180, 90, 268), dot(560, 90), dot(560, 268),
     port(660, 90, 'VOUT'), wire(620, 90, 660, 90), port(660, 268, 'RTN'), wire(620, 268, 660, 268),
+    sig(224, 228, 'g1', 'down'), ctrlIC(bom, 400, 315, ['g1']),
   ].join(''))
 }
 
 function forward(bom) {
-  return svg(800, 320, [
+  return svg(800, 350, [
     srcDC(60, 160), wire(60, 145, 60, 70, 250, 70), wire(60, 175, 60, 260, 260, 260),
     // demagnetization winding back to the bus
     diode('Ddemag', bom, 160, 120, 'up', 'right'), wire(160, 70, 160, 100), dot(160, 70),
@@ -373,6 +453,7 @@ function forward(bom) {
     capV('Cout', bom, 580, 180), wire(580, 90, 580, 160), wire(580, 200, 580, 268), dot(580, 268),
     loadR(640, 180, 90, 268), dot(640, 90), dot(640, 268),
     port(690, 90, 'VOUT'), wire(660, 90, 690, 90),
+    sig(234, 216, 'g1'), ctrlIC(bom, 450, 320, ['g1']),
   ].join(''))
 }
 
@@ -390,6 +471,11 @@ function pushPull(bom) {
     mosfetV('Q2', bom, 200, 250, 'right'),
     wire(200, 276, 200, 300), dot(200, 300),
     gnd(120, 300),
+    // real RC damper across the primary (pri_top → Rdmp → Cdmp → pri_bot), per the pushPullCell nets
+    dot(230, 86), wire(230, 86, 230, 60, 105, 60, 105, 100),
+    resV('Rdmp', bom, 105, 120, 'left'),
+    capV('Cdmp', bom, 105, 170, 'left'), wire(105, 140, 105, 150),
+    wire(105, 190, 105, 224, 200, 224), dot(200, 224),
     // secondary full-wave rectifier: both windings' outer ends through diodes
     wire(280, 100, 280, 84, 360, 84),
     diode('Dtop', bom, 380, 84, 'right'), wire(400, 84, 460, 84), dot(460, 84),
@@ -401,6 +487,7 @@ function pushPull(bom) {
     capV('Cout', bom, 590, 190), wire(590, 84, 590, 170), wire(590, 210, 590, 310), dot(590, 310),
     loadR(650, 190, 84, 310), dot(650, 84), dot(650, 310),
     port(710, 84, 'VOUT'), wire(680, 84, 710, 84),
+    sig(174, 120, 'g1'), sig(174, 250, 'g2'), ctrlIC(bom, 720, 250, ['g1', 'g2']),
   ].join(''))
 }
 
@@ -471,7 +558,9 @@ function secCD(bom, tx, ty, h, o = {}) {
   return [
     indH(lo1, bom, tx + 90, yT), wire(tx + 10, yT, tx + 62, yT), wire(tx + 118, yT, voX, yT), dot(voX, yT),
     indH(lo2, bom, tx + 90, yB), wire(tx + 10, yB, tx + 62, yB), wire(tx + 118, yB, voX, yB),
-    wire(voX, yT, voX, yB),
+    // Rlb: series loop-breaker between Lo2's output and the vout node (functional aid that
+    // survives to the real deck — a real BOM row, so it is drawn in its electrical position)
+    resV('Rlb', bom, voX, ty, 'right'), wire(voX, yT, voX, ty - 20), wire(voX, ty + 20, voX, yB),
     diode(d1, bom, tx + 40, (yT + retY) / 2, 'up', 'left'), wire(tx + 40, (yT + retY) / 2 - 20, tx + 40, yT), wire(tx + 40, (yT + retY) / 2 + 20, tx + 40, retY),
     diode(d2, bom, tx + 90, (yB + retY) / 2, 'up'), wire(tx + 90, (yB + retY) / 2 - 20, tx + 90, yB), wire(tx + 90, (yB + retY) / 2 + 20, tx + 90, retY),
     wire(tx + 40, retY, t.retX, retY), gnd(tx + 60, retY),
@@ -496,22 +585,30 @@ function bridgeRefs(variant) {
 
 function llc(bom, variant = 'centerTapped') {
   const tx = 380, ty = 170, h = 80
-  return svg(860, 340, [
+  return svg(860, 370, [
     srcDC(60, 165), wire(60, 150, 60, 80, 170, 80), wire(60, 180, 60, 280, 345, 280),
     mosfetV('Q1', bom, 170, 118, 'left'), wire(170, 80, 170, 92), wire(170, 144, 170, 165), dot(170, 165),
     mosfetV('Q2', bom, 170, 212, 'left'), wire(170, 165, 170, 186), wire(170, 238, 170, 280), dot(170, 280),
     gnd(120, 280),
+    // split bus Chi / Clo with balancing bleeders Rbal_hi / Rbal_lo — the primary returns to the
+    // cap midpoint (msplit), per the llcCell nets
+    wire(170, 80, 268, 80), dot(170, 80), dot(240, 80), wire(170, 280, 268, 280),
+    capV('Chi', bom, 240, 118, 'left'), wire(240, 80, 240, 98), wire(240, 138, 240, 190), dot(240, 190),
+    capV('Clo', bom, 240, 225, 'left'), wire(240, 190, 240, 205), wire(240, 245, 240, 280), dot(240, 280),
+    resV('Rbal_hi', bom, 268, 125, 'right'), wire(268, 80, 268, 105), wire(268, 145, 268, 190), dot(268, 190),
+    resV('Rbal_lo', bom, 268, 235, 'right'), wire(268, 190, 268, 215), wire(268, 255, 268, 280), dot(268, 280),
     // resonant tank into the primary — winding terminals are entered/left VERTICALLY
-    capH('Cr', bom, 225, 165), wire(170, 165, 205, 165),
-    indH('Lr', bom, 300, 165), wire(245, 165, 272, 165), wire(328, 165, 345, 165, 345, 105, tx - 10, 105, tx - 10, ty - h / 2),
+    capH('Cr', bom, 200, 165), wire(170, 165, 180, 165),
+    indH('Lr', bom, 300, 165), wire(220, 165, 272, 165), wire(328, 165, 345, 165, 345, 105, tx - 10, 105, tx - 10, ty - h / 2),
     xfmr('T1', bom, tx, ty, { h, ct: ctOpt(variant), labelDx: -40 }),
-    wire(tx - 10, ty + h / 2, tx - 10, 235, 345, 235, 345, 280),
+    wire(tx - 10, ty + h / 2, tx - 10, 235, 345, 235, 345, 190, 240, 190),
     ...resonantSecondary(bom, tx, ty, h, variant),
+    sig(144, 118, 'g1'), sig(144, 212, 'g2'), ctrlIC(bom, 100, 330, ['g1', 'g2']),
   ].join(''))
 }
 
 function dab(bom) {
-  return svg(840, 345, [
+  return svg(840, 400, [
     srcDC(52, 160), wire(52, 145, 52, 78, 250, 78), wire(52, 175, 52, 262, 250, 262),
     // bridge A/B leg
     mosfetV('QA', bom, 140, 112, 'left', true), wire(140, 78, 140, 86), wire(140, 138, 140, 160), dot(140, 160), dot(140, 78),
@@ -539,12 +636,34 @@ function dab(bom) {
     capV('Cout', bom, 700, 170), wire(700, 78, 700, 150), wire(700, 190, 700, 262),
     loadR(760, 170, 78, 262),
     port(788, 78, 'VOUT'), wire(760, 78, 782, 78),
+    // leg voltage-balancing dividers (Rbias<leg>_hi: rail → mid, Rbias<leg>_lo: mid → return), per dabCell
+    dot(176, 78), resV('RbiasA_hi', bom, 176, 112, 'left'), wire(176, 78, 176, 92),
+    wire(176, 132, 176, 160), dot(176, 160), wire(176, 160, 152, 160), dot(152, 160),
+    resV('RbiasA_lo', bom, 176, 208, 'left'), wire(176, 160, 176, 188), wire(176, 228, 176, 262), dot(176, 262),
+    wire(250, 78, 290, 78), dot(250, 78), resV('RbiasC_hi', bom, 290, 125, 'right'), wire(290, 78, 290, 105),
+    wire(290, 145, 290, 160), dot(290, 160), wire(290, 160, 262, 160), dot(262, 160),
+    resV('RbiasC_lo', bom, 290, 208, 'right'), wire(290, 160, 290, 188), wire(290, 228, 290, 262), dot(290, 262),
+    wire(250, 262, 290, 262), dot(250, 262),
+    dot(575, 78), resV('RbiasE_hi', bom, 575, 118, 'right'), wire(575, 78, 575, 98),
+    wire(575, 138, 575, 160), dot(575, 160), wire(575, 160, 542, 160),
+    resV('RbiasE_lo', bom, 575, 208, 'right'), wire(575, 160, 575, 188), wire(575, 228, 575, 262), dot(575, 262),
+    dot(670, 78), resV('RbiasG_hi', bom, 670, 118, 'left'), wire(670, 78, 670, 98),
+    wire(670, 138, 670, 160), dot(670, 160), wire(670, 160, 640, 160),
+    resV('RbiasG_lo', bom, 670, 208, 'left'), wire(670, 160, 670, 188), wire(670, 228, 670, 262), dot(670, 262),
+    // real RC snubber between the primary leg midpoints (midA → Crc_pri → Rrc_pri → midC), per dabCell
+    dot(280, 300), wire(280, 300, 280, 330), capH('Crc_pri', bom, 310, 330),
+    wire(330, 330, 353, 330), resH('Rrc_pri', bom, 373, 330, 'below'),
+    wire(393, 330, 440, 330, 440, 60, 370, 60, 370, 100), dot(370, 100),
+    sig(100, 112, 'gA'), sig(100, 208, 'gB'), sig(224, 112, 'gC'), sig(224, 208, 'gD'),
+    sig(516, 112, 'gE'), sig(516, 208, 'gF'), sig(614, 112, 'gG'), sig(614, 208, 'gH'),
+    ctrlIC(bom, 100, 345, ['gA', 'gB', 'gC', 'gD']),
+    icBox('UDR', bom, 740, 345, 64, 76, [], ['gE', 'gF', 'gG', 'gH'], 'SR DRV'),
   ].join(''))
 }
 
 // ── two-switch forward: Q1/Q2 sandwich the primary, D1/D2 clamp the reset to the bus ─────
 function twoSwitchForward(bom) {
-  return svg(820, 360, [
+  return svg(820, 390, [
     srcDC(60, 190), wire(60, 175, 60, 70, 300, 70), wire(60, 205, 60, 300, 700, 300),
     mosfetV('Q1', bom, 280, 110), wire(280, 70, 280, 84), dot(280, 70), wire(280, 136, 280, 150),
     xfmr('T1', bom, 290, 190, { h: 80, labelDx: -18, labelDy: -22 }),
@@ -562,12 +681,13 @@ function twoSwitchForward(bom) {
     capV('Cout', bom, 590, 210), wire(590, 120, 590, 190), wire(590, 230, 590, 300), dot(590, 300),
     loadR(660, 210, 120, 300), dot(660, 120), dot(660, 300),
     port(720, 120, 'VOUT'), wire(660, 120, 720, 120),
+    sig(254, 110, 'g1', 'up'), sig(254, 270, 'g2'), ctrlIC(bom, 450, 350, ['g1', 'g2']),
   ].join(''))
 }
 
 // ── active-clamp forward: clamp leg Sc+Cc resets the core; synchronous rectifiers ────────
 function acf(bom) {
-  return svg(860, 360, [
+  return svg(860, 400, [
     srcDC(60, 190), wire(60, 175, 60, 70, 330, 70), wire(60, 205, 60, 300, 720, 300),
     mosfetV('Q1', bom, 300, 145), wire(300, 70, 300, 119), dot(300, 70), wire(300, 171, 300, 185),
     xfmr('T1', bom, 310, 195, { h: 90, labelDx: -18, labelDy: -22 }), dot(300, 185),
@@ -584,27 +704,36 @@ function acf(bom) {
     capV('Cout', bom, 620, 210), wire(620, 120, 620, 190), wire(620, 230, 620, 300), dot(620, 300),
     loadR(690, 210, 120, 300), dot(690, 120), dot(690, 300),
     port(750, 120, 'VOUT'), wire(690, 120, 750, 120),
+    sig(274, 145, 'g1'), sig(194, 110, 'gc'), sig(400, 146, 'sr1', 'down'), sig(444, 195, 'sr2'),
+    ctrlIC(bom, 160, 350, ['g1', 'gc', 'sr1', 'sr2']),
   ].join(''))
 }
 
 // ── isolated buck (Fly-Buck): sync buck whose inductor is the transformer primary ────────
 function isolatedBuck(bom) {
-  return svg(860, 360, [
+  return svg(860, 390, [
     srcDC(60, 180), wire(60, 165, 60, 70, 230, 70), wire(60, 195, 60, 300, 420, 300),
     mosfetV('QS1', bom, 230, 110), wire(230, 70, 230, 84), dot(230, 70), wire(230, 136, 230, 180),
     mosfetV('QS2', bom, 230, 250), wire(230, 180, 230, 224), wire(230, 276, 230, 300), dot(230, 300),
     dot(230, 180),
+    // discrete antiparallel diodes across the sync FETs (DS1: sw→vin, DS2: gnd→sw), per flybuckCell
+    wire(230, 70, 272, 70), diode('DS1', bom, 272, 125, 'up', 'right'), wire(272, 70, 272, 105),
+    wire(272, 145, 272, 180), dot(265, 180),
+    diode('DS2', bom, 272, 235, 'up', 'right'), wire(272, 180, 272, 215),
+    wire(272, 255, 272, 300), dot(272, 300),
     xfmr('T1', bom, 310, 185, { h: 90, labelDy: -24 }),
     wire(230, 180, 265, 180, 265, 140, 300, 140), // sw node → primary top
     // primary buck rail = main output
     wire(300, 230, 360, 230), dot(360, 230),
     capV('Cpri', bom, 360, 265, 'left'), wire(360, 230, 360, 245), wire(360, 285, 360, 300), dot(360, 300),
     port(440, 230, 'VOUT'), wire(360, 230, 440, 230),
-    // isolated secondary rail: own return, single flyback rectifier
+    // isolated secondary rail: own return, single flyback rectifier + preload/bleed Rsec
     wire(320, 140, 320, 118, 700, 118),
     wire(320, 230, 320, 258, 540, 258), diode('Dsec', bom, 560, 258, 'right'), wire(580, 258, 620, 258), dot(620, 258),
+    resV('Rsec', bom, 585, 188, 'left'), wire(585, 118, 585, 168), dot(585, 118), wire(585, 208, 585, 258), dot(585, 258),
     capV('Csec', bom, 620, 188), wire(620, 168, 620, 118), dot(620, 118), wire(620, 208, 620, 258),
     port(700, 258, 'VISO'), wire(620, 258, 700, 258), port(700, 118, 'ISO-RTN', 'end'),
+    sig(204, 110, 'g1'), sig(204, 250, 'g2'), ctrlIC(bom, 140, 345, ['g1', 'g2']),
   ].join(''))
 }
 
@@ -619,19 +748,26 @@ function isolatedBuckBoost(bom) {
     diode('Dpri', bom, 200, 180, 'up', 'left'), wire(200, 160, 200, 140, 280, 140), wire(200, 200, 200, 240, 150, 240),
     capV('Cpri', bom, 150, 270, 'left'), wire(150, 240, 150, 250), dot(150, 240), wire(150, 290, 150, 300), dot(150, 300),
     port(120, 240, 'VOUT(−)', 'end'), wire(150, 240, 120, 240),
-    // isolated secondary rail (shares primary ground per the model)
+    // isolated secondary rail (shares primary ground per the model) + preload/bleed Rsec
     wire(300, 140, 300, 110, 660, 110, 660, 300), dot(660, 300),
     wire(300, 220, 300, 250, 520, 250), diode('Dsec', bom, 540, 250, 'right'), wire(560, 250, 600, 250), dot(600, 250),
+    resV('Rsec', bom, 565, 178, 'left'), wire(565, 110, 565, 158), dot(565, 110), wire(565, 198, 565, 250), dot(565, 250),
     capV('Csec', bom, 600, 178), wire(600, 158, 600, 110), dot(600, 110), wire(600, 198, 600, 250),
     port(690, 250, 'VISO'), wire(600, 250, 690, 250),
+    sig(254, 100, 'g1'), ctrlIC(bom, 140, 330, ['g1']),
   ].join(''))
 }
 
 // ── Weinberg: current-fed push-pull with a coupled input choke feeding the primary tap ───
 function weinberg(bom) {
-  return svg(820, 360, [
+  return svg(820, 380, [
     srcDC(60, 190),
-    wire(60, 175, 60, 100, 122, 100), indH('L1', bom, 150, 100), wire(178, 100, 246, 100, 246, 190),
+    wire(60, 175, 60, 100, 122, 100), indH('L1', bom, 150, 100), wire(178, 100, 246, 100, 246, 140),
+    // the coupled input choke's winding DCR loop-breakers: Rdcra in the drawn winding-a path;
+    // winding b (the choke's second coupled winding, not sketched) reaches primary tap b through
+    // Rdcrb — drawn with net-label flags to its two undrawn nets.
+    resV('Rdcra', bom, 246, 160, 'right'), wire(246, 180, 246, 190),
+    resV('Rdcrb', bom, 210, 160, 'left'), sig(210, 140, 'L1·b', 'up'), sig(210, 180, 'ctB', 'down'),
     wire(60, 205, 60, 320, 200, 320),
     xfmr('T1', bom, 300, 190, { h: 130, ct: 'both', labelDy: -12 }),
     // push-pull switches on the primary outer ends
@@ -647,6 +783,7 @@ function weinberg(bom) {
     capV('Cout', bom, 600, 220), wire(600, 110, 600, 200), wire(600, 240, 600, 330), dot(600, 330),
     loadR(690, 220, 110, 330), dot(690, 110), dot(690, 330),
     port(750, 110, 'VOUT'), wire(720, 110, 750, 110),
+    sig(174, 144, 'g1'), sig(174, 286, 'g2'), ctrlIC(bom, 500, 45, ['g1', 'g2']),
   ].join(''))
 }
 
@@ -661,14 +798,20 @@ function ahb(bom, variant = 'fullBridge') {
     capV('Cb', bom, 270, 122, 'left'), wire(270, 80, 270, 102), dot(270, 80), wire(270, 142, tx - 10, 142, tx - 10, 150),
     xfmr('T1', bom, tx, ty, { h, ct: ctOpt(variant), labelDy: -24 }),
     wire(tx - 10, 235, tx - 10, 260, 210, 260, 210, 190, 170, 190), // primary return → sw node
+    // real RC damper across the primary (cb_mid → Rdmp → Cdmp → sw_net), per the ahbCell nets
+    dot(290, 142), resV('Rdmp', bom, 290, 170, 'left'), wire(290, 142, 290, 150),
+    capV('Cdmp', bom, 290, 222, 'left'), wire(290, 190, 290, 202),
+    wire(290, 242, 290, 260), dot(290, 260),
     ...secondaryFor(bom, tx, ty, h, variant, bridgeRefs(variant)),
+    sig(144, 128, 'g1'), sig(144, 240, 'g2'), ctrlIC(bom, 90, 45, ['g1', 'g2']),
+    icBox('UDR', bom, 850, 340, 64, 44, [], ['sr'], 'SR DRV'),
   ].join(''))
 }
 
 // ── phase-shifted full bridge: four switches, series Lr, full-bridge secondary ───────────
 function psfb(bom, variant = 'fullBridge') {
   const tx = 330, ty = 195, h = 90
-  return svg(1040, 380, [
+  return svg(1040, 430, [
     srcDC(60, 175), wire(60, 160, 60, 80, 320, 80), wire(60, 190, 60, 320, 200, 320),
     mosfetV('QA', bom, 150, 128, 'left', true), wire(150, 102, 150, 80), dot(150, 80), wire(150, 154, 150, 200), dot(150, 200),
     mosfetV('QB', bom, 150, 246, 'left', true), wire(150, 200, 150, 220), wire(150, 272, 150, 320), dot(150, 320),
@@ -678,14 +821,26 @@ function psfb(bom, variant = 'fullBridge') {
     wire(150, 200, 200, 200), indH('Lr', bom, 228, 200), wire(256, 200, 300, 200, 300, 150),
     xfmr('T1', bom, tx, ty, { h, ct: ctOpt(variant), labelDy: -24 }),
     wire(tx - 10, 240, tx - 10, 300, 280, 300, 280, 195), dot(280, 195),
+    // real RC snubber between the two leg midpoints (midA → Crc_pri → Rrc_pri → midC), per psfbCell
+    dot(178, 200), wire(178, 200, 178, 240), capV('Crc_pri', bom, 178, 260, 'right'),
+    wire(178, 280, 178, 300, 200, 300), resH('Rrc_pri', bom, 220, 300, 'below'),
+    wire(240, 300, 280, 300), dot(280, 300),
+    // secondary bleed/balance resistors from each winding end to the secondary return (Rbsa/Rbsb)
+    dot(390, 195), wire(390, 195, 390, 220), resV('Rbsa', bom, 390, 240, 'left'),
+    wire(390, 260, 390, 325, 420, 325),
+    dot(534, 240), wire(534, 240, 560, 240, 560, 244), resV('Rbsb', bom, 560, 264, 'right'),
+    wire(560, 284, 560, 325), dot(560, 325),
     ...secondaryFor(bom, tx, ty, h, variant, bridgeRefs(variant)),
+    sig(124, 128, 'gA'), sig(124, 246, 'gB'), sig(254, 128, 'gC'), sig(254, 246, 'gD'),
+    ctrlIC(bom, 90, 385, ['gA', 'gB', 'gC', 'gD']),
+    icBox('UDR', bom, 900, 390, 64, 44, [], ['sr'], 'SR DRV'),
   ].join(''))
 }
 
 // ── phase-shifted half bridge (3-level NPC): split caps + clamp diodes + series Lr ───────
 function pshb(bom, variant = 'fullBridge') {
   const tx = 430, ty = 240, h = 90
-  return svg(1060, 400, [
+  return svg(1060, 460, [
     srcDC(60, 180), wire(60, 165, 60, 70, 150, 70), wire(60, 195, 60, 340, 200, 340),
     // split input caps CsHi / CsLo about the neutral (mid)
     capV('CsHi', bom, 150, 100, 'left'), wire(150, 70, 150, 80), dot(150, 70), wire(150, 120, 150, 170), dot(150, 170),
@@ -702,7 +857,14 @@ function pshb(bom, variant = 'fullBridge') {
     wire(250, 225, 300, 225), indH('Lr', bom, 328, 225), wire(356, 225, 400, 225, 400, 195),
     xfmr('T1', bom, tx, ty, { h, ct: ctOpt(variant), labelDy: -24 }),
     wire(tx - 10, 285, tx - 10, 300, 150, 300, 150, 170),
+    // real RC snubber across the primary (pri_x → Crc_pri → Rrc_pri → neutral), per pshbCell
+    dot(380, 225), capV('Crc_pri', bom, 380, 247, 'right'), wire(380, 225, 380, 227),
+    wire(380, 267, 380, 282), resH('Rrc_pri', bom, 348, 282, 'above'),
+    wire(328, 282, 310, 282, 310, 300), dot(310, 300),
     ...secondaryFor(bom, tx, ty, h, variant, bridgeRefs(variant)),
+    sig(224, 100, 'g1'), sig(224, 180, 'g2'), sig(224, 270, 'g3'), sig(224, 350, 'g4'),
+    ctrlIC(bom, 90, 400, ['g1', 'g2', 'g3', 'g4']),
+    icBox('UDR', bom, 920, 410, 64, 44, [], ['sr'], 'SR DRV'),
   ].join(''))
 }
 
@@ -713,15 +875,19 @@ function src(bom, variant = 'centerTapped') {
     srcDC(60, 175), wire(60, 160, 60, 80, 170, 80), wire(60, 190, 60, 300, 170, 300),
     mosfetV('Q1', bom, 170, 118, 'left'), wire(170, 92, 170, 80), dot(170, 80), wire(170, 144, 170, 165), dot(170, 165),
     mosfetV('Q2', bom, 170, 212, 'left'), wire(170, 186, 170, 165), wire(170, 238, 170, 300), dot(170, 300),
-    // split bus Chi / Clo — tank returns to the mid-bus
-    capV('Chi', bom, 240, 118, 'right'), wire(240, 80, 240, 98), dot(240, 80), wire(240, 138, 240, 190), dot(240, 190),
-    capV('Clo', bom, 240, 250, 'right'), wire(240, 190, 240, 230), wire(240, 270, 240, 300), dot(240, 300), gnd(200, 300),
+    // split bus Chi / Clo — tank returns to the mid-bus; Rbal_hi / Rbal_lo balance the split
+    wire(170, 80, 268, 80), dot(170, 80), dot(240, 80), wire(170, 300, 268, 300),
+    capV('Chi', bom, 240, 118, 'left'), wire(240, 80, 240, 98), wire(240, 138, 240, 190), dot(240, 190),
+    capV('Clo', bom, 240, 250, 'left'), wire(240, 190, 240, 230), wire(240, 270, 240, 300), dot(240, 300), gnd(200, 300),
+    resV('Rbal_hi', bom, 268, 125, 'right'), wire(268, 80, 268, 105), wire(268, 145, 268, 190), dot(268, 190),
+    resV('Rbal_lo', bom, 268, 240, 'right'), wire(268, 190, 268, 220), wire(268, 260, 268, 300), dot(268, 300),
     // series tank Cr → Lr off the switch node into the primary
     capH('Cr', bom, 210, 165), wire(170, 165, 190, 165), indH('Lr', bom, 300, 165), wire(230, 165, 272, 165),
     wire(328, 165, 355, 165, 355, 110, tx - 10, 110, tx - 10, ty - h / 2),
     xfmr('T1', bom, tx, ty, { h, ct: ctOpt(variant), labelDx: -40 }),
     wire(tx - 10, ty + h / 2, tx - 10, 235, 355, 235, 355, 190, 240, 190), // primary return → mid bus
     ...resonantSecondary(bom, tx, ty, h, variant),
+    sig(144, 118, 'g1'), sig(144, 212, 'g2'), ctrlIC(bom, 100, 335, ['g1', 'g2']),
   ].join(''))
 }
 
@@ -747,7 +913,7 @@ function srBridgeOut(bom, nx, ny, ny2, refs) {
 
 // ── CLLC: full bridge + primary tank Cr1–Lr1, symmetric secondary tank Lr2–Cr2, SR bridge ─
 function cllc(bom) {
-  return svg(1040, 360, [
+  return svg(1040, 430, [
     srcDC(60, 175), wire(60, 160, 60, 80, 300, 80), wire(60, 190, 60, 320, 110, 320),
     mosfetV('Q1', bom, 150, 128, 'left', true), wire(150, 102, 150, 80), dot(150, 80), wire(150, 154, 150, 205), dot(150, 205),
     mosfetV('Q2', bom, 150, 250, 'left', true), wire(150, 205, 150, 224), wire(150, 276, 150, 320), dot(150, 320),
@@ -762,12 +928,15 @@ function cllc(bom) {
     wire(350, 150, 380, 150), indH('Lr2', bom, 408, 150), wire(436, 150, 460, 150), capH('Cr2', bom, 486, 150), wire(508, 150, 540, 150),
     wire(350, 240, 540, 240),
     ...srBridgeOut(bom, 540, 150, 240, ['Qa', 'Qb', 'Qc', 'Qd']),
+    sig(124, 128, 'g1'), sig(124, 250, 'g2'), sig(254, 128, 'g3'), sig(254, 250, 'g4'),
+    sig(584, 130, 'sa'), sig(584, 250, 'sb'), sig(654, 130, 'sc'), sig(654, 250, 'sd'),
+    icBox('U1', bom, 120, 380, 64, 80, ['g1', 'g2', 'g3', 'g4'], ['sa', 'sb', 'sc', 'sd'], 'PWM'),
   ].join(''))
 }
 
 // ── CLLLC: like CLLC but with a discrete secondary resonant inductor path (QE..QH SR) ────
 function clllc(bom) {
-  return svg(1040, 360, [
+  return svg(1040, 430, [
     srcDC(60, 175), wire(60, 160, 60, 80, 300, 80), wire(60, 190, 60, 320, 110, 320),
     mosfetV('Q1', bom, 150, 128, 'left', true), wire(150, 102, 150, 80), dot(150, 80), wire(150, 154, 150, 205), dot(150, 205),
     mosfetV('Q2', bom, 150, 250, 'left', true), wire(150, 205, 150, 224), wire(150, 276, 150, 320), dot(150, 320),
@@ -777,15 +946,24 @@ function clllc(bom) {
     wire(296, 205, 310, 205, 310, 150),
     xfmr('T1', bom, 340, 195, { h: 90, labelDy: -24 }),
     wire(330, 240, 330, 300, 280, 300, 280, 205), dot(280, 205),
-    wire(350, 150, 380, 150), indH('Lr2', bom, 408, 150), wire(436, 150, 460, 150), capH('Cr2', bom, 486, 150), wire(508, 150, 540, 150),
+    // secondary tank Lr2 → Cr2, then the SR current-sense shunt Rsense into the bridge (senseP/senseM
+    // feed the SR controller, per the clllcPower/srControl nets)
+    wire(350, 150, 380, 150), indH('Lr2', bom, 408, 150), wire(436, 150, 450, 150),
+    capH('Cr2', bom, 470, 150), resH('Rsense', bom, 510, 150, 'above'),
+    wire(530, 150, 540, 150),
+    sig(490, 150, 'sP', 'down'), sig(530, 150, 'sM', 'down'),
     wire(350, 240, 540, 240),
     ...srBridgeOut(bom, 540, 150, 240, ['QE', 'QF', 'QG', 'QH']),
+    sig(124, 128, 'g1'), sig(124, 250, 'g2'), sig(254, 128, 'g3'), sig(254, 250, 'g4'),
+    sig(584, 130, 'gA'), sig(584, 250, 'gB'), sig(654, 130, 'gB'), sig(654, 250, 'gA'),
+    ctrlIC(bom, 120, 380, ['g1', 'g2', 'g3', 'g4']),
+    icBox('SR', bom, 450, 390, 70, 64, ['sP', 'sM'], ['gA', 'gB'], 'SR CTRL'),
   ].join(''))
 }
 
 // ── boost PFC: full-bridge line rectifier feeding a boost cell (L, SW, D5) ────────────────
 function pfc(bom) {
-  return svg(880, 380, [
+  return svg(880, 520, [
     srcAC(70, 200, 'VAC'),
     // full-bridge line rectifier: acLine (top) / acNeutral (bottom); busP=150, gnd=320, mid=235
     wire(70, 185, 120, 185, 120, 235, 180, 235),
@@ -797,42 +975,81 @@ function pfc(bom) {
     diode('D4', bom, 250, 273, 'up'), wire(250, 253, 250, 235), wire(250, 293, 250, 320),
     dot(180, 150), dot(250, 150), wire(180, 150, 250, 150),
     wire(180, 320, 660, 320), gnd(180, 320),
-    // boost cell: rectified bus → L → switch node; SW shunt, D5 into the bus cap
-    indH('L', bom, 340, 150), wire(250, 150, 312, 150), wire(368, 150, 410, 150), dot(410, 150),
+    // Rref bleeds the acNeutral reference to ground (per pfcPower nets)
+    dot(130, 360), resV('Rref', bom, 130, 340, 'left'), wire(130, 320, 180, 320), dot(130, 320),
+    // boost cell: rectified bus → Rsense (current shunt) → L → switch node; SW shunt, D5 into the bus cap
+    wire(250, 150, 260, 150), resH('Rsense', bom, 280, 150, 'above'),
+    sig(255, 150, 'busP', 'down'), sig(303, 150, 'nL', 'down'),
+    indH('L', bom, 340, 150), wire(300, 150, 312, 150), wire(368, 150, 410, 150), dot(410, 150),
     mosfetV('SW', bom, 410, 225), wire(410, 150, 410, 199), wire(410, 251, 410, 320), dot(410, 320),
     diode('D5', bom, 480, 150, 'right'), wire(410, 150, 460, 150), wire(500, 150, 600, 150), dot(560, 150),
     capV('Cout', bom, 560, 235), wire(560, 150, 560, 215), wire(560, 255, 560, 320), dot(560, 320),
     loadR(630, 235, 150, 320), dot(630, 150), dot(630, 320),
     port(690, 150, 'VBUS'), wire(630, 150, 690, 150),
+    // output-voltage divider feeding the control law (vout → Rv1 → vs → Rv2 → gnd)
+    dot(660, 150), wire(660, 150, 660, 170), resV('Rv1', bom, 660, 190, 'left'),
+    sig(660, 226, 'vs', 'right'), wire(660, 210, 660, 242), resV('Rv2', bom, 660, 262, 'left'),
+    wire(660, 282, 660, 320), dot(660, 320),
+    sig(384, 225, 'g'),
+    // ── control law (average-current-mode PFC), signal nets by label: vs → ∫/EA → ×busP → PWM vs nL ──
+    txt(60, 405, 'CONTROL — average-current-mode PFC law', 'sch-blk', 'start'),
+    icBox('Iv', bom, 160, 460, 60, 56, ['vs'], ['iv'], '∫'),
+    icBox('Sgv', bom, 300, 460, 60, 56, ['iv', 'vs'], ['gv'], 'EA'),
+    icBox('Mv', bom, 440, 460, 60, 56, ['busP', 'gv'], ['vth'], '×'),
+    icBox('Cmp', bom, 580, 460, 60, 56, ['nL', 'vth'], ['g'], 'PWM'),
+    ctrlIC(bom, 740, 460, ['g'], 'U1', 'CTRL'),
   ].join(''))
 }
 
 // ── Vienna: 3-phase 3-level rectifier — three boost legs into a split DC bus ─────────────
 function viennaLeg(bom, x, ph) {
-  // vertical leg: phase-in → L → node X, with Dp↑ to busP and Dn↑ from busN, plus the
-  // bidirectional midpoint switch (SW+SQ, common node) clamping X to the neutral rail.
+  // vertical leg: phase-in → Rs (current shunt) → L → node X, with Dp↑ to busP and Dn↑ from busN,
+  // plus the bidirectional midpoint switch (SW+SQ, common node) clamping X to the neutral rail.
   const busP = 60, neu = 270, busN = 340, X = 130, sx = x + 48
   return [
-    port(x - 48, 410, ph, 'start'), wire(x - 48, 410, x - 48, 403),
+    port(x - 48, 462, ph, 'start'), wire(x - 48, 462, x - 48, 455),
+    resV(`Rs${ph}`, bom, x - 48, 435, 'left'), wire(x - 48, 415, x - 48, 403),
+    sig(x - 48, 410, `nl${ph}`, 'right'),
     indV(`L${ph}`, bom, x - 48, 375, 'left'), wire(x - 48, 347, x - 48, X, x, X), dot(x, X),
     diode(`Dp${ph}`, bom, x, 95, 'up'), wire(x, 75, x, busP), wire(x, 115, x, X), dot(x, busP),
     diode(`Dn${ph}`, bom, x, 300, 'up'), wire(x, 280, x, X), wire(x, 320, x, busN), dot(x, busN),
     wire(x, X, sx, X),
     mosfetV(`SW${ph}`, bom, sx, 160, 'right', true), wire(sx, 134, sx, X), wire(sx, 186, sx, 194),
     mosfetV(`SQ${ph}`, bom, sx, 220, 'right', true), wire(sx, 246, sx, neu), dot(sx, neu),
+    sig(sx - 26, 160, `g${ph}`), sig(sx - 26, 220, `g${ph}`),
   ]
 }
 function vienna(bom) {
   const cols = [{ x: 155, ph: 'a' }, { x: 365, ph: 'b' }, { x: 575, ph: 'c' }]
-  return svg(940, 440, [
+  // per-phase current-loop block chain (Gvm/Sub/Sum/Add/Mul/Cmp), nets by label per viennaControl
+  const phaseRow = (ph, y) => [
+    icBox(`Gvm${ph}`, bom, 150, y, 60, 56, [ph, 'gcond'], [`gvp${ph}`], '×'),
+    icBox(`Sub${ph}`, bom, 280, y, 60, 56, [`nl${ph}`, ph], [`nmp${ph}`], '−'),
+    icBox(`Sum${ph}`, bom, 410, y, 60, 56, [`nmp${ph}`, `gvp${ph}`], [`err${ph}`], 'Σ'),
+    icBox(`Add${ph}`, bom, 540, y, 60, 56, [`err${ph}`, 'bal'], [`errp${ph}`], '+'),
+    icBox(`Mul${ph}`, bom, 670, y, 60, 56, [ph, `errp${ph}`], [`m${ph}`], '×'),
+    icBox(`Cmp${ph}`, bom, 800, y, 60, 56, [`m${ph}`, 'gnd'], [`g${ph}`], 'PWM'),
+  ].join('')
+  return svg(940, 830, [
     wire(95, 60, 780, 60), wire(95, 270, 780, 270), wire(95, 340, 780, 340), // busP / neutral / busN
     ...cols.flatMap((c) => viennaLeg(bom, c.x, c.ph)),
     txt(110, 264, 'N', 'sch-port', 'end'),
+    sig(770, 60, 'busP', 'up'), sig(770, 340, 'busN', 'down'),
     // split caps Cp (busP→neutral) and Cn (neutral→busN) + load across the full bus
     capV('Cp', bom, 720, 165, 'right'), wire(720, 60, 720, 145), dot(720, 60), wire(720, 185, 720, 270), dot(720, 270),
     capV('Cn', bom, 720, 305, 'right'), wire(720, 270, 720, 285), wire(720, 325, 720, 340), dot(720, 340),
-    loadR(790, 200, 60, 340), dot(790, 60), dot(790, 340),
+    resV('Rload', bom, 790, 200, 'right'), wire(790, 60, 790, 180), wire(790, 220, 790, 340),
+    dot(790, 60), dot(790, 340),
     port(850, 60, 'BUS+'), wire(790, 60, 850, 60), port(850, 340, 'BUS−'), wire(790, 340, 850, 340),
+    // ── control law: bus-voltage loop + imbalance loop (shared), then one current loop per phase ──
+    txt(60, 505, 'CONTROL — bus-voltage + balance loops, per-phase current loops', 'sch-blk', 'start'),
+    icBox('Svs', bom, 150, 560, 60, 56, ['busP', 'busN'], ['vbus'], 'G'),
+    icBox('Ivolt', bom, 280, 560, 60, 56, ['vbus'], ['vint'], '∫'),
+    icBox('Sg', bom, 410, 560, 60, 56, ['vint', 'vbus'], ['gcond'], 'EA'),
+    icBox('Simb', bom, 540, 560, 60, 56, ['busP', 'busN'], ['imb'], '−'),
+    icBox('Ibal', bom, 670, 560, 60, 56, ['imb'], ['bal'], 'G'),
+    ctrlIC(bom, 810, 560, ['ga', 'gb', 'gc'], 'U1', 'CTRL'),
+    phaseRow('a', 650), phaseRow('b', 720), phaseRow('c', 790),
   ].join(''))
 }
 
@@ -848,51 +1065,17 @@ export function hasSchematic(topologyId) {
   return topologyId in LAYOUTS
 }
 
-// A small chip for an auxiliary component (drawn in the completeness strip, not on the power path).
-const KIND_TAG = { Capacitor: 'C', Resistor: 'R', Diode: 'D', MOSFET: 'Q', Controller: 'IC', Inductor: 'L', Transformer: 'T' }
-function auxChip(row, cx, cy, w) {
-  const tag = KIND_TAG[row.kind] ?? '·'
-  const val = row.value && row.value !== '—' ? row.value : ''
-  return `<g class="sch-hot" data-ref="${row.ref}">
-    <rect class="sch-hitbox" x="${cx - w / 2 + 4}" y="${cy - 15}" width="${w - 8}" height="34" rx="3"/>
-    <rect class="sch-aux-chip" x="${cx - w / 2 + 8}" y="${cy - 11}" width="18" height="14" rx="2"/>
-    ${txt(cx - w / 2 + 17, cy, tag, 'sch-aux-tag')}
-    ${txt(cx - w / 2 + 30, cy - 1, row.ref, 'sch-ref', 'start')}
-    ${val ? txt(cx - w / 2 + 30, cy + 11, val, 'sch-val', 'start') : ''}
-  </g>`
-}
-
-// Append every BOM component the hand-drawn layout did not place (snubbers, dampers, balancing /
-// bias resistors, controllers) as a labelled auxiliary strip, so the schematic and the BOM carry
-// the SAME components — nothing shows up in the waveform/BOM lists that is absent from the drawing.
-function withAux(mainSvg, missing) {
-  if (!missing.length) return mainSvg
-  const m = mainSvg.match(/viewBox="0 0 ([\d.]+) ([\d.]+)"/)
-  const W = m ? parseFloat(m[1]) : 820, H = m ? parseFloat(m[2]) : 360
-  const perRow = Math.max(3, Math.floor((W - 32) / 165))
-  const colW = (W - 32) / perRow
-  const rowsN = Math.ceil(missing.length / perRow)
-  const y0 = H + 14
-  const chips = missing.map((r, i) => {
-    const cx = 16 + (i % perRow) * colW + colW / 2
-    const cy = y0 + 34 + Math.floor(i / perRow) * 40
-    return auxChip(r, cx, cy, colW)
-  }).join('')
-  const header = txt(16, y0 + 16, 'AUXILIARY — in the BOM, off the power-path sketch (snubbers · balancing · control)', 'sch-aux-head', 'start')
-  const divider = P(`M 12 ${y0} H ${W - 12}`, 'sch-wire')
-  const newH = y0 + 34 + rowsN * 40 + 6
-  return mainSvg
-    .replace(/viewBox="0 0 [\d.]+ [\d.]+"/, `viewBox="0 0 ${W} ${newH}"`)
-    .replace(/<\/svg>\s*$/, `${divider}${header}${chips}</svg>`)
-}
-
 export function renderSchematic(topologyId, bomRows, variant) {
   const fn = LAYOUTS[topologyId]
   if (!fn) return null
   const rows = bomRows ?? []
   const bom = new Map(rows.map((r) => [r.ref, r]))
   const main = fn(bom, variant)
+  // Parity guard: every BOM component must be drawn (no hidden parts, no auxiliary strip).
+  // A miss is a layout bug — surface it loudly in the console so it gets fixed, never swallowed.
   const drawn = new Set([...main.matchAll(/data-ref="([^"]+)"/g)].map((mm) => mm[1]))
-  const missing = rows.filter((r) => !drawn.has(r.ref))
-  return withAux(main, missing)
+  const missing = rows.filter((r) => !drawn.has(r.ref)).map((r) => r.ref)
+  if (missing.length)
+    console.warn(`schematic '${topologyId}': BOM components not drawn: ${missing.join(', ')}`)
+  return main
 }
