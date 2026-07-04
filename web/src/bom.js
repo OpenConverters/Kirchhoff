@@ -133,7 +133,7 @@ function headlineRating(kind, req) {
       const i = req.ratedForwardCurrent ? si(req.ratedForwardCurrent, 'A') : null
       return [v, i].filter(Boolean).join(' / ') || '—'
     }
-    case 'Resistor': return req.ratedPower ? si(req.ratedPower, 'W') : '—'
+    case 'Resistor': return req.powerRating ? si(req.powerRating, 'W') : '—'
     default: return '—'
   }
 }

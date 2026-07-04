@@ -364,7 +364,7 @@ const RATING = {
   mosfet: { v: 'ratedDrainSourceVoltage', i: 'ratedContinuousDrainCurrent' },
   diode: { v: 'ratedReverseVoltage', i: 'ratedForwardCurrent' },
   capacitor: { v: 'ratedVoltage' },
-  resistor: { p: 'ratedPower' },
+  resistor: { p: 'powerRating' },
 }
 function ratedOf(req, key) {
   const v = req?.[key]
