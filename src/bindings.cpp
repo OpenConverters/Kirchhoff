@@ -13,6 +13,7 @@
 #include "CurrentTransformer.hpp"  // current transformer — component designer
 #include "ConverterExtract.hpp"  // main_magnetic_inputs — the adviser's MAS::Inputs from a TAS
 #include "JsonUtil.hpp"      // strip_nulls — schema-valid serialization of typed MAS objects
+#include "KirchhoffApi.hpp"  // api::select_components / api::bind_part (Kelvin sourcing facade)
 
 namespace py = pybind11;
 using json = nlohmann::json;
@@ -207,6 +208,28 @@ assembly/simulate steps (tas_to_ngspice / tas_to_ltspice) are topology-agnostic.
           },
           py::arg("tas"), py::arg("fidelity"),
           "Same assembly rendered in the LTspice dialect (a second SPICE backend).");
+
+    // --- Kelvin component sourcing (real parts from the TAS DB, via the shared selector) ---
+    auto unwrap = [](const std::string& r) -> json {
+        if (r.rfind("Exception:", 0) == 0) throw std::runtime_error(r);
+        return json::parse(r);
+    };
+    m.def("select_components",
+          [unwrap](const json& tas, const std::string& data_dir, const std::string& cache_dir,
+                   const json& options) {
+              return unwrap(Kirchhoff::api::select_components(
+                  tas.dump(), data_dir, cache_dir, options.is_null() ? "" : options.dump()));
+          },
+          py::arg("tas"), py::arg("data_dir"), py::arg("cache_dir") = std::string(),
+          py::arg("options") = json::object(),
+          "Kelvin sourcing: ranked candidate list per fillable component seed. Returns\n"
+          "{components:[{ref,family,kind?,filled,mpn?|deferred?|error?,selection?}]}.");
+    m.def("bind_part",
+          [unwrap](const json& tas, const std::string& ref, const json& envelope) {
+              return unwrap(Kirchhoff::api::bind_part(tas.dump(), ref, envelope.dump()));
+          },
+          py::arg("tas"), py::arg("ref"), py::arg("envelope"),
+          "Stamp a chosen candidate envelope into a component (DATASHEET fidelity).");
 }
 
 #undef BIND_DESIGN

@@ -27,6 +27,10 @@ EMSCRIPTEN_BINDINGS(kirchhoff) {
     em::function("component_waveforms", &api::component_waveforms);
     // realize requirements-derived datasheet models (real conduction) onto a spec-designed TAS
     em::function("realize_tas", &api::realize_tas);
+    // Kelvin component sourcing: candidate lists per seed + bind a chosen part (DATASHEET fidelity).
+    // In the browser, dataDir/cacheDir are the Emscripten FS paths the worker mounts shards into.
+    em::function("select_components", &api::select_components);
+    em::function("bind_part", &api::bind_part);
     em::function("diagnostics", &api::diagnostics);
     em::function("main_magnetic_inputs", &api::main_magnetic_inputs);
     // the one-shot Wizard entry point

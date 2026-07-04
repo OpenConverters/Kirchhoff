@@ -76,6 +76,23 @@ KH_API std::string realize_tas(const std::string& tasJson);
 KH_API std::string diagnostics(const std::string& tasJson);
 KH_API std::string main_magnetic_inputs(const std::string& tasJson); // the adviser's MAS::Inputs (as JSON)
 
+// --- Kelvin component sourcing (real parts from the TAS DB) ---
+// Walk a TAS and select a real candidate list per fillable component seed (delegating to Kelvin,
+// the shared selector). `dataDir` = the TAS/data NDJSON dir; `cacheDir` = the .kidx shard cache
+// (empty = build in memory). `optionsJson` = Kelvin options (topology, maxCandidates, …).
+// Returns {"components":[{ref,family,kind?,filled,mpn?|deferred?|error?,selection?}]} — the same
+// candidate lists KH shows in PartDrawer and HS feeds to its LLM chooser. Body diodes, numerical
+// aids, magnetics (→ MKF), and already-bound parts are deferred.
+KH_API std::string select_components(const std::string& tasJson, const std::string& dataDir,
+                                     const std::string& cacheDir, const std::string& optionsJson);
+
+// Bind a chosen candidate's envelope into the named component's data slot (verbatim; already
+// schema-valid) and return the new TAS. The component then reads as DATASHEET fidelity — a
+// subsequent realize/simulate renders the real part; the numerical snubber strips when it carries
+// its Coss. This is the real-part replacement for realize_tas's "requirements-derived" fabrication.
+KH_API std::string bind_part(const std::string& tasJson, const std::string& ref,
+                             const std::string& envelopeJson);
+
 // One-shot: spec -> {topology, inputs, operatingPoint, diagnostics, tas}. Mirrors WebLibMKF process_converter.
 KH_API std::string process_converter(const std::string& topology, const std::string& specJson,
                               const std::string& engine);

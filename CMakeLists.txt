@@ -41,6 +41,16 @@ add_subdirectory("${PSMA_ROOT}/CTAS"     "${CMAKE_BINARY_DIR}/CTAS")
 add_subdirectory("${PSMA_ROOT}/MAS/kirchhoff" "${CMAKE_BINARY_DIR}/MAS")
 add_subdirectory("${PSMA_ROOT}/CIAS"     "${CMAKE_BINARY_DIR}/CIAS")
 
+# Kelvin — the shared TAS component selector (KH consumes it via src/KelvinBridge.cpp). Embedded
+# build: only its `kelvin` static lib (tests/CLI/pybind self-disable when not top-level). It reuses
+# the nlohmann target created above and PEAS from deps/. Location overridable with -DKELVIN_DIR.
+set(KELVIN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/deps/Kelvin" CACHE PATH "Path to the Kelvin checkout")
+if (NOT EXISTS "${KELVIN_DIR}/CMakeLists.txt")
+    set(KELVIN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../Kelvin")  # sibling checkout fallback
+endif()
+set(KELVIN_PEAS_DIR "${PSMA_ROOT}/PEAS/src" CACHE PATH "" FORCE)
+add_subdirectory("${KELVIN_DIR}" "${CMAKE_BINARY_DIR}/Kelvin")
+
 # Optional in-process ngspice runner (libngspice shared-library API). When ON, CMake locates
 # libngspice + <ngspice/sharedspice.h> and src/NgspiceRunner.cpp is compiled with ENABLE_NGSPICE; when
 # OFF (or the lib is absent) the runner stub throws and callers use the ngspice CLI. Default: auto —
@@ -81,7 +91,7 @@ if (NOT EXISTS "${MKF_WAVEFORM_PROCESSOR}")
         "-DMKF_DIR=<path-to-MKF-checkout> at a local MKF clone.")
 endif()
 
-add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/Dab.cpp src/IsolatedBuck.cpp src/IsolatedBuckBoost.cpp src/Weinberg.cpp src/Llc.cpp src/Src.cpp src/Cllc.cpp src/Clllc.cpp src/Pfc.cpp src/Vienna.cpp src/Cmc.cpp src/CmcSim.cpp src/Dmc.cpp src/DmcSim.cpp src/CurrentTransformer.cpp src/TasAssembler.cpp src/NgspiceRunner.cpp src/Analytical.cpp src/ConverterAnalytical.cpp src/ConverterExtract.cpp src/ComponentWaveforms.cpp src/DatasheetModels.cpp "${MKF_WAVEFORM_PROCESSOR}")
+add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/Dab.cpp src/IsolatedBuck.cpp src/IsolatedBuckBoost.cpp src/Weinberg.cpp src/Llc.cpp src/Src.cpp src/Cllc.cpp src/Clllc.cpp src/Pfc.cpp src/Vienna.cpp src/Cmc.cpp src/CmcSim.cpp src/Dmc.cpp src/DmcSim.cpp src/CurrentTransformer.cpp src/TasAssembler.cpp src/NgspiceRunner.cpp src/Analytical.cpp src/ConverterAnalytical.cpp src/ConverterExtract.cpp src/ComponentWaveforms.cpp src/DatasheetModels.cpp src/KelvinBridge.cpp "${MKF_WAVEFORM_PROCESSOR}")
 target_include_directories(kirchhoff PUBLIC src)
 # The PSMA/MAS/json dependency headers are marked SYSTEM so the -Wall/-Wextra enabled below reports only
 # Kirchhoff's OWN code, not warnings inside generated/vendored dependency headers (e.g. MAS.hpp).
@@ -99,7 +109,7 @@ target_include_directories(kirchhoff SYSTEM PUBLIC
 # kirchhoff's own TUs (ConverterAnalytical.cpp + WaveformProcessor.cpp) but does NOT propagate to test
 # binaries (no risk of an MKF header shadowing a Kirchhoff one).
 target_include_directories(kirchhoff SYSTEM PRIVATE "${MKF_DIR}/src")
-target_link_libraries(kirchhoff PUBLIC RAS CAS SAS AAS CTAS MAS_kirchhoff CIAS nlohmann_json::nlohmann_json)
+target_link_libraries(kirchhoff PUBLIC RAS CAS SAS AAS CTAS MAS_kirchhoff CIAS kelvin nlohmann_json::nlohmann_json)
 # MSVC's <cmath> only defines M_PI et al. when _USE_MATH_DEFINES is set. Define it PUBLICly (harmless /
 # ignored on GCC/Clang) so every TU that includes <cmath> — here and in anything linking kirchhoff — sees
 # the math constants, instead of sprinkling fragile per-file `#define _USE_MATH_DEFINES` that must precede
@@ -275,6 +285,11 @@ target_link_libraries(test_dmc_ct PRIVATE kirchhoff Catch2::Catch2WithMain)
 
 add_executable(test_component_waveforms tests/test_component_waveforms.cpp src/KirchhoffApi.cpp)
 target_link_libraries(test_component_waveforms PRIVATE kirchhoff Catch2::Catch2WithMain)
+
+# Kelvin component sourcing (select_components + bind_part) end-to-end against the TAS DB.
+add_executable(test_kelvin_sourcing tests/test_kelvin_sourcing.cpp src/KirchhoffApi.cpp)
+target_link_libraries(test_kelvin_sourcing PRIVATE kirchhoff Catch2::Catch2WithMain)
+target_compile_definitions(test_kelvin_sourcing PRIVATE KELVIN_TAS_DATA_DIR="/home/alf/PSMA/TAS/data")
 
 add_executable(test_advanced tests/test_advanced.cpp)
 target_link_libraries(test_advanced PRIVATE kirchhoff Catch2::Catch2WithMain)
