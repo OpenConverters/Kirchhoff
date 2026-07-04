@@ -14,17 +14,20 @@
 //    mid nodes bridged by a cap, some secondary-rectifier nets.
 //  - The drawing may be electrically equivalent to the netlist but label a node differently (e.g. a forward
 //    switch drawn low-side vs the netlist's high-side labelling) → flagged though not "broken".
-// Residual flags as of this commit (all triaged — none are the floating-rail / broken-leg class, which
-// are ALL fixed: fsbb/dab/cllc/clllc grounds, cllc/clllc node_b + VOUT rail, secFB bridge-diode refdes
-// mapping, pshb primary ground):
-//   - boost/synchronous, acf: a synchronous-rectifier MOSFET is drawn source/drain-swapped vs the netlist
-//     (mosfetH is fixed drain-left/source-right). The circuit is correct — the body diode (drawn as D2 /
-//     DS*) sets the real orientation — only the FET symbol's S/D labels differ.
-//   - forward: Q1 drawn low-side while the netlist labels it high-side (electrically equivalent forward).
-//   - pshb mid_cap/nH: NPC clamp-diode orientation + neutral bridged by unanchored split caps (original
-//     3-level code; part real-orientation, part cap-mediated false positive).
-//   - vienna csa/csb/csc: current-sense nets routed through control blocks (control-plane, not power wire).
-// The ground-only rail checker (scratch: all grounds connected) and parity both pass cleanly.
+// This tool drove fixes for EVERY power-connectivity defect it found: fsbb/dab/cllc/clllc floating
+// grounds; cllc/clllc broken bridge leg (node_b) and floating VOUT rail; secFB bridge-diode refdes
+// mapping; pshb missing primary ground and REVERSED clamp diode (DC1); boost-sync + acf sync-rectifier
+// MOSFETs drawn source/drain-swapped (now mirrored); and Vienna's bidirectional midpoint switch drawn as
+// a cascode instead of common-source (now flipped). All verified by re-running this checker.
+//
+// SOLE REMAINING RESIDUAL (documented, intentional — not an electrical defect):
+//   - forward: vin_net/gnd_net. Q1 is drawn LOW-side (a standard, gate-drive-friendly forward) while the
+//     TAS labels it HIGH-side (VIN→Q1.drain). Both are valid forward converters — same volt-seconds — so
+//     the drawing is electrically correct; only the switch NODE labels differ. The forward transformer is
+//     also 3-winding (primary + demag + output) approximated by the 2-winding symbol. Matching the TAS
+//     node-for-node needs a high-side redraw + a 3-winding transformer symbol; deferred as low value/high
+//     risk vs the electrical correctness already achieved.
+// The ground-only rail checker (all grounds connected) and parity both pass cleanly across all 39 combos.
 import init from '../../build-wasm-ng/kirchhoff.js'
 import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
 import { extractBom } from '../src/bom.js'

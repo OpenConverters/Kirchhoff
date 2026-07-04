@@ -51,8 +51,10 @@ function hot(ref, bom, box, body, labelPos) {
 // Geometry ported from chris-pikul/electronic-symbols Transistor-COM-MOSFET-N-Enhancement.svg
 // (MIT), scaled from its 150×150 tile to this footprint: three-segment channel, source-side
 // body tie with the N-channel arrow, and the classic enclosure circle.
-function mosfetV(ref, bom, x, y, labelSide = 'right', noVal = false) {
-  const body =
+// flip=true mirrors vertically so the SOURCE is on TOP (y-26) and DRAIN on the bottom — needed where
+// the FET's body-diode / source node must face upward (e.g. Vienna's common-source bidirectional switch).
+function mosfetV(ref, bom, x, y, labelSide = 'right', noVal = false, flip = false) {
+  const inner =
     `<circle class="sch-sym" cx="${x - 8.7}" cy="${y}" r="17.3"/>` +
     // channel: three dashes
     P(`M ${x - 13} ${y - 11.9} L ${x - 13} ${y - 5.5}`) +
@@ -66,15 +68,18 @@ function mosfetV(ref, bom, x, y, labelSide = 'right', noVal = false) {
     P(`M ${x} ${y + 26} L ${x} ${y} L ${x - 13} ${y}`) +
     P(`M ${x} ${y + 8.7} L ${x - 13} ${y + 8.7}`) +
     `<polygon class="sch-fill" points="${x - 10.8},${y} ${x - 4.3},${y - 4.3} ${x - 4.3},${y + 4.3}"/>`
+  const body = flip ? `<g transform="matrix(1,0,0,-1,0,${2 * y})">${inner}</g>` : inner
   const lab = labelSide === 'right' ? [x + 12, y - 2, 'start', noVal] : [x - 29, y - 2, 'end', noVal]
-  regPin(ref, 'drain', x, y - 26); regPin(ref, 'source', x, y + 26); regPin(ref, 'gate', x - 26, y)
+  regPin(ref, 'drain', x, flip ? y + 26 : y - 26); regPin(ref, 'source', x, flip ? y - 26 : y + 26); regPin(ref, 'gate', x - 26, y)
   return hot(ref, bom, [x - 27, y - 26, 46, 52], body, lab)
 }
 
 // N-MOSFET on a horizontal rail: drain (x-26, y), source (x+26, y), gate below.
 // Same ported geometry, transposed (u,v) -> (v,-u) so the channel sits under the rail.
-function mosfetH(ref, bom, x, y, noVal = false) {
-  const body =
+// flip=true mirrors the symbol horizontally so the SOURCE is on the LEFT (x-26) and DRAIN on the right —
+// needed where a synchronous rectifier's body diode must face a specific way (source toward the sw node).
+function mosfetH(ref, bom, x, y, noVal = false, flip = false) {
+  const inner =
     `<circle class="sch-sym" cx="${x}" cy="${y + 8.7}" r="17.3"/>` +
     P(`M ${x - 11.9} ${y + 13} L ${x - 5.5} ${y + 13}`) +
     P(`M ${x - 3.2} ${y + 13} L ${x + 3.2} ${y + 13}`) +
@@ -85,7 +90,8 @@ function mosfetH(ref, bom, x, y, noVal = false) {
     P(`M ${x + 26} ${y} L ${x} ${y} L ${x} ${y + 13}`) +
     P(`M ${x + 8.7} ${y} L ${x + 8.7} ${y + 13}`) +
     `<polygon class="sch-fill" points="${x},${y + 10.8} ${x - 4.3},${y + 4.3} ${x + 4.3},${y + 4.3}"/>`
-  regPin(ref, 'drain', x - 26, y); regPin(ref, 'source', x + 26, y); regPin(ref, 'gate', x, y + 26)
+  const body = flip ? `<g transform="matrix(-1,0,0,1,${2 * x},0)">${inner}</g>` : inner
+  regPin(ref, 'drain', flip ? x + 26 : x - 26, y); regPin(ref, 'source', flip ? x - 26 : x + 26, y); regPin(ref, 'gate', x, y + 26)
   return hot(ref, bom, [x - 26, y - 12, 52, 40], body, [x, y - 26, 'middle', noVal])
 }
 
@@ -331,7 +337,7 @@ function boost(bom, variant) {
   const rect =
     variant === 'synchronous'
       ? [
-          wire(240, 80, 284, 80), mosfetH('Q2', bom, 310, 80, true), wire(336, 80, 560, 80),
+          wire(240, 80, 284, 80), mosfetH('Q2', bom, 310, 80, true, true), wire(336, 80, 560, 80),
           diode('D2', bom, 310, 40, 'right', 'above', true), wire(284, 80, 284, 40, 290, 40), wire(330, 40, 336, 40, 336, 80),
         ]
       : [diode('D1', bom, 310, 80, 'right'), wire(240, 80, 290, 80), wire(330, 80, 560, 80)]
@@ -733,7 +739,7 @@ function acf(bom) {
     wire(220, 190, 260, 190, 260, 185, 320, 185),
     sig(294, 145, 'g1'), sig(194, 110, 'gc'),
     // secondary synchronous rectifiers SRfwd (series) + SRfw (freewheel)
-    wire(390, 155, 440, 155, 440, 120, 474, 120), mosfetH('SRfwd', bom, 500, 120, true), wire(526, 120, 570, 120), dot(570, 120),
+    wire(390, 155, 440, 155, 440, 120, 474, 120), mosfetH('SRfwd', bom, 500, 120, true, true), wire(526, 120, 570, 120), dot(570, 120),
     mosfetV('SRfw', bom, 570, 195, 'right', true), wire(570, 120, 570, 169), wire(570, 221, 570, 300), dot(570, 300),
     wire(390, 235, 440, 235, 440, 300), dot(440, 300),
     sig(500, 146, 'sr1', 'down'), sig(544, 195, 'sr2'),
@@ -913,7 +919,8 @@ function pshb(bom, variant = 'fullBridge') {
     mosfetV('S3', bom, 250, 270, 'right', true), wire(250, 244, 250, 225), wire(250, 296, 250, 310), dot(250, 310),
     mosfetV('S4', bom, 250, 350, 'right', true), wire(250, 324, 250, 310), wire(250, 376, 250, 340, 200, 340),
     // clamp diodes tie inner nodes to the neutral (mid)
-    diode('DC1', bom, 200, 140, 'left'), wire(180, 140, 150, 140, 150, 170), wire(220, 140, 250, 140),
+    // DC1: neutral → upper inner node (anode=neutral); DC2: lower inner node → neutral (anode=lower)
+    diode('DC1', bom, 200, 140, 'right'), wire(180, 140, 150, 140, 150, 170), wire(220, 140, 250, 140),
     diode('DC2', bom, 200, 310, 'left', 'below'), wire(180, 310, 150, 310, 150, 170), wire(220, 310, 250, 310),
     // stack output (bridge_a) → series Lr → primary; primary return → neutral (mid)
     wire(250, 225, 300, 225), indH('Lr', bom, 340, 225), wire(368, 225, 440, 225, 440, 195, tx - 10, 195),
@@ -1072,7 +1079,7 @@ function viennaLeg(bom, x, ph) {
     diode(`Dn${ph}`, bom, x, 300, 'up'), wire(x, 280, x, X), wire(x, 320, x, busN), dot(x, busN),
     wire(x, X, sx, X),
     mosfetV(`SW${ph}`, bom, sx, 160, 'right', true), wire(sx, 134, sx, X), wire(sx, 186, sx, 194),
-    mosfetV(`SQ${ph}`, bom, sx, 220, 'right', true), wire(sx, 246, sx, neu), dot(sx, neu),
+    mosfetV(`SQ${ph}`, bom, sx, 220, 'right', true, true), wire(sx, 246, sx, neu), dot(sx, neu), // flipped: common source with SW
     sig(sx - 26, 160, `g${ph}`), sig(sx - 26, 220, `g${ph}`),
   ]
 }
