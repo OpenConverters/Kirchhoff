@@ -779,33 +779,55 @@ function isolatedBuckBoost(bom) {
   ].join(''))
 }
 
-// ── Weinberg: current-fed push-pull with a coupled input choke feeding the primary tap ───
+// Four-winding transformer for the Weinberg / dual-inductor push-pull: two primary half-windings
+// (left, each fed by its own coupled-inductor winding — NOT joined at a shared tap) and two secondary
+// half-windings (right, center-tapped output). Returns terminal coords keyed by winding:
+//   pA{top,bot} pB{top,bot} sC{top,bot} sD{top,bot}, plus the svg body under data-ref=ref.
+function xfmr4(ref, bom, x, y) {
+  const cL = x - 2, cR = x + 2, top = y - 100, bot = y + 100
+  // winding vertical extents (2 stacked coils per side, gap at the core middle)
+  const yA = [top + 10, top + 80], yB = [bot - 80, bot - 10]
+  const body =
+    P(coilV(x - 10, yA[0], 3, (yA[1] - yA[0]) / 3, 8.4, -1)) + P(coilV(x - 10, yB[0], 3, (yB[1] - yB[0]) / 3, 8.4, -1)) +
+    P(coilV(x + 10, yA[0], 3, (yA[1] - yA[0]) / 3, 8.4, 1)) + P(coilV(x + 10, yB[0], 3, (yB[1] - yB[0]) / 3, 8.4, 1)) +
+    P(`M ${cL} ${top} L ${cL} ${bot}`, 'sch-wire') + P(`M ${cR} ${top} L ${cR} ${bot}`, 'sch-wire') +
+    `<circle class="sch-fill" cx="${x - 7}" cy="${yA[0] + 5}" r="2.3"/>` +
+    `<circle class="sch-fill" cx="${x + 7}" cy="${yA[0] + 5}" r="2.3"/>`
+  const el = hot(ref, bom, [x - 22, top - 6, 44, bot - top + 12], body, [x, top - 12, 'middle'])
+  return { el, pA: { top: [x - 10, yA[0]], bot: [x - 10, yA[1]] }, pB: { top: [x - 10, yB[0]], bot: [x - 10, yB[1]] },
+           sC: { top: [x + 10, yA[0]], bot: [x + 10, yA[1]] }, sD: { top: [x + 10, yB[0]], bot: [x + 10, yB[1]] } }
+}
+
+// ── Weinberg (dual-inductor / double-coupled current-fed push-pull): L1's TWO coupled windings each
+//    feed a SEPARATE push-pull primary half through its own DCR loop-breaker (Rdcra/Rdcrb) — they are
+//    NOT joined at a shared center tap. Each primary half is switched to ground by S1/S2. ────────────
 function weinberg(bom) {
-  const gy = 360
-  return svg(960, 430, [
-    srcDC(60, 210), wire(60, 195, 60, 100, 170, 100), wire(60, 225, 60, gy, 330, gy),
-    // coupled input choke L1 (two windings), each in series with its DCR loop-breaker (Rdcra/Rdcrb);
-    // the two windings feed the push-pull primary center tap (current-fed input)
-    xfmr('L1', bom, 190, 170, { h: 80, labelDx: -18, labelDy: -20 }),
-    wire(180, 130, 180, 100), dot(180, 100), wire(200, 130, 200, 100), dot(200, 100), // winding tops → VIN+
-    wire(180, 210, 180, 260, 210, 260), resH('Rdcra', bom, 240, 260, 'above'), wire(270, 260, 340, 260), // winding a → Rdcra
-    wire(200, 210, 200, 310, 210, 310), resH('Rdcrb', bom, 240, 310, 'below'), wire(270, 310, 340, 310), // winding b → Rdcrb
-    wire(340, 260, 340, 310), dot(340, 285), wire(340, 285, 466, 285, 466, 210), // both breakers → primary CT
-    // push-pull primary (center-tapped) at T1; each outer end drives a switch to ground
-    xfmr('T1', bom, 490, 210, { h: 140, ct: 'both', labelDy: -12 }),
-    mosfetV('S1', bom, 410, 150, 'right', true), wire(480, 140, 410, 140, 410, 124), wire(410, 176, 410, gy), dot(410, gy),
-    mosfetV('S2', bom, 330, 300, 'right', true), wire(480, 280, 330, 280, 330, 274), wire(330, 326, 330, gy),
-    gnd(370, gy), wire(410, gy, 330, gy),
-    sig(384, 150, 'g1'), sig(304, 300, 'g2'),
-    // center-tapped full-wave secondary → Dpos / Dneg → Cout ∥ load
-    wire(500, 140, 500, 110, 590, 110), diode('Dpos', bom, 610, 110, 'right'), wire(630, 110, 690, 110), dot(690, 110),
-    wire(500, 280, 500, 320, 590, 320), diode('Dneg', bom, 610, 320, 'right', 'below'), wire(630, 320, 690, 320), wire(690, 320, 690, 110),
-    wire(514, 210, 540, 210, 540, gy + 30, 840, gy + 30),
-    wire(690, 110, 840, 110), dot(760, 110),
-    capV('Cout', bom, 760, 235), wire(760, 110, 760, 215), wire(760, 255, 760, gy + 30), dot(760, gy + 30),
-    loadR(840, 235, 110, gy + 30), dot(840, 110), dot(840, gy + 30),
-    port(900, 110, 'VOUT'), wire(840, 110, 900, 110),
-    ctrlIC(bom, 560, 60, ['g1', 'g2']),
+  const gy = 380
+  const T = xfmr4('T1', bom, 560, 230)
+  const [pAt, pAb] = [T.pA.top, T.pA.bot], [pBt, pBb] = [T.pB.top, T.pB.bot]
+  const [sCt, sCb] = [T.sC.top, T.sC.bot], [sDt, sDb] = [T.sD.top, T.sD.bot]
+  return svg(1000, 440, [
+    srcDC(60, 210), wire(60, 195, 60, 90, 190, 90), wire(60, 225, 60, gy, 430, gy),
+    // coupled input choke L1 (two windings), both fed from VIN+; each winding returns through its DCR
+    // loop-breaker to a DIFFERENT primary half of T1 (the defining dual-inductor structure)
+    xfmr('L1', bom, 210, 170, { h: 80, labelDx: -18, labelDy: -20 }),
+    wire(200, 130, 200, 90), dot(200, 90), wire(220, 130, 220, 90), dot(220, 90),
+    wire(200, 210, 200, 250, 250, 250), resH('Rdcra', bom, 280, 250, 'above'), wire(310, 250, pAb[0], 250, pAb[0], pAb[1]), // L1a → Rdcra → pri A bottom
+    wire(220, 210, 220, 320, 250, 320), resH('Rdcrb', bom, 280, 320, 'below'), wire(310, 320, pBt[0], 320, pBt[0], pBt[1]), // L1b → Rdcrb → pri B top
+    T.el,
+    // each primary half's outer end → its own switch → ground
+    mosfetV('S1', bom, 470, 180, 'right', true), wire(pAt[0], pAt[1], 470, pAt[1], 470, 154), wire(470, 206, 470, gy), dot(470, gy),
+    mosfetV('S2', bom, 470, 330, 'right', true), wire(pBb[0], pBb[1], 470, pBb[1], 470, 304), wire(470, 356, 470, gy),
+    gnd(430, gy), sig(444, 180, 'g1'), sig(444, 330, 'g2'),
+    // center-tapped full-wave secondary: outer ends → Dpos / Dneg, inner ends → CT (ground) → Cout ∥ load
+    wire(sCt[0], sCt[1], 600, sCt[1], 600, 110, 640, 110), diode('Dpos', bom, 660, 110, 'right'), wire(680, 110, 740, 110), dot(740, 110),
+    wire(sDb[0], sDb[1], 600, sDb[1], 600, 350, 640, 350), diode('Dneg', bom, 660, 350, 'right', 'below'), wire(680, 350, 740, 350), wire(740, 350, 740, 110),
+    wire(sCb[0], sCb[1], 610, sCb[1], 610, sDt[1], sDt[0], sDt[1]), wire(610, (sCb[1] + sDt[1]) / 2, 610, gy), dot(610, gy), // CT → gnd
+    wire(740, 110, 900, 110), dot(820, 110),
+    capV('Cout', bom, 820, 245), wire(820, 110, 820, 225), wire(820, 265, 820, gy), dot(820, gy),
+    loadR(900, 245, 110, gy), dot(900, 110), dot(900, gy),
+    port(960, 110, 'VOUT'), wire(900, 110, 960, 110),
+    ctrlIC(bom, 620, 60, ['g1', 'g2']),
   ].join(''))
 }
 
