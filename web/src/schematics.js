@@ -386,7 +386,7 @@ function zeta(bom) {
 function fsbb(bom) {
   const top = 70, gy = 320, mid = 190
   return svg(860, 450, [
-    srcDC(60, 195), wire(60, 180, 60, top, 220, top), wire(60, 210, 60, gy, 220, gy),
+    srcDC(60, 195), wire(60, 180, 60, top, 220, top), wire(60, 210, 60, gy, 680, gy), // continuous ground rail
     // left leg Q1/Q2 over switch node sw1 (Q1.drain=VIN, mid=sw1, Q2.source=gnd)
     mosfetV('Q1', bom, 220, 132, 'right', true), wire(220, top, 220, 106), wire(220, 158, 220, mid), dot(220, mid),
     mosfetV('Q2', bom, 220, 248, 'right', true), wire(220, mid, 220, 222), wire(220, 274, 220, gy), dot(220, gy),
@@ -404,7 +404,6 @@ function fsbb(bom) {
     // VOUT rail off Q3 drain
     wire(440, top, 720, top), dot(620, top),
     capV('Cout', bom, 620, 195), wire(620, top, 620, 175), wire(620, 215, 620, gy), dot(620, gy),
-    wire(440, gy, 680, gy),
     loadR(680, 195, top, gy), dot(680, top),
     gnd(330, gy), port(770, top, 'VOUT'), wire(720, top, 770, top),
     sig(194, 132, 'g1'), sig(194, 248, 'g2'), sig(414, 132, 'g3'), sig(414, 248, 'g4'),
@@ -646,7 +645,7 @@ function dab(bom) {
     ]
   }
   return svg(1300, 470, [
-    srcDC(50, 190), wire(50, 175, 50, top, 230, top), wire(50, 205, 50, gy, 230, gy),
+    srcDC(50, 190), wire(50, 175, 50, top, 450, top), wire(50, 205, 50, gy, 450, gy), // rails span both primary legs + bias lanes
     gnd(50, gy),
     // ---- primary full bridge: leg A (QA/QB) + leg C (QC/QD) ----
     ...leg('QA', 'QB', 'RbiasA_hi', 'RbiasA_lo', 230, 130),
@@ -665,9 +664,9 @@ function dab(bom) {
     // T1 sec-top → midE ; T1 sec-bot → midG
     wire(580, 155, 580, 110, 770, 110, 770, mid),
     wire(580, 235, 620, 235, 620, 420, 890, 420, 890, mid),
-    // output: bridge legs' rails → Cout ∥ load → VOUT
-    dot(770, top), dot(890, top), wire(770, top, 1090, top), dot(1010, top),
-    dot(770, gy), dot(890, gy), wire(770, gy, 1050, gy),
+    // output: bridge legs' rails (spanning bias E lane at 660 → bias G at 990) → Cout ∥ load → VOUT
+    dot(770, top), dot(890, top), wire(660, top, 1090, top), dot(1010, top),
+    dot(770, gy), dot(890, gy), wire(660, gy, 1050, gy), gnd(960, gy), // isolated secondary return
     capV('Cout', bom, 1010, mid), wire(1010, top, 1010, mid - 20), wire(1010, mid + 20, 1010, gy), dot(1010, gy),
     loadR(1090, mid, top, gy), dot(1090, top),
     port(1150, top, 'VOUT'), wire(1090, top, 1150, top),
@@ -807,7 +806,7 @@ function weinberg(bom) {
   const [pAt, pAb] = [T.pA.top, T.pA.bot], [pBt, pBb] = [T.pB.top, T.pB.bot]
   const [sCt, sCb] = [T.sC.top, T.sC.bot], [sDt, sDb] = [T.sD.top, T.sD.bot]
   return svg(1000, 440, [
-    srcDC(60, 210), wire(60, 195, 60, 90, 190, 90), wire(60, 225, 60, gy, 430, gy),
+    srcDC(60, 210), wire(60, 195, 60, 90, 190, 90), wire(60, 225, 60, gy, 900, gy), // continuous ground/output-return rail
     // coupled input choke L1 (two windings), both fed from VIN+; each winding returns through its DCR
     // loop-breaker to a DIFFERENT primary half of T1 (the defining dual-inductor structure)
     xfmr('L1', bom, 210, 170, { h: 80, labelDx: -18, labelDy: -20 }),
@@ -857,7 +856,7 @@ function ahb(bom, variant = 'fullBridge') {
 function psfb(bom, variant = 'fullBridge') {
   const tx = 330, ty = 195, h = 90
   return svg(1040, 430, [
-    srcDC(60, 175), wire(60, 160, 60, 80, 320, 80), wire(60, 190, 60, 320, 200, 320),
+    srcDC(60, 175), wire(60, 160, 60, 80, 320, 80), wire(60, 190, 60, 320, 280, 320), // ground rail spans both legs
     mosfetV('QA', bom, 150, 128, 'right', true), wire(150, 102, 150, 80), dot(150, 80), wire(150, 154, 150, 200), dot(150, 200),
     mosfetV('QB', bom, 150, 246, 'right', true), wire(150, 200, 150, 220), wire(150, 272, 150, 320), dot(150, 320),
     mosfetV('QC', bom, 280, 128, 'right', true), wire(280, 102, 280, 80), dot(280, 80), wire(280, 154, 280, 195),
@@ -954,7 +953,7 @@ function srBridgeOut(bom, nx, ny, ny2, refs) {
 // ── CLLC: full bridge + primary tank Cr1–Lr1, symmetric secondary tank Lr2–Cr2, SR bridge ─
 function cllc(bom) {
   return svg(1040, 430, [
-    srcDC(60, 175), wire(60, 160, 60, 80, 300, 80), wire(60, 190, 60, 320, 110, 320),
+    srcDC(60, 175), wire(60, 160, 60, 80, 300, 80), wire(60, 190, 60, 320, 280, 320), // ground rail spans both legs
     mosfetV('Q1', bom, 150, 128, 'right', true), wire(150, 102, 150, 80), dot(150, 80), wire(150, 154, 150, 205), dot(150, 205),
     mosfetV('Q2', bom, 150, 250, 'right', true), wire(150, 205, 150, 224), wire(150, 276, 150, 320), dot(150, 320),
     mosfetV('Q3', bom, 280, 128, 'right', true), wire(280, 102, 280, 80), dot(280, 80), wire(280, 154, 280, 150),
@@ -977,7 +976,7 @@ function cllc(bom) {
 // ── CLLLC: like CLLC but with a discrete secondary resonant inductor path (QE..QH SR) ────
 function clllc(bom) {
   return svg(1040, 430, [
-    srcDC(60, 175), wire(60, 160, 60, 80, 300, 80), wire(60, 190, 60, 320, 110, 320),
+    srcDC(60, 175), wire(60, 160, 60, 80, 300, 80), wire(60, 190, 60, 320, 280, 320), // ground rail spans both legs
     mosfetV('Q1', bom, 150, 128, 'right', true), wire(150, 102, 150, 80), dot(150, 80), wire(150, 154, 150, 205), dot(150, 205),
     mosfetV('Q2', bom, 150, 250, 'right', true), wire(150, 205, 150, 224), wire(150, 276, 150, 320), dot(150, 320),
     mosfetV('Q3', bom, 280, 128, 'right', true), wire(280, 102, 280, 80), dot(280, 80), wire(280, 154, 280, 150),
