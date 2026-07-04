@@ -14,6 +14,7 @@
 #include <vector>
 #include <stdexcept>
 #include <cmath>
+#include <limits>
 
 namespace Kirchhoff {
 
@@ -96,12 +97,19 @@ FlybackDesign design_flyback(const json& tasInputs) {
     d.magnetizingInductance = req::provided_inductance(dr).value_or(
         voltsSeconds / rippleRatio / centerPrimaryRamp);
 
-    // Conduction mode (ABT #80): CCM (default) sizes L for continuous magnetizing current; DCM/BCM/QRM
-    // size L at/below the CCM–DCM boundary so the magnetizing current resets each cycle. A pinned magnetic
-    // (della-Pollock Pass 2) always wins. analytical_flyback already renders DCM vs CCM from L vs its own
-    // critical inductance, and the ngspice deck uses d.dutyCycle + d.magnetizingInductance — so the mode
-    // flows to the design values, the analytical waveforms AND the simulation from this one knob.
+    // Conduction mode (ABT #80): CCM (default) sizes L for continuous magnetizing current; DCM/BCM size L
+    // at/below the CCM–DCM boundary so the magnetizing current resets each cycle; QRM is boundary
+    // conduction PLUS a first-valley idle (below). A pinned magnetic (della-Pollock Pass 2) always wins.
+    // analytical_flyback already renders DCM vs CCM from L vs its own critical inductance, and the ngspice
+    // deck uses d.dutyCycle + d.magnetizingInductance — so the mode flows to the design values, the
+    // analytical waveforms AND the simulation from this one knob.
     const std::string mode = cfg::get_str(d.config, "mode", "ccm");
+    if (mode != "ccm" && mode != "dcm" && mode != "bcm" && mode != "qrm")
+        throw std::runtime_error("design_flyback: unknown conduction mode '" + mode +
+                                 "' (flyback modes: ccm, dcm, bcm, qrm)");
+    d.mode = mode;
+    d.resonantCapacitance = 0.0;
+    d.valleyDeadTime = 0.0;
     // CCM–DCM boundary (critical) inductance at the OPERATING point (Basso 2nd ed. p.747) — the same
     // formula analytical_flyback uses, evaluated at the operating Vin (not the min-Vin design corner).
     const double auxV = n * (d.outputVoltage + d.diodeDrop);
@@ -115,17 +123,36 @@ FlybackDesign design_flyback(const json& tasInputs) {
             // keep the ripple-sized CCM inductance above
         } else if (mode == "dcm") {
             d.magnetizingInductance = 0.6 * Lcrit;                 // solidly discontinuous
-        } else if (mode == "bcm" || mode == "qrm") {
-            d.magnetizingInductance = Lcrit;                        // critical (BCM) / valley-switched (QRM) boundary
-        } else {
-            throw std::runtime_error("design_flyback: unknown conduction mode '" + mode +
-                                     "' (flyback modes: ccm, dcm, bcm, qrm)");
+        } else if (mode == "bcm") {
+            d.magnetizingInductance = Lcrit;                        // critical: conduction fills the period
+        } else { // qrm
+            // Quasi-resonant (first-valley switching) at the declared fsw: boundary conduction plus a
+            // half-resonant-period idle t_v = π·√(Lm·Cr) during which the drain rings on Lm·Cr and the
+            // switch turns on at the first valley (Vds = Vin − Vor). Cycle timing at the operating point:
+            //     T = t_on + t_reset + t_v,   t_reset = Vin·t_on/Vor      (volt-second balance)
+            // with full energy transfer per cycle (DCM-family energy balance):
+            //     Pin = ½·Lm·Ipk²·fsw,  Ipk = Vin·t_on/Lm   ⇒   Lm = Vin²·t_on²/(2·Pin·T).
+            // Substituting Lm into t_v makes t_v ∝ t_on, so t_on solves in closed form:
+            //     t_on = T / (1 + Vin/Vor + π·Vin·√(Cr/(2·Pin·T))).
+            const double Cr  = cfg::qr_resonant_cap(d.config);
+            const double T   = 1.0 / d.switchingFrequency;
+            const double Pin = d.outputPower / d.efficiency;
+            const double tOn = T / (1.0 + d.inputVoltage / auxV
+                                        + M_PI * d.inputVoltage * std::sqrt(Cr / (2.0 * Pin * T)));
+            d.magnetizingInductance = d.inputVoltage * d.inputVoltage * tOn * tOn / (2.0 * Pin * T);
+            d.resonantCapacitance   = Cr;
+            d.valleyDeadTime        = M_PI * std::sqrt(d.magnetizingInductance * Cr);
         }
     }
+    if (mode == "qrm" && d.resonantCapacitance == 0.0) {
+        // Pinned magnetic: the boundary solve above was skipped, but the valley timing is still defined
+        // by the pinned Lm against the drain-node capacitance.
+        d.resonantCapacitance = cfg::qr_resonant_cap(d.config);
+        d.valleyDeadTime      = M_PI * std::sqrt(d.magnetizingInductance * d.resonantCapacitance);
+    }
     // Operating-point duty: DCM/BCM/QRM follow the energy-balance duty D = sqrt(2·Pin·L·fsw)/Vin; CCM keeps
-    // the voltage-ratio duty computed above. (QRM valley-switching only delays turn-on — a control
-    // refinement — so its design-point waveform equals BCM here; variable-frequency valley tracking is a
-    // regulation concern, not a design-point change.)
+    // the voltage-ratio duty computed above. (For QRM this lands exactly on t_on/T from the solve above:
+    // √(2·Pin·Lm·fsw)/Vin = t_on·fsw by construction.)
     if (mode != "ccm") {
         const double Pin = d.outputPower / d.efficiency;
         const double dEnergy = std::sqrt(2.0 * Pin * d.magnetizingInductance * d.switchingFrequency) / d.inputVoltage;
@@ -221,6 +248,16 @@ json build_flyback_brick(const FlybackDesign& d, const PEAS::Fidelity& f) {
     connections.push_back(net("0",     { pe("Q1", "source"), pe("Cin", "2"),
                                          pe("T1", "secondary1_start"),
                                          pe("Cout", "2"), pe("Rload", "2") }));
+    // QRM: real drain-source resonant capacitor so the deck's drain rings after diode cutoff and
+    // turn-on lands in the first valley (see build_flyback_tas for the sizing rationale).
+    if (d.resonantCapacitance > 0.0) {
+        const double vdsStress = d.inputVoltageMax + d.turnsRatio * d.outputVoltage;
+        components.push_back(atom(CAS::cas_to_cias(capDoc(d.resonantCapacitance,
+                                                          vdsStress / cfg::v_derate_capacitor(d.config)), f),
+                                  "Cres"));
+        connections.at(1)["endpoints"].push_back(pe("Cres", "1"));   // DRAIN
+        connections.at(3)["endpoints"].push_back(pe("Cres", "2"));   // 0
+    }
     connections.push_back(net("SEC",   { pe("T1", "secondary1_end"), pe("D1", "anode") }));
     connections.push_back(net("VOUT",  { pe("D1", "cathode"), pe("Cout", "1"),
                                          pe("Rload", "1"), po("VOUT") }));
@@ -300,10 +337,18 @@ json build_flyback_tas(const FlybackDesign& d) {
     }
     const double Pin = totalOutputPower / d.efficiency;
     const double IinMin = Pin / d.inputVoltageMin;
+    // The design's rectifier drop is passed through (NOT 0) so the solver's reflected voltage Vor —
+    // and with it the reset/idle split (t_reset = Vin·t_on/Vor) — matches the deck's DIDEAL diode:
+    // the QR valley arc then spans exactly the designed half resonant period t_v = π·√(Lm·Cres).
+    // (QRM: d.resonantCapacitance > 0 renders the valley arc + magnetizing ring on the idle tail; at the
+    // worst corner Vin_min the converter runs deeper into conduction, the idle vanishes and the ring with it.)
+    const double rippleNaN = std::numeric_limits<double>::quiet_NaN();
     const MAS::OperatingPoint aopWorst = AN::analytical_flyback(d.inputVoltageMin, Vouts, iouts,
-                                                               ratios, fsw, Lm, 0.0, d.efficiency);
+                                                               ratios, fsw, Lm, d.diodeDrop, d.efficiency,
+                                                               rippleNaN, d.resonantCapacitance);
     const MAS::OperatingPoint aopNom   = AN::analytical_flyback(d.inputVoltage,    Vouts, iouts,
-                                                               ratios, fsw, Lm, 0.0, d.efficiency);
+                                                               ratios, fsw, Lm, d.diodeDrop, d.efficiency,
+                                                               rippleNaN, d.resonantCapacitance);
     const double IpkPri  = AN::winding_current(aopWorst, 0, "peak");
     const double IrmsPri = AN::winding_current(aopWorst, 0, "rms");
 
@@ -350,6 +395,24 @@ json build_flyback_tas(const FlybackDesign& d) {
         conn("clmp_mid", {pin("Cclmp", "2"), pin("Rclmp", "1")}),
         conn("gate",   {pin("Q1", "gate"), prt("gate")}),
         conn("dc_neg", {pin("Q1", "source"), pin("Cin", "2"), prt("dc-")})});
+    // QRM: REAL drain-source resonant capacitor (CAS role "resonant") — the valley-timing element the
+    // design solves around (t_v = π·√(Lm·Cres)): physically the lumped switch Coss + transformer winding
+    // capacitance (plus any added ZVS-extension C). Included as a sourced part so the simulated drain
+    // actually rings after diode cutoff and turn-on lands in the first valley. NOT a numerical aid — never
+    // stripped at real fidelity.
+    if (d.resonantCapacitance > 0.0) {
+        json capCres; capCres["capacitor"] = json::object();
+        capCres["inputs"]["designRequirements"] = req::capacitor(
+            d.resonantCapacitance, ratedVds,
+            d.resonantCapacitance * VdsStress * fsw,           // ~charge·f_sw it cycles per period
+            0.01 * std::sqrt(Lm / d.resonantCapacitance),      // ESR ≪ Z_r keeps the valley tank underdamped
+            "resonant");
+        inv["components"].push_back(comp("Cres", capCres));
+        for (auto& c : inv["connections"]) {
+            if (c["name"] == "sw")     c["endpoints"].push_back(pin("Cres", "1"));
+            if (c["name"] == "dc_neg") c["endpoints"].push_back(pin("Cres", "2"));
+        }
+    }
 
     // typed terminal bindings (portType) + stage/ISC builders — a powerStage has one input + one output;
     // the isolation stage fans out (outputPorts[]). Defined before the per-output loop that uses them.

@@ -96,6 +96,12 @@ constexpr double kDiodeSnubberCap     = 1e-9;     // series-RC across a hard-com
 // commutation droop enough to fail points. So it is a named, documented, overridable constant — never a
 // scattered literal. Override per design via config "nodeSnubberCap".
 constexpr double kNodeSnubberCap    = 2.2e-9;
+// Quasi-resonant (valley-switching) flyback drain-node resonant capacitance. This is a REAL, load-bearing
+// design element (it sets the valley timing t_v = π·√(Lm·Cr) the QRM design solves around), not a numerical
+// aid. Default = a typical drain-node total for the sub-150 W QR class: superjunction-FET Coss(er)
+// (~50–100 pF) + transformer intrawinding capacitance (~100–150 pF). Override per design via config
+// "resonantCapacitance" (e.g. when an external ZVS-extension cap is added).
+constexpr double kQrResonantCap     = 220e-12;
 constexpr double kBiasLossFrac      = 1e-3;   // a DC-bias/bleed resistor dissipates <= this fraction of rated P
 constexpr double kLoopBreakerFrac   = 1e-4;   // numerical loop-breaker R as a fraction of the reflected load R
 constexpr double kVoltageDerate     = 0.8;    // operate devices at <= this fraction of rating (IPC-9592)
@@ -143,6 +149,7 @@ inline bool is_numerical_aid(const json& data) {
 // Numerical commutation-snubber capacitances — documented constants above, each overridable. (Not
 // operating-point-derived; see kNodeSnubberCap for why a formula is wrong for these.)
 inline double node_snubber_cap(const json& in)      { return get(in, "nodeSnubberCap",      kNodeSnubberCap); }
+inline double qr_resonant_cap(const json& in)       { return get(in, "resonantCapacitance", kQrResonantCap); }
 inline double rectifier_snubber_cap(const json& in) { return get(in, "rectifierSnubberCap", kRectifierSnubberCap); }
 inline double diode_snubber_cap(const json& in)     { return get(in, "diodeSnubberCap",     kDiodeSnubberCap); }
 

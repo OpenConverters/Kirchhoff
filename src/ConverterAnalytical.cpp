@@ -239,7 +239,7 @@ MAS::OperatingPoint analytical_flyback(double inputVoltage,
                                        const std::vector<double>& turnsRatios,
                                        double switchingFrequency, double inductance,
                                        double diodeVoltageDrop, double efficiency,
-                                       double currentRippleRatio) {
+                                       double currentRippleRatio, double resonantCapacitance) {
     using Lbl = MAS::WaveformLabel;
     if (outputVoltages.empty() || outputVoltages.size() != outputCurrents.size() ||
         outputVoltages.size() != turnsRatios.size())
@@ -282,27 +282,92 @@ MAS::OperatingPoint analytical_flyback(double inputVoltage,
     double centerPrimaryCurrentRamp = centerSecondaryCurrentRampLumped / turnsRatios[0];
 
     double primaryCurrentAverage = centerPrimaryCurrentRamp;
-    double ripple;
-    if (std::isnan(currentRippleRatio)) {
-        double primaryCurrentPeakToPeak = inputVoltage * dutyCycle / switchingFrequency / inductance;
-        ripple = primaryCurrentPeakToPeak / centerPrimaryCurrentRamp;
-    } else {
-        ripple = currentRippleRatio;
-    }
-    double primaryCurrentPeakToPeak = centerPrimaryCurrentRamp * ripple * 2;
+    // Magnetizing ramp straight from Faraday: ΔI = Vin·D·T/L — that IS the primary peak-to-peak.
+    // NOTE: MKF's Flyback.cpp folded this through ripple = ΔI/center and then pkpk = center·ripple·2,
+    // silently DOUBLING the ripple: 2× the primary peak in DCM/BCM/QRM and double the CCM ripple
+    // (ngspice cross-check: DCM Ipk 6.41 A vs simulated 3.21 A before this fix). KH owns the converter
+    // solvers now and enforces the physics. An explicitly supplied currentRippleRatio keeps MKF's
+    // pkpk = 2·ratio·center convention.
+    double primaryCurrentPeakToPeak = std::isnan(currentRippleRatio)
+        ? inputVoltage * dutyCycle / switchingFrequency / inductance
+        : centerPrimaryCurrentRamp * currentRippleRatio * 2;
+    // Half-ripple over center: the secondary loop below scales each rail's pk-pk by ripple·2 so the
+    // reflected ramp mirrors the primary's (pkpk_sec_i = N_i·powerDivider_i·pkpk_pri).
+    double ripple = primaryCurrentPeakToPeak / (2.0 * centerPrimaryCurrentRamp);
     double primaryCurrentOffset = std::max(0.0, primaryCurrentAverage - primaryCurrentPeakToPeak / 2);
 
     // mode follows the primary current offset (CCM iff the ramp does not touch zero).
     bool modeIsCcm = (primaryCurrentOffset > 0);
 
+    // DCM/boundary reset interval: the magnetizing current returns to zero after
+    // t_reset = Vin·t_on/Vor (volt-second balance, identical to L·ΔI/Vor). min() against the off-window
+    // is the CCM/DCM boundary condition itself — conduction cannot outlast the off-time; at the boundary
+    // (t_reset = T−t_on) the dead segment degenerates to zero and the shape becomes the BCM rectangle.
+    const double period = 1.0 / switchingFrequency;
+    const double tOn = dutyCycle * period;
+    const double tReset = std::min(inputVoltage * tOn / maximumReflectedOutputVoltage, period - tOn);
+    const double idleTime = period - tOn - tReset;
+
+    // Quasi-resonant valley ring: with a drain-node resonant capacitance and an idle tail after the
+    // rectifier cuts off, Lm rings against Cr — winding voltage −Vor·cos(ω_r·τ) (drain Vin+Vor·cos,
+    // first valley at Vds = Vin−Vor), magnetizing ring current −(Vor/Z_r)·sin(ω_r·τ). The QRM design
+    // sizes the idle to exactly the half resonant period π·√(Lm·Cr) and turn-on lands at the valley;
+    // the arc is rendered over the ACTUAL idle tail (phase 0→π), so the few-% skew from the Vd=0 call
+    // convention stretches the arc slightly instead of leaving it open.
+    const bool qrRing = !modeIsCcm && resonantCapacitance > 0.0 && idleTime > 1e-6 * period;
+    constexpr int kQrArcPoints = 32;
+    // Appends the ring arc over the idle tail: value = amp·shape(π·frac) for frac ∈ (0, 1].
+    auto append_arc = [&](std::vector<double>& data, std::vector<double>& time, double amp,
+                          double (*shape)(double)) {
+        for (int k = 1; k <= kQrArcPoints; ++k) {
+            const double frac = static_cast<double>(k) / kQrArcPoints;
+            time.push_back(tOn + tReset + frac * idleTime);
+            data.push_back(amp * shape(M_PI * frac));
+        }
+    };
+
     MAS::OperatingPoint operatingPoint;
     // Primary
     {
-        MAS::Waveform currentWaveform = WP::create_waveform(Lbl::FLYBACK_PRIMARY, primaryCurrentPeakToPeak,
-                                                            switchingFrequency, dutyCycle, primaryCurrentOffset, deadTime);
-        MAS::Waveform voltageWaveform = modeIsCcm
-            ? WP::create_waveform(Lbl::RECTANGULAR, primaryVoltagePeaktoPeak, switchingFrequency, dutyCycle, 0, deadTime)
-            : WP::create_waveform(Lbl::RECTANGULAR_WITH_DEADTIME, primaryVoltagePeaktoPeak, switchingFrequency, dutyCycle, 0, deadTime);
+        MAS::Waveform currentWaveform;
+        if (qrRing) {
+            // Ramp 0→ΔI during t_on, zero while the rectifier conducts, then the magnetizing ring dip
+            // −(Vor/Z_r)·sin — returning to exactly 0 at the valley/turn-on, closing the period.
+            const double ringAmplitude = maximumReflectedOutputVoltage
+                                         / std::sqrt(inductance / resonantCapacitance);
+            std::vector<double> data{0, primaryCurrentPeakToPeak, 0, 0};
+            std::vector<double> time{0, tOn, tOn, tOn + tReset};
+            append_arc(data, time, -ringAmplitude, [](double p) { return std::sin(p); });
+            currentWaveform.set_data(data);
+            currentWaveform.set_time(time);
+            currentWaveform.set_ancillary_label(Lbl::CUSTOM);
+        } else {
+            currentWaveform = WP::create_waveform(Lbl::FLYBACK_PRIMARY, primaryCurrentPeakToPeak,
+                                                  switchingFrequency, dutyCycle, primaryCurrentOffset, deadTime);
+        }
+        MAS::Waveform voltageWaveform;
+        if (modeIsCcm) {
+            voltageWaveform = WP::create_waveform(Lbl::RECTANGULAR, primaryVoltagePeaktoPeak, switchingFrequency, dutyCycle, 0, deadTime);
+        } else {
+            // DCM/boundary: +Vin while the switch conducts, −Vor while the magnetizing current resets,
+            // then the idle tail — flat 0 (plain DCM) or the QR valley arc −Vor·cos rising to +Vor at
+            // turn-on. The RECTANGULAR_WITH_DEADTIME builder cannot render this — it rebalances the
+            // levels over the full period and pins the negative segment to period−deadTime, which put
+            // the reflected voltage across the winding for the whole off-time (no zero segment) — so
+            // build the exact shape. Volt-second balance holds by construction of tReset.
+            std::vector<double> data{inputVoltage, inputVoltage,
+                                     -maximumReflectedOutputVoltage, -maximumReflectedOutputVoltage};
+            std::vector<double> time{0, tOn, tOn, tOn + tReset};
+            if (qrRing) {
+                append_arc(data, time, -maximumReflectedOutputVoltage, [](double p) { return std::cos(p); });
+            } else {
+                data.insert(data.end(), {0.0, 0.0});
+                time.insert(time.end(), {tOn + tReset, period});
+            }
+            voltageWaveform.set_data(data);
+            voltageWaveform.set_time(time);
+            voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
+        }
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Primary"));
     }
@@ -317,29 +382,42 @@ MAS::OperatingPoint analytical_flyback(double inputVoltage,
         double secondaryCurrentPeaktoPeak = secondaryCurrentAverage * ripple * 2;
         double secondaryCurrentOffset = std::max(0.0, secondaryCurrentAverage - secondaryCurrentPeaktoPeak / 2);
 
-        double secondaryVoltageDuty = dutyCycle;
-        if (isDcm) {
-            double secondaryAux = maximumSecondaryVoltage * turnsRatios[i];
-            secondaryVoltageDuty = secondaryAux / (inputVoltage + secondaryAux);
-        }
-
         MAS::Waveform currentWaveform, voltageWaveform;
         if (modeIsCcm) {
-            voltageWaveform = WP::create_waveform(Lbl::SECONDARY_RECTANGULAR, secondaryVoltagePeaktoPeak, switchingFrequency, secondaryVoltageDuty, 0, deadTime);
+            voltageWaveform = WP::create_waveform(Lbl::SECONDARY_RECTANGULAR, secondaryVoltagePeaktoPeak, switchingFrequency, dutyCycle, 0, deadTime);
             currentWaveform = WP::create_waveform(Lbl::FLYBACK_SECONDARY, secondaryCurrentPeaktoPeak, switchingFrequency, dutyCycle, secondaryCurrentOffset, deadTime);
         } else {
-            voltageWaveform = WP::create_waveform(Lbl::SECONDARY_RECTANGULAR_WITH_DEADTIME, secondaryVoltagePeaktoPeak, switchingFrequency, secondaryVoltageDuty, 0, deadTime);
-            // DCM: the rectifier conducts only for t_sec (< toff), the reflected secondary current ramping
-            // from its peak down to zero. secondaryCurrentPeaktoPeak/2 is the physical reflected peak
-            // (= N_i·powerDivider_i·I_pri_pk). Confine the falling ramp to t_sec via a derived dead time so the
-            // full-period average equals the load current Iout_i: <i_sec> = (I_pk/2)·(t_sec·fsw) = Iout_i.
+            // DCM/boundary secondary voltage: −Vin/N_i while the switch conducts, +(Vout_i+Vd) while the
+            // rectifier conducts (t_reset), then the idle tail — flat 0 (plain DCM) or the mirrored QR
+            // valley arc +(Vout_i+Vd)·cos falling to −(Vout_i+Vd) at turn-on. Exact mirror of the
+            // primary's custom shape, on the same timeline (the old SECONDARY_RECTANGULAR_WITH_DEADTIME
+            // rendering put the on/off transition at a volt-second-fudged duty, out of sync with the
+            // current waveform, and had no zero segment).
+            std::vector<double> vdata{minimumSecondaryVoltage, minimumSecondaryVoltage,
+                                      maximumSecondaryVoltage, maximumSecondaryVoltage};
+            std::vector<double> vtime{0, tOn, tOn, tOn + tReset};
+            if (qrRing) {
+                append_arc(vdata, vtime, maximumSecondaryVoltage, [](double p) { return std::cos(p); });
+            } else {
+                vdata.insert(vdata.end(), {0.0, 0.0});
+                vtime.insert(vtime.end(), {tOn + tReset, period});
+            }
+            voltageWaveform.set_data(vdata);
+            voltageWaveform.set_time(vtime);
+            voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
+            // DCM: the rectifier conducts only for t_sec (≤ toff), the reflected secondary current ramping
+            // from its peak down to zero. With the corrected ripple above, secondaryCurrentPeaktoPeak IS the
+            // physical reflected peak (= N_i·powerDivider_i·I_pri_pk; the primary offset is 0 in DCM).
+            // Confine the falling ramp to t_sec via a derived dead time so the full-period average equals
+            // the load current Iout_i: <i_sec> = (I_pk/2)·(t_sec·fsw) = Iout_i. The dead time is floored at
+            // zero: at the CCM/DCM boundary t_sec fills the whole off-window (t_sec > toff cannot happen
+            // physically — it IS the boundary condition).
             // NOTE: MKF's analytical Flyback.cpp leaves deadTime=0 here and the secondary integrates to
             // (I_pk/2)·(1−D) ≠ Iout (a latent bug; MKF only checks secondary-avg in its ngspice path). KH
             // owns the converter solvers now and enforces the correct physics, matching the ngspice waveform.
-            const double secondaryPeakCurrent = secondaryCurrentPeaktoPeak / 2.0;
-            const double period = 1.0 / switchingFrequency;
+            const double secondaryPeakCurrent = secondaryCurrentPeaktoPeak;
             const double secondaryConductionTime = 2.0 * outputCurrents[i] / (secondaryPeakCurrent * switchingFrequency);
-            const double secondaryDeadTime = period - dutyCycle * period - secondaryConductionTime;
+            const double secondaryDeadTime = std::max(0.0, period - tOn - secondaryConductionTime);
             currentWaveform = WP::create_waveform(Lbl::FLYBACK_SECONDARY_WITH_DEADTIME, secondaryPeakCurrent, switchingFrequency, dutyCycle, 0.0, secondaryDeadTime);
         }
         operatingPoint.get_mutable_excitations_per_winding().push_back(

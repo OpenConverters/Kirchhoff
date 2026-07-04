@@ -44,6 +44,14 @@ struct FlybackDesign {
     nlohmann::json config;  // F
     double inputCapacitance;   // F
     std::vector<FlybackOutputLeg> outputs;   // >=1 entry; [0] duplicates the scalars above (ABT #86)
+
+    // Conduction-mode variant (config.mode: ccm/dcm/bcm/qrm; ABT #80). QRM (quasi-resonant / valley
+    // switching) is boundary conduction PLUS a half-resonant-period idle on the drain node: after the
+    // rectifier current reaches zero, Lm rings against the drain-node capacitance Cr and the switch
+    // turns on at the FIRST VALLEY (Vds = Vin − Vor), t_valley = π·√(Lm·Cr) after diode cutoff.
+    std::string mode;              // "ccm" | "dcm" | "bcm" | "qrm"
+    double resonantCapacitance;    // F — drain-node C (QRM only; 0 otherwise). Real part: Cres.
+    double valleyDeadTime;         // s — π·√(Lm·Cr), the designed idle between diode cutoff and turn-on
 };
 
 // Design from TAS-style inputs.designRequirements + a chosen operating point.

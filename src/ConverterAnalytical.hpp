@@ -96,13 +96,18 @@ MAS::OperatingPoint analytical_boost(double inputVoltage, double outputVoltage, 
 // current offset; the secondary rectangular-voltage duty switches to the volt-second value in
 // DCM. `currentRippleRatio` defaults to NaN → derived from L. Ported from MKF Flyback.cpp:123
 // (process_operating_points_for_input_voltage). Throws if the duty cycle > 1.
+// `resonantCapacitance` > 0 enables quasi-resonant (valley-switching) rendering: when the operating
+// point has an idle tail after the rectifier cuts off (DCM/QR), the primary voltage rings on Lm·Cr —
+// a half-cosine arc from −Vor up to +Vor (the first drain valley, Vds = Vin − Vor) — and the primary
+// current carries the magnetizing ring dip −(Vor/Zr)·sin, Zr = √(Lm/Cr). 0 keeps the flat idle.
 MAS::OperatingPoint analytical_flyback(double inputVoltage,
                                        const std::vector<double>& outputVoltages,
                                        const std::vector<double>& outputCurrents,
                                        const std::vector<double>& turnsRatios,
                                        double switchingFrequency, double inductance,
                                        double diodeVoltageDrop = 0.0, double efficiency = 1.0,
-                                       double currentRippleRatio = std::numeric_limits<double>::quiet_NaN());
+                                       double currentRippleRatio = std::numeric_limits<double>::quiet_NaN(),
+                                       double resonantCapacitance = 0.0);
 
 // Single-switch forward (CCM + DCM). `turnsRatios` is [demag(=1), sec0, sec1, …]; the
 // magnetizing inductance and the output-filter inductance (for the DCM boundary) are scalar

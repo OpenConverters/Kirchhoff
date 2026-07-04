@@ -142,8 +142,22 @@ TEST_CASE("design_flyback conduction modes size L at/below the critical boundary
     // DCM sits solidly below the boundary; DCM = 0.6·BCM by construction.
     CHECK(dcm.magnetizingInductance < bcm.magnetizingInductance);
     CHECK(dcm.magnetizingInductance == Catch::Approx(0.6 * bcm.magnetizingInductance).epsilon(1e-6));
-    // QRM shares BCM's boundary inductance at the design point (valley switching is a control refinement).
-    CHECK(qrm.magnetizingInductance == Catch::Approx(bcm.magnetizingInductance).epsilon(1e-9));
+    // QRM = boundary conduction + a first-valley idle t_v = π·√(Lm·Cres): the idle steals volt-seconds,
+    // so t_on (and with it Lm ∝ t_on²) lands BELOW the zero-idle BCM boundary, and the cycle timing
+    // closes exactly: t_on + t_reset + t_v = T (t_reset = Vin·t_on/Vor from volt-second balance).
+    CHECK(qrm.magnetizingInductance < bcm.magnetizingInductance);
+    CHECK(qrm.resonantCapacitance > 0.0);
+    CHECK(qrm.valleyDeadTime == Catch::Approx(M_PI * std::sqrt(qrm.magnetizingInductance * qrm.resonantCapacitance)).epsilon(1e-9));
+    {
+        const double T = 1.0 / qrm.switchingFrequency;
+        const double tOn = qrm.dutyCycle * T;
+        const double vor = qrm.turnsRatio * (qrm.outputVoltage + qrm.diodeDrop);
+        const double tReset = qrm.inputVoltage * tOn / vor;
+        CHECK(tOn + tReset + qrm.valleyDeadTime == Catch::Approx(T).epsilon(1e-6));
+    }
+    // BCM has no idle: no resonant cap, no valley dead time.
+    CHECK(bcm.resonantCapacitance == 0.0);
+    CHECK(bcm.valleyDeadTime == 0.0);
     // Non-CCM duty follows the energy-balance law and stays a valid (0,1) duty.
     CHECK(dcm.dutyCycle > 0.0);
     CHECK(dcm.dutyCycle < 1.0);
