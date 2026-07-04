@@ -93,6 +93,16 @@ KH_API std::string select_components(const std::string& tasJson, const std::stri
 KH_API std::string bind_part(const std::string& tasJson, const std::string& ref,
                              const std::string& envelopeJson);
 
+// Browser sourcing (no filesystem): load a prebuilt Kelvin shard from raw bytes into a persistent
+// in-module engine, then select over the loaded families. Candidates carry mpn/manufacturer/
+// margins/evidence + the record's byte span (srcOffset/srcLength) — NOT the full envelope; the
+// caller fetches the chosen record itself (HTTP Range into the hosted NDJSON) and passes it to
+// bind_part. kelvin_load_shard returns {family,rowCount,buildId}; kelvin_select returns a
+// SelectionResult, or {error:"NoCandidates",rejections,...} when nothing satisfies the request.
+KH_API std::string kelvin_load_shard(const std::string& family, const std::string& shardBytes);
+KH_API std::string kelvin_select(const std::string& category, const std::string& designReqJson,
+                                 const std::string& optionsJson);
+
 // One-shot: spec -> {topology, inputs, operatingPoint, diagnostics, tas}. Mirrors WebLibMKF process_converter.
 KH_API std::string process_converter(const std::string& topology, const std::string& specJson,
                               const std::string& engine);

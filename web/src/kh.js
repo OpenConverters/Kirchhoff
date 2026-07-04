@@ -84,3 +84,44 @@ export function generateNetlist(tas, flavor = 'ngspice', fidelity = { origin: 'R
 export function simulateNgspice(tas, fidelity = { origin: 'REQUIREMENTS' }) {
   return callJson('simulate_ngspice', JSON.stringify(tas), JSON.stringify(fidelity))
 }
+
+// ── Kelvin component sourcing (real parts from the TAS DB) ──────────────────
+// Prebuilt per-family index shards (.kidx) are hosted next to the SPA (public/kelvin/) and
+// loaded into the WASM engine on first use of a category; selection then runs fully in-browser
+// over the shard (no backend). Candidates carry MPN / manufacturer / margins / evidence + the
+// record's byte span — the full datasheet envelope is fetched on demand (Range) only when binding.
+const KELVIN_BASE = '/kelvin'
+const KIND_TO_CATEGORY = {
+  MOSFET: 'mosfet', Diode: 'diode', Capacitor: 'capacitor', Resistor: 'resistor',
+  Controller: 'controller', IGBT: 'igbt', BJT: 'bjt', Varistor: 'varistor',
+}
+const _kelvinShards = new Map() // family -> Promise<meta>
+
+export function kelvinCategoryFor(kind) {
+  return KIND_TO_CATEGORY[kind] ?? null
+}
+
+function ensureShard(category) {
+  if (!_kelvinShards.has(category)) {
+    _kelvinShards.set(category, (async () => {
+      const res = await fetch(`${KELVIN_BASE}/${category}.kidx`)
+      if (!res.ok) throw new Error(`Kelvin shard '${category}' not hosted (HTTP ${res.status})`)
+      const bytes = new Uint8Array(await res.arrayBuffer())
+      return callJson('kelvin_load_shard', category, bytes)
+    })())
+  }
+  return _kelvinShards.get(category)
+}
+
+// Given a BOM row's kind + its designRequirements (+ converter context for controllers/HV FETs),
+// return a Kelvin SelectionResult ({candidates, rejections, ...}) or {error:'NoCandidates',...}.
+export async function selectCandidates(kind, requirements, context = {}) {
+  const category = kelvinCategoryFor(kind)
+  if (!category) throw new Error(`no Kelvin category for kind '${kind}'`)
+  await ensureShard(category)
+  const options = { maxCandidates: 12 }
+  if (context.switchingFrequency) options.switchingFrequency = context.switchingFrequency
+  if (context.inputVoltage) options.inputVoltage = context.inputVoltage
+  if (context.topology) options.topology = context.topology
+  return callJson('kelvin_select', category, JSON.stringify(requirements), JSON.stringify(options))
+}

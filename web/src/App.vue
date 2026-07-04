@@ -235,6 +235,18 @@ const selectedPartWave = computed(() => {
   return { name: `${c.ref} · ${c.voltage?.label ?? 'V'}`, frequency: f, current: c.current, voltage: c.voltage }
 })
 
+// Converter context Kelvin needs for controllers (topology + Vin + fsw) and HV-mosfet total-loss
+// ranking (fsw). Read from the built TAS's designRequirements — the same block the selector uses.
+const kelvinContext = computed(() => {
+  const dr = result.value?.tas?.inputs?.designRequirements ?? {}
+  const nom = (x) => (typeof x === 'number' ? x : (x?.nominal ?? x?.minimum ?? x?.maximum))
+  return {
+    topology: topoId.value,
+    inputVoltage: nom(dr.inputVoltage),
+    switchingFrequency: nom(dr.switchingFrequency),
+  }
+})
+
 // ── bench/test hook ──────────────────────────────────────────────────────────
 // Read-only live view of the app's state for Playwright e2e (docs/TOPOLOGY_BENCH_PROPOSAL.md).
 // Tests DRIVE everything through the DOM; they only READ rich waveform/spec data through here
@@ -259,6 +271,9 @@ if (typeof window !== 'undefined') {
     get running() { return running.value },
     get runError() { return runError.value },
     get engineState() { return engineState.value },
+    // Open a component drawer by ref (the schematic click is hard to script) — for the Kelvin
+    // candidate-sourcing e2e. Pure UI action, mirrors a schematic/BOM click.
+    openPart: (ref) => openPart(ref),
   }
 }
 
@@ -787,6 +802,7 @@ provide('kh', {
       :part="selectedPart"
       :device-wave="selectedPartWave"
       :periods="form.showPeriods"
+      :context="kelvinContext"
       @close="selectedPart = null"
     />
   </div>

@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 
 #include "KelvinApi.hpp"  // kelvin::api::Engine / select_components / bind_part
+#include "Select.hpp"     // kelvin::NoCandidates
 
 using json = nlohmann::json;
 
@@ -43,6 +44,41 @@ std::string bind_part(const std::string& tasJson, const std::string& ref,
     return kelvin_guarded([&] {
         return kelvin::api::bind_part(json::parse(tasJson), ref, json::parse(envelopeJson)).dump();
     });
+}
+
+// --- browser sourcing: a persistent in-module engine fed prebuilt shard bytes ---------------
+namespace {
+kelvin::api::Engine& web_engine() {
+    static kelvin::api::Engine engine("", "", /*quiet=*/true);  // no filesystem; shards loaded by bytes
+    return engine;
+}
+}  // namespace
+
+std::string kelvin_load_shard(const std::string& family, const std::string& shardBytes) {
+    return kelvin_guarded([&] {
+        kelvin::ShardMeta m = web_engine().load_shard_bytes(family, shardBytes);
+        return json{{"family", kelvin::family_name(m.family)},
+                    {"rowCount", m.row_count},
+                    {"buildId", m.build_id}}
+            .dump();
+    });
+}
+
+std::string kelvin_select(const std::string& category, const std::string& reqJson,
+                          const std::string& optionsJson) {
+    try {
+        json req = reqJson.empty() ? json::object() : json::parse(reqJson);
+        json options = optionsJson.empty() ? json::object() : json::parse(optionsJson);
+        return web_engine().select(category, req, options).dump();
+    } catch (const kelvin::NoCandidates& e) {
+        return json{{"error", "NoCandidates"},
+                    {"category", e.category},
+                    {"rejections", e.rejections},
+                    {"totalRowsConsidered", e.total_rows_considered}}
+            .dump();
+    } catch (const std::exception& e) {
+        return std::string("Exception: ") + e.what();
+    }
 }
 
 }  // namespace api

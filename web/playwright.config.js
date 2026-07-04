@@ -26,6 +26,7 @@ export default defineConfig({
   projects: [
     { name: 'smoke', testMatch: /smoke\.spec\.js/, use: { ...devices['Desktop Chrome'] } },
     { name: 'knobs', testMatch: /(serialization|physics)\.spec\.js/, use: { ...devices['Desktop Chrome'] } },
+    { name: 'kelvin', testMatch: /kelvin\.spec\.js/, use: { ...devices['Desktop Chrome'] } },
   ],
   webServer: {
     command: 'npm run build && npm run preview -- --port 4173',

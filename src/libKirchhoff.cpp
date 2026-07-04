@@ -7,6 +7,11 @@
 // module (ENABLE_NGSPICE=ON) so the browser can both design AND simulate.
 
 #include <emscripten/bind.h>
+#include <emscripten/val.h>
+
+#include <string>
+#include <vector>
+
 #include "KirchhoffApi.hpp"
 
 EMSCRIPTEN_BINDINGS(kirchhoff) {
@@ -28,9 +33,18 @@ EMSCRIPTEN_BINDINGS(kirchhoff) {
     // realize requirements-derived datasheet models (real conduction) onto a spec-designed TAS
     em::function("realize_tas", &api::realize_tas);
     // Kelvin component sourcing: candidate lists per seed + bind a chosen part (DATASHEET fidelity).
-    // In the browser, dataDir/cacheDir are the Emscripten FS paths the worker mounts shards into.
     em::function("select_components", &api::select_components);
     em::function("bind_part", &api::bind_part);
+    // Browser sourcing (no FS): load prebuilt shard bytes, then select over the loaded families.
+    // Shard bytes are BINARY, so kelvin_load_shard takes a Uint8Array (not a std::string, whose
+    // embind marshalling is UTF-8 and would corrupt bytes >= 0x80). kelvin_select args are UTF-8
+    // JSON, so plain strings are fine.
+    em::function("kelvin_load_shard",
+                 em::optional_override([](std::string family, em::val bytes) {
+                     std::vector<unsigned char> v = em::vecFromJSArray<unsigned char>(bytes);
+                     return api::kelvin_load_shard(family, std::string(v.begin(), v.end()));
+                 }));
+    em::function("kelvin_select", &api::kelvin_select);
     em::function("diagnostics", &api::diagnostics);
     em::function("main_magnetic_inputs", &api::main_magnetic_inputs);
     // the one-shot Wizard entry point
