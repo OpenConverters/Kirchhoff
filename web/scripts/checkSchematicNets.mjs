@@ -106,10 +106,17 @@ for (const t of TOPOLOGIES) {
     for (const st of tas.topology?.stages ?? []) for (const c of st.circuit?.components ?? []) if (c.data?.magnetic !== undefined) magRefs.add(c.name)
 
     // drawn coords: unambiguous non-mag anchors keyed "ref|pin"; magnetic terminals grouped by ref;
-    // reference roots = wire pieces that contain a ground symbol or external port glyph.
+    // reference roots = wire pieces that contain a ground symbol or external port glyph. Primary earth
+    // (@gnd) and isolated secondary return (@sgnd + any *RTN* port) are tracked separately so the
+    // isolation barrier can be enforced.
     const byKey = new Map(), magTerms = new Map(), refRoots = new Set()
+    const primGndCoords = [], secRtnCoords = []
     for (const p of pins) {
-      if (p.ref === '@gnd' || p.ref === '@port') { const r = g.rootAt([p.x, p.y]); if (r !== null) refRoots.add(r) }
+      if (p.ref === '@gnd' || p.ref === '@sgnd' || p.ref === '@port') {
+        const r = g.rootAt([p.x, p.y]); if (r !== null) refRoots.add(r)
+        if (p.ref === '@gnd') primGndCoords.push([p.x, p.y])
+        else if (p.ref === '@sgnd' || /rtn/i.test(p.pin)) secRtnCoords.push([p.x, p.y])
+      }
       else if (magRefs.has(p.ref)) { (magTerms.get(p.ref) || magTerms.set(p.ref, []).get(p.ref)).push([p.x, p.y]) }
       else byKey.set(p.ref + '|' + p.pin, [p.x, p.y])
     }
@@ -148,6 +155,17 @@ for (const t of TOPOLOGIES) {
       if (floating) bits.push(`${floating} floating terminal`)
       if (wrongNet.length) bits.push(`terminal on foreign net ${wrongNet.map(netLabel).join(',')}`)
       if (bits.length) problems.push(`${Mref}[winding: ${bits.join('; ')}]`)
+    }
+    // D: ISOLATION BARRIER. On any transformer (isolated) topology the primary earth ground and the
+    // isolated secondary return must be DISTINCT drawn references joined only through the transformer —
+    // never by a wire. Enforce: (1) a distinct secondary return is drawn, (2) no wire root is shared
+    // between the primary @gnd and the secondary @sgnd/RTN glyphs (a shared root = a shorted barrier).
+    const isolated = [...pinNet.keys()].some((k) => magRefs.has(k.split('|')[0]) && /secondary/.test(k))
+    if (isolated) {
+      const primRoots = new Set(primGndCoords.map((c) => g.rootAt(c)).filter((r) => r !== null))
+      const secRoots = new Set(secRtnCoords.map((c) => g.rootAt(c)).filter((r) => r !== null))
+      if (!secRtnCoords.length) problems.push('ISOLATION: no distinct secondary return drawn (primary earth used on both sides of the barrier)')
+      else if ([...primRoots].some((r) => secRoots.has(r))) problems.push('ISOLATION: primary ground bonded to secondary return by a wire (barrier shorted)')
     }
     if (problems.length) { flagged++; console.log((t.id + (opt ? '/' + opt : '')).padEnd(26), problems.join('  |  ')) }
   }

@@ -286,12 +286,28 @@ function srcAC(x, y, label = 'VAC') {
 // Ground-COM-General: short stem + three bars (8:4:1), hanging BELOW the rail
 // it connects to so the top bar never overlaps the rail line.
 function gnd(x, y) {
-  regPin('@gnd', 'gnd', x, y)   // all ground symbols are the same net by convention
+  regPin('@gnd', 'gnd', x, y)   // primary-side ground; all @gnd symbols are the same net by convention
   return P(
     `M ${x} ${y} L ${x} ${y + 6}` +
     ` M ${x - 10} ${y + 6} H ${x + 10} M ${x - 5} ${y + 11} H ${x + 5} M ${x - 1.25} ${y + 16} H ${x + 1.25}`
   )
 }
+
+// Isolated secondary return (signal-ground triangle): a DISTINCT reference from the primary earth `gnd`.
+// On an isolated converter the output return is galvanically separate from primary ground — joined only
+// THROUGH the transformer, never by a wire. Drawn distinct so a reviewer never mistakes the two sides for
+// one node, and tagged @sgnd so the net checker can enforce that no wire bridges the isolation barrier.
+function isoGnd(x, y) {
+  regPin('@sgnd', 'sgnd', x, y)
+  return P(
+    `M ${x} ${y} L ${x} ${y + 6}` +                                   // stem
+    ` M ${x - 9} ${y + 6} L ${x + 9} ${y + 6} L ${x} ${y + 16} Z`     // downward hollow triangle
+  )
+}
+
+// Isolation-barrier marker: a dashed vertical line drawn between a transformer's primary and secondary
+// columns to make the galvanic boundary explicit on the schematic.
+const isoBar = (x, y0, y1) => P(`M ${x} ${y0} L ${x} ${y1}`, 'sch-ctl')
 
 function loadR(x, y, top, bot) {
   return (
@@ -472,7 +488,8 @@ function forward(bom) {
   return svg(820, 400, [
     srcDC(60, 180),
     wire(60, 165, 60, 60, 250, 60),   // Vin+ rail (feeds Q1 drain + Ddemag cathode)
-    wire(60, 195, 60, 320, 700, 320), // ground / output-return rail
+    wire(60, 195, 60, 320, 320, 320), gnd(120, 320), // primary return rail + earth (ends under T1)
+    wire(340, 320, 700, 320), isoGnd(430, 320),      // isolated secondary/output return (separate rail)
     // high-side switch: Q1 drain → Vin, source → primary top (pri_node); primary bottom → gnd
     mosfetV('Q1', bom, 220, 90), wire(220, 64, 220, 60), dot(220, 60),
     wire(220, 116, 220, 110, T.p0[0], 110),   // Q1 source → primary top p0
@@ -515,8 +532,8 @@ function pushPull(bom) {
     // secondary full-wave rectifier: both winding ends → Dtop / Dbot → output rail
     wire(290, 105, 290, 90, 380, 90), diode('Dtop', bom, 400, 90, 'right'), wire(420, 90, 480, 90), dot(480, 90),
     wire(290, 235, 290, 250, 380, 250), diode('Dbot', bom, 400, 250, 'right', 'below'), wire(420, 250, 480, 250), wire(480, 250, 480, 90),
-    // secondary center tap = output return
-    wire(304, 170, 340, 170, 340, 330, 700, 330),
+    // secondary center tap = output return (isolated from the primary earth — its own return symbol)
+    wire(304, 170, 340, 170, 340, 330, 700, 330), isoGnd(450, 330),
     indH('Lout', bom, 540, 90), wire(480, 90, 512, 90), wire(568, 90, 700, 90), dot(620, 90),
     capV('Cout', bom, 620, 190), wire(620, 90, 620, 170), wire(620, 210, 620, 330), dot(620, 330),
     loadR(700, 190, 90, 330), dot(700, 90), dot(700, 330),
@@ -544,6 +561,7 @@ function outTail(bom, x0, yTop, retY, lout) {
     capV('Cout', bom, cX, cY), wire(cX, yTop, cX, cY - 10), wire(cX, cY + 10, cX, retY), dot(cX, retY),
     loadR(lX, cY, yTop, retY), dot(lX, yTop), dot(lX, retY),
     port(pX, yTop, 'VOUT'), wire(cX + 88, yTop, pX, yTop),
+    isoGnd(cX, retY),   // isolated secondary return (distinct from primary earth; no wire crosses the barrier)
   )
   return { els, retX: lX }
 }
@@ -580,7 +598,7 @@ function secFB(bom, tx, ty, h, o = {}) {
     diode(ds[2], bom, xB, (yP + yM) / 2, 'up', 'right', true), wire(xB, (yP + yM) / 2 - 20, xB, yP), wire(xB, (yP + yM) / 2 + 20, xB, yM),
     diode(ds[3], bom, xB, (yN + yM) / 2, 'up', 'right', true), wire(xB, (yN + yM) / 2 - 20, xB, yM), wire(xB, (yN + yM) / 2 + 20, xB, yN),
     dot(xA, yP), dot(xB, yP), wire(xA, yP, xB, yP),
-    wire(xA, yN, t.retX, yN), gnd(xA + 20, yN),
+    wire(xA, yN, t.retX, yN),   // secondary return rail → isolated return drawn by outTail
     ...t.els,
   ]
 }
@@ -598,7 +616,7 @@ function secCD(bom, tx, ty, h, o = {}) {
     resV('Rlb', bom, voX, ty, 'right'), wire(voX, yT, voX, ty - 20), wire(voX, ty + 20, voX, yB),
     diode(d1, bom, tx + 40, (yT + retY) / 2, 'up', 'left'), wire(tx + 40, (yT + retY) / 2 - 20, tx + 40, yT), wire(tx + 40, (yT + retY) / 2 + 20, tx + 40, retY),
     diode(d2, bom, tx + 90, (yB + retY) / 2, 'up'), wire(tx + 90, (yB + retY) / 2 - 20, tx + 90, yB), wire(tx + 90, (yB + retY) / 2 + 20, tx + 90, retY),
-    wire(tx + 40, retY, t.retX, retY), gnd(tx + 60, retY),
+    wire(tx + 40, retY, t.retX, retY),   // secondary return rail → isolated return drawn by outTail
     ...t.els,
   ]
 }
@@ -710,7 +728,7 @@ function dab(bom) {
     wire(580, 235, 620, 235, 620, 340, 840, 340, 840, mid, 890, mid),
     // output: bridge legs' rails (spanning bias E lane at 660 → bias G at 990) → Cout ∥ load → VOUT
     dot(770, top), dot(890, top), wire(660, top, 1090, top), dot(1010, top),
-    dot(770, gy), dot(890, gy), wire(660, gy, 1050, gy), gnd(960, gy), // isolated secondary return
+    dot(770, gy), dot(890, gy), wire(660, gy, 1050, gy), isoGnd(960, gy), // isolated secondary return
     capV('Cout', bom, 1010, mid), wire(1010, top, 1010, mid - 20), wire(1010, mid + 20, 1010, gy), dot(1010, gy),
     loadR(1090, mid, top, gy), dot(1090, top),
     port(1150, top, 'VOUT'), wire(1090, top, 1150, top),
@@ -723,7 +741,9 @@ function dab(bom) {
 // ── two-switch forward: Q1/Q2 sandwich the primary, D1/D2 clamp the reset to the bus ─────
 function twoSwitchForward(bom) {
   return svg(880, 400, [
-    srcDC(60, 200), wire(60, 185, 60, 70, 320, 70), wire(60, 215, 60, 320, 760, 320),
+    srcDC(60, 200), wire(60, 185, 60, 70, 320, 70),
+    wire(60, 215, 60, 320, 320, 320), gnd(150, 320),   // primary return rail + earth (ends under T1)
+    wire(480, 320, 810, 320), isoGnd(540, 320),        // isolated secondary/output return (separate rail)
     // Q1 (high) and Q2 (low) sandwich the primary; the T1 primary sits to their right (in series)
     mosfetV('Q1', bom, 320, 120, 'right', true), wire(320, 70, 320, 94), dot(320, 70), wire(320, 146, 320, 165), dot(320, 165),
     mosfetV('Q2', bom, 320, 290, 'right', true), wire(320, 245, 320, 264), dot(320, 245), wire(320, 316, 320, 320),
@@ -749,7 +769,9 @@ function twoSwitchForward(bom) {
 // ── active-clamp forward: clamp leg Sc+Cc resets the core; synchronous rectifiers ────────
 function acf(bom) {
   return svg(920, 400, [
-    srcDC(60, 190), wire(60, 175, 60, 70, 340, 70), wire(60, 205, 60, 300, 760, 300),
+    srcDC(60, 190), wire(60, 175, 60, 70, 340, 70),
+    wire(60, 205, 60, 300, 320, 300), gnd(150, 300),   // primary return rail + earth (ends under T1)
+    wire(440, 300, 800, 300), isoGnd(500, 300),        // isolated secondary/output return (separate rail)
     // main switch Q1 in series with the primary (VIN → Q1 → sw → T1 pri → gnd)
     mosfetV('Q1', bom, 320, 145, 'right', true), wire(320, 70, 320, 119), dot(320, 70), wire(320, 171, 320, 185),
     xfmr('T1', bom, 380, 195, { h: 90, labelDx: -18, labelDy: -22 }), wire(320, 185, 370, 185), dot(320, 185),
@@ -812,12 +834,13 @@ function isolatedBuckBoost(bom) {
     diode('Dpri', bom, 170, 180, 'up', 'left'), wire(170, 160, 170, 140, 280, 140), wire(170, 200, 170, 240, 150, 240),
     capV('Cpri', bom, 150, 270, 'left'), wire(150, 240, 150, 250), dot(150, 240), wire(150, 290, 150, 300), dot(150, 300),
     port(120, 240, 'VOUT(−)', 'end'), wire(150, 240, 120, 240),
-    // isolated secondary rail (shares primary ground per the model) + preload/bleed Rsec
-    wire(300, 140, 300, 110, 660, 110, 660, 300), dot(660, 300),
+    // isolated secondary rail: its OWN floating return (ISO-RTN), galvanically separate from primary
+    // ground — the two are joined only through T1. + preload/bleed Rsec.
+    wire(300, 140, 300, 110, 690, 110), port(760, 110, 'ISO-RTN', 'end'), wire(690, 110, 760, 110),
     wire(300, 220, 300, 250, 520, 250), diode('Dsec', bom, 540, 250, 'right'), wire(560, 250, 600, 250), dot(600, 250),
     resV('Rsec', bom, 565, 178, 'left'), wire(565, 110, 565, 158), dot(565, 110), wire(565, 198, 565, 250), dot(565, 250),
     capV('Csec', bom, 600, 178), wire(600, 158, 600, 110), dot(600, 110), wire(600, 198, 600, 250),
-    port(690, 250, 'VISO'), wire(600, 250, 690, 250),
+    port(760, 250, 'VISO', 'end'), wire(600, 250, 760, 250),
     sig(184, 100, 'g1'), ctrlIC(bom, 140, 330, ['g1']),
   ].join(''))
 }
@@ -872,7 +895,9 @@ function weinberg(bom) {
   const [pAt, pAb] = [T.pA.top, T.pA.bot], [pBt, pBb] = [T.pB.top, T.pB.bot]
   const [sCt, sCb] = [T.sC.top, T.sC.bot], [sDt, sDb] = [T.sD.top, T.sD.bot]
   return svg(1000, 440, [
-    srcDC(60, 210), wire(60, 195, 60, 90, 190, 90), wire(60, 225, 60, gy, 900, gy), // continuous ground/output-return rail
+    srcDC(60, 210), wire(60, 195, 60, 90, 190, 90),
+    wire(60, 225, 60, gy, 470, gy),          // primary return rail (ends under T1)
+    wire(610, gy, 900, gy), isoGnd(700, gy), // isolated secondary/output return (separate rail)
     // coupled input choke L1 (two windings), both fed from VIN+; each winding returns through its DCR
     // loop-breaker to a DIFFERENT primary half of T1 (the defining dual-inductor structure)
     xfmr('L1', bom, 210, 170, { h: 80, labelDx: -18, labelDy: -20 }),
@@ -1018,7 +1043,7 @@ function srBridgeOut(bom, nx, ny, ny2, refs) {
     dot(cx, yP), capV('Cout', bom, cx, 190), wire(cx, yP, cx, 170), wire(cx, 210, cx, yN), dot(cx, yN),
     loadR(lx, 190, yP, yN), dot(lx, yP), dot(lx, yN),
     port(lx + 60, yP, 'VOUT'), wire(lx, yP, lx + 60, yP),
-    gnd(nx + 140, yN),   // isolated secondary return reference
+    isoGnd(nx + 140, yN),   // isolated secondary return reference
   ]
 }
 
