@@ -1,7 +1,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { requirementRows } from '../bom.js'
-import { selectCandidates, kelvinCategoryFor, bindPart, mainMagneticInputs, designMagneticInOpenMagnetics } from '../kh.js'
+import { selectCandidates, kelvinCategoryFor, bindPart, mainMagneticInputs, enrichMagneticWaveforms, designMagneticInOpenMagnetics } from '../kh.js'
 import WavePane from './WavePane.vue'
 
 const props = defineProps({
@@ -71,7 +71,8 @@ async function designMagnetic() {
   magErr.value = ''
   try {
     magState.value = 'exporting'
-    const inputs = await mainMagneticInputs(props.tas)   // this magnetic's MAS Inputs (waveforms + reqs)
+    const inputs = await mainMagneticInputs(props.tas)   // this magnetic's MAS Inputs (processed stats only)
+    enrichMagneticWaveforms(inputs, props.part.windings) // splice real samples for custom shapes (QRM)
     magState.value = 'advising'                          // OM tab is open + advising
     const mas = await designMagneticInOpenMagnetics(props.part.ref, inputs)
     magMpn.value = mas?.magnetic?.manufacturerInfo?.reference ?? 'OpenMagnetics design'

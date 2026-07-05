@@ -371,9 +371,30 @@ inline json magnetic_inputs(double Lm, double lmTolerance,
     }
     dr["isolationSides"] = isolationSides;
     if (isolationVoltage) {
-        dr["insulation"]["mainSupplyVoltage"]["nominal"] = *isolationVoltage;
-        dr["insulation"]["insulationType"] = "reinforced";
-        dr["insulation"]["standards"] = json::array({"IEC 62368-1"});
+        // These are DC-DC converters: the barrier is FUNCTIONAL isolation. The MAS insulation-requirements
+        // model coordinates from the mains supply voltage (it DERIVES the withstand) — it has no field for
+        // a dielectric-withstand target, and putting the withstand (e.g. 1500 V) into mainSupplyVoltage
+        // makes an insulation coordinator read it as a 1500 V mains and reject it (IEC 62368-1 table 27).
+        // So coordinate at the actual peak WORKING voltage the barrier sees (the largest winding peak).
+        double workingVoltage = 0.0;
+        for (const auto& exc : excitationsPerWinding) {
+            if (exc.contains("voltage") && exc.at("voltage").contains("processed"))
+                workingVoltage = std::max(workingVoltage,
+                                          std::abs(exc.at("voltage").at("processed").value("peak", 0.0)));
+        }
+        if (workingVoltage > 0.0) {
+            auto& ins = dr["insulation"];
+            ins["mainSupplyVoltage"]["nominal"] = workingVoltage;
+            ins["insulationType"] = "reinforced";
+            ins["standards"] = json::array({"IEC 62368-1"});
+            // Insulation-coordination context the adviser needs to derive clearance/creepage (IEC 60664-1).
+            // Standard assumptions for enclosed converter equipment; without them the coordination is
+            // undefined (the adviser throws "Missing cti").
+            ins["overvoltageCategory"] = "II";
+            ins["pollutionDegree"] = "PD2";
+            ins["cti"] = "groupII";
+            ins["altitude"]["maximum"] = 2000;
+        }
     }
     json op;
     op["conditions"]["ambientTemperature"] = ambientC;

@@ -88,18 +88,15 @@ export function enrichMagneticWaveforms(inputs, windings) {
     if (!Array.isArray(exs)) continue
     for (let w = 0; w < exs.length && w < windings.length; w++) {
       for (const side of ['voltage', 'current']) {
-        // Only splice when the shape is 'custom' (e.g. QRM valley-switching): the adviser reconstructs
-        // a 'rectangular' from processed stats, so overriding those with samples just perturbs a working
-        // path — but a custom shape can't be reconstructed and needs the real samples.
+        // Only splice a genuinely 'custom' shape (QRM valley-switching): MKF reconstructs the named shapes
+        // (rectangular, flybackSecondaryWithDeadtime, …) from stats and splicing those breaks it. NOTE: the
+        // JS reshape below is still an approximation — a full fix builds the waveform via MKF's own
+        // WaveformProcessor in C++ (consistent waveform+processed+harmonics). See ABT #132.
         if (exs[w]?.[side]?.processed?.label !== 'custom') continue
-        const wf = windings[w]?.[side]?.waveform
-        if (Array.isArray(wf?.data) && wf.data.length >= 2) {
-          // Reshape to the MAS convention: one period with time normalized to [0,1]. KH's analytical
-          // waveform carries ABSOLUTE-second time; the adviser reads `frequency` for the real timescale
-          // and mis-reads absolute time (→ silently no results), so hand it the normalized shape.
-          const n = wf.data.length
-          exs[w][side].waveform = { data: wf.data.slice(), time: wf.data.map((_, i) => i / (n - 1)) }
-        }
+        // Replace the whole side with ConverterAnalytical's version — MKF's WaveformProcessor already built
+        // it consistently (waveform + harmonics + processed, canonical MAS format). Don't hand-reshape.
+        const src = windings[w]?.[side]
+        if (Array.isArray(src?.waveform?.data) && src.waveform.data.length >= 2) exs[w][side] = src
       }
     }
   }
@@ -116,7 +113,7 @@ export function enrichMagneticWaveforms(inputs, windings) {
 // param on the KH page or window.__OPENMAGNETICS_ORIGIN__.
 function resolveOmOrigin() {
   if (typeof window === 'undefined') return 'https://openmagnetics.com'
-  const q = new URLSearchParams(window.location.search).get('om')
+  const q = new URLSearchParams(window.location.search).get('om')  // ?om=<origin> overrides for local dev
   return q || window.__OPENMAGNETICS_ORIGIN__ || 'https://openmagnetics.com'
 }
 const OPENMAGNETICS_ORIGIN = resolveOmOrigin()
