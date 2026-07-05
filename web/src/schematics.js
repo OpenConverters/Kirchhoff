@@ -939,7 +939,6 @@ function ahb(bom, variant = 'fullBridge') {
     capV('Cdmp', bom, 430, 258, 'right'), wire(430, 210, 430, 238), wire(430, 278, 430, 300), dot(430, 300),
     ...secondaryFor(bom, tx, ty, h, variant, bridgeRefs(variant)),
     ctrlIC(bom, 120, 45, ['g1', 'g2']),
-    icBox('UDR', bom, 960, 360, 64, 44, [], ['sr'], 'SR DRV'),
   ].join(''))
 }
 
@@ -973,7 +972,6 @@ function psfb(bom, variant = 'fullBridge') {
     ...secondaryFor(bom, tx, ty, h, variant, bridgeRefs(variant)),
     sig(124, 128, 'gA'), sig(124, 246, 'gB'), sig(254, 128, 'gC'), sig(254, 246, 'gD'),
     ctrlIC(bom, 90, 385, ['gA', 'gB', 'gC', 'gD']),
-    icBox('UDR', bom, 900, 390, 64, 44, [], ['sr'], 'SR DRV'),
   ].join(''))
 }
 
@@ -1005,7 +1003,6 @@ function pshb(bom, variant = 'fullBridge') {
     ...secondaryFor(bom, tx, ty, h, variant, bridgeRefs(variant)),
     sig(224, 100, 'g1'), sig(224, 180, 'g2'), sig(224, 270, 'g3'), sig(224, 350, 'g4'),
     ctrlIC(bom, 90, 400, ['g1', 'g2', 'g3', 'g4']),
-    icBox('UDR', bom, 1000, 410, 64, 44, [], ['sr'], 'SR DRV'),
   ].join(''))
 }
 
