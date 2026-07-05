@@ -125,3 +125,23 @@ export async function selectCandidates(kind, requirements, context = {}) {
   if (context.topology) options.topology = context.topology
   return callJson('kelvin_select', category, JSON.stringify(requirements), JSON.stringify(options))
 }
+
+// Cross-reference: given an ORIGINAL part's spec block and a candidate list
+// (e.g. from selectCandidates over the original's value), return Kelvin's
+// deterministic scored substitutes — {category, original_verified, candidates:
+// [{mpn, status, penalty, params, ...}]}, ranked best-first. Runs fully
+// in-browser over the WASM ranker, NO LLM (Kirchhoff's program-only mode; the
+// same authority Heaviside runs its LLM chooser over). `originalVerified=false`
+// applies the honesty cap (an unidentified original never yields 'recommended').
+export function crossReference(kind, original, candidates, { originalVerified = true, maxResults = 12 } = {}) {
+  const category = kelvinCategoryFor(kind)
+  if (!category) throw new Error(`no Kelvin category for kind '${kind}'`)
+  const options = { original_verified: originalVerified, max_results: maxResults }
+  return callJson(
+    'cross_reference_string',
+    category,
+    JSON.stringify(original),
+    JSON.stringify(candidates),
+    JSON.stringify(options),
+  )
+}
