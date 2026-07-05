@@ -21,7 +21,9 @@ const M = await init()
 
 // rating leaves whose value must be ≥ 0 (schema minimum:0), searched recursively
 const RATING_KEYS = /voltage|current|power|resistance|capacitance|inductance|forward|reverse|rated|maximum|rds|drainSource/i
-const CURRENT_KEYS = /ratedForwardCurrent|ratedCurrent|ratedDrainSourceCurrent|ratedContinuousCurrent/
+// a device current-rating leaf on a semiconductor: MOSFET `ratedContinuousDrainCurrent`, diode
+// `ratedForwardCurrent` — match any rating key ending in "Current" (the guard only runs on semiconductors)
+const CURRENT_KEYS = /Current$/
 
 // collect every numeric leaf (INCLUDING non-finite NaN/Inf, so the guard can flag them)
 function leaves(obj, path = '') {
