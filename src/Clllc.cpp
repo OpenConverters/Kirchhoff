@@ -97,8 +97,9 @@ json build_clllc_tas(const ClllcDesign& d) {
         json c; c["name"] = name; c["kind"] = kind; if (dir[0]) c["direction"] = dir; c["endpoints"] = eps; return c; };
     // Bare seeds (no designRequirements). Body diodes (anti-parallel to a FET) use these as-is — the HS
     // fill DEFERS a requirement-less diode as a FET body diode. REAL switches take a `req`.
-    auto diode  = [&]() { json j; j["semiconductor"]["diode"] = json::object();
-        j["inputs"]["designRequirements"] = req::body_diode(d.inputVoltage, d.outputPower / d.inputVoltage); return j; };
+    auto diode  = [&](json reqs = json()) { json j; j["semiconductor"]["diode"] = json::object();
+        j["inputs"]["designRequirements"] = reqs.is_null()
+            ? req::body_diode(d.inputVoltage, d.outputPower / d.inputVoltage) : reqs; return j; };
     auto mosfetReq = [](const json& r) { json j; j["semiconductor"]["mosfet"] = json::object();
         j["inputs"]["designRequirements"] = r; return j; };
     auto capBrick = [&](double c, double vr) { json j; j["capacitor"] = json::object();
@@ -231,10 +232,12 @@ json build_clllc_tas(const ClllcDesign& d) {
         comp("Lr2", lr2),
         comp("Cr2", resCap(d.secondaryResonantCapacitance, d.outputVoltage * 2)),
         comp("Rsense", resBrick(cfg::get(d.config, "senseResistance", kSenseResistance))),
-        // secondary SR full bridge + body diodes (DSE..DSH = QE..QH body diodes -> bare seed, deferred)
+        // secondary SR full bridge + body diodes (DSE..DSH = QE..QH body diodes) — rated to their host
+        // SECONDARY FETs (block Vout, carry IsecPk), NOT the primary rating a bare diode() would default to
         comp("QE", mosfetReq(reqSec)), comp("QF", mosfetReq(reqSec)),
         comp("QG", mosfetReq(reqSec)), comp("QH", mosfetReq(reqSec)),
-        comp("DSE", diode()), comp("DSF", diode()), comp("DSG", diode()), comp("DSH", diode()),
+        comp("DSE", diode(req::body_diode(ratedVdsSec, IsecPk))), comp("DSF", diode(req::body_diode(ratedVdsSec, IsecPk))),
+        comp("DSG", diode(req::body_diode(ratedVdsSec, IsecPk))), comp("DSH", diode(req::body_diode(ratedVdsSec, IsecPk))),
         comp("Cout", capBrick(d.outputCapacitance, d.outputVoltage * 2))});
     pcell["connections"] = json::array({
         // Primary full bridge. (Q1,Q4) on g1, (Q2,Q3) on g2 -> ±Vin.

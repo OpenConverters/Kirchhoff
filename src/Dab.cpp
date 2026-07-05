@@ -365,8 +365,11 @@ json build_dab_tas(const DabDesign& d) {
 
         secSwitchComps.push_back(compS(qE, mkSec())); secSwitchComps.push_back(compS(qF, mkSec()));
         secSwitchComps.push_back(compS(qG, mkSec())); secSwitchComps.push_back(compS(qH, mkSec()));
-        secSwitchComps.push_back(compS(dE, diode())); secSwitchComps.push_back(compS(dF, diode()));
-        secSwitchComps.push_back(compS(dG, diode())); secSwitchComps.push_back(compS(dH, diode()));
+        // body diodes of the SECONDARY FETs — mirror their host (block the secondary Vds, carry IpkSec),
+        // NOT the primary rating a bare diode() would default to (a 60 V FET has no 400 V body diode).
+        const json secBody = req::body_diode(ratedVdsSec_i, IpkSec_i);
+        secSwitchComps.push_back(compS(dE, diode(secBody))); secSwitchComps.push_back(compS(dF, diode(secBody)));
+        secSwitchComps.push_back(compS(dG, diode(secBody))); secSwitchComps.push_back(compS(dH, diode(secBody)));
 
         json capi; capi["capacitor"] = json::object();
         capi["inputs"]["designRequirements"]["capacitance"]["nominal"] = leg.outputCapacitance;

@@ -110,8 +110,9 @@ json build_cllc_tas(const CllcDesign& d) {
         json c; c["name"] = name; c["kind"] = kind; if (dir[0]) c["direction"] = dir; c["endpoints"] = eps; return c; };
     // Bare seeds (no designRequirements). Body diodes (anti-parallel to a FET) use these as-is — the HS
     // fill DEFERS a requirement-less diode as a FET body diode. REAL switches take a `req`.
-    auto diode  = [&]() { json j; j["semiconductor"]["diode"] = json::object();
-        j["inputs"]["designRequirements"] = req::body_diode(d.inputVoltage, d.outputPower / d.inputVoltage); return j; };
+    auto diode  = [&](json reqs = json()) { json j; j["semiconductor"]["diode"] = json::object();
+        j["inputs"]["designRequirements"] = reqs.is_null()
+            ? req::body_diode(d.inputVoltage, d.outputPower / d.inputVoltage) : reqs; return j; };
     auto mosfetReq = [](const json& r) { json j; j["semiconductor"]["mosfet"] = json::object();
         j["inputs"]["designRequirements"] = r; return j; };
 
@@ -242,7 +243,10 @@ json build_cllc_tas(const CllcDesign& d) {
         // diodes -> bare seed, deferred; the rectifiers are the SR MOSFETs themselves)
         comp("Qa", mosfetReq(reqSec)), comp("Qb", mosfetReq(reqSec)),
         comp("Qc", mosfetReq(reqSec)), comp("Qd", mosfetReq(reqSec)),
-        comp("DSa", diode()), comp("DSb", diode()), comp("DSc", diode()), comp("DSd", diode()),
+        // DSa..DSd = Qa..Qd (SECONDARY SR bridge) body diodes — rated to their host secondary FETs
+        // (block Vout, carry IsecPk), NOT the primary rating a bare diode() would default to
+        comp("DSa", diode(req::body_diode(ratedVdsSec, IsecPk))), comp("DSb", diode(req::body_diode(ratedVdsSec, IsecPk))),
+        comp("DSc", diode(req::body_diode(ratedVdsSec, IsecPk))), comp("DSd", diode(req::body_diode(ratedVdsSec, IsecPk))),
         comp("Cout", cout)});
     cell["connections"] = json::array({
         // ── Primary full bridge. Diagonal pairs (Q1,Q4) on g1, (Q2,Q3) on g2 -> vab=±Vin.
