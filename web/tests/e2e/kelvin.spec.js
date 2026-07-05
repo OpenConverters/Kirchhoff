@@ -54,6 +54,12 @@ test.describe('Kelvin candidate sourcing', () => {
       return c?.data?.semiconductor?.mosfet?.manufacturerInfo?.reference ?? null
     }, ref)
     expect(boundRef, 'bound MPN is written into the TAS').toBe(topMpn)
+
+    // Binding kicked a fresh component sim (App.onBound → fetchComponentWaves) so the verdict table
+    // re-validates against the real part — the re-sim produced waveforms for the bound ref.
+    await page.waitForFunction(
+      (r) => window.__bench.componentWaves?.components?.some((c) => c.ref === r),
+      ref, { timeout: 30000 })
   })
 
   test('bind refuses a shard/catalog version mismatch (safety guard)', async ({ page }) => {
