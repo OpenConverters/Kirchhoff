@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, provide, reactive, ref, watch } from 'vue'
 import { FAMILIES, FAMILY_SHORT, PLANNED, TOPOLOGIES, buildSpec, topologyById, variantAxis, defaultVariant, knobsFor, knobGroups } from './topologies.js'
-import { loadEngine, processConverter, topologyWaveforms, extractOperatingPoint, componentWaveforms, realizeTas, generateNetlist } from './kh.js'
+import { loadEngine, processConverter, topologyWaveforms, extractOperatingPoint, componentWaveforms, realizeTas, generateNetlist, bindMagnetic } from './kh.js'
 import { extractBom } from './bom.js'
 import { hasSchematic, renderSchematic } from './schematics.js'
 import { si, pct } from './units.js'
@@ -302,6 +302,19 @@ async function onBound({ tas }) {
     ngspiceOps.value = {}
     componentWaves.value = null
     fetchComponentWaves()   // fills the verdict table from a fresh sim of the bound design
+  } catch (e) {
+    runError.value = e.message
+  }
+}
+
+// A magnetic was designed by the OpenMagnetics adviser and sent back (PartDrawer → OM handoff). Bind
+// the MAS magnetic into the component's data.magnetic and re-run the downstream like any other bind.
+async function onBoundMagnetic({ ref, mas }) {
+  if (!result.value) return
+  try {
+    const tas = await bindMagnetic(result.value.tas, ref, mas)
+    await onBound({ tas })
+    waveMagnetics.value = await topologyWaveforms(tas)   // magnetics list changed — refresh winding views
   } catch (e) {
     runError.value = e.message
   }
@@ -824,6 +837,7 @@ provide('kh', {
       :context="kelvinContext"
       @close="selectedPart = null"
       @bound="onBound"
+      @bound-magnetic="onBoundMagnetic"
     />
   </div>
 </template>

@@ -1,7 +1,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { requirementRows } from '../bom.js'
-import { selectCandidates, kelvinCategoryFor, bindPart } from '../kh.js'
+import { selectCandidates, kelvinCategoryFor, bindPart, mainMagneticInputs, designMagneticInOpenMagnetics } from '../kh.js'
 import WavePane from './WavePane.vue'
 
 const props = defineProps({
@@ -11,9 +11,13 @@ const props = defineProps({
   periods: { type: Number, default: 1 },
   context: { type: Object, default: () => ({}) }, // { topology, inputVoltage, switchingFrequency }
 })
-const emit = defineEmits(['close', 'bound'])
+const emit = defineEmits(['close', 'bound', 'bound-magnetic'])
 
 const rows = computed(() => requirementRows(props.part?.requirements))
+
+// Magnetics aren't catalog-matched — they're custom-designed. The drawer offers a handoff to the
+// OpenMagnetics adviser instead of a candidate table.
+const isMagnetic = computed(() => props.part?.kind === 'Inductor' || props.part?.kind === 'Transformer')
 
 // ── Kelvin candidate sourcing ──────────────────────────────────────────────
 const state = ref('idle')       // idle | loading | ok | empty | error | unsupported
@@ -57,6 +61,28 @@ async function useCandidate(c) {
   }
 }
 
+// ── Magnetics: hand off to the OpenMagnetics adviser (export MAS Inputs → advise → bind back) ──────
+const magState = ref('idle')  // idle | exporting | advising | done | error
+const magMpn = ref(null)      // reference of the design brought back
+const magErr = ref('')
+
+async function designMagnetic() {
+  if (!props.tas) { magErr.value = 'no design loaded'; magState.value = 'error'; return }
+  magErr.value = ''
+  try {
+    magState.value = 'exporting'
+    const inputs = await mainMagneticInputs(props.tas)   // this magnetic's MAS Inputs (waveforms + reqs)
+    magState.value = 'advising'                          // OM tab is open + advising
+    const mas = await designMagneticInOpenMagnetics(props.part.ref, inputs)
+    magMpn.value = mas?.magnetic?.manufacturerInfo?.reference ?? 'OpenMagnetics design'
+    magState.value = 'done'
+    emit('bound-magnetic', { ref: props.part.ref, mas })  // App binds it into data.magnetic + re-sims
+  } catch (e) {
+    magErr.value = e?.message ?? String(e)
+    magState.value = 'error'
+  }
+}
+
 // Reset when the selected component changes (don't auto-fetch big shards — user clicks).
 watch(() => props.part?.ref, () => {
   state.value = category.value ? 'idle' : 'unsupported'
@@ -65,6 +91,9 @@ watch(() => props.part?.ref, () => {
   binding.value = null
   boundMpn.value = null
   bindErr.value = ''
+  magState.value = 'idle'
+  magMpn.value = null
+  magErr.value = ''
 })
 
 const candidates = computed(() => result.value?.candidates ?? [])
@@ -127,15 +156,47 @@ function fmtx(v) { return v == null ? '—' : `×${v >= 100 ? Math.round(v) : v.
           <WavePane :excitation="deviceWave" source-kind="ngspice" :periods="periods" />
         </template>
 
+        <!-- ── Magnetics: design via the OpenMagnetics adviser (no catalog match) ── -->
+        <template v-if="isMagnetic">
+          <div class="section-label" style="margin-top: 1.2rem" data-testid="magnetic-section">
+            Magnetic design
+            <span class="hint">custom-designed by the OpenMagnetics adviser</span>
+          </div>
+          <button
+            v-if="magState === 'idle' || magState === 'error'"
+            class="find-parts"
+            data-testid="design-magnetic"
+            :disabled="!tas"
+            @click="designMagnetic"
+          >
+            Design this magnetic in OpenMagnetics →
+          </button>
+          <div v-else-if="magState === 'exporting'" class="suggest-box">Exporting MAS inputs…</div>
+          <div v-else-if="magState === 'advising'" class="suggest-box" data-testid="magnetic-advising">
+            OpenMagnetics is running the magnetic adviser in a new tab — pick a design there and send it back.
+          </div>
+          <div v-else-if="magState === 'done'" class="suggest-box" data-testid="magnetic-done">
+            <span class="bound-tag">✓ bound</span> OpenMagnetics design <b>{{ magMpn }}</b> — re-simulated.
+          </div>
+          <div v-if="magErr" class="suggest-box err" data-testid="magnetic-error" style="margin-top: 0.4rem">
+            {{ magErr }}
+          </div>
+          <div class="hint" style="margin-top: 0.35rem">
+            The adviser opens with this component's operating point pre-loaded; the chosen core+winding
+            design binds straight back into the converter.
+          </div>
+        </template>
+
         <!-- ── TAS DB candidate parts (Kelvin) ── -->
+        <template v-else>
         <div class="section-label" style="margin-top: 1.2rem" data-testid="kelvin-section">
           TAS DB candidates
           <span v-if="state === 'ok'" class="hint">{{ alternatives }} of {{ considered }} parts fit</span>
         </div>
 
         <div v-if="state === 'unsupported'" class="suggest-box">
-          Real-part sourcing isn't available for this component kind yet (magnetics are designed by
-          MKF's adviser; this pane covers semiconductors, capacitors, resistors and controllers).
+          Real-part sourcing isn't available for this component kind yet
+          (this pane covers semiconductors, capacitors, resistors and controllers).
         </div>
 
         <button
@@ -206,6 +267,7 @@ function fmtx(v) { return v == null ? '—' : `×${v >= 100 ? Math.round(v) : v.
           Top row is the deterministic default. Ranked by
           {{ result?.tiebreaker?.replace(/_/g, ' ') }}. <b>“use”</b> binds the real part and re-simulates.
         </div>
+        </template>
       </aside>
     </template>
   </Teleport>

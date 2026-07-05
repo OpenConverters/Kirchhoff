@@ -76,6 +76,46 @@ export function mainMagneticInputs(tas) {
   return callJson('main_magnetic_inputs', JSON.stringify(tas))
 }
 
+// ── Magnetics: OpenMagnetics adviser handoff ────────────────────────────────────────────────────
+// Magnetics aren't catalog-matched — they're custom-designed by MKF's adviser. So instead of a
+// candidate table the drawer exports this component's MAS Inputs, opens the OpenMagnetics magnetic
+// adviser in a new tab, hands the Inputs over via a cross-origin postMessage handshake, and — when
+// the user picks one of the advised designs — receives the MAS magnetic back to bind into the TAS.
+// Origin is overridable for local dev (window.__OPENMAGNETICS_ORIGIN__).
+const OPENMAGNETICS_ORIGIN =
+  (typeof window !== 'undefined' && window.__OPENMAGNETICS_ORIGIN__) || 'https://openmagnetics.com'
+
+// Open the OM adviser with these MAS Inputs; resolves with the MAS magnetic the user sends back, or
+// rejects if the popup is blocked or the tab is closed without choosing. `ref` labels the round-trip
+// so a stray message from an unrelated OM tab can't bind the wrong component.
+export function designMagneticInOpenMagnetics(ref, inputs) {
+  return new Promise((resolve, reject) => {
+    const omWin = window.open(`${OPENMAGNETICS_ORIGIN}/magnetic_tool?handoff=kirchhoff`, '_blank')
+    if (!omWin) return reject(new Error('pop-up blocked — allow pop-ups to design in OpenMagnetics'))
+    let settled = false
+    const cleanup = () => { settled = true; window.removeEventListener('message', onMessage); clearInterval(poll) }
+    function onMessage(ev) {
+      if (ev.origin !== OPENMAGNETICS_ORIGIN || ev.data?.source !== 'openmagnetics') return
+      if (ev.data.type === 'ready') {
+        omWin.postMessage({ source: 'kirchhoff', type: 'mas-inputs', ref, inputs }, OPENMAGNETICS_ORIGIN)
+      } else if (ev.data.type === 'magnetic' && ev.data.ref === ref) {
+        cleanup(); resolve(ev.data.mas)
+      }
+    }
+    window.addEventListener('message', onMessage)
+    const poll = setInterval(() => {
+      if (omWin.closed && !settled) { cleanup(); reject(new Error('OpenMagnetics tab closed without sending a design')) }
+    }, 1000)
+  })
+}
+
+// Bind an OM-advised magnetic (a full MAS) into the TAS component's data.magnetic, verbatim (already
+// schema-valid). Reuses Kelvin's bind_part — the envelope's first key ('magnetic') is the family slot.
+export function bindMagnetic(tas, ref, mas) {
+  const magnetic = mas?.magnetic ?? mas
+  return callJson('bind_part', JSON.stringify(tas), ref, JSON.stringify({ magnetic }))
+}
+
 export function generateNetlist(tas, flavor = 'ngspice', fidelity = { origin: 'REQUIREMENTS' }) {
   const fn = flavor === 'ltspice' ? 'generate_ltspice_circuit' : 'generate_ngspice_circuit'
   return call(fn, JSON.stringify(tas), JSON.stringify(fidelity))

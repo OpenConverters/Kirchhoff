@@ -62,6 +62,22 @@ test.describe('Kelvin candidate sourcing', () => {
       ref, { timeout: 30000 })
   })
 
+  test('magnetic drawer offers the OpenMagnetics adviser handoff (not a catalog table)', async ({ page }) => {
+    await boot(page)
+    await selectTopology(page, 'flyback')
+    expect(await solve(page, 'analytical'), 'solve error').toBeNull()
+
+    const ref = await page.evaluate(() =>
+      window.__bench.bomRows.find((r) => r.kind === 'Transformer' || r.kind === 'Inductor')?.ref)
+    expect(ref, 'flyback has a magnetic').toBeTruthy()
+    await page.evaluate((r) => window.__bench.openPart(r), ref)
+
+    // Magnetics get the adviser handoff, not the Kelvin candidate table.
+    await expect(page.getByTestId('magnetic-section')).toBeVisible()
+    await expect(page.getByTestId('design-magnetic')).toBeVisible()
+    await expect(page.getByTestId('kelvin-section')).toHaveCount(0)
+  })
+
   test('bind refuses a shard/catalog version mismatch (safety guard)', async ({ page }) => {
     // Serve a manifest whose mosfet.sourceSize disagrees with the hosted NDJSON. Selection (shard-only)
     // must still work, but binding — which Range-reads the NDJSON by the shard's byte offsets — must
