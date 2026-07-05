@@ -76,21 +76,59 @@ export function mainMagneticInputs(tas) {
   return callJson('main_magnetic_inputs', JSON.stringify(tas))
 }
 
+// The MAS inputs KH emits carry only processed stats (waveform: null); OM's magnetic adviser needs a
+// real ≥2-point time-domain waveform and won't reliably reconstruct one from stats ("Waveform must have
+// at least 2 data points"). KH already computed the per-winding waveforms — splice them in, keyed by
+// winding index within each operating point. `windings` is the BOM row's `windings` (analyticalWaveforms
+// excitationsPerWinding). Mutates + returns `inputs`.
+export function enrichMagneticWaveforms(inputs, windings) {
+  if (!Array.isArray(windings) || !windings.length || !Array.isArray(inputs?.operatingPoints)) return inputs
+  for (const op of inputs.operatingPoints) {
+    const exs = op?.excitationsPerWinding
+    if (!Array.isArray(exs)) continue
+    for (let w = 0; w < exs.length && w < windings.length; w++) {
+      for (const side of ['voltage', 'current']) {
+        // Only splice when the shape is 'custom' (e.g. QRM valley-switching): the adviser reconstructs
+        // a 'rectangular' from processed stats, so overriding those with samples just perturbs a working
+        // path — but a custom shape can't be reconstructed and needs the real samples.
+        if (exs[w]?.[side]?.processed?.label !== 'custom') continue
+        const wf = windings[w]?.[side]?.waveform
+        if (Array.isArray(wf?.data) && wf.data.length >= 2) {
+          // Reshape to the MAS convention: one period with time normalized to [0,1]. KH's analytical
+          // waveform carries ABSOLUTE-second time; the adviser reads `frequency` for the real timescale
+          // and mis-reads absolute time (→ silently no results), so hand it the normalized shape.
+          const n = wf.data.length
+          exs[w][side].waveform = { data: wf.data.slice(), time: wf.data.map((_, i) => i / (n - 1)) }
+        }
+      }
+    }
+  }
+  return inputs
+}
+
 // ── Magnetics: OpenMagnetics adviser handoff ────────────────────────────────────────────────────
 // Magnetics aren't catalog-matched — they're custom-designed by MKF's adviser. So instead of a
 // candidate table the drawer exports this component's MAS Inputs, opens the OpenMagnetics magnetic
 // adviser in a new tab, hands the Inputs over via a cross-origin postMessage handshake, and — when
 // the user picks one of the advised designs — receives the MAS magnetic back to bind into the TAS.
 // Origin is overridable for local dev (window.__OPENMAGNETICS_ORIGIN__).
-const OPENMAGNETICS_ORIGIN =
-  (typeof window !== 'undefined' && window.__OPENMAGNETICS_ORIGIN__) || 'https://openmagnetics.com'
+// Origin of the OpenMagnetics app. Prod default; overridable for local dev via a ?om=<origin> query
+// param on the KH page or window.__OPENMAGNETICS_ORIGIN__.
+function resolveOmOrigin() {
+  if (typeof window === 'undefined') return 'https://openmagnetics.com'
+  const q = new URLSearchParams(window.location.search).get('om')
+  return q || window.__OPENMAGNETICS_ORIGIN__ || 'https://openmagnetics.com'
+}
+const OPENMAGNETICS_ORIGIN = resolveOmOrigin()
 
 // Open the OM adviser with these MAS Inputs; resolves with the MAS magnetic the user sends back, or
 // rejects if the popup is blocked or the tab is closed without choosing. `ref` labels the round-trip
 // so a stray message from an unrelated OM tab can't bind the wrong component.
 export function designMagneticInOpenMagnetics(ref, inputs) {
   return new Promise((resolve, reject) => {
-    const omWin = window.open(`${OPENMAGNETICS_ORIGIN}/magnetic_tool?handoff=kirchhoff`, '_blank')
+    // Open the OM home (it preloads the magnetic engine); the handoff bridge navigates to the adviser
+    // once it has our inputs, so the adviser mounts with the MAS already loaded (no reset race).
+    const omWin = window.open(`${OPENMAGNETICS_ORIGIN}/?handoff=kirchhoff`, '_blank')
     if (!omWin) return reject(new Error('pop-up blocked — allow pop-ups to design in OpenMagnetics'))
     let settled = false
     const cleanup = () => { settled = true; window.removeEventListener('message', onMessage); clearInterval(poll) }
