@@ -797,7 +797,7 @@ function acf(bom) {
 // ── isolated buck (Fly-Buck): sync buck whose inductor is the transformer primary ────────
 function isolatedBuck(bom) {
   return svg(900, 400, [
-    srcDC(60, 180), wire(60, 165, 60, 70, 230, 70), wire(60, 195, 60, 300, 420, 300),
+    srcDC(60, 180), wire(60, 165, 60, 70, 230, 70), wire(60, 195, 60, 300, 420, 300), gnd(110, 300), // primary (buck) earth
     // sync half bridge QS1/QS2 (refs right, gate flags left)
     mosfetV('QS1', bom, 230, 110, 'right', true), wire(230, 70, 230, 84), dot(230, 70), wire(230, 136, 230, 180),
     mosfetV('QS2', bom, 230, 250, 'right', true), wire(230, 180, 230, 224), wire(230, 276, 230, 300), dot(230, 300),
@@ -813,12 +813,13 @@ function isolatedBuck(bom) {
     wire(350, 230, 420, 230), dot(420, 230),
     capV('Cpri', bom, 420, 265, 'left'), wire(420, 230, 420, 245), wire(420, 285, 420, 300), dot(420, 300),
     port(490, 230, 'VOUT'), wire(420, 230, 490, 230),
-    // isolated secondary rail: own return, single flyback rectifier + preload/bleed Rsec
-    wire(370, 140, 370, 118, 760, 118),
+    // isolated secondary rail: own floating return (isoGnd, distinct from primary earth), single flyback
+    // rectifier + preload/bleed Rsec
+    wire(370, 140, 370, 118, 720, 118), isoGnd(720, 118),
     wire(370, 230, 370, 258, 600, 258), diode('Dsec', bom, 620, 258, 'right'), wire(640, 258, 680, 258), dot(680, 258),
     resV('Rsec', bom, 645, 188, 'left'), wire(645, 118, 645, 168), dot(645, 118), wire(645, 208, 645, 258), dot(645, 258),
     capV('Csec', bom, 680, 188), wire(680, 168, 680, 118), dot(680, 118), wire(680, 208, 680, 258),
-    port(760, 258, 'VISO'), wire(680, 258, 760, 258), port(760, 118, 'ISO-RTN', 'end'),
+    port(760, 258, 'VISO'), wire(680, 258, 760, 258),
     ctrlIC(bom, 140, 350, ['g1', 'g2']),
   ].join(''))
 }
@@ -826,7 +827,7 @@ function isolatedBuck(bom) {
 // ── isolated buck-boost: single-switch inverting flyback with a second isolated rail ─────
 function isolatedBuckBoost(bom) {
   return svg(860, 360, [
-    srcDC(60, 180), wire(60, 165, 60, 70, 280, 70), wire(60, 195, 60, 300, 700, 300),
+    srcDC(60, 180), wire(60, 165, 60, 70, 280, 70), wire(60, 195, 60, 300, 280, 300), gnd(100, 300), // primary earth (rail ends at T1 pri-bottom)
     mosfetV('QS1', bom, 210, 100, 'right', true), wire(210, 70, 210, 74), dot(210, 70), wire(210, 126, 210, 140, 280, 140),
     xfmr('T1', bom, 290, 180, { h: 80, opp: true, labelDy: -24 }), dot(280, 140),
     wire(280, 220, 280, 300), dot(280, 300),
@@ -836,7 +837,7 @@ function isolatedBuckBoost(bom) {
     port(120, 240, 'VOUT(−)', 'end'), wire(150, 240, 120, 240),
     // isolated secondary rail: its OWN floating return (ISO-RTN), galvanically separate from primary
     // ground — the two are joined only through T1. + preload/bleed Rsec.
-    wire(300, 140, 300, 110, 690, 110), port(760, 110, 'ISO-RTN', 'end'), wire(690, 110, 760, 110),
+    wire(300, 140, 300, 110, 690, 110), isoGnd(690, 110),
     wire(300, 220, 300, 250, 520, 250), diode('Dsec', bom, 540, 250, 'right'), wire(560, 250, 600, 250), dot(600, 250),
     resV('Rsec', bom, 565, 178, 'left'), wire(565, 110, 565, 158), dot(565, 110), wire(565, 198, 565, 250), dot(565, 250),
     capV('Csec', bom, 600, 178), wire(600, 158, 600, 110), dot(600, 110), wire(600, 198, 600, 250),
