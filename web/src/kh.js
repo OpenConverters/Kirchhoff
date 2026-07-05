@@ -161,14 +161,23 @@ function ensureShard(category) {
 
 // Given a BOM row's kind + its designRequirements (+ converter context for controllers/HV FETs),
 // return a Kelvin SelectionResult ({candidates, rejections, ...}) or {error:'NoCandidates',...}.
+// Cap any single manufacturer at 20% of the candidate list so the ranked Pareto spans many vendors
+// (Kelvin's diversity policy — apply_mfr_policy; without it e.g. a flyback cap list comes back all
+// Panasonic). Kelvin defaults to no cap to stay parity-locked, so the consumer opts in here.
+const KELVIN_MAX_MFR_FRACTION = 0.2
+
 export async function selectCandidates(kind, requirements, context = {}) {
   const category = kelvinCategoryFor(kind)
   if (!category) throw new Error(`no Kelvin category for kind '${kind}'`)
   await ensureShard(category)
-  const options = { maxCandidates: 12 }
+  const options = { maxCandidates: 12, maxManufacturerFraction: KELVIN_MAX_MFR_FRACTION }
   if (context.switchingFrequency) options.switchingFrequency = context.switchingFrequency
   if (context.inputVoltage) options.inputVoltage = context.inputVoltage
   if (context.topology) options.topology = context.topology
+  // Manufacturer controls (settings; GUI-wired later). The diversity cap defaults
+  // to KELVIN_MAX_MFR_FRACTION above; an optional allowlist restricts to named vendors.
+  if (context.maxManufacturerFraction != null) options.maxManufacturerFraction = context.maxManufacturerFraction
+  if (context.manufacturerAllowlist) options.manufacturerAllowlist = context.manufacturerAllowlist
   return callJson('kelvin_select', category, JSON.stringify(requirements), JSON.stringify(options))
 }
 
