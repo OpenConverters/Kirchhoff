@@ -94,5 +94,12 @@ test.describe('Kelvin candidate sourcing', () => {
     await page.getByTestId('find-parts').click()
     await expect(page.getByTestId('kelvin-candidates')).toBeVisible({ timeout: 20000 })
     expect(await page.getByTestId('kelvin-candidate').count()).toBeGreaterThan(0)
+
+    // Manufacturer diversity cap (maxManufacturerFraction=0.2) must actually take effect in the WASM:
+    // the flyback bulk-cap set is vendor-skewed, so uncapped it comes back all one manufacturer;
+    // capped it spans several. >1 distinct vendor proves the cap reached apply_mfr_policy.
+    const vendors = await page.$$eval('[data-testid=kelvin-candidate] .mfr',
+      els => [...new Set(els.map(e => e.textContent.trim()))])
+    expect(vendors.length, `candidate list spans multiple manufacturers (got ${vendors.join(', ')})`).toBeGreaterThan(1)
   })
 })
