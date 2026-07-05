@@ -288,6 +288,24 @@ function openPart(ref_) {
   const row = bomRows.value.find((r) => r.ref === ref_)
   if (row) selectedPart.value = row
 }
+
+// A real part was bound into a component (PartDrawer → Kelvin bind_part). Swap in the new TAS and
+// re-run the downstream so the schematic/BOM/verdict table reflect the real part: infer_fidelity now
+// reads DATASHEET off its manufacturerInfo, the snubber strip fires on real Coss, and the stress/rating
+// verdicts recompute from a fresh component sim.
+async function onBound({ tas }) {
+  if (!result.value) return
+  result.value = { ...result.value, tas }
+  try {
+    realizedTas.value = form.models === 'datasheet' ? await realizeTas(tas) : null
+    bomRows.value = enrichBom(extractBom(tas), result.value.analyticalWaveforms)
+    ngspiceOps.value = {}
+    componentWaves.value = null
+    fetchComponentWaves()   // fills the verdict table from a fresh sim of the bound design
+  } catch (e) {
+    runError.value = e.message
+  }
+}
 function onKey(e) {
   if (e.key === 'Escape') selectedPart.value = null
 }
@@ -800,10 +818,12 @@ provide('kh', {
 
     <PartDrawer
       :part="selectedPart"
+      :tas="result?.tas"
       :device-wave="selectedPartWave"
       :periods="form.showPeriods"
       :context="kelvinContext"
       @close="selectedPart = null"
+      @bound="onBound"
     />
   </div>
 </template>

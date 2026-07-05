@@ -29,6 +29,56 @@ test.describe('Kelvin candidate sourcing', () => {
     expect(topMpn.trim().length, 'top candidate has an MPN').toBeGreaterThan(0)
   })
 
+  test('binding a MOSFET candidate Range-fetches its record and re-sims the design', async ({ page }) => {
+    await boot(page)
+    await selectTopology(page, 'flyback')
+    expect(await solve(page, 'analytical'), 'solve error').toBeNull()
+
+    const ref = await openKind(page, 'MOSFET')
+    await page.getByTestId('find-parts').click()
+    await expect(page.getByTestId('kelvin-candidates')).toBeVisible({ timeout: 15000 })
+
+    const topMpn = (await page.getByTestId('kelvin-candidate').first().locator('.mpn').innerText()).trim()
+
+    // "use" the top candidate: the PartDrawer Range-fetches that one record from the hosted NDJSON
+    // (bytes=srcOffset-srcLength → 206) and binds it via Kelvin's bind_part; App swaps the TAS + re-sims.
+    await page.getByTestId('use-part').first().click()
+    await expect(page.getByTestId('bound-tag')).toBeVisible({ timeout: 15000 })
+    await expect(page.getByTestId('kelvin-bind-error')).toHaveCount(0)
+
+    // The real part is now in the design TAS (bind_part wrote data.semiconductor verbatim) — the
+    // deterministic default's MPN, bound onto the MOSFET we opened.
+    const boundRef = await page.evaluate((r) => {
+      const comps = window.__bench.result?.tas?.topology?.stages?.flatMap((s) => s.circuit?.components ?? []) ?? []
+      const c = comps.find((x) => x.name === r)
+      return c?.data?.semiconductor?.mosfet?.manufacturerInfo?.reference ?? null
+    }, ref)
+    expect(boundRef, 'bound MPN is written into the TAS').toBe(topMpn)
+  })
+
+  test('bind refuses a shard/catalog version mismatch (safety guard)', async ({ page }) => {
+    // Serve a manifest whose mosfet.sourceSize disagrees with the hosted NDJSON. Selection (shard-only)
+    // must still work, but binding — which Range-reads the NDJSON by the shard's byte offsets — must
+    // refuse rather than risk reading the wrong record from a mismatched catalog.
+    await page.route('**/kelvin/manifest.json', async (route) => {
+      const res = await route.fetch()
+      const m = await res.json()
+      m.families.mosfet.sourceSize += 1 // deliberately wrong vs the real NDJSON size
+      await route.fulfill({ json: m })
+    })
+    await boot(page)
+    await selectTopology(page, 'flyback')
+    expect(await solve(page, 'analytical'), 'solve error').toBeNull()
+
+    await openKind(page, 'MOSFET')
+    await page.getByTestId('find-parts').click()
+    await expect(page.getByTestId('kelvin-candidates')).toBeVisible({ timeout: 15000 }) // select unaffected
+
+    await page.getByTestId('use-part').first().click()
+    await expect(page.getByTestId('kelvin-bind-error')).toContainText('version mismatch', { timeout: 15000 })
+    await expect(page.getByTestId('bound-tag')).toHaveCount(0)
+  })
+
   test('capacitor drawer sources real parts (large shard lazy-loads)', async ({ page }) => {
     await boot(page)
     await selectTopology(page, 'flyback')

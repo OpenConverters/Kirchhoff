@@ -20,5 +20,19 @@ if [[ ! -x "$KELVIN_INDEX" ]]; then
 fi
 mkdir -p "$OUT"
 "$KELVIN_INDEX" --data "$TAS_DATA" --out "$OUT"
-echo "Kelvin shards written to $OUT"
+
+# Host each catalog's NDJSON next to its shard so the PartDrawer can Range-fetch a chosen part's
+# ONE record (bytes=srcOffset-srcLength) at bind time — the full envelope never lives in the shard.
+# The web fetches singular /kelvin/<category>.ndjson; the source catalogs are plural (<category>s).
+# Symlinks keep local/dev disk ~0 (sirv/nginx both follow them); the prod deploy rsync -L resolves
+# them into real files. The bytes MUST stay identical to what the shard was indexed from (same DB).
+for cat in mosfet diode capacitor resistor controller igbt bjt varistor; do
+  src="$TAS_DATA/${cat}s.ndjson"
+  if [[ -f "$src" ]]; then
+    ln -sfn "$src" "$OUT/${cat}.ndjson"
+  else
+    echo "WARN: source catalog $src missing — bind for '$cat' will 404 until it is hosted" >&2
+  fi
+done
+echo "Kelvin shards + NDJSON written to $OUT"
 ls -la "$OUT"

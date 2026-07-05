@@ -1,16 +1,17 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { requirementRows } from '../bom.js'
-import { selectCandidates, kelvinCategoryFor } from '../kh.js'
+import { selectCandidates, kelvinCategoryFor, bindPart } from '../kh.js'
 import WavePane from './WavePane.vue'
 
 const props = defineProps({
   part: { type: Object, default: null },       // a BOM row
+  tas: { type: Object, default: null },         // the current design TAS (for binding a chosen part)
   deviceWave: { type: Object, default: null }, // simulated V/I excitation for a non-magnetic device
   periods: { type: Number, default: 1 },
   context: { type: Object, default: () => ({}) }, // { topology, inputVoltage, switchingFrequency }
 })
-const emit = defineEmits(['close'])
+const emit = defineEmits(['close', 'bound'])
 
 const rows = computed(() => requirementRows(props.part?.requirements))
 
@@ -36,11 +37,34 @@ async function findParts() {
   }
 }
 
+// ── Bind a chosen candidate into the design (Tier 2: Range-fetch its record → bind_part → re-sim) ──
+const binding = ref(null)   // mpn currently being bound
+const boundMpn = ref(null)  // mpn last successfully bound into this component
+const bindErr = ref('')
+
+async function useCandidate(c) {
+  if (!props.tas) { bindErr.value = 'no design loaded to bind into'; return }
+  binding.value = c.mpn
+  bindErr.value = ''
+  try {
+    const tas = await bindPart(props.tas, props.part.ref, props.part.kind, c)
+    boundMpn.value = c.mpn
+    emit('bound', { ref: props.part.ref, mpn: c.mpn, tas })  // App swaps the TAS in and re-sims
+  } catch (e) {
+    bindErr.value = e?.message ?? String(e)
+  } finally {
+    binding.value = null
+  }
+}
+
 // Reset when the selected component changes (don't auto-fetch big shards — user clicks).
 watch(() => props.part?.ref, () => {
   state.value = category.value ? 'idle' : 'unsupported'
   result.value = null
   errMsg.value = ''
+  binding.value = null
+  boundMpn.value = null
+  bindErr.value = ''
 })
 
 const candidates = computed(() => result.value?.candidates ?? [])
@@ -144,10 +168,10 @@ function fmtx(v) { return v == null ? '—' : `×${v >= 100 ? Math.round(v) : v.
 
         <table v-else-if="state === 'ok'" class="cand" data-testid="kelvin-candidates">
           <thead>
-            <tr><th>MPN</th><th>mfr</th><th>margins</th><th></th></tr>
+            <tr><th>MPN</th><th>mfr</th><th>margins</th><th></th><th></th></tr>
           </thead>
           <tbody>
-            <tr v-for="(c, i) in candidates" :key="c.mpn" :class="{ top: i === 0 }" data-testid="kelvin-candidate">
+            <tr v-for="(c, i) in candidates" :key="c.mpn" :class="{ top: i === 0, bound: boundMpn === c.mpn }" data-testid="kelvin-candidate">
               <td class="mono mpn">{{ c.mpn }}</td>
               <td class="mfr">{{ c.manufacturer }}</td>
               <td class="mono margins">
@@ -162,12 +186,25 @@ function fmtx(v) { return v == null ? '—' : `×${v >= 100 ? Math.round(v) : v.
                 <span v-if="c.evidence?.datasheetUsable === false" class="badge warn" title="datasheet link unusable">⚠</span>
                 <span v-if="c.evidence?.thermalPresent" class="badge ok" title="thermal data present">θ</span>
               </td>
+              <td class="use-cell">
+                <span v-if="boundMpn === c.mpn" class="bound-tag" data-testid="bound-tag" title="bound into the design">✓ bound</span>
+                <button
+                  v-else
+                  class="use-btn"
+                  :disabled="binding != null"
+                  data-testid="use-part"
+                  @click="useCandidate(c)"
+                >{{ binding === c.mpn ? '…' : 'use' }}</button>
+              </td>
             </tr>
           </tbody>
         </table>
+        <div v-if="state === 'ok' && bindErr" class="suggest-box err" data-testid="kelvin-bind-error" style="margin-top: 0.4rem">
+          Binding failed: {{ bindErr }}
+        </div>
         <div v-if="state === 'ok'" class="hint" style="margin-top: 0.35rem">
           Top row is the deterministic default. Ranked by
-          {{ result?.tiebreaker?.replace(/_/g, ' ') }}.
+          {{ result?.tiebreaker?.replace(/_/g, ' ') }}. <b>“use”</b> binds the real part and re-simulates.
         </div>
       </aside>
     </template>
@@ -186,7 +223,17 @@ table.cand { width: 100%; margin-top: 0.5rem; border-collapse: collapse; font-si
 table.cand th { text-align: left; color: var(--ink-dim); font-weight: normal; padding: 0.2rem 0.3rem; border-bottom: 1px solid var(--rule, #333); }
 table.cand td { padding: 0.25rem 0.3rem; border-bottom: 1px solid var(--rule-dim, #222); vertical-align: top; }
 table.cand tr.top { background: rgba(255, 207, 107, 0.08); }
+table.cand tr.bound { background: rgba(127, 208, 138, 0.12); }
 table.cand .mpn { color: var(--amber-hi, #ffcf6b); }
+.use-cell { white-space: nowrap; text-align: right; }
+.use-btn {
+  padding: 0.1rem 0.5rem; cursor: pointer; font: inherit; font-size: 0.68rem;
+  background: transparent; color: var(--amber-hi, #ffcf6b);
+  border: 1px solid var(--amber-hi, #ffcf6b); border-radius: 3px;
+}
+.use-btn:hover:not(:disabled) { background: var(--amber-hi, #ffcf6b); color: #000; }
+.use-btn:disabled { opacity: 0.4; cursor: default; }
+.bound-tag { color: #7fd08a; font-size: 0.68rem; white-space: nowrap; }
 table.cand .mfr { color: var(--ink-dim); font-size: 0.68rem; }
 table.cand .margins span { margin-right: 0.4rem; white-space: nowrap; }
 .badge { display: inline-block; padding: 0 0.25rem; border-radius: 3px; font-size: 0.7rem; }
