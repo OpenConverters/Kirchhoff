@@ -202,15 +202,15 @@ json build_pfc_tas(const PfcDesign& d) {
     auto indBrick = [&](double L, const json& excitation) { json j; j["magnetic"] = json::object();
         j["inputs"] = req::magnetic_inputs(L, 0.2, /*single winding*/ {}, {"primary"},
             std::nullopt, 25.0, {excitation}); return j; };
-    auto resBrick = [&](double r) { json j; j["resistor"] = json::object();
+    auto resBrick = [&](double r, double powerW = -1.0) { json j; j["resistor"] = json::object();
         auto& dr = j["inputs"]["designRequirements"];
         dr["deviceType"] = "resistor";
         dr["resistance"]["nominal"] = r;
-        // Conservative requirement floor: a resistor dissipates I^2*R (series) or V^2/R (shunt);
-        // the physical value is the smaller. Exact for load resistors (=Pout), safe for sense/divider.
-        const double Iout_ = d.outputPower / d.outputVoltage, Vb_ = d.outputVoltage;
-        const double i2r_ = Iout_*Iout_*r, v2r_ = Vb_*Vb_/r;
-        dr["powerRating"] = (i2r_ < v2r_ ? i2r_ : v2r_);
+        // Power rating = the resistor's ACTUAL dissipation, passed by the caller (series I^2R, divider
+        // share, or reference floor). A bare call defaults to a shunt across the full bus (V^2/R). Using
+        // V^2/R with the FULL bus for a high-value divider/reference leg over-rates it by orders of
+        // magnitude (a 1k divider bottom is a 16 mW part, not 160 W).
+        dr["powerRating"] = (powerW >= 0.0 ? powerW : d.outputVoltage * d.outputVoltage / r);
         return j; };
     auto comparator = [&](double hyst) { json j; json& e = j["analog"]["comparator"]["behavioral"];
         e["outputHigh"] = 5.0; e["outputLow"] = 0.0; e["threshold"] = 0.0; e["hysteresis"] = hyst; return j; };
@@ -265,10 +265,10 @@ json build_pfc_tas(const PfcDesign& d) {
                                   port("busP"), port("nL"), port("g")});
     pcell["components"] = json::array({
         comp("D1", diode(reqBridge)), comp("D2", diode(reqBridge)), comp("D3", diode(reqBridge)), comp("D4", diode(reqBridge)),
-        comp("Rsense", resBrick(d.senseResistance)),   // inductor-current sense (in series with L)
+        comp("Rsense", resBrick(d.senseResistance, d.outputPower / (d.inputVoltageRms * d.efficiency) * d.outputPower / (d.inputVoltageRms * d.efficiency) * d.senseResistance * 2.0)),   // inductor-current sense (in series with L)
         comp("L", indBrick(d.boostInductance, indExc)), comp("SW", mosfet(reqSW)), comp("D5", diode(reqD5)),
         comp("Cout", capBrick(d.outputCapacitance, d.outputVoltage * 2)),
-        comp("Rref", resBrick(10e3))});                 // floating-mains common-mode reference
+        comp("Rref", resBrick(10e3, 0.25))});                 // floating-mains common-mode reference
     pcell["connections"] = json::array({
         // Full bridge: A=acLine, B=acNeutral, top rail busP, bottom rail = ground.
         conn("acLine",  {pin("D1","anode"), pin("D3","cathode"), prt("acLine")}),
@@ -303,7 +303,7 @@ json build_pfc_tas(const PfcDesign& d) {
     json ccell; ccell["name"] = "pfc-voltage-current-control";
     ccell["ports"] = json::array({port("busP"), port("nL"), port("vout"), port("gnd"), port("g")});
     ccell["components"] = json::array({
-        comp("Rv1", resBrick(rv1)), comp("Rv2", resBrick(rv2)),
+        comp("Rv1", resBrick(rv1, d.outputVoltage / (rv1 + rv2) * d.outputVoltage / (rv1 + rv2) * rv1)), comp("Rv2", resBrick(rv2, d.outputVoltage / (rv1 + rv2) * d.outputVoltage / (rv1 + rv2) * rv2)),
         comp("Iv", integrator(d.integralGain, ivInit, vref, ivLo, ivHi)),
         comp("Sgv", summer(1.0, kp)),     // gv = Iv + kp·voutScaled (PI: integral + proportional paths)
         comp("Mv", multiplier()),
@@ -394,12 +394,11 @@ static json build_pfc_totempole_tas(const PfcDesign& d) {
     auto indBrick = [&](double L, const json& excitation) { json j; j["magnetic"] = json::object();
         j["inputs"] = req::magnetic_inputs(L, 0.2, /*single winding*/ {}, {"primary"},
             std::nullopt, 25.0, {excitation}); return j; };
-    auto resBrick = [&](double r) { json j; j["resistor"] = json::object();
+    auto resBrick = [&](double r, double powerW = -1.0) { json j; j["resistor"] = json::object();
         auto& dr = j["inputs"]["designRequirements"];
         dr["deviceType"] = "resistor"; dr["resistance"]["nominal"] = r;
-        const double Iout_ = d.outputPower / d.outputVoltage, Vb_ = d.outputVoltage;
-        const double i2r_ = Iout_*Iout_*r, v2r_ = Vb_*Vb_/r;
-        dr["powerRating"] = (i2r_ < v2r_ ? i2r_ : v2r_);
+        // Power from the resistor's actual dissipation (caller-supplied); bare = shunt across the bus.
+        dr["powerRating"] = (powerW >= 0.0 ? powerW : d.outputVoltage * d.outputVoltage / r);
         return j; };
     auto comparator = [&](double hyst, double lo, double hi) { json j; json& e = j["analog"]["comparator"]["behavioral"];
         e["outputHigh"] = hi; e["outputLow"] = lo; e["threshold"] = 0.0; e["hysteresis"] = hyst; return j; };
@@ -445,13 +444,13 @@ static json build_pfc_totempole_tas(const PfcDesign& d) {
     pcell["ports"] = json::array({port("acLine"), port("acNeutral"), port("gnd"), port("vout"),
                                   port("nL"), port("gHi"), port("gLo")});
     pcell["components"] = json::array({
-        comp("Rsense", resBrick(d.senseResistance)),
+        comp("Rsense", resBrick(d.senseResistance, d.outputPower / (d.inputVoltageRms * d.efficiency) * d.outputPower / (d.inputVoltageRms * d.efficiency) * d.senseResistance * 2.0)),
         comp("L", indBrick(d.boostInductance, indExc)),
         comp("Q1", mosfet(reqSW)), comp("Q2", mosfet(reqSW)),               // fast leg (high, low)
         comp("DQ1", diode(reqDfw)), comp("DQ2", diode(reqDfw)),             // anti-parallel free-wheel
         comp("Da", diode(reqDslow)), comp("Db", diode(reqDslow)),          // slow-leg line return
         comp("Cout", capBrick(d.outputCapacitance, d.outputVoltage * 2)),
-        comp("Rref", resBrick(10e3))});                                     // floating-mains reference
+        comp("Rref", resBrick(10e3, 0.25))});                                     // floating-mains reference
     pcell["connections"] = json::array({
         conn("acLine",  {pin("Rsense","1"), prt("acLine")}),
         conn("nL",      {pin("Rsense","2"), pin("L","primary_start"), prt("nL")}),
@@ -487,7 +486,7 @@ static json build_pfc_totempole_tas(const PfcDesign& d) {
                                   port("vout"), port("gnd"), port("gHi"), port("gLo")});
     ccell["components"] = json::array({
         // Outer voltage loop → gv (boost-identical).
-        comp("Rv1", resBrick(rv1)), comp("Rv2", resBrick(rv2)),
+        comp("Rv1", resBrick(rv1, d.outputVoltage / (rv1 + rv2) * d.outputVoltage / (rv1 + rv2) * rv1)), comp("Rv2", resBrick(rv2, d.outputVoltage / (rv1 + rv2) * d.outputVoltage / (rv1 + rv2) * rv2)),
         comp("Iv", integrator(d.integralGain, ivInit, vref, ivLo, ivHi)),
         comp("Sgv", summer(1.0, kp)),
         // Bipolar current reference iRefV = vLineClean·(1−gv):
@@ -595,12 +594,11 @@ static json build_pfc_interleaved_tas(const PfcDesign& d) {
     auto indBrick = [&](double L, const json& excitation) { json j; j["magnetic"] = json::object();
         j["inputs"] = req::magnetic_inputs(L, 0.2, /*single winding*/ {}, {"primary"},
             std::nullopt, 25.0, {excitation}); return j; };
-    auto resBrick = [&](double r) { json j; j["resistor"] = json::object();
+    auto resBrick = [&](double r, double powerW = -1.0) { json j; j["resistor"] = json::object();
         auto& dr = j["inputs"]["designRequirements"];
         dr["deviceType"] = "resistor"; dr["resistance"]["nominal"] = r;
-        const double Iout_ = d.outputPower / d.outputVoltage, Vb_ = d.outputVoltage;
-        const double i2r_ = Iout_*Iout_*r, v2r_ = Vb_*Vb_/r;
-        dr["powerRating"] = (i2r_ < v2r_ ? i2r_ : v2r_);
+        // Power from the resistor's actual dissipation (caller-supplied); bare = shunt across the bus.
+        dr["powerRating"] = (powerW >= 0.0 ? powerW : d.outputVoltage * d.outputVoltage / r);
         return j; };
     auto comparator = [&](double hyst) { json j; json& e = j["analog"]["comparator"]["behavioral"];
         e["outputHigh"] = 5.0; e["outputLow"] = 0.0; e["threshold"] = 0.0; e["hysteresis"] = hyst; return j; };
@@ -649,9 +647,9 @@ static json build_pfc_interleaved_tas(const PfcDesign& d) {
         comp("D1", diode(reqBridge)), comp("D2", diode(reqBridge)),
         comp("D3", diode(reqBridge)), comp("D4", diode(reqBridge)),
         comp("Cout", capBrick(d.outputCapacitance, d.outputVoltage * 2)),
-        comp("Rref", resBrick(10e3))};
+        comp("Rref", resBrick(10e3, 0.25))};
     for (int p = 1; p <= N; ++p) {
-        pcomps.push_back(comp("Rsense" + std::to_string(p), resBrick(d.senseResistance)));
+        pcomps.push_back(comp("Rsense" + std::to_string(p), resBrick(d.senseResistance, d.outputPower / (d.inputVoltageRms * d.efficiency) * d.outputPower / (d.inputVoltageRms * d.efficiency) * d.senseResistance * 2.0)));
         pcomps.push_back(comp("L" + std::to_string(p), indBrick(d.boostInductance, indExc)));
         pcomps.push_back(comp("SW" + std::to_string(p), mosfet(reqSW)));
         pcomps.push_back(comp("D5" + std::to_string(p), diode(reqD5)));
@@ -696,7 +694,7 @@ static json build_pfc_interleaved_tas(const PfcDesign& d) {
     for (int p = 1; p <= N; ++p) { cports.push_back(port(nL(p))); cports.push_back(port(gp(p))); }
     ccell["ports"] = cports;
     std::vector<json> ccomps = {
-        comp("Rv1", resBrick(rv1)), comp("Rv2", resBrick(rv2)),
+        comp("Rv1", resBrick(rv1, d.outputVoltage / (rv1 + rv2) * d.outputVoltage / (rv1 + rv2) * rv1)), comp("Rv2", resBrick(rv2, d.outputVoltage / (rv1 + rv2) * d.outputVoltage / (rv1 + rv2) * rv2)),
         comp("Iv", integrator(d.integralGain, ivInit, vref, ivLo, ivHi)),
         comp("Sgv", summer(1.0, kp)),
         comp("Mv", multiplier())};
@@ -795,12 +793,11 @@ static json build_pfc_buckboost_tas(const PfcDesign& d) {
     auto indBrick = [&](double L, const json& excitation) { json j; j["magnetic"] = json::object();
         j["inputs"] = req::magnetic_inputs(L, 0.2, /*single winding*/ {}, {"primary"},
             std::nullopt, 25.0, {excitation}); return j; };
-    auto resBrick = [&](double r) { json j; j["resistor"] = json::object();
+    auto resBrick = [&](double r, double powerW = -1.0) { json j; j["resistor"] = json::object();
         auto& dr = j["inputs"]["designRequirements"];
         dr["deviceType"] = "resistor"; dr["resistance"]["nominal"] = r;
-        const double Iout_ = d.outputPower / d.outputVoltage, Vb_ = d.outputVoltage;
-        const double i2r_ = Iout_*Iout_*r, v2r_ = Vb_*Vb_/r;
-        dr["powerRating"] = (i2r_ < v2r_ ? i2r_ : v2r_);
+        // Power from the resistor's actual dissipation (caller-supplied); bare = shunt across the bus.
+        dr["powerRating"] = (powerW >= 0.0 ? powerW : d.outputVoltage * d.outputVoltage / r);
         return j; };
     auto comparator = [&](double hyst) { json j; json& e = j["analog"]["comparator"]["behavioral"];
         e["outputHigh"] = 5.0; e["outputLow"] = 0.0; e["threshold"] = 0.0; e["hysteresis"] = hyst; return j; };
@@ -846,14 +843,14 @@ static json build_pfc_buckboost_tas(const PfcDesign& d) {
     std::vector<json> pcomps = {
         comp("D1", diode(reqBridge)), comp("D2", diode(reqBridge)),
         comp("D3", diode(reqBridge)), comp("D4", diode(reqBridge)),
-        comp("Rsense", resBrick(d.senseResistance)),
+        comp("Rsense", resBrick(d.senseResistance, d.outputPower / (d.inputVoltageRms * d.efficiency) * d.outputPower / (d.inputVoltageRms * d.efficiency) * d.senseResistance * 2.0)),
         comp("L1", indBrick(d.boostInductance, indExc)),
         comp("SW", mosfet(reqSW)),
         comp("Cs", capBrick(d.couplingCapacitance, vSwStress * 2)),
         comp("L2", indBrick(d.coupledInductance, indExc)),
         comp("D5", diode(reqD5)),
         comp("Cout", capBrick(d.outputCapacitance, d.outputVoltage * 2)),
-        comp("Rref", resBrick(10e3))};
+        comp("Rref", resBrick(10e3, 0.25))};
     pcell["components"] = pcomps;
     // The input side (bridge + Rsense + L1 + SW-to-gnd + Cs on the switch node nA) is common; only the
     // output cell (L2 / D5 orientation and the bus sign) differs between SEPIC and Ćuk.
@@ -907,8 +904,8 @@ static json build_pfc_buckboost_tas(const PfcDesign& d) {
     // Voltage sense → voutScaled (always positive). SEPIC: resistive divider. Ćuk (negative bus): a summer
     // negator voutScaled = −kv·V(vout) (inA=vout gain −kv; inB=gnd gain 0).
     if (!inverting) {
-        ccomps.push_back(comp("Rv1", resBrick(rv1)));
-        ccomps.push_back(comp("Rv2", resBrick(rv2)));
+        ccomps.push_back(comp("Rv1", resBrick(rv1, d.outputVoltage / (rv1 + rv2) * d.outputVoltage / (rv1 + rv2) * rv1)));
+        ccomps.push_back(comp("Rv2", resBrick(rv2, d.outputVoltage / (rv1 + rv2) * d.outputVoltage / (rv1 + rv2) * rv2)));
     } else {
         ccomps.push_back(comp("Svo", summer(-kv, 0.0)));
     }

@@ -136,20 +136,19 @@ json build_vienna_tas(const ViennaDesign& d) {
                                                                viennaChannels, viennaPlusSectors);
     const double IpkLV  = AN::winding_current(aopVienna, 0, "peak");
     const double IrmsLV = AN::winding_current(aopVienna, 0, "rms");
-    const double IavgLV = AN::winding_current(aopVienna, 0, "offset");
     // Unnamed (no full-waveform capture): this one excitation is shared by all three phase inductors
     // (La/Lb/Lc), so a single-component key would misattribute it; the labels are sinusoidal and the
     // frontend re-synthesizes them from processed data.
     const json indExcV = AN::excitations_processed(aopVienna).at(0);
-    auto resBrick = [&](double r) { json j; j["resistor"] = json::object();
+    auto resBrick = [&](double r, double powerW = -1.0) { json j; j["resistor"] = json::object();
         auto& dr = j["inputs"]["designRequirements"];
         dr["deviceType"] = "resistor";
         dr["resistance"]["nominal"] = r;
-        // Conservative requirement floor: a resistor dissipates I^2*R (series) or V^2/R (shunt);
-        // the physical value is the smaller. Exact for load resistors (=Pout), safe for sense/divider.
-        const double Iout_ = d.outputPower / d.outputVoltage, Vb_ = d.outputVoltage;
-        const double i2r_ = Iout_*Iout_*r, v2r_ = Vb_*Vb_/r;
-        dr["powerRating"] = (i2r_ < v2r_ ? i2r_ : v2r_);
+        // Power rating = the resistor's ACTUAL dissipation, passed by the caller (series I^2R, divider
+        // share, or reference floor). A bare call defaults to a shunt across the full bus (V^2/R) — the
+        // load resistor only. (V^2/R with the FULL bus for a divider/reference over-rates by orders of
+        // magnitude — a 1k divider leg is not a 160 W part.)
+        dr["powerRating"] = (powerW >= 0.0 ? powerW : d.outputVoltage * d.outputVoltage / r);
         return j; };
 
     // ── per-phase semiconductor requirements (worst-case corner) ──
@@ -164,7 +163,8 @@ json build_vienna_tas(const ViennaDesign& d) {
     const double ratedVrV  = d.outputVoltage / cfg::v_derate_diode(d.config); // each diode blocks the FULL bus
     const double maxRdsOnV = cfg::rds_on_loss_fraction(d.config) * (d.outputPower / 3.0) / (IrmsLV * IrmsLV);
     const double maxVfV    = (ratedVrV < 100.0) ? 0.6 : 1.2;
-    const double IfV       = IavgLV / 0.7;   // per-phase rectifier average current with margin
+    const double IfV       = IrmsLV / 0.7;   // rectifier carries the phase (inductor) current, NOT the
+                                             // inductor DC offset (≈0 for a line inductor → absurd µA rating)
     const json reqSWV = req::mosfet("mainSwitch", ratedVdsV, IpkLV, maxRdsOnV, 125.0);
     const json reqDV  = req::diode(ratedVrV, IfV, maxVfV);   // phase rectifier (no trr spec)
 
@@ -189,7 +189,7 @@ json build_vienna_tas(const ViennaDesign& d) {
         const std::string p = ph[i];
         const std::string RS="Rs"+p, L="L"+p, SW="SW"+p, SW2="SQ"+p, DP="Dp"+p, DN="Dn"+p,
                           X="x"+p, G="g"+p, NL="nl"+p, CS="cs"+p;
-        comps.push_back(comp(RS, resBrick(d.senseResistance)));
+        comps.push_back(comp(RS, resBrick(d.senseResistance, IrmsLV * IrmsLV * d.senseResistance)));  // series sense: I^2R
         comps.push_back(comp(L, indBrick(d.boostInductance, indExcV)));
         // Bidirectional midpoint switch = TWO MOSFETs in common-source back-to-back (drains at node X and at
         // the midpoint, sources tied together, BOTH gates = G). A SINGLE MOSFET cannot realise the Vienna

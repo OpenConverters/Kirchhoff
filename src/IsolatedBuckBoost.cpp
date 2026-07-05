@@ -22,7 +22,7 @@ IsolatedBuckBoostDesign design_isolated_buck_boost(const json& tasInputs) {
     IsolatedBuckBoostDesign d{};
     d.config = cfg::object_of(tasInputs);
     d.primaryVoltage   = nominal(dr.at("outputs").at(0).at("voltage"));   // magnitude (rail is inverting)
-    d.secondaryVoltage = nominal(dr.at("outputs").at(1).at("voltage"));
+    d.secondaryVoltage = std::abs(nominal(dr.at("outputs").at(1).at("voltage")));  // magnitude (rail may be inverting)
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 1.0);
     {
@@ -56,7 +56,7 @@ const double Vd = req::dideal_diode_drop(Ipri);  // DIDEAL Vf at the primary rec
     std::vector<double> secTurns;
     double sumReflected = 0.0;
     for (size_t k = 1; k < nOut; ++k) {
-        const double Vsec_k = nominal(dr.at("outputs").at(k).at("voltage"));
+        const double Vsec_k = std::abs(nominal(dr.at("outputs").at(k).at("voltage")));
         const double Isec_k = opOut.at(k).at("power").get<double>() / Vsec_k;
         double Nk;
         if (k == 1) {
@@ -84,7 +84,7 @@ const double Vd = req::dideal_diode_drop(Ipri);  // DIDEAL Vf at the primary rec
     // carry their own turns ratio / load / cap and are exposed on external vout<i> ports by the builder.
     for (size_t k = 1; k < nOut; ++k) {
         IsolatedBuckBoostSecondaryLeg leg{};
-        leg.voltage    = nominal(dr.at("outputs").at(k).at("voltage"));
+        leg.voltage    = std::abs(nominal(dr.at("outputs").at(k).at("voltage")));
         leg.power      = opOut.at(k).at("power").get<double>();
         leg.turnsRatio = secTurns.at(k - 1);
         if (k == 1) {

@@ -153,7 +153,7 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
         std::vector<json> comps{
             comp("QS1", mosfet(req::mosfet("mainSwitch", ratedVds, IpkPri, maxRdsOn, 125.0))),
             comp("QS2", mosfet(req::mosfet("mainSwitch", ratedVds, IpkPri, maxRdsOn, 125.0))),
-            comp("DS1", diode()), comp("DS2", diode()),
+            comp("DS1", diode(req::body_diode(ratedVds, IpkPri))), comp("DS2", diode(req::body_diode(ratedVds, IpkPri))),
             comp("T1", xfmr), comp("Cpri", cpri)};
         std::vector<json> cports{port("vin"), port("gnd"), port("vout"), port("g1"), port("g2")};
         std::vector<json> conns{
@@ -302,8 +302,9 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
     cell["components"] = json::array({
         comp("QS1", mosfet(req::mosfet("mainSwitch", ratedVds, IpkPri, maxRdsOn, 125.0))),
         comp("QS2", mosfet(req::mosfet("mainSwitch", ratedVds, IpkPri, maxRdsOn, 125.0))),
-        // DS1/DS2 are anti-parallel BODY diodes across QS1/QS2 -> requirement-less (carried by the FET).
-        comp("DS1", diode()),  comp("DS2", diode()),
+        // DS1/DS2 are anti-parallel BODY diodes across QS1/QS2 — tagged role:bodyDiode (folded into the
+        // FET in the BOM), ratings mirror the switch they shadow (block Vin, carry the inductor peak).
+        comp("DS1", diode(req::body_diode(ratedVds, IpkPri))),  comp("DS2", diode(req::body_diode(ratedVds, IpkPri))),
         comp("T1", xfmr), comp("Cpri", cpri),
         comp("Dsec", diode(req::diode(VrSec, IsecLoad / 0.7, maxVfSec, 0.05 * T))), comp("Csec", csec), comp("Rsec", rsec)});
     cell["connections"] = json::array({
