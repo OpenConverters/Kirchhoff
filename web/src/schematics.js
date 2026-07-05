@@ -140,11 +140,13 @@ const coilV = (x, y0, n = 4, w = 14, h = 8.4, side = 1) => {
 
 function indH(ref, bom, x, y, labelSide = 'above') {
   const lab = labelSide === 'above' ? [x, y - 24, 'middle'] : [x, y + 20, 'middle']
+  regPin(ref, 'p0', x - 28, y); regPin(ref, 'p1', x + 28, y)
   return hot(ref, bom, [x - 28, y - 14, 56, 20], P(coilH(x - 28, y)), lab)
 }
 
 function indV(ref, bom, x, y, labelSide = 'right') {
   const lab = labelSide === 'right' ? [x + 13, y - 2, 'start'] : [x - 13, y - 2, 'end']
+  regPin(ref, 'p0', x, y - 28); regPin(ref, 'p1', x, y + 28)
   return hot(ref, bom, [x - 12, y - 28, 26, 56], P(coilV(x, y - 28)), lab)
 }
 
@@ -255,6 +257,10 @@ function xfmr(ref, bom, x, y, opts = {}) {
   // default top-center label zone.
   const ly = t - 24 + (opts.labelDy ?? 0)
   const lab = opts.labelDx ? [x + opts.labelDx, ly, 'end'] : [x, ly, 'middle']
+  // winding terminals (for the magnetic connectivity check): primary L, secondary R, optional CT stubs
+  regPin(ref, 'p0', x - 10, t); regPin(ref, 'p1', x - 10, b); regPin(ref, 's0', x + 10, t); regPin(ref, 's1', x + 10, b)
+  if (opts.ct === true || opts.ct === 'right' || opts.ct === 'both') regPin(ref, 'sct', x + 24, y)
+  if (opts.ct === 'left' || opts.ct === 'both') regPin(ref, 'pct', x - 24, y)
   return hot(ref, bom, [x - 22, t - 6, 44, h + 12], body, lab)
 }
 
@@ -462,24 +468,30 @@ function flyback(bom) {
 }
 
 function forward(bom) {
-  return svg(800, 350, [
-    srcDC(60, 160), wire(60, 145, 60, 70, 250, 70), wire(60, 175, 60, 260, 260, 260),
-    // demagnetization winding back to the bus
-    diode('Ddemag', bom, 160, 120, 'up', 'right'), wire(160, 70, 160, 100), dot(160, 70),
-    wire(160, 140, 160, 190, 250, 190),
-    xfmr('T1', bom, 270, 140, { labelDy: -30 }), wire(250, 70, 260, 70, 260, 100), wire(250, 190, 260, 190, 260, 180),
-    mosfetV('Q1', bom, 260, 216), wire(260, 180, 260, 190), wire(260, 242, 260, 260),
-    gnd(200, 260),
+  const T = xfmr3('T1', bom, 330, 180, { labelDy: -22 })
+  return svg(820, 400, [
+    srcDC(60, 180),
+    wire(60, 165, 60, 60, 250, 60),   // Vin+ rail (feeds Q1 drain + Ddemag cathode)
+    wire(60, 195, 60, 320, 700, 320), // ground / output-return rail
+    // high-side switch: Q1 drain → Vin, source → primary top (pri_node); primary bottom → gnd
+    mosfetV('Q1', bom, 220, 90), wire(220, 64, 220, 60), dot(220, 60),
+    wire(220, 116, 220, 110, T.p0[0], 110),   // Q1 source → primary top p0
+    // reset/demag winding returns the magnetizing energy to Vin through Ddemag
+    diode('Ddemag', bom, 165, 110, 'up', 'left'), wire(165, 90, 165, 60), dot(165, 60),
+    wire(165, 130, 165, 190, T.r0[0], 190),   // Ddemag anode → reset top r0 (demag_in)
+    T.el,
+    wire(T.p1[0], T.p1[1], 270, 170, 270, 320), dot(270, 320),  // primary bottom p1 → gnd (crosses r0 lead, no dot)
+    wire(T.r1[0], T.r1[1], 320, 320), dot(320, 320),            // reset bottom r1 → gnd
     // secondary: forward diode + freewheel + output LC
-    wire(280, 100, 280, 90, 360, 90),
-    diode('Dfwd', bom, 380, 90, 'right'), wire(400, 90, 450, 90), dot(450, 90),
-    wire(280, 180, 280, 268, 640, 268), dot(450, 268),
-    diode('Dfw', bom, 450, 180, 'up', 'right'), wire(450, 90, 450, 160), wire(450, 200, 450, 268),
-    indH('Lout', bom, 510, 90), wire(450, 90, 482, 90), wire(538, 90, 660, 90), dot(580, 90),
-    capV('Cout', bom, 580, 180), wire(580, 90, 580, 160), wire(580, 200, 580, 268), dot(580, 268),
-    loadR(640, 180, 90, 268), dot(640, 90), dot(640, 268),
+    wire(T.s0[0], T.s0[1], 340, 90, 400, 90), diode('Dfwd', bom, 420, 90, 'right'),
+    wire(440, 90, 470, 90), dot(470, 90),
+    wire(T.s1[0], T.s1[1], 340, 320), dot(340, 320),            // secondary bottom s1 → gnd
+    diode('Dfw', bom, 470, 180, 'up', 'right'), wire(470, 90, 470, 160), wire(470, 200, 470, 320),
+    indH('Lout', bom, 530, 90), wire(470, 90, 502, 90), wire(558, 90, 660, 90), dot(580, 90),
+    capV('Cout', bom, 580, 180), wire(580, 90, 580, 160), wire(580, 200, 580, 320), dot(580, 320),
+    loadR(640, 180, 90, 320), dot(640, 90), dot(640, 320),
     port(690, 90, 'VOUT'), wire(660, 90, 690, 90),
-    sig(234, 216, 'g1'), ctrlIC(bom, 450, 320, ['g1']),
+    sig(194, 90, 'g1'), ctrlIC(bom, 250, 360, ['g1']),
   ].join(''))
 }
 
@@ -673,20 +685,29 @@ function dab(bom) {
     // ---- primary full bridge: leg A (QA/QB) + leg C (QC/QD) ----
     ...leg('QA', 'QB', 'RbiasA_hi', 'RbiasA_lo', 230, 130),
     ...leg('QC', 'QD', 'RbiasC_hi', 'RbiasC_lo', 350, 450),
-    // series Lr: midA → (down, across) → Lr → T1 pri-top; T1 pri-bot → midC
-    wire(230, mid, 230, 380, 500, 380), indH('Lr', bom, 528, 380, 'below'), wire(556, 380, 560, 380, 560, 155),
+    // series Lr: midA → (right, down, across) → Lr → T1 pri-top; T1 pri-bot → midC. Drop to y=380 at
+    // x=270 (a clean column) — NOT down x=230, which would pass through QB's source-to-gnd junction dot
+    // at (230,300) and short midA/Lr to ground.
+    wire(230, mid, 270, mid, 270, 380, 500, 380), indH('Lr', bom, 528, 380, 'below'),
+    // Lr → T1 primary top (p0). Rise up x=520 (a clear column) — NOT straight up x=560, which would run
+    // through T1's primary-bottom terminal p1 at (560,235) and short the primary winding to midC.
+    wire(556, 380, 556, 360, 520, 360, 520, 155, 560, 155),
     xfmr('T1', bom, 570, mid, { h: 80, labelDy: -26 }),
     wire(560, 235, 350, 235, 350, mid),
-    // RC snubber across the primary (midC → Crc_pri → Rrc_pri → midA lane), clear lane below
-    dot(350, mid), wire(350, 330, 380, 330), capH('Crc_pri', bom, 400, 330), wire(420, 330, 440, 330),
-    resH('Rrc_pri', bom, 460, 330, 'below'), wire(350, mid, 350, 330), wire(480, 330, 500, 330, 500, mid), dot(500, mid),
+    // RC snubber across the primary (midC → Crc_pri → Rrc_pri → midA lane), clear lane below. Drop from
+    // midC to the snubber at x=370 — NOT straight down x=350, which would overlap QD's source-to-gnd
+    // drop (350,276→300) and short the whole primary to ground.
+    dot(350, mid), capH('Crc_pri', bom, 400, 330), wire(420, 330, 440, 330),
+    resH('Rrc_pri', bom, 460, 330, 'below'), wire(350, mid, 370, mid, 370, 330, 380, 330), wire(480, 330, 500, 330, 500, mid), dot(500, mid),
     wire(500, mid, 500, 380),
     // ---- secondary full bridge: leg E (QE/QF) + leg G (QG/QH) ----
     ...leg('QE', 'QF', 'RbiasE_hi', 'RbiasE_lo', 770, 660),
     ...leg('QG', 'QH', 'RbiasG_hi', 'RbiasG_lo', 890, 990),
-    // T1 sec-top → midE ; T1 sec-bot → midG
-    wire(580, 155, 580, 110, 770, 110, 770, mid),
-    wire(580, 235, 620, 235, 620, 420, 890, 420, 890, mid),
+    // T1 sec-top → midE ; T1 sec-bot → midG. Approach each bridge midpoint horizontally at mid level:
+    // s0 must NOT run down x=770 (it would overlap QE's drain-to-vout riser at 770,90–114 → vout short);
+    // s1 must NOT rise up x=890 (it would pass through QH's source-to-gnd dot at 890,300 → gnd short).
+    wire(580, 155, 600, 155, 600, mid, 770, mid),
+    wire(580, 235, 620, 235, 620, 340, 840, 340, 840, mid, 890, mid),
     // output: bridge legs' rails (spanning bias E lane at 660 → bias G at 990) → Cout ∥ load → VOUT
     dot(770, top), dot(890, top), wire(660, top, 1090, top), dot(1010, top),
     dot(770, gy), dot(890, gy), wire(660, gy, 1050, gy), gnd(960, gy), // isolated secondary return
@@ -816,8 +837,30 @@ function xfmr4(ref, bom, x, y) {
     `<circle class="sch-fill" cx="${x - 7}" cy="${yA[0] + 5}" r="2.3"/>` +
     `<circle class="sch-fill" cx="${x + 7}" cy="${yA[0] + 5}" r="2.3"/>`
   const el = hot(ref, bom, [x - 22, top - 6, 44, bot - top + 12], body, [x, top - 12, 'middle'])
+  regPin(ref, 'a0', x - 10, yA[0]); regPin(ref, 'a1', x - 10, yA[1]); regPin(ref, 'b0', x - 10, yB[0]); regPin(ref, 'b1', x - 10, yB[1])
+  regPin(ref, 'c0', x + 10, yA[0]); regPin(ref, 'c1', x + 10, yA[1]); regPin(ref, 'd0', x + 10, yB[0]); regPin(ref, 'd1', x + 10, yB[1])
   return { el, pA: { top: [x - 10, yA[0]], bot: [x - 10, yA[1]] }, pB: { top: [x - 10, yB[0]], bot: [x - 10, yB[1]] },
            sC: { top: [x + 10, yA[0]], bot: [x + 10, yA[1]] }, sD: { top: [x + 10, yB[0]], bot: [x + 10, yB[1]] } }
+}
+
+// Three-winding transformer for the forward converter: primary (left, upper) + reset/demag tertiary
+// (left, lower) + output secondary (right, upper), all on one core. Returns each terminal's coord.
+// Terminals: p0/p1 primary, r0/r1 reset, s0/s1 secondary — regPin'd for the connectivity check.
+function xfmr3(ref, bom, x, y, opts = {}) {
+  const cL = x - 2, cR = x + 2, top = y - 80, bot = y + 80
+  const yP = [top + 10, y - 10], yR = [y + 10, bot - 10], yS = [top + 10, y - 10]
+  const coil = (cx, yy, dir) => P(coilV(cx, yy[0], 3, (yy[1] - yy[0]) / 3, 8.4, dir))
+  const body =
+    coil(x - 10, yP, -1) + coil(x - 10, yR, -1) + coil(x + 10, yS, 1) +
+    P(`M ${cL} ${top} L ${cL} ${bot}`, 'sch-wire') + P(`M ${cR} ${top} L ${cR} ${bot}`, 'sch-wire') +
+    `<circle class="sch-fill" cx="${x - 7}" cy="${yP[0] + 5}" r="2.3"/>` +   // primary dot (top)
+    `<circle class="sch-fill" cx="${x + 7}" cy="${yS[0] + 5}" r="2.3"/>` +   // secondary dot (top → same sense = forward transfer)
+    `<circle class="sch-fill" cx="${x - 7}" cy="${yR[1] - 5}" r="2.3"/>`     // reset dot (bottom → opposite = magnetizing reset
+  regPin(ref, 'p0', x - 10, yP[0]); regPin(ref, 'p1', x - 10, yP[1])
+  regPin(ref, 'r0', x - 10, yR[0]); regPin(ref, 'r1', x - 10, yR[1])
+  regPin(ref, 's0', x + 10, yS[0]); regPin(ref, 's1', x + 10, yS[1])
+  const el = hot(ref, bom, [x - 22, top - 6, 44, bot - top + 12], body, [x, top - 12 + (opts.labelDy ?? 0), 'middle'])
+  return { el, p0: [x - 10, yP[0]], p1: [x - 10, yP[1]], r0: [x - 10, yR[0]], r1: [x - 10, yR[1]], s0: [x + 10, yS[0]], s1: [x + 10, yS[1]] }
 }
 
 // ── Weinberg (dual-inductor / double-coupled current-fed push-pull): L1's TWO coupled windings each
@@ -887,11 +930,15 @@ function psfb(bom, variant = 'fullBridge') {
     // leg-A mid → series Lr → transformer primary; primary return → leg-C mid
     wire(150, 200, 200, 200), indH('Lr', bom, 228, 200), wire(256, 200, 300, 200, 300, 150),
     xfmr('T1', bom, tx, ty, { h, ct: ctOpt(variant), labelDy: -24 }),
-    wire(tx - 10, 240, tx - 10, 300, 280, 300, 280, 195), dot(280, 195),
-    // real RC snubber between the two leg midpoints (midA → Crc_pri → Rrc_pri → midC), per psfbCell
+    // primary return (p1) → leg-C mid. Enter midC from the right at its own y-band (y=210, inside the
+    // 195–220 drain node) so the wire never runs down the x=280 line, where QD's source-to-gnd drop
+    // (280,272→320) sits — routing through it silently shorted the primary return to ground.
+    wire(tx - 10, 240, tx - 10, 270, 295, 270, 295, 210, 280, 210), dot(280, 210),
+    // real RC snubber between the two leg midpoints (midA → Crc_pri → Rrc_pri → midC), per psfbCell;
+    // its return also enters midC at y=210 from the left, clear of the QD source-to-gnd drop
     dot(178, 200), wire(178, 200, 178, 240), capV('Crc_pri', bom, 178, 260, 'right'),
     wire(178, 280, 178, 300, 200, 300), resH('Rrc_pri', bom, 220, 300, 'below'),
-    wire(240, 300, 280, 300), dot(280, 300),
+    wire(240, 300, 240, 210, 280, 210),
     // secondary bleed/balance resistors from each winding end to the secondary return (Rbsa/Rbsb) —
     // dropped low so labels clear the transformer winding
     dot(390, 195), wire(390, 195, 390, 285), resV('Rbsa', bom, 390, 305, 'left'),
@@ -923,7 +970,7 @@ function pshb(bom, variant = 'fullBridge') {
     diode('DC1', bom, 200, 140, 'right'), wire(180, 140, 150, 140, 150, 170), wire(220, 140, 250, 140),
     diode('DC2', bom, 200, 310, 'left', 'below'), wire(180, 310, 150, 310, 150, 170), wire(220, 310, 250, 310),
     // stack output (bridge_a) → series Lr → primary; primary return → neutral (mid)
-    wire(250, 225, 300, 225), indH('Lr', bom, 340, 225), wire(368, 225, 440, 225, 440, 195, tx - 10, 195),
+    wire(250, 225, 312, 225), indH('Lr', bom, 340, 225), wire(368, 225, 440, 225, 440, 195, tx - 10, 195),
     xfmr('T1', bom, tx, ty, { h, ct: ctOpt(variant), labelDy: -24 }),
     wire(tx - 10, 285, tx - 10, 300, 150, 300, 150, 170),
     // real RC snubber across the primary (pri_x → Crc_pri → Rrc_pri → neutral) — own column, labels
@@ -987,7 +1034,7 @@ function cllc(bom) {
     wire(150, 205, 175, 205), capH('Cr1', bom, 200, 205), indH('Lr1', bom, 268, 205), wire(225, 205, 240, 205),
     wire(296, 205, 310, 205, 310, 150),
     xfmr('T1', bom, 340, 195, { h: 90, labelDy: -24 }),
-    wire(330, 240, 330, 300, 280, 300, 280, 205), dot(280, 205),
+    wire(330, 240, 330, 265, 305, 265, 305, 215, 280, 215), dot(280, 215),
     // secondary tank Lr2 → Cr2 into the SR bridge
     wire(350, 150, 380, 150), indH('Lr2', bom, 408, 150), wire(436, 150, 460, 150), capH('Cr2', bom, 486, 150), wire(508, 150, 540, 150),
     wire(350, 240, 540, 240),
@@ -1009,7 +1056,7 @@ function clllc(bom) {
     wire(150, 205, 175, 205), capH('Cr1', bom, 200, 205), indH('Lr1', bom, 268, 205), wire(225, 205, 240, 205),
     wire(296, 205, 310, 205, 310, 150),
     xfmr('T1', bom, 340, 195, { h: 90, labelDy: -24 }),
-    wire(330, 240, 330, 300, 280, 300, 280, 205), dot(280, 205),
+    wire(330, 240, 330, 265, 305, 265, 305, 215, 280, 215), dot(280, 215),
     // secondary tank Lr2 → Cr2, then the SR current-sense shunt Rsense into the bridge (senseP/senseM
     // feed the SR controller, per the clllcPower/srControl nets)
     wire(350, 150, 380, 150), indH('Lr2', bom, 408, 150), wire(436, 150, 450, 150),
