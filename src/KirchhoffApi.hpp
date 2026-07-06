@@ -157,5 +157,11 @@ KH_API std::string simulate_dmc_waveforms(const std::string& specJson, double in
 KH_API std::string verify_dmc_attenuation(const std::string& specJson, double inductance,
                                           double capacitance);
 
+/// PFC "I know the design" helper (legacy webMKF determine_pfc_mode): given the wizard spec and a
+/// user-chosen inductance, label the actual conduction mode against the boundary (CrCM) inductance
+/// sized at the line-voltage peak. Returns {"actualMode": "...", "criticalInductance": L} (dump) or
+/// "Exception: ..." on failure (e.g. sepic/cuk variants, which are CCM-only by design).
+KH_API std::string determine_pfc_mode(const std::string& spec, double inductance);
+
 }  // namespace api
 }  // namespace Kirchhoff

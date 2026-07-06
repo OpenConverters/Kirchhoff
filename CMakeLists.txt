@@ -253,7 +253,7 @@ target_link_libraries(test_control_stage PRIVATE kirchhoff Catch2::Catch2WithMai
 add_executable(pfc_demo examples/pfc_demo.cpp)
 target_link_libraries(pfc_demo PRIVATE kirchhoff)
 
-add_executable(test_pfc tests/test_pfc.cpp)
+add_executable(test_pfc tests/test_pfc.cpp src/KirchhoffApi.cpp)  # api::determine_pfc_mode test
 target_link_libraries(test_pfc PRIVATE kirchhoff Catch2::Catch2WithMain)
 
 add_executable(test_ngspice_runner tests/test_ngspice_runner.cpp)

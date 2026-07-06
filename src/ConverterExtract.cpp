@@ -372,6 +372,25 @@ json diagnostics(const json& tas) {
     // inferred CCM flag (main-winding current stays > 0 over the cycle). The flat top-level fields mirror
     // the first OP (MKF's "first-OP, get_last_* fallback").
     const json& mainInputs = *mags[mi].inputs;
+    // Converter-level switching frequency from the TAS root (every topology builder writes
+    // inputs.designRequirements.switchingFrequency). For AC-input topologies (PFC, Vienna) the
+    // MAIN magnetic's excitation is stamped at the LINE frequency (50/60 Hz envelope), so
+    // winding-0's excitation frequency is NOT the switching frequency, and the DC-biased-triangle
+    // CCM inference below is meaningless for it (ABT #149: "DCM @ 50 Hz" on a CCM 65 kHz PFC).
+    std::optional<double> converterFsw;
+    if (tas.contains("inputs") && tas.at("inputs").is_object()) {
+        const json& ti = tas.at("inputs");
+        if (ti.contains("designRequirements") && ti.at("designRequirements").contains("switchingFrequency"))
+            converterFsw = PEAS::resolve_dimensional_values(ti.at("designRequirements").at("switchingFrequency"));
+    }
+    // An excitation "runs at the switching rate" when its frequency is commensurate with the
+    // declared converter fsw; a line-frequency envelope sits orders of magnitude below it. When the
+    // TAS declares no fsw we cannot tell and keep the legacy first-winding behavior.
+    auto atSwitchingRate = [&](const json& exc) {
+        if (!converterFsw) return true;
+        if (!exc.contains("frequency") || !exc.at("frequency").is_number()) return true;
+        return exc.at("frequency").get<double>() > 0.5 * *converterFsw;
+    };
     json opsArr = json::array();
     if (mainInputs.contains("operatingPoints") && mainInputs.at("operatingPoints").is_array()) {
         for (const auto& op : mainInputs.at("operatingPoints")) {
@@ -391,7 +410,9 @@ json diagnostics(const json& tas) {
                         if (auto v = processed_field(exc, side, field)) we[std::string(side) + "_" + field] = *v;
                 windings.push_back(std::move(we));
                 // CCM inference from the PRIMARY winding current: continuous if it never crosses zero.
-                if (w == 0) {
+                // Only valid on a switching-rate excitation — a line-frequency sine envelope always
+                // "fails" this DC-biased-triangle test and would report DCM regardless of the design.
+                if (w == 0 && atSwitchingRate(exc)) {
                     auto off = processed_field(exc, "current", "offset");
                     auto pkpk = processed_field(exc, "current", "peakToPeak");
                     if (off && pkpk) { ccm = (std::abs(*off) - *pkpk / 2.0) > 0.0; ccmKnown = true; }
@@ -408,10 +429,16 @@ json diagnostics(const json& tas) {
         if (first.contains("isCcm")) d["isCcm"] = first.at("isCcm");
         if (first.contains("windings") && !first.at("windings").empty()) {
             const json& w0 = first.at("windings").at(0);
-            if (w0.contains("frequency")) d["switchingFrequency"] = w0.at("frequency");
+            // Prefer the converter-declared switching frequency: for AC-input topologies w0 runs at
+            // the line frequency and mirroring it here surfaced "50 Hz" as the switching frequency.
+            if (converterFsw) d["switchingFrequency"] = *converterFsw;
+            else if (w0.contains("frequency")) d["switchingFrequency"] = w0.at("frequency");
             if (w0.contains("current_peak")) d["primaryPeakCurrent"] = w0.at("current_peak");
             if (w0.contains("current_rms")) d["primaryRmsCurrent"] = w0.at("current_rms");
-            if (w0.contains("current_dutyCycle")) d["dutyCycle"] = w0.at("current_dutyCycle");
+            // A line-frequency envelope's 0.500 "duty cycle" is the sine's midpoint, not a
+            // converter duty — only mirror duty from a switching-rate excitation.
+            if (w0.contains("current_dutyCycle") && atSwitchingRate(first.at("windings").at(0)))
+                d["dutyCycle"] = w0.at("current_dutyCycle");
         }
     }
     d["operatingPoints"] = std::move(opsArr);

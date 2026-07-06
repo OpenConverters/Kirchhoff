@@ -328,6 +328,27 @@ std::string verify_dmc_attenuation(const std::string& spec, double inductance, d
     });
 }
 
+std::string determine_pfc_mode(const std::string& spec, double inductance) {
+    return guarded([&] {
+        // Boundary (critical) inductance = the "crm" sizing branch of design_pfc, evaluated at the
+        // line-voltage peak — the same formula MKF's calculate_inductance_crcm used. Force the mode on
+        // a copy of the spec; the caller's requested mode is irrelevant to the boundary.
+        json specJson = json::parse(spec);
+        specJson["config"]["mode"] = "crm";
+        const Kirchhoff::PfcDesign d = Kirchhoff::design_pfc(specJson);
+        const double lCritical = d.boostInductance;
+        // +-5 % band labels the result Critical (boundary) mode — a labelling convenience absorbing
+        // floating-point/tolerance drift of the sizing formulas, consistent with TI SLUA479 fig. 6
+        // (carried over verbatim from MKF PowerFactorCorrection::determine_actual_mode).
+        const double tolerance = 0.05;
+        std::string actualMode;
+        if (inductance > lCritical * (1.0 + tolerance))      actualMode = "Continuous Conduction Mode";
+        else if (inductance < lCritical * (1.0 - tolerance)) actualMode = "Discontinuous Conduction Mode";
+        else                                                 actualMode = "Critical Conduction Mode";
+        return json{{"actualMode", actualMode}, {"criticalInductance", lCritical}}.dump();
+    });
+}
+
 std::string process_converter(const std::string& topology, const std::string& spec, const std::string& engine) {
     return guarded([&] {
         json tas = build_tas_for(topology, json::parse(spec));

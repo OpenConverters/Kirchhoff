@@ -77,3 +77,28 @@ TEST_CASE("diagnostics: buck is CCM with a single inductor", "[diagnostics][buck
 TEST_CASE("diagnostics: empty TAS throws (no silent fallback)", "[diagnostics][errors]") {
     CHECK_THROWS(Kirchhoff::diagnostics(json::object()));
 }
+
+TEST_CASE("diagnostics: PFC mirrors the declared fsw, not the 50 Hz line excitation — ABT #149",
+          "[diagnostics][pfc]") {
+    // The PFC main magnetic's single operating point is stamped at the LINE frequency (50 Hz
+    // envelope). The flat mirror must surface the converter's declared switching frequency and
+    // must NOT run the DC-biased-triangle CCM inference (nor mirror the sine's 0.5 "duty") on it.
+    json di;
+    di["designRequirements"]["efficiency"] = 0.95;
+    di["designRequirements"]["inputType"] = "acSinglePhase";
+    di["designRequirements"]["inputVoltage"] = {{"minimum", 85.0}, {"nominal", 230.0}, {"maximum", 265.0}};
+    di["designRequirements"]["lineFrequency"]["nominal"] = 50.0;
+    di["designRequirements"]["switchingFrequency"]["nominal"] = 65e3;
+    { json o; o["name"]="out"; o["voltage"]["nominal"]=400.0; di["designRequirements"]["outputs"]=json::array({o}); }
+    { json op; op["inputVoltage"]=230.0; json o; o["power"]=300.0; op["outputs"]=json::array({o});
+      di["operatingPoints"]=json::array({op}); }
+
+    json d = Kirchhoff::diagnostics(Kirchhoff::build_pfc_tas(Kirchhoff::design_pfc(di)));
+
+    REQUIRE(d.contains("switchingFrequency"));
+    CHECK(d.at("switchingFrequency").get<double>() == Catch::Approx(65e3).epsilon(0.01));
+    CHECK_FALSE(d.contains("isCcm"));      // line-envelope op: inference is meaningless
+    CHECK_FALSE(d.contains("dutyCycle"));  // 0.500 was the sine midpoint, not a converter duty
+    // The per-winding stress mirror still works — it is frequency-agnostic.
+    CHECK(d.at("primaryPeakCurrent").get<double>() > 0.0);
+}

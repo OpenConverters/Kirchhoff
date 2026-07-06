@@ -136,10 +136,12 @@ json build_vienna_tas(const ViennaDesign& d) {
                                                                viennaChannels, viennaPlusSectors);
     const double IpkLV  = AN::winding_current(aopVienna, 0, "peak");
     const double IrmsLV = AN::winding_current(aopVienna, 0, "rms");
-    // Unnamed (no full-waveform capture): this one excitation is shared by all three phase inductors
-    // (La/Lb/Lc), so a single-component key would misattribute it; the labels are sinusoidal and the
-    // frontend re-synthesizes them from processed data.
-    const json indExcV = AN::excitations_processed(aopVienna).at(0);
+    // Capture the full waveforms under phase A's inductor ("La"): the excitation is shared by all
+    // three phase inductors by 120-degree symmetry, and phase A is the canonical representative the
+    // UI presents ("Phase A shown -- identical by symmetry"). The earlier unnamed (non-capturing)
+    // call left analyticalWaveforms empty, so the wizard's waveform pane had nothing to plot
+    // (ABT #150) -- the frontend does NOT re-synthesize traces from processed data.
+    const json indExcV = AN::excitations_processed(aopVienna, "La").at(0);
     auto resBrick = [&](double r, double powerW = -1.0) { json j; j["resistor"] = json::object();
         auto& dr = j["inputs"]["designRequirements"];
         dr["deviceType"] = "resistor";

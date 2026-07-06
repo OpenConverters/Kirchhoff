@@ -312,3 +312,39 @@ TEST_CASE("analytical_vienna peakOfLinePlusSectors: peak-of-line + six DPWM sect
                                                    1.0, 1.0, /*fullLineCycle=*/true, 1, /*plusSectors=*/true);
     CHECK(opFull.get_excitations_per_winding().size() == 3);
 }
+
+TEST_CASE("vienna: analytical waveforms are captured under La — ABT #150", "[vienna][waveforms]") {
+    // The wizard's waveform pane reads the captured-operating-point registry
+    // (analyticalWaveforms). Vienna used the non-capturing excitations_processed overload, so the
+    // registry stayed empty and the pane had nothing to plot.
+    namespace AN = Kirchhoff::analytical;
+    json di;
+    di["designRequirements"]["efficiency"] = 0.97;
+    di["designRequirements"]["inputType"] = "acThreePhase";
+    // inputVoltage is PHASE RMS: 230 V phase == 400 V line-to-line; 2*sqrt(2)*230 = 650 V < 800 V bus.
+    di["designRequirements"]["inputVoltage"]["nominal"] = 230.0;
+    di["designRequirements"]["lineFrequency"]["nominal"] = 50.0;
+    di["designRequirements"]["switchingFrequency"]["nominal"] = 20e3;
+    { json o; o["name"]="out"; o["voltage"]["nominal"]=800.0; di["designRequirements"]["outputs"]=json::array({o}); }
+    { json op; op["inputVoltage"]=230.0; json o; o["power"]=10000.0; op["outputs"]=json::array({o});
+      di["operatingPoints"]=json::array({op}); }
+
+    AN::clear_captured_operating_points();
+    json tas = Kirchhoff::build_vienna_tas(Kirchhoff::design_vienna(di));
+    const auto& captured = AN::captured_operating_points();
+
+    REQUIRE(captured.size() >= 1);
+    bool foundLa = false;
+    for (const auto& [component, op] : captured) {
+        if (component != "La") continue;
+        foundLa = true;
+        REQUIRE(op.contains("excitationsPerWinding"));
+        const json& exc0 = op.at("excitationsPerWinding").at(0);
+        REQUIRE(exc0.contains("current"));
+        REQUIRE(exc0.at("current").contains("waveform"));
+        CHECK(exc0.at("current").at("waveform").at("data").size() > 8);
+        REQUIRE(exc0.contains("voltage"));
+        CHECK(exc0.at("voltage").at("waveform").at("data").size() > 8);
+    }
+    CHECK(foundLa);
+}

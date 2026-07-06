@@ -56,6 +56,8 @@ EMSCRIPTEN_BINDINGS(kirchhoff) {
     // the DMC one-shot (calculate_dmc_inputs) + its "help me" LC sizing (propose_dmc_design)
     em::function("design_dmc", &api::design_dmc);
     em::function("propose_dmc_design", &api::propose_dmc_design);
+    // PFC "I know the design" conduction-mode hint (legacy webMKF determine_pfc_mode)
+    em::function("determine_pfc_mode", &api::determine_pfc_mode);
     // the current-transformer one-shot (process_current_transformer replacement)
     em::function("design_current_transformer", &api::design_current_transformer);
     // CMC EMI/waveform sims (simulate_cmc_ideal_waveforms + simulate_cmc_lisn_waveforms)

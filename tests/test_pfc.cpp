@@ -24,6 +24,7 @@
 #include "Pfc.hpp"
 #include "TasAssembler.hpp"
 #include "Fidelity.hpp"
+#include "KirchhoffApi.hpp"
 
 #include <nlohmann/json.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -543,4 +544,32 @@ TEST_CASE("single-phase boost PFC: realistic 50 Hz mains runs and matches the or
     Point p = run_pfc(120.0, 400.0, f, 300.0, /*rloadOverride*/0.0, tstop, tstep, t0, t1, "mains50");
     INFO("50 Hz mains: Vout=" << p.vout << " PF=" << p.pf << " Pin=" << p.pin);
     CHECK(p.pf > 0.95);      // near-unity PF sustained over the realistic 50 Hz line cycle
+}
+
+TEST_CASE("api::determine_pfc_mode labels CCM/DCM against the CrCM boundary — ABT #149 companion",
+          "[pfc][api][mode]") {
+    // Port of MKF PowerFactorCorrection::determine_actual_mode (legacy webMKF determine_pfc_mode):
+    // the wizard's "I know the design" hint. Boundary = design_pfc's "crm" sizing at the line peak.
+    json di;
+    di["designRequirements"]["efficiency"] = 0.95;
+    di["designRequirements"]["inputType"] = "acSinglePhase";
+    di["designRequirements"]["inputVoltage"]["nominal"] = 230.0;
+    di["designRequirements"]["lineFrequency"]["nominal"] = 50.0;
+    di["designRequirements"]["switchingFrequency"]["nominal"] = 65e3;
+    { json o; o["name"]="out"; o["voltage"]["nominal"]=400.0; di["designRequirements"]["outputs"]=json::array({o}); }
+    { json op; op["inputVoltage"]=230.0; json o; o["power"]=300.0; op["outputs"]=json::array({o});
+      di["operatingPoints"]=json::array({op}); }
+    const std::string spec = di.dump();
+
+    json probe = json::parse(Kirchhoff::api::determine_pfc_mode(spec, 1.0));
+    REQUIRE(probe.contains("criticalInductance"));
+    const double lCrit = probe.at("criticalInductance").get<double>();
+    CHECK(lCrit > 0.0);
+
+    CHECK(json::parse(Kirchhoff::api::determine_pfc_mode(spec, lCrit * 2.0)).at("actualMode")
+          == "Continuous Conduction Mode");
+    CHECK(json::parse(Kirchhoff::api::determine_pfc_mode(spec, lCrit * 0.5)).at("actualMode")
+          == "Discontinuous Conduction Mode");
+    CHECK(json::parse(Kirchhoff::api::determine_pfc_mode(spec, lCrit)).at("actualMode")
+          == "Critical Conduction Mode");
 }
