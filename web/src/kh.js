@@ -96,7 +96,7 @@ export function enrichMagneticWaveforms(inputs, windings) {
         // Replace the whole side with ConverterAnalytical's version — MKF's WaveformProcessor already built
         // it consistently (waveform + harmonics + processed, canonical MAS format). Don't hand-reshape.
         const src = windings[w]?.[side]
-        if (Array.isArray(src?.waveform?.data) && src.waveform.data.length >= 2) exs[w][side] = src
+        if (Array.isArray(src?.waveform?.data) && src.waveform.data.length >= 2) exs[w][side] = JSON.parse(JSON.stringify(src))  // strip Vue reactivity → structured-cloneable for postMessage
       }
     }
   }
@@ -132,7 +132,15 @@ export function designMagneticInOpenMagnetics(ref, inputs) {
     function onMessage(ev) {
       if (ev.origin !== OPENMAGNETICS_ORIGIN || ev.data?.source !== 'openmagnetics') return
       if (ev.data.type === 'ready') {
-        omWin.postMessage({ source: 'kirchhoff', type: 'mas-inputs', ref, inputs }, OPENMAGNETICS_ORIGIN)
+        // Surface a structured-clone failure LOUDLY. A throw here (this is an event handler) would
+        // otherwise die silently and the whole handoff would no-op with zero feedback — which is
+        // exactly what a Vue reactive proxy in `inputs` once did. inputs must be plain cloneable data.
+        try {
+          omWin.postMessage({ source: 'kirchhoff', type: 'mas-inputs', ref, inputs }, OPENMAGNETICS_ORIGIN)
+        } catch (e) {
+          cleanup()
+          reject(new Error(`could not send MAS inputs to OpenMagnetics (non-cloneable data — a Vue reactive object? see enrichMagneticWaveforms): ${e.message}`))
+        }
       } else if (ev.data.type === 'magnetic' && ev.data.ref === ref) {
         cleanup(); resolve(ev.data.mas)
       }
