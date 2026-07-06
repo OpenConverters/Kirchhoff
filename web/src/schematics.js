@@ -243,8 +243,11 @@ function xfmr(ref, bom, x, y, opts = {}) {
   // always clear of them (the outer side, where they used to be, is not).
   let body =
     P(coilV(x - 10, t, 4, h / 4, 8.4, -1)) + P(coilV(x + 10, t, 4, h / 4, 8.4, 1)) +
-    P(`M ${x - 2} ${t} L ${x - 2} ${b}`, 'sch-wire') +
-    P(`M ${x + 2} ${t} L ${x + 2} ${b}`, 'sch-wire') +
+    // Magnetic core (two vertical bars) — NOT an electrical wire. Must be 'sch-sym', never 'sch-wire':
+    // as a wire it sits ~8px from the winding terminals and masks a genuinely-disconnected winding from
+    // the connectivity checker (this hid the LLC primary being unwired to the resonant tank).
+    P(`M ${x - 2} ${t} L ${x - 2} ${b}`, 'sch-sym') +
+    P(`M ${x + 2} ${t} L ${x + 2} ${b}`, 'sch-sym') +
     `<circle class="sch-fill" cx="${x - 7}" cy="${t + 5}" r="2.3"/>` +
     `<circle class="sch-fill" cx="${x + 7}" cy="${opts.opp ? b - 5 : t + 5}" r="2.3"/>`
   // center-tap stubs: wires must attach at the stub END, never bare mid-winding
@@ -670,7 +673,8 @@ function llc(bom, variant = 'centerTapped') {
     ...hb.els,
     // resonant tank sw → Cr → Lr → T1 primary top (clear horizontal lane, well-spaced labels)
     capH('Cr', bom, 380, swy), wire(swx, swy, 360, swy),
-    indH('Lr', bom, 480, swy), wire(400, swy, 452, swy), wire(508, swy, 540, swy, 540, ty - h / 2),
+    indH('Lr', bom, 480, swy), wire(400, swy, 452, swy),
+    wire(508, swy, 540, swy, 540, ty - h / 2, tx - 10, ty - h / 2), // tank → T1 primary top (reach the terminal, not short of it)
     xfmr('T1', bom, tx, ty, { h, ct: ctOpt(variant), labelDx: -44 }),
     // primary return: T1 pri bottom → back to the split-bus midpoint (msplit rail)
     wire(tx - 10, ty + h / 2, tx - 10, 335, 220, 335, 220, swy, hb.msplit, swy),
@@ -774,8 +778,9 @@ function acf(bom) {
     wire(440, 300, 800, 300), isoGnd(500, 300),        // isolated secondary/output return (separate rail)
     // main switch Q1 in series with the primary (VIN → Q1 → sw → T1 pri → gnd)
     mosfetV('Q1', bom, 320, 145, 'right', true), wire(320, 70, 320, 119), dot(320, 70), wire(320, 171, 320, 185),
-    xfmr('T1', bom, 380, 195, { h: 90, labelDx: -18, labelDy: -22 }), wire(320, 185, 370, 185), dot(320, 185),
-    wire(370, 235, 320, 235, 320, 300), dot(320, 300),
+    xfmr('T1', bom, 380, 195, { h: 90, labelDx: -18, labelDy: -22 }),
+    wire(320, 185, 370, 185, 370, 150), dot(320, 185),          // sw node → T1 primary top p0 (reach the terminal)
+    wire(370, 240, 320, 240, 320, 300), dot(320, 300),          // T1 primary bottom p1 → gnd
     // active-clamp leg: Sc (Vin → clamp node) in series with Cc (clamp node → switch node)
     mosfetV('Sc', bom, 220, 110, 'right', true), wire(220, 70, 220, 84), dot(220, 70),
     capV('Cc', bom, 220, 170, 'left'), wire(220, 136, 220, 150),
@@ -953,7 +958,7 @@ function psfb(bom, variant = 'fullBridge') {
     mosfetV('QC', bom, 280, 128, 'right', true), wire(280, 102, 280, 80), dot(280, 80), wire(280, 154, 280, 195),
     mosfetV('QD', bom, 280, 246, 'right', true), wire(280, 195, 280, 220), wire(280, 272, 280, 320), dot(280, 320), gnd(110, 320),
     // leg-A mid → series Lr → transformer primary; primary return → leg-C mid
-    wire(150, 200, 200, 200), indH('Lr', bom, 228, 200), wire(256, 200, 300, 200, 300, 150),
+    wire(150, 200, 200, 200), indH('Lr', bom, 228, 200), wire(256, 200, 300, 200, 300, 150, 320, 150), // reach T1 primary top
     xfmr('T1', bom, tx, ty, { h, ct: ctOpt(variant), labelDy: -24 }),
     // primary return (p1) → leg-C mid. Enter midC from the right at its own y-band (y=210, inside the
     // 195–220 drain node) so the wire never runs down the x=280 line, where QD's source-to-gnd drop
@@ -1016,7 +1021,8 @@ function src(bom, variant = 'centerTapped') {
   return svg(1060, 380, [
     ...hb.els,
     capH('Cr', bom, 380, swy), wire(swx, swy, 360, swy),
-    indH('Lr', bom, 480, swy), wire(400, swy, 452, swy), wire(508, swy, 540, swy, 540, ty - h / 2),
+    indH('Lr', bom, 480, swy), wire(400, swy, 452, swy),
+    wire(508, swy, 540, swy, 540, ty - h / 2, tx - 10, ty - h / 2), // tank → T1 primary top (reach the terminal, not short of it)
     xfmr('T1', bom, tx, ty, { h, ct: ctOpt(variant), labelDx: -44 }),
     wire(tx - 10, ty + h / 2, tx - 10, 335, 220, 335, 220, swy, hb.msplit, swy),
     ...resonantSecondary(bom, tx, ty, h, variant),
@@ -1055,7 +1061,7 @@ function cllc(bom) {
     mosfetV('Q4', bom, 280, 250, 'right', true), wire(280, 205, 280, 224), wire(280, 276, 280, 320), dot(280, 320), gnd(110, 320),
     // node_a → Cr1 → Lr1 → primary; primary return (node_b) → leg 3/4 mid
     wire(150, 205, 175, 205), capH('Cr1', bom, 200, 205), indH('Lr1', bom, 268, 205), wire(225, 205, 240, 205),
-    wire(296, 205, 310, 205, 310, 150),
+    wire(296, 205, 310, 205, 310, 150, 330, 150), // reach T1 primary top
     xfmr('T1', bom, 340, 195, { h: 90, labelDy: -24 }),
     wire(330, 240, 330, 265, 305, 265, 305, 215, 280, 215), dot(280, 215),
     // secondary tank Lr2 → Cr2 into the SR bridge
@@ -1077,7 +1083,7 @@ function clllc(bom) {
     mosfetV('Q3', bom, 280, 128, 'right', true), wire(280, 102, 280, 80), dot(280, 80), wire(280, 154, 280, 205), // Q3.source → node_b (leg mid / T1.primary_end)
     mosfetV('Q4', bom, 280, 250, 'right', true), wire(280, 205, 280, 224), wire(280, 276, 280, 320), dot(280, 320), gnd(110, 320),
     wire(150, 205, 175, 205), capH('Cr1', bom, 200, 205), indH('Lr1', bom, 268, 205), wire(225, 205, 240, 205),
-    wire(296, 205, 310, 205, 310, 150),
+    wire(296, 205, 310, 205, 310, 150, 330, 150), // reach T1 primary top
     xfmr('T1', bom, 340, 195, { h: 90, labelDy: -24 }),
     wire(330, 240, 330, 265, 305, 265, 305, 215, 280, 215), dot(280, 215),
     // secondary tank Lr2 → Cr2, then the SR current-sense shunt Rsense into the bridge (senseP/senseM
@@ -1197,6 +1203,15 @@ const LAYOUTS = {
 
 export function hasSchematic(topologyId) {
   return topologyId in LAYOUTS
+}
+
+// The phosphor symbol library, exposed so the CIAS-driven generator (ciasSchematic.js) draws the
+// SAME line-art as the hand-authored layouts instead of re-inventing symbols. Each returns an SVG
+// group; the `hot`-wrapped ones carry a data-ref hotspot + BOM value. Pure given their args (the
+// regPin side effects are inert unless a collectPins recording is active).
+export const symbols = {
+  svg, wire, dot, mosfetV, mosfetH, diode, indH, indV, capV, capH, resV, resH,
+  xfmr, srcDC, srcAC, gnd, isoGnd, loadR, port, sig, ctrlIC,
 }
 
 export function renderSchematic(topologyId, bomRows, variant) {

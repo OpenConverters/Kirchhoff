@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html>
+  <head>
+  <link rel="manifest" href="manifest.json">
+  
+    <!-- Properties can be specified to influence deferred binding -->
+    <meta name='gwt:property' content='locale=en_UK'>
+    
+    
+    <!-- Titles are optional, but useful -->
+    <title></title>
+
+<style>
+.disabled {
+	color: lightgray
+}
+.topSpace {
+	margin-top: 12px;
+}
+.cursorPointer {
+   cursor: default;
+}
+.cursorCross {
+   cursor: crosshair;
+}
+
+.cursorSplitter {
+   cursor: row-resize;
+}
+
+.gwt-MenuItem-disabled {
+	color: lightgray;
+}
+.offScreen {
+	position: absolute;
+	right: 101%;
+	overflow: hidden;
+}
+.gwt-Frame{
+	scrolling="no";
+	border: 0px !important;
+}
+
+.gwt-MenuItem {
+	font-size: 12px !important;
+}
+
+.gwt-MenuBar-horizontal {
+	font-size: 12px !important;
+	}
+	
+.gwt-Label-selected {
+	font-size: 1.3em;
+	font-weight: 700;
+	border-top: 1px solid black;
+	border-bottom: 1px solid black;
+}
+.gwt-Label-1off {
+	color: DarkGray;
+}
+
+.gwt-Label-2off {
+	font-size:0.8em;
+	color: LightGray;
+}
+
+.gwt-Label-current {
+}
+
+.gwt-Button.chbut {
+	padding:3px;
+	margin: 3px;
+}
+
+.gwt-Button.chbut.chsel {
+	font-weight: bold;
+}
+
+.gwt-Button.chbut-black {
+	background: black;
+	color: white;
+}
+
+.gwt-Button.chbut-white {
+	background: white;
+	color: black;
+}
+
+.gwt-TextBox.scalebox {
+	width: 100px;
+}
+
+.gwt-Button.expand-but {
+	line-height: 0;
+	font-size: 13px;
+	margin-right: 5px;
+	border-radius:0px;
+	display: inline-block;
+	text-align: center;
+	width: 15px;
+	height: 15px;
+	padding-left: 0;
+	padding-right: 0;
+	padding-bottom:1px;
+	padding-top:0;
+	margin-bottom:1px;
+	background:gray;
+	color:white;
+}
+
+
+.topButton-red {
+    margin-top: 5px;
+    margin-bottom: 5px;
+    margin-left:5px;
+    padding: 5px 7px;
+    text-decoration: none;
+    color: #ffffff;
+    cursor: pointer;
+    cursor: hand;
+    font-size: small;
+    background-color: #ff0000; 
+    border: 1px solid #bbb;
+    border-bottom: 1px solid #a0a0a0;
+    border-radius: 3px;
+    -moz-border-radius: 3px;
+}
+
+.topButton {
+    margin-top: 5px;
+    margin-bottom: 5px;
+    margin-left:5px;
+    padding: 5px 7px;
+    text-decoration: none;
+    cursor: pointer;
+    cursor: hand;
+    font-size: small;
+    background-color: #e7e7e7; 
+    border: 1px solid #bbb;
+    border-bottom: 1px solid #a0a0a0;
+    border-radius: 3px;
+    -moz-border-radius: 3px;
+}
+
+.radioPanel label {
+	margin-right: 15px;
+}
+
+</style>
+
+<link rel="stylesheet" href="font/fontello.css">
+<!-- Kirchhoff theme (self-hosted; phosphor amber on near-black to match the KH bench) -->
+<link rel="stylesheet" href="kh-theme.css">
+
+</head>
+  <body>
+  <!-- Dropbox import/export removed: this is a self-hosted, self-contained embed — no external hosts. -->
+
+  <script language="javascript" src="lz-string.min.js"></script>
+   
+    <!-- This script tag is what actually loads the GWT module.  The -->
+    <!-- 'nocache.js' file (also called a "selection script") is     -->
+    <!-- produced by the GWT compiler in the module output directory -->
+    <!-- or generated automatically in development mode.             -->
+    <script language="javascript" src="circuitjs107/circuitjs1.nocache.js"></script>
+    
+    <!-- Include a history iframe to enable full GWT history support -->
+    <!-- (the id must be exactly as shown)                           -->
+    <iframe src="javascript:''" id="__gwt_historyFrame" style="width:0;height:0;border:0"></iframe>
+    
+    <!-- Service-worker registration removed: pointed at the upstream /circuit/ scope; not used here. -->
+
+    <!-- Custom-Transformer (dump type 406) cold-parse self-heal. CircuitJS1 has a bistability: a single
+         cold URL parse of a multi-winding Custom Transformer can latch the circuit into a spurious
+         0-output fixed point (the winding coupling isn't fully established on the first analyze). Re-
+         importing the circuit onto a freshly-cleared state converges to the true operating point. So for
+         circuits that contain a 406 element (the isolated 3-winding topologies: forward, push_pull,
+         weinberg), once the JS API is ready we import a trivial blank (forcing a full node reset) then
+         re-import the real circuit. This runs ONLY when a 406 is present — a strict no-op for every other
+         topology, whose cold parse already converges. -->
+    <script>
+    (function () {
+      var m = location.search.match(/[?&]cct=([^&]*)/); if (!m) return;
+      var cct; try { cct = decodeURIComponent(m[1]); } catch (e) { return; }
+      if (!/(^|\n)406 /.test(cct)) return;            // no Custom Transformer → nothing to heal
+      // Wait until the GWT app has not only exposed its API but ALSO finished parsing the URL circuit
+      // (getElements() populated) — otherwise our reset races the app's own cold parse, which then
+      // overwrites us back to the latched 0 state. Keying on getElements().length makes it deterministic.
+      var n = 0, iv = setInterval(function () {
+        var C = window.CircuitJS1;
+        if (C && C.importCircuit && C.getElements && C.getElements().length > 1) {
+          clearInterval(iv);
+          try {
+            C.importCircuit('$ 1 0.000005 10 50 5 50'); // blank → full node reset
+            C.importCircuit(cct);                       // real circuit converges
+            C.setSimRunning(true);
+          } catch (e) {}
+        } else if (++n > 400) { clearInterval(iv); }
+      }, 50);
+    })();
+    </script>
+
+  </body>
+ </html>

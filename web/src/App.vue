@@ -3,7 +3,9 @@ import { computed, onMounted, onUnmounted, provide, reactive, ref, watch } from 
 import { FAMILIES, FAMILY_SHORT, PLANNED, TOPOLOGIES, buildSpec, topologyById, variantAxis, defaultVariant, knobsFor, knobGroups } from './topologies.js'
 import { loadEngine, processConverter, topologyWaveforms, extractOperatingPoint, componentWaveforms, realizeTas, generateNetlist, bindMagnetic } from './kh.js'
 import { extractBom } from './bom.js'
-import { hasSchematic, renderSchematic } from './schematics.js'
+import { falstadExport, hasVisualSim } from './falstad.js'
+import { renderVerifiedSchematic } from './ciasSchematic.js'
+import { hasSchematic } from './schematics.js'
 import { si, pct } from './units.js'
 import PartDrawer from './components/PartDrawer.vue'
 import FamilyDial from './components/FamilyDial.vue'
@@ -23,6 +25,13 @@ onMounted(async () => {
 
 // ── topology & spec form ───────────────────────────────────────────────────
 const topoId = ref('flyback')
+// The bench needs a working default topology (flyback) so the spec form is populated, but the card
+// grid should NOT look pre-committed on load — no card is highlighted until the user actually picks
+// one. `topoTouched` flips on the first explicit card click (see pickTopology).
+const topoTouched = ref(false)
+// Same for the variant cards: a default variant is set so the design is valid, but no variant card
+// is highlighted until the user actually picks one (reset whenever the topology changes).
+const variantTouched = ref(false)
 // ngspice by default: the real transient is the reference; analytical stays one
 // click away for instant iteration. 100 periods settle the converter, 2 shown.
 // models: 'ideal' switches, or 'datasheet' — real-conduction semiconductor models
@@ -95,11 +104,14 @@ function knobPlaceholder(k) {
 }
 
 function pickTopology(id) {
+  topoTouched.value = true
+  variantTouched.value = false   // new topology → its variants start unselected
   selectTopology(id)
   // a topology with a single canonical build has nothing to choose — skip straight to the spec
   stage.value = hasVariantChoice.value ? 'variant' : 'spec'
 }
 function pickVariant(id) {
+  variantTouched.value = true
   form.variant = id
   stage.value = 'spec'
 }
@@ -222,9 +234,28 @@ function enrichBom(rows, analyticalWaveforms) {
 }
 
 // ── schematic ──────────────────────────────────────────────────────────────
-const schematicSvg = computed(() =>
-  result.value ? renderSchematic(topoId.value, bomRows.value, form.variant) : null
-)
+// Prefer the CIAS-driven generator (one source of truth with ngspice + the visual sim) where a layout
+// exists; fall back to the hand-authored SVG elsewhere. If the generator throws (a real netlist drift),
+// SURFACE it — never silently substitute a possibly-wrong hand drawing (house rule: don't route around
+// broken things). The banner appears in the schematic pane; the hand-drawn art is not shown in its place.
+const schematicError = ref(null)
+const schematicSvg = computed(() => {
+  schematicError.value = null
+  if (!result.value) return null
+  try { return renderVerifiedSchematic(topoId.value, result.value.tas, form.variant, bomRows.value) }
+  catch (e) { schematicError.value = e?.message ?? String(e); return null }
+})
+// ── visual simulation (CIAS-driven CircuitJS1 export, falstad.js) ──────────
+// Which scope set the sim shows ('overview' or 'magnetic'); changing it regenerates the URL below,
+// which reloads the iframe with the new scopes.
+const visualScopeSet = ref('overview')
+const visualSim = computed(() => {
+  if (!result.value) return null
+  if (!hasVisualSim(topoId.value)) return { unsupported: true }
+  try { return falstadExport(topoId.value, result.value.tas, visualScopeSet.value) }
+  catch (e) { return { error: e?.message ?? String(e) } }
+})
+
 const selectedPart = ref(null)
 // The simulated V/I for the open part, as an excitation WavePane can render (non-magnetics only;
 // magnetics keep their per-winding block in the drawer).
@@ -271,6 +302,7 @@ if (typeof window !== 'undefined') {
     get running() { return running.value },
     get runError() { return runError.value },
     get engineState() { return engineState.value },
+    get visualSim() { return visualSim.value },
     // Open a component drawer by ref (the schematic click is hard to script) — for the Kelvin
     // candidate-sourcing e2e. Pure UI action, mirrors a schematic/BOM click.
     openPart: (ref) => openPart(ref),
@@ -547,13 +579,13 @@ function downloadMagneticInputs() {
 
 // Everything the two OutputPanes render is shared through this context (they are pure views).
 provide('kh', {
-  result, topo, diag, bomRows, selectedPart, schematicSvg, schematicClick, openPart,
+  result, topo, diag, bomRows, selectedPart, schematicSvg, schematicError, schematicClick, openPart,
   waveTarget, waveMagnetics, deviceGroups, targetIsMagnetic, waveOps, waveOpIdx, waveSource,
   waveExcitations, waveMag, ngspiceOps, ngspiceBusy, simulateMagnetic, downloadMagneticInputs,
   deviceExcitation, deviceComp, componentBusy, fetchComponentWaves,
   componentStress, stressSummary, verdict, mainExcNames, form,
   deck, deckFlavor, deckFidelity, simStop, simStep, deckBusy, designStop, designStep, periodsShown,
-  makeDeck, copyDeck, downloadDeck, si, pct,
+  makeDeck, copyDeck, downloadDeck, si, pct, visualSim, visualScopeSet,
 })
 </script>
 
@@ -617,7 +649,7 @@ provide('kh', {
               <div class="topo-list">
                 <button
                   v-for="t in familyTopologies" :key="t.id" :data-testid="`topo-${t.id}`"
-                  class="topo-card" :class="{ active: t.id === topoId, planned: t.planned }"
+                  class="topo-card" :class="{ active: topoTouched && t.id === topoId, planned: t.planned }"
                   :disabled="t.planned" @click="pickTopology(t.id)"
                 >
                   <div class="t-name">{{ t.name }}<span v-if="t.planned" class="t-tag">planned</span></div>
@@ -637,10 +669,10 @@ provide('kh', {
               <div class="variant-list">
                 <button
                   v-for="v in variantOptions" :key="v.id"
-                  class="topo-card variant-card" :class="{ active: v.id === form.variant }"
+                  class="topo-card variant-card" :class="{ active: variantTouched && v.id === form.variant }"
                   @click="pickVariant(v.id)"
                 >
-                  <div class="t-name">{{ v.name }}<span v-if="v.id === axis.default" class="t-tag t-default">default</span></div>
+                  <div class="t-name">{{ v.name }}</div>
                   <div class="t-desc">{{ v.desc }}</div>
                 </button>
               </div>

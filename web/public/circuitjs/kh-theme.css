@@ -1,0 +1,60 @@
+/* Kirchhoff theme for the embedded CircuitJS1 — phosphor amber on near-black, matching the KH bench.
+   Canvas element colors (wires, current dots, voltage polarity) are set via URL params in falstad.js;
+   this file themes the surrounding GWT chrome (menu bar, RUN/Reset buttons, sliders, labels). */
+:root {
+  --kh-bg: #0c0c0c; --kh-panel: #161310; --kh-line: #3a2f22;
+  --kh-amber: #ffb347; --kh-amber-hi: #ffd98a; --kh-amber-deep: #7a5a2c;
+}
+html, body {
+  background: var(--kh-bg) !important;
+  color: var(--kh-amber) !important;
+  font-family: "DejaVu Sans Mono", ui-monospace, monospace;
+}
+/* top menu bar */
+.gwt-MenuBar, .gwt-MenuBar-horizontal, .gwt-MenuBar-vertical,
+.menuPopupTopLeft, .menuPopupTopCenter, .menuPopupTopRight,
+.menuPopupMiddleLeft, .menuPopupMiddleRight, .menuPopupMiddleCenter,
+.menuPopupBottomLeft, .menuPopupBottomCenter, .menuPopupBottomRight,
+.menuPopupMiddleCenterInner, .menuPopupMiddleCenterInner>div>table {
+  background: var(--kh-panel) !important;
+  color: var(--kh-amber) !important;
+  border-color: var(--kh-line) !important;
+}
+.gwt-MenuItem { color: var(--kh-amber) !important; }
+.gwt-MenuItem-selected { background: var(--kh-amber-deep) !important; color: var(--kh-bg) !important; }
+/* buttons: RUN/Reset and the channel/expand buttons */
+.gwt-Button, .topButton {
+  background: rgba(255, 179, 71, 0.06) !important;
+  color: var(--kh-amber) !important;
+  border: 1px solid var(--kh-amber-deep) !important;
+  border-radius: 4px !important;
+}
+.gwt-Button:hover, .topButton:hover { background: rgba(255, 179, 71, 0.16) !important; }
+.gwt-Button.chbut-black { background: #000 !important; color: var(--kh-amber) !important; }
+.gwt-Button.chbut-white { background: var(--kh-amber) !important; color: var(--kh-bg) !important; }
+/* labels / sliders / text */
+.gwt-Label, .gwt-Label-current, .gwt-HTML, td, .gwt-CheckBox label { color: var(--kh-amber) !important; }
+.gwt-Label-1off { color: var(--kh-amber-deep) !important; }
+.gwt-Label-2off { color: var(--kh-amber-deep) !important; }
+.gwt-Label-selected { border-color: var(--kh-line) !important; }
+input[type=range] { accent-color: var(--kh-amber); }
+.gwt-TextBox, .gwt-ListBox, select, input {
+  background: var(--kh-panel) !important; color: var(--kh-amber) !important;
+  border: 1px solid var(--kh-amber-deep) !important;
+}
+/* dialogs */
+.gwt-DialogBox, .dialogMiddleCenter, .Caption {
+  background: var(--kh-panel) !important; color: var(--kh-amber) !important; border-color: var(--kh-line) !important;
+}
+/* sidebar sliders + palette: the default white track/box reads as unstyled on the dark bench */
+.palette-container { background: var(--kh-panel) !important; border: 1px solid var(--kh-line) !important; }
+#painel { background: var(--kh-bg) !important; }
+/* the SVG speed/brightness sliders: darken the track rects, amber the fill/handle */
+#painel svg rect { fill: var(--kh-panel); stroke: var(--kh-amber-deep); }
+#painel svg .thumb, #painel svg circle { fill: var(--kh-amber) !important; }
+/* "Current Circuit:" live-preview frame: blank dark host (no clutter, blends into the sidebar) */
+#painel iframe.gwt-Frame { background: var(--kh-bg) !important; border: 1px solid var(--kh-line) !important; }
+/* Simulation/Current-speed + Power-brightness sliders are painted on small CANVASES (colors baked in
+   by CircuitJS1, not reachable by CSS) — leaving a jarring red fill. Hue-shift ONLY the sidebar
+   canvases toward the KH amber; the main circuit canvas lives OUTSIDE .verticalPanel and is untouched. */
+.verticalPanel canvas { filter: sepia(1) saturate(4) hue-rotate(-8deg) brightness(1.05); }
