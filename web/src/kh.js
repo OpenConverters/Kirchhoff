@@ -72,8 +72,11 @@ export function extractOperatingPoint(tas, engine = 'analytical', magneticName =
   return callJson('extract_operating_point', JSON.stringify(tas), engine, magneticName)
 }
 
-export function mainMagneticInputs(tas) {
-  return callJson('main_magnetic_inputs', JSON.stringify(tas))
+// ref names which magnetic to design (BOM ref == component name). '' → the main magnetic. Multi-magnetic
+// topologies (LLC/CLLC/CLLLC transformer + resonant inductor, SEPIC/Cuk/Zeta two inductors, PSFB/DAB)
+// need the ref so the drawer designs the magnetic the user actually opened, not always the main one.
+export function mainMagneticInputs(tas, ref = '') {
+  return callJson('main_magnetic_inputs', JSON.stringify(tas), ref)
 }
 
 // The MAS inputs KH emits carry only processed stats (waveform: null); OM's magnetic adviser needs a

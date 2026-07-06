@@ -24,7 +24,16 @@ const state = ref('idle')       // idle | loading | ok | empty | error | unsuppo
 const result = ref(null)        // Kelvin SelectionResult
 const errMsg = ref('')
 
+// Optional single-manufacturer restriction. When set, Kelvin selects ONLY over this vendor
+// (manufacturerAllowlist) and the per-vendor diversity cap is lifted (maxManufacturerFraction:1) so the
+// whole result can come from it. Empty ⇒ the default cross-vendor selection with the diversity cap.
+const onlyMfr = ref('')
+
 const category = computed(() => (props.part ? kelvinCategoryFor(props.part.kind) : null))
+// Distinct vendors offered in the restrict-to-one-manufacturer dropdown. Captured from the FIRST
+// (unrestricted) search and kept across restricted re-queries, so you can switch between vendors even
+// though a restricted result only contains one. Empty until the first search runs.
+const manufacturers = ref([])
 
 async function findParts() {
   if (!props.part || !category.value) { state.value = 'unsupported'; return }
@@ -32,13 +41,29 @@ async function findParts() {
   result.value = null
   errMsg.value = ''
   try {
-    const r = await selectCandidates(props.part.kind, props.part.requirements, props.context)
+    // A single-manufacturer restriction (manufacturerAllowlist) is applied inside Kelvin over the whole
+    // gate-passing pool — Kelvin returns that vendor's best-fitting parts, not a post-filtered top-N. The
+    // diversity cap is lifted (maxManufacturerFraction:1) so the whole result can be that one vendor.
+    const ctx = onlyMfr.value
+      ? { ...props.context, manufacturerAllowlist: [onlyMfr.value], maxManufacturerFraction: 1 }
+      : props.context
+    const r = await selectCandidates(props.part.kind, props.part.requirements, ctx)
     if (r.error === 'NoCandidates') { result.value = r; state.value = 'empty' }
     else { result.value = r; state.value = 'ok' }
+    // Populate the vendor dropdown only from an unrestricted search (keeps the full list available).
+    if (!onlyMfr.value && Array.isArray(r.candidates)) {
+      manufacturers.value = [...new Set(r.candidates.map((c) => c.manufacturer).filter(Boolean))].sort()
+    }
   } catch (e) {
     errMsg.value = e?.message ?? String(e)
     state.value = 'error'
   }
+}
+
+// Re-query when the manufacturer restriction changes, but only once a search has been run (so it doesn't
+// fire on the initial idle state). Clearing it re-runs unrestricted.
+function onMfrChange() {
+  if (state.value === 'ok' || state.value === 'empty' || state.value === 'error') findParts()
 }
 
 // ── Bind a chosen candidate into the design (Tier 2: Range-fetch its record → bind_part → re-sim) ──
@@ -71,7 +96,7 @@ async function designMagnetic() {
   magErr.value = ''
   try {
     magState.value = 'exporting'
-    const inputs = await mainMagneticInputs(props.tas)   // this magnetic's MAS Inputs (processed stats only)
+    const inputs = await mainMagneticInputs(props.tas, props.part.ref)   // THIS magnetic's MAS Inputs (by ref)
     enrichMagneticWaveforms(inputs, props.part.windings) // splice real samples for custom shapes (QRM)
     magState.value = 'advising'                          // OM tab is open + advising
     const mas = await designMagneticInOpenMagnetics(props.part.ref, inputs)
@@ -89,6 +114,8 @@ watch(() => props.part?.ref, () => {
   state.value = category.value ? 'idle' : 'unsupported'
   result.value = null
   errMsg.value = ''
+  onlyMfr.value = ''
+  manufacturers.value = []
   binding.value = null
   boundMpn.value = null
   bindErr.value = ''
@@ -193,6 +220,19 @@ function fmtx(v) { return v == null ? '—' : `×${v >= 100 ? Math.round(v) : v.
         <div class="section-label" style="margin-top: 1.2rem" data-testid="kelvin-section">
           TAS DB candidates
           <span v-if="state === 'ok'" class="hint">{{ alternatives }} of {{ considered }} parts fit</span>
+        </div>
+
+        <!-- Restrict selection to ONE manufacturer (Kelvin manufacturerAllowlist over the full pool).
+             Appears once a search has found the vendors; "All manufacturers" clears the restriction. -->
+        <div v-if="manufacturers.length" class="mfr-restrict" data-testid="mfr-restrict">
+          <label class="mfr-label">Manufacturer</label>
+          <select
+            class="mfr-select" v-model="onlyMfr" @change="onMfrChange"
+            data-testid="mfr-only-select"
+          >
+            <option value="">All manufacturers</option>
+            <option v-for="m in manufacturers" :key="m" :value="m">{{ m }}</option>
+          </select>
         </div>
 
         <div v-if="state === 'unsupported'" class="suggest-box">
@@ -301,4 +341,12 @@ table.cand .mfr { color: var(--ink-dim); font-size: 0.68rem; }
 table.cand .margins span { margin-right: 0.4rem; white-space: nowrap; }
 .badge { display: inline-block; padding: 0 0.25rem; border-radius: 3px; font-size: 0.7rem; }
 .badge.ok { color: #7fd08a; } .badge.warn { color: #ffb454; }
+.mfr-restrict { margin-top: 0.4rem; display: flex; align-items: center; gap: 0.5rem; }
+.mfr-label { color: var(--ink-dim); font-size: 0.7rem; white-space: nowrap; }
+.mfr-select {
+  flex: 1; padding: 0.35rem 0.5rem; font: inherit; font-size: 0.72rem; cursor: pointer;
+  background: var(--panel, #1a1a1a); color: var(--ink, #ddd);
+  border: 1px solid var(--rule, #333); border-radius: 3px;
+}
+.mfr-select:focus { outline: none; border-color: var(--amber-hi, #ffcf6b); }
 </style>

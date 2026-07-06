@@ -282,11 +282,23 @@ std::vector<RawCapacitor> raw_capacitors(const json& tas) {
 
 }  // namespace
 
-MAS::Inputs main_magnetic_inputs(const json& tas) {
+MAS::Inputs main_magnetic_inputs(const json& tas, const std::string& magneticName) {
     auto mags = raw_magnetics(tas);
     if (mags.empty())
         throw std::runtime_error("main_magnetic_inputs: TAS has no magnetic components");
-    return mags[main_index(mags)].inputs->get<MAS::Inputs>();
+    // A topology can carry more than one magnetic (LLC/CLLC/CLLLC transformer + resonant inductor;
+    // SEPIC/Cuk/Zeta two inductors; PSFB/DAB transformer + output inductor). When the caller names one
+    // (the drawer passes the BOM row's ref == component name), design THAT magnetic; otherwise default
+    // to the main one (most windings). Mirrors extract_operating_point's by-name selection.
+    size_t idx = main_index(mags);
+    if (!magneticName.empty()) {
+        bool found = false;
+        for (size_t i = 0; i < mags.size(); ++i)
+            if (mags[i].name == magneticName) { idx = i; found = true; break; }
+        if (!found)
+            throw std::runtime_error("main_magnetic_inputs: magnetic '" + magneticName + "' not found in TAS");
+    }
+    return mags[idx].inputs->get<MAS::Inputs>();
 }
 
 json diagnostics(const json& tas) {

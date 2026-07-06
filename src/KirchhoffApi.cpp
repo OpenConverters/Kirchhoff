@@ -232,9 +232,9 @@ std::string diagnostics(const std::string& tas) {
     return guarded([&] { return Kirchhoff::diagnostics(json::parse(tas)).dump(); });
 }
 
-std::string main_magnetic_inputs(const std::string& tas) {
+std::string main_magnetic_inputs(const std::string& tas, const std::string& magneticName) {
     return guarded([&] {
-        MAS::Inputs in = Kirchhoff::main_magnetic_inputs(json::parse(tas));
+        MAS::Inputs in = Kirchhoff::main_magnetic_inputs(json::parse(tas), magneticName);
         json j = in; return j.dump();
     });
 }

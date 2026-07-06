@@ -61,7 +61,7 @@ MAS::OperatingPoint extract_operating_point(const nlohmann::json& tas, ExtractEn
 // which already carries every extra component — output inductor, resonant Lr/Cr, output Co — as its own
 // stage component, so a separate "extra components" extraction is redundant. Use topology_waveforms(tas)
 // for the non-main magnetics and walk the TAS caps directly if needed.)
-MAS::Inputs main_magnetic_inputs(const nlohmann::json& tas);
+MAS::Inputs main_magnetic_inputs(const nlohmann::json& tas, const std::string& magneticName = "");
 
 // Per-topology design diagnostics, derived from the assembled TAS. Replaces MKF's per-model
 // "<name>Diagnostics" objects (Flyback::get_last_*, Llc::get_computed_*, …) with the topology-AGNOSTIC

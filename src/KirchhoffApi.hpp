@@ -74,7 +74,8 @@ KH_API std::string component_waveforms(const std::string& tasJson, const std::st
 KH_API std::string realize_tas(const std::string& tasJson);
 
 KH_API std::string diagnostics(const std::string& tasJson);
-KH_API std::string main_magnetic_inputs(const std::string& tasJson); // the adviser's MAS::Inputs (as JSON)
+// magneticName selects which magnetic to design (BOM ref == component name); "" -> the main magnetic.
+KH_API std::string main_magnetic_inputs(const std::string& tasJson, const std::string& magneticName = "");
 
 // --- Kelvin component sourcing (real parts from the TAS DB) ---
 // Walk a TAS and select a real candidate list per fillable component seed (delegating to Kelvin,

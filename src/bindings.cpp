@@ -107,13 +107,34 @@ assembly/simulate steps (tas_to_ngspice / tas_to_ltspice) are topology-agnostic.
     //     to get a designed core+coil. This is the KH-native replacement for MKF's deleted
     //     design_magnetics_from_converter (design_<topo>_tas -> main_magnetic_inputs -> adviser). ---
     m.def("main_magnetic_inputs",
+          [](const json& tas, const std::string& magnetic) {
+              return Kirchhoff::strip_nulls(json(Kirchhoff::main_magnetic_inputs(tas, magnetic)));
+          },
+          py::arg("tas"), py::arg("magnetic") = std::string(""),
+          "Extract a magnetic's MAS Inputs (designRequirements + operatingPoints) from an assembled TAS\n"
+          "document (any design_<topo>_tas result). `magnetic` names which one (component name / BOM ref);\n"
+          "'' picks the main magnetic (most windings). Multi-magnetic topologies (LLC/CLLC/CLLLC,\n"
+          "SEPIC/Cuk/Zeta, PSFB/DAB) expose each magnetic separately. Pass the result to\n"
+          "PyOpenMagnetics.calculate_advised_magnetics_fast(inputs, N, mode) to design a core+coil.");
+
+    // --- per-magnetic FULL-waveform inputs (real ≥2-point time-domain samples), one entry per magnetic.
+    //     main_magnetic_inputs carries processed stats only (waveform: null); for a 'custom'-shaped
+    //     excitation (QRM valley-switching, resonant/bridge transformer legs) the adviser needs the real
+    //     samples spliced in. This is the source the web BOM enriches from (analyticalWaveforms). Parity
+    //     with the embind topology_waveforms. ---
+    m.def("topology_waveforms",
           [](const json& tas) {
-              return Kirchhoff::strip_nulls(json(Kirchhoff::main_magnetic_inputs(tas)));
+              json out = json::array();
+              for (auto& m : Kirchhoff::topology_waveforms(tas))
+                  out.push_back(json{{"name", m.name}, {"isMain", m.isMain},
+                                     {"inputs", Kirchhoff::strip_nulls(json(m.inputs))}});
+              return out;
           },
           py::arg("tas"),
-          "Extract the main magnetic's MAS Inputs (designRequirements + operatingPoints) from an\n"
-          "assembled TAS document (any design_<topo>_tas result). Pass the result to\n"
-          "PyOpenMagnetics.calculate_advised_magnetics_fast(inputs, N, mode) to design a core+coil.");
+          "Full-waveform MAS Inputs for EVERY magnetic in an assembled TAS: a list of\n"
+          "{name, isMain, inputs} with real time-domain waveforms (unlike main_magnetic_inputs, which\n"
+          "carries processed stats only). Use inputs.operatingPoints[].excitationsPerWinding to enrich a\n"
+          "'custom'-shaped excitation before advising.");
 
     // --- common-mode choke: a COMPONENT designer, not a topology (no TAS document) ---
     m.def("design_cmc_inputs",
