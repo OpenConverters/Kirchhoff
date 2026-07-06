@@ -538,7 +538,43 @@ details.adv .adv-body { margin-top: 0.75rem; }
   border-bottom: 1px solid var(--line-soft);
 }
 .knob-toggle { display: flex; align-items: baseline; gap: 0.4rem; cursor: pointer; font-size: 0.72rem; }
-.knob-toggle input[type='checkbox'] { accent-color: var(--amber); cursor: pointer; }
+/* KH-themed checkbox: a dark phosphor box that fills amber with a check when on — replaces the stark
+   white default control so it reads like the rest of the bench. Shared by the knob override toggles
+   and the boolean knobs. */
+.knob-toggle input[type='checkbox'],
+.knob-bool input[type='checkbox'] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 0.82rem;
+  height: 0.82rem;
+  margin: 0;
+  flex: none;
+  position: relative;
+  top: 0.08rem;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--bg-deep);
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.knob-toggle input[type='checkbox']:hover,
+.knob-bool input[type='checkbox']:hover { border-color: var(--amber-deep); }
+.knob-toggle input[type='checkbox']:focus-visible,
+.knob-bool input[type='checkbox']:focus-visible { outline: 1px solid var(--amber); outline-offset: 1px; }
+.knob-toggle input[type='checkbox']:checked,
+.knob-bool input[type='checkbox']:checked { background: var(--amber); border-color: var(--amber); }
+.knob-toggle input[type='checkbox']:checked::after,
+.knob-bool input[type='checkbox']:checked::after {
+  content: '';
+  position: absolute;
+  left: 0.27rem;
+  top: 0.08rem;
+  width: 0.2rem;
+  height: 0.4rem;
+  border: solid var(--bg-deep);
+  border-width: 0 2px 2px 0;
+  transform: rotate(43deg);
+}
 .knob-name { color: var(--ink); }
 .knob-sym { font-family: var(--mono); font-size: 0.62rem; color: var(--ink-dim); }
 .knob-ctl { display: flex; justify-content: flex-end; }
@@ -551,7 +587,6 @@ details.adv .adv-body { margin-top: 0.75rem; }
   font-style: italic;
 }
 .knob-bool { display: flex; align-items: center; gap: 0.35rem; font-size: 0.68rem; color: var(--ink-dim); }
-.knob-bool input[type='checkbox'] { accent-color: var(--amber); }
 
 /* ── buttons ────────────────────────────────────────────────────────────── */
 
