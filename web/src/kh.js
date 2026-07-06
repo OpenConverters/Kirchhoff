@@ -180,6 +180,10 @@ const KELVIN_BASE = '/kelvin'
 const KIND_TO_CATEGORY = {
   MOSFET: 'mosfet', Diode: 'diode', Capacitor: 'capacitor', Resistor: 'resistor',
   Controller: 'controller', IGBT: 'igbt', BJT: 'bjt', Varistor: 'varistor',
+  // Magnetics also get a Kelvin catalog lookup (real off-the-shelf inductors/transformers), ALONGSIDE
+  // the OpenMagnetics custom-design adviser. The selector ranks the whole catalog and returns matches
+  // even when none fully meet the spec (see Kelvin select_magnetic).
+  Inductor: 'magnetic', Transformer: 'magnetic',
 }
 const _kelvinShards = new Map() // family -> Promise<meta>
 let _manifestPromise = null

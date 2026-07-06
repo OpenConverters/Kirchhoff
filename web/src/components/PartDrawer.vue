@@ -50,10 +50,12 @@ async function findParts() {
     const r = await selectCandidates(props.part.kind, props.part.requirements, ctx)
     if (r.error === 'NoCandidates') { result.value = r; state.value = 'empty' }
     else { result.value = r; state.value = 'ok' }
-    // Populate the vendor dropdown only from an unrestricted search (keeps the full list available).
-    if (!onlyMfr.value && Array.isArray(r.candidates)) {
+    // Vendor dropdown ← Kelvin's manufacturer FACET: every vendor with a fitting part (the full
+    // gate-passing pool), not just the vendors of the top-N shown. Complete even under a restriction, so
+    // it's safe to refresh on every search. (Fallback to candidates' vendors for an old engine w/o facet.)
+    if (Array.isArray(r.manufacturers)) manufacturers.value = r.manufacturers
+    else if (!onlyMfr.value && Array.isArray(r.candidates))
       manufacturers.value = [...new Set(r.candidates.map((c) => c.manufacturer).filter(Boolean))].sort()
-    }
   } catch (e) {
     errMsg.value = e?.message ?? String(e)
     state.value = 'error'
@@ -215,10 +217,11 @@ function fmtx(v) { return v == null ? '—' : `×${v >= 100 ? Math.round(v) : v.
           </div>
         </template>
 
-        <!-- ── TAS DB candidate parts (Kelvin) ── -->
-        <template v-else>
+        <!-- ── TAS DB candidate parts (Kelvin) ── shown for any Kelvin category, INCLUDING magnetics
+             (where it sits alongside the OpenMagnetics custom-design adviser above as a second option). -->
+        <template v-if="category">
         <div class="section-label" style="margin-top: 1.2rem" data-testid="kelvin-section">
-          TAS DB candidates
+          {{ isMagnetic ? 'or pick a real catalog magnetic' : 'TAS DB candidates' }}
           <span v-if="state === 'ok'" class="hint">{{ alternatives }} of {{ considered }} parts fit</span>
         </div>
 
