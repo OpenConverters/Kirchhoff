@@ -1708,7 +1708,7 @@ MAS::OperatingPoint analytical_asymmetric_half_bridge(double inputVoltage,
 
     const int N = 128;
     std::vector<double> time, vPri, iPri, vSec_a, iSec_a, vSec_b, iSec_b;
-    const size_t cap = 2 * N + 3;
+    const size_t cap = 2 * N + 1;
     for (auto* v : {&time, &vPri, &iPri, &vSec_a, &iSec_a, &vSec_b, &iSec_b}) v->reserve(cap);
 
     // emit one sample to the primary + center-tapped half-winding arrays.
@@ -1730,17 +1730,27 @@ MAS::OperatingPoint analytical_asymmetric_half_bridge(double inputVoltage,
         }
     };
 
-    // Interval A (Q1 ON): Lo1 charges (+slope).
-    for (int k = 0; k <= N; ++k) {
-        const double frac = static_cast<double>(k) / N;
-        emit(frac * tA, Vpri_pos, Im0 + frac * dILm_pp, ILo1_min + frac * dILo1_pp);
-    }
-    // Discontinuity duplicate sample (post-jump v_pri).
-    emit(tA, Vpri_neg, Im0 + dILm_pp, ILo1_max);
-    // Interval C (Q2 ON): Lo1 discharges (−slope); i_Lm ramps back to Im0.
-    for (int k = 1; k <= N; ++k) {
-        const double frac = static_cast<double>(k) / N;
-        emit(tA + frac * tC, Vpri_neg, (Im0 + dILm_pp) - frac * dILm_pp, ILo1_max - frac * dILo1_pp);
+    // Sample on a UNIFORM time grid over [0, Tsw]. Interval A (Q1 ON, Lo1 charges, +slope) spans [0, tA];
+    // interval C (Q2 ON, Lo1 discharges, −slope) spans [tA, Tsw]. The grid MUST be uniform: the downstream
+    // MKF WaveformProcessor derives the winding RMS as an equal-weight mean of squares over the sample
+    // vector (WaveformProcessor.cpp calculate_processed_data), which equals the true time-weighted RMS only
+    // when the samples are equally spaced in time. The prior per-interval fractional sampling put N points
+    // across tA=D·Tsw and N across tC=(1−D)·Tsw, over-weighting the shorter interval whenever D≠0.5 and
+    // over-reading the primary RMS by ~18% at D=0.3 (1.777 A vs the closed-form 1.511 A). Every other
+    // analytical converter here (DAB, PSFB, PSHB) already samples uniformly; this brings AHB in line. The
+    // ±Vpri/current discontinuity at tA is captured as a single-sample jump between adjacent grid points
+    // (same as the resampled stored waveform), so no zero-width duplicate is emitted. (ABT #152.)
+    const int M = 2 * N;                       // number of uniform grid intervals over the period
+    const double dtGrid = Tsw / M;
+    for (int k = 0; k <= M; ++k) {
+        const double t = (k == M) ? Tsw : k * dtGrid;
+        if (t < tA) {                          // interval A
+            const double frac = t / tA;
+            emit(t, Vpri_pos, Im0 + frac * dILm_pp, ILo1_min + frac * dILo1_pp);
+        } else {                               // interval C
+            const double frac = (t - tA) / tC;
+            emit(t, Vpri_neg, (Im0 + dILm_pp) - frac * dILm_pp, ILo1_max - frac * dILo1_pp);
+        }
     }
 
     auto wfm = [](const std::vector<double>& d, const std::vector<double>& t) {
