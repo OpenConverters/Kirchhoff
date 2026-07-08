@@ -123,15 +123,20 @@ function resolveOmOrigin() {
 }
 const OPENMAGNETICS_ORIGIN = resolveOmOrigin()
 
-// Open the OM adviser with these MAS Inputs; resolves with the MAS magnetic the user sends back, or
-// rejects if the popup is blocked or the tab is closed without choosing. `ref` labels the round-trip
-// so a stray message from an unrelated OM tab can't bind the wrong component.
-export function designMagneticInOpenMagnetics(ref, inputs) {
+// Open the OM adviser tab with these MAS Inputs and run one handoff round-trip. Two modes:
+//   'design' — the user picks ONE design in the OM UI; resolves with { mas }.
+//   'advise' — the adviser auto-runs headlessly, posts the WHOLE advise list and closes the tab;
+//              resolves with { advises: [{mas, scoringPerFilter, weightedTotalScoring}] }.
+// Rejects if the popup is blocked or the tab closes without a reply. `ref` labels the round-trip so
+// a stray message from an unrelated OM tab can't bind the wrong component. An OLD deployed OM that
+// predates 'advise' ignores the mode and behaves like 'design' (user picks there, single 'magnetic'
+// reply) — accepted in either mode so the flow degrades gracefully instead of hanging.
+function openMagneticsHandoff(ref, inputs, mode) {
   return new Promise((resolve, reject) => {
     // Open the OM home (it preloads the magnetic engine); the handoff bridge navigates to the adviser
     // once it has our inputs, so the adviser mounts with the MAS already loaded (no reset race).
     const omWin = window.open(`${OPENMAGNETICS_ORIGIN}/?handoff=kirchhoff`, '_blank')
-    if (!omWin) return reject(new Error('pop-up blocked — allow pop-ups to design in OpenMagnetics'))
+    if (!omWin) return reject(new Error('pop-up blocked — allow pop-ups to use OpenMagnetics'))
     let settled = false
     const cleanup = () => { settled = true; window.removeEventListener('message', onMessage); clearInterval(poll) }
     function onMessage(ev) {
@@ -141,20 +146,46 @@ export function designMagneticInOpenMagnetics(ref, inputs) {
         // otherwise die silently and the whole handoff would no-op with zero feedback — which is
         // exactly what a Vue reactive proxy in `inputs` once did. inputs must be plain cloneable data.
         try {
-          omWin.postMessage({ source: 'kirchhoff', type: 'mas-inputs', ref, inputs }, OPENMAGNETICS_ORIGIN)
+          omWin.postMessage({ source: 'kirchhoff', type: 'mas-inputs', ref, inputs, mode }, OPENMAGNETICS_ORIGIN)
         } catch (e) {
           cleanup()
           reject(new Error(`could not send MAS inputs to OpenMagnetics (non-cloneable data — a Vue reactive object? see enrichMagneticWaveforms): ${e.message}`))
         }
       } else if (ev.data.type === 'magnetic' && ev.data.ref === ref) {
-        cleanup(); resolve(ev.data.mas)
+        cleanup(); resolve({ mas: ev.data.mas, advises: [{ mas: ev.data.mas }], droppedInvalid: 0 })
+      } else if (ev.data.type === 'magnetics' && ev.data.ref === ref) {
+        cleanup(); resolve({ mas: ev.data.advises?.[0]?.mas ?? null, advises: ev.data.advises ?? [],
+                             droppedInvalid: ev.data.droppedInvalid ?? 0 })
       }
     }
     window.addEventListener('message', onMessage)
     const poll = setInterval(() => {
-      if (omWin.closed && !settled) { cleanup(); reject(new Error('OpenMagnetics tab closed without sending a design')) }
+      // The advise-mode tab closes itself right after posting — give an in-flight message a grace
+      // tick to land before treating the close as an abort.
+      if (omWin.closed && !settled)
+        setTimeout(() => {
+          if (!settled) { cleanup(); reject(new Error('OpenMagnetics tab closed without sending a design')) }
+        }, 1500)
     }, 1000)
   })
+}
+
+// Interactive design round-trip — resolves with the single MAS the user chose in OM.
+export async function designMagneticInOpenMagnetics(ref, inputs) {
+  return (await openMagneticsHandoff(ref, inputs, 'design')).mas
+}
+
+// Headless adviser round-trip — resolves with { advises, droppedInvalid }: the advise LIST
+// (candidate-table material: each row a full MAS with its NGSPICE subcircuit attached, plus the
+// adviser's scoring) and how many adviser results were dropped for failing MKF's coil validity
+// filters (OM marks those with an "INVALID (failed validity filters): " reference prefix — they
+// are not buildable designs, so they are filtered, and the count says why the list is short).
+export async function suggestMagneticsInOpenMagnetics(ref, inputs) {
+  const INVALID_PREFIX = 'INVALID (failed validity filters): '
+  const r = await openMagneticsHandoff(ref, inputs, 'advise')
+  // Defensive re-filter: an OM deploy that predates the OM-side filter still marks them.
+  const advises = r.advises.filter((a) => !(a?.mas?.magnetic?.manufacturerInfo?.reference ?? '').startsWith(INVALID_PREFIX))
+  return { advises, droppedInvalid: (r.droppedInvalid ?? 0) + (r.advises.length - advises.length) }
 }
 
 // Bind an OM-advised magnetic (a full MAS) into the TAS component's data.magnetic, verbatim (already

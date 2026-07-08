@@ -1,7 +1,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { requirementRows } from '../bom.js'
-import { selectCandidates, kelvinCategoryFor, bindPart, mainMagneticInputs, enrichMagneticWaveforms, designMagneticInOpenMagnetics } from '../kh.js'
+import { selectCandidates, kelvinCategoryFor, bindPart, mainMagneticInputs, enrichMagneticWaveforms, designMagneticInOpenMagnetics, suggestMagneticsInOpenMagnetics } from '../kh.js'
 import WavePane from './WavePane.vue'
 
 const props = defineProps({
@@ -130,6 +130,48 @@ async function designMagnetic() {
   }
 }
 
+// ── Magnetics: headless OM adviser round-trip — the advises render as a candidate table here ──────
+// (the third sourcing path: adviser suggestions, next to the interactive OM design handoff above and
+// the TAS-DB catalog below). Each advise arrives as a full MAS with its NGSPICE subcircuit attached,
+// so binding one renders the real (MKF_MODEL) magnetic immediately.
+const sugState = ref('idle')  // idle | advising | ok | empty | error
+const sugList = ref([])       // [{mas, scoringPerFilter, weightedTotalScoring}]
+const sugDropped = ref(0)     // adviser results dropped for failing MKF's coil validity filters
+const sugErr = ref('')
+const sugBound = ref(null)    // reference of the advise bound from this list
+
+async function suggestMagnetics() {
+  if (!props.tas) { sugErr.value = 'no design loaded'; sugState.value = 'error'; return }
+  sugErr.value = ''
+  sugState.value = 'advising'
+  try {
+    const inputs = await mainMagneticInputs(props.tas, props.part.ref)
+    enrichMagneticWaveforms(inputs, props.part.windings)
+    const { advises, droppedInvalid } = await suggestMagneticsInOpenMagnetics(props.part.ref, inputs)
+    sugList.value = advises
+    sugDropped.value = droppedInvalid
+    sugState.value = advises.length ? 'ok' : 'empty'
+  } catch (e) {
+    sugErr.value = e?.message ?? String(e)
+    sugState.value = 'error'
+  }
+}
+
+function adviseRef(a) { return a?.mas?.magnetic?.manufacturerInfo?.reference ?? 'OpenMagnetics design' }
+function adviseCore(a) {
+  const fd = a?.mas?.magnetic?.core?.functionalDescription
+  const nameOf = (v) => (typeof v === 'string' ? v : v?.name ?? '')
+  return [nameOf(fd?.shape), nameOf(fd?.material)].filter(Boolean).join(' · ')
+}
+function adviseTurns(a) {
+  const w = a?.mas?.magnetic?.coil?.functionalDescription
+  return Array.isArray(w) ? w.map((x) => x?.numberTurns).filter((n) => n != null).join(':') : ''
+}
+function useAdvise(a) {
+  sugBound.value = adviseRef(a)
+  emit('bound-magnetic', { ref: props.part.ref, mas: a.mas })  // same bind path as the interactive handoff
+}
+
 // Reset when the selected component changes (don't auto-fetch big shards — user clicks).
 watch(() => props.part?.ref, () => {
   state.value = category.value ? 'idle' : 'unsupported'
@@ -143,6 +185,10 @@ watch(() => props.part?.ref, () => {
   magState.value = 'idle'
   magMpn.value = null
   magErr.value = ''
+  sugState.value = 'idle'
+  sugList.value = []
+  sugErr.value = ''
+  sugBound.value = null
 })
 
 const candidates = computed(() => result.value?.candidates ?? [])
@@ -226,9 +272,64 @@ function fmtx(v) { return v == null ? '—' : `×${v >= 100 ? Math.round(v) : v.
             </select>
           </div>
 
+          <!-- ── Sourcing path 1: adviser SUGGESTIONS as a candidate list (headless OM round-trip) ── -->
+          <div class="section-label" style="margin-top: 1.2rem" data-testid="magnetic-suggest-section">
+            Suggest magnetics with OpenMagnetics
+            <span v-if="sugState === 'ok'" class="hint">{{ sugList.length }} advised designs</span>
+            <span v-else class="hint">the OM Magnetic Adviser's top designs, listed here like catalog parts</span>
+          </div>
+          <button
+            v-if="sugState === 'idle' || sugState === 'error'"
+            class="find-parts"
+            data-testid="suggest-magnetics"
+            :disabled="!tas"
+            @click="suggestMagnetics"
+          >
+            Suggest magnetics with OpenMagnetics →
+          </button>
+          <div v-else-if="sugState === 'advising'" class="suggest-box" data-testid="magnetic-suggesting">
+            OpenMagnetics is running its Magnetic Adviser in a background tab — the advised designs
+            will list here when it finishes (the tab closes itself).
+          </div>
+          <div v-else-if="sugState === 'empty'" class="suggest-box" data-testid="magnetic-suggest-empty">
+            <template v-if="sugDropped > 0">
+              The adviser found {{ sugDropped }} design(s) but ALL failed its coil validity filters —
+              none is buildable as advised. Try the interactive design below (adjust the constraints there).
+            </template>
+            <template v-else>The adviser returned no designs for this operating point.</template>
+          </div>
+          <table v-else-if="sugState === 'ok'" class="cand" data-testid="magnetic-suggestions">
+            <thead>
+              <tr><th>design</th><th>core</th><th>turns</th><th>score</th><th></th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="(a, i) in sugList" :key="i" :class="{ top: i === 0, bound: sugBound === adviseRef(a) }" data-testid="magnetic-suggestion">
+                <td class="mono mpn">{{ adviseRef(a) }}</td>
+                <td class="mfr">{{ adviseCore(a) }}</td>
+                <td class="mono">{{ adviseTurns(a) }}</td>
+                <td class="mono">{{ a.weightedTotalScoring != null ? a.weightedTotalScoring.toFixed(2) : '' }}</td>
+                <td class="use-cell">
+                  <span v-if="sugBound === adviseRef(a)" class="bound-tag" title="bound into the design">✓ bound</span>
+                  <button v-else class="use-btn" data-testid="use-suggestion" @click="useAdvise(a)">use</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <div v-if="sugErr" class="suggest-box err" data-testid="magnetic-suggest-error" style="margin-top: 0.4rem">
+            {{ sugErr }}
+          </div>
+          <div v-if="sugState === 'ok'" class="hint" style="margin-top: 0.35rem">
+            Each design carries its full MKF physical model — <b>“use”</b> binds it and re-simulates
+            with the real magnetic.
+            <template v-if="sugDropped > 0">
+              ({{ sugDropped }} more advised design(s) hidden: failed OM's coil validity filters.)
+            </template>
+          </div>
+
+          <!-- ── Sourcing path 2: interactive design in the OM UI ── -->
           <div class="section-label" style="margin-top: 1.2rem" data-testid="magnetic-section">
-            Magnetic design
-            <span class="hint">custom-designed by the OpenMagnetics adviser</span>
+            or design it yourself
+            <span class="hint">interactively, in the OpenMagnetics magnetic tool</span>
           </div>
           <button
             v-if="magState === 'idle' || magState === 'error'"

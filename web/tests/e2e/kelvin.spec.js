@@ -62,7 +62,10 @@ test.describe('Kelvin candidate sourcing', () => {
       ref, { timeout: 30000 })
   })
 
-  test('magnetic drawer offers the OpenMagnetics adviser handoff (not a catalog table)', async ({ page }) => {
+  test('magnetic drawer offers all three sourcing paths (suggest / design in OM / catalog)', async ({ page }) => {
+    // Originally magnetics had ONLY the OM handoff ("not a catalog table"); since the Kelvin
+    // magnetic family landed, the drawer deliberately offers the catalog alongside it, and the
+    // adviser-suggestions list (ABT #177) is the third path. Assert all three surfaces.
     await boot(page)
     await selectTopology(page, 'flyback')
     expect(await solve(page, 'analytical'), 'solve error').toBeNull()
@@ -72,10 +75,13 @@ test.describe('Kelvin candidate sourcing', () => {
     expect(ref, 'flyback has a magnetic').toBeTruthy()
     await page.evaluate((r) => window.__bench.openPart(r), ref)
 
-    // Magnetics get the adviser handoff, not the Kelvin candidate table.
-    await expect(page.getByTestId('magnetic-section')).toBeVisible()
+    await expect(page.getByTestId('magnetic-suggest-section')).toBeVisible()   // 1: adviser suggestions
+    await expect(page.getByTestId('suggest-magnetics')).toBeVisible()
+    await expect(page.getByTestId('magnetic-section')).toBeVisible()           // 2: interactive OM design
     await expect(page.getByTestId('design-magnetic')).toBeVisible()
-    await expect(page.getByTestId('kelvin-section')).toHaveCount(0)
+    await expect(page.getByTestId('kelvin-section')).toBeVisible()             // 3: TAS-DB catalog
+    // The per-magnetic simulation-model selector rides along in the same drawer.
+    await expect(page.getByTestId('magnetic-model-select')).toBeVisible()
   })
 
   test('bind refuses a shard/catalog version mismatch (safety guard)', async ({ page }) => {
