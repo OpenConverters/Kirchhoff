@@ -118,7 +118,8 @@ Vout/Iout ~0.9 % (efficiency directional — Kirchhoff's ideal switches beat MKF
 
 - ✅ **P0** reset + toolchain.
 - ✅ **P1** per-family `to_cias` (RAS/CAS/SAS/MAS), ideal + datasheet, tri-target (native+pybind+WASM),
-  ~40 unit checks green. (Real parasitics + MAS DATASHEET/MKF_MODEL origins = P4.)
+  ~40 unit checks green. (MAS DATASHEET origin: ABT #170; MKF_MODEL subcircuit hoist: test_real_magnetic;
+  remaining real parasitics — e.g. magnetic winding Rdc — still open.)
 - ✅ **P2** CIAS atom-brick → ngspice (`.subckt`/cards), tested.
 - 🟡 **P3** assembly: done for the flyback in `Kirchhoff/src`; a generic TAS-document walker (any topology)
   in `TAS/src` is pending.
