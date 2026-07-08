@@ -94,15 +94,15 @@ MAS::OperatingPoint analytical_operating_point_of(const std::vector<RawMagnetic>
 // winding to its ngspice vector by the winding name (primary/secondary/...) and rebuild each excitation
 // with the shared WaveformProcessor (sampled -> harmonics -> processed), preserving the winding labels &
 // structure the analytical operating point already has.
-MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vector<RawMagnetic>& mags, size_t idx) {
+MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vector<RawMagnetic>& mags, size_t idx,
+                                               const PEAS::Fidelity& fidelity) {
     if (!ngspice_in_process_available())
         throw std::runtime_error("extract_operating_point(NGSPICE): Kirchhoff built without libngspice");
     // Start from the analytical operating point (correct winding count / labels / voltages) and overwrite
     // the currents with the simulated ones where we can find the matching branch.
     MAS::OperatingPoint op = analytical_operating_point_of(mags, idx);
 
-    PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
-    const std::string deck = tas_to_ngspice(tas, ideal);
+    const std::string deck = tas_to_ngspice(tas, fidelity);
     NgspiceRunResult r = run_ngspice_in_process(deck);
     if (!r.success)
         throw std::runtime_error("extract_operating_point(NGSPICE): sim failed: " + r.error);
@@ -219,7 +219,8 @@ MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vecto
 
 }  // namespace
 
-MAS::OperatingPoint extract_operating_point(const json& tas, ExtractEngine engine, const std::string& magneticName) {
+MAS::OperatingPoint extract_operating_point(const json& tas, ExtractEngine engine, const std::string& magneticName,
+                                            const PEAS::Fidelity& fidelity) {
     auto mags = raw_magnetics(tas);
     if (mags.empty())
         throw std::runtime_error("extract_operating_point: TAS has no magnetic components");
@@ -232,7 +233,7 @@ MAS::OperatingPoint extract_operating_point(const json& tas, ExtractEngine engin
     }
     switch (engine) {
         case ExtractEngine::ANALYTICAL: return analytical_operating_point_of(mags, idx);
-        case ExtractEngine::NGSPICE:    return ngspice_operating_point_of(tas, mags, idx);
+        case ExtractEngine::NGSPICE:    return ngspice_operating_point_of(tas, mags, idx, fidelity);
     }
     throw std::runtime_error("extract_operating_point: unknown engine");
 }

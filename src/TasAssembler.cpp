@@ -111,7 +111,15 @@ std::string emit_load_card(const std::string& node, const json& inputs, size_t o
 // from the librarian's selection) -> DATASHEET (real device model); a pre-sourcing SEED (empty part +
 // requirements) -> REQUIREMENTS (ideal). This lets the SAME TAS get progressively more real as parts
 // are bound (the Heaviside librarian round-trip), and mixed (real magnetic + ideal passives) decks.
-PEAS::Fidelity infer_fidelity(const json& data, const PEAS::Fidelity& base) {
+// An explicit fidelity.componentOrigins["<ref>"] entry is a USER DIRECTIVE and wins over the
+// inference: REQUIREMENTS renders the ideal seed model even for a bound part; DATASHEET/MKF_MODEL
+// demand the corresponding data and the family converter throws when it is absent (no downgrade).
+PEAS::Fidelity infer_fidelity(const std::string& ref, const json& data, const PEAS::Fidelity& base) {
+    if (auto it = base.componentOrigins.find(ref); it != base.componentOrigins.end()) {
+        PEAS::Fidelity f = base;
+        f.origin = it->second;
+        return f;
+    }
     auto bound = [](const json& obj) {
         return obj.is_object() && (obj.contains("manufacturerInfo") || obj.contains("core") || obj.contains("coil"));
     };
@@ -235,6 +243,21 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
     std::map<std::tuple<std::string, std::string, std::string>, std::string> pinPort;
     bool deckHasRealComponent = false;   // any real part (DATASHEET semi OR MKF_MODEL magnetic) -> gets cshunt
 
+    // A per-component fidelity override naming a ref that exists nowhere in the TAS is a caller
+    // error (typo / stale ref) — validate up front rather than silently ignoring the directive.
+    if (!fidelity.componentOrigins.empty()) {
+        std::set<std::string> refs;
+        for (const auto& stage : stages)
+            if (stage.contains("circuit") && stage.at("circuit").is_object()
+                && stage.at("circuit").contains("components"))
+                for (const auto& comp : stage.at("circuit").at("components"))
+                    refs.insert(comp.value("name", std::string()));
+        for (const auto& [ref, org] : fidelity.componentOrigins)
+            if (!refs.count(ref))
+                throw std::runtime_error("TasAssembler: fidelity.components override names '" + ref +
+                                         "' but no component with that ref exists in the TAS");
+    }
+
     for (const auto& stage : stages) {
         if (!stage.contains("circuit") || !stage.at("circuit").is_object()) continue;  // control stages (no brick)
         // A physicalControl stage (role "control") DOES carry a circuit (its controller IC),
@@ -296,7 +319,8 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
             const json& cd = comp.at("data");
             if (!cd.is_object() || !cd.contains("semiconductor")) continue;
             hasSemi = true;
-            if (infer_fidelity(cd, fidelity).origin != PEAS::Fidelity::Origin::DATASHEET) { allRealAdequate = false; continue; }
+            if (infer_fidelity(comp.at("name").get<std::string>(), cd, fidelity).origin
+                != PEAS::Fidelity::Origin::DATASHEET) { allRealAdequate = false; continue; }
             deckHasRealComponent = true;
             const json& semi = cd.at("semiconductor");
             if (semi.contains("mosfet") &&
@@ -328,9 +352,9 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
         std::vector<std::pair<std::string, std::string>> realSwitchDS;   // {drain net, source net} per real mosfet
         for (const auto& comp : brick.at("components")) {
             const json& cd = comp.at("data");
+            const std::string n = comp.at("name").get<std::string>();
             if (cd.is_object() && cd.contains("semiconductor") && cd.at("semiconductor").contains("mosfet")
-                && infer_fidelity(cd, fidelity).origin == PEAS::Fidelity::Origin::DATASHEET) {
-                const std::string n = comp.at("name").get<std::string>();
+                && infer_fidelity(n, cd, fidelity).origin == PEAS::Fidelity::Origin::DATASHEET) {
                 realSwitchDS.push_back({netOf(n, "drain"), netOf(n, "source")});
             }
         }
@@ -350,9 +374,13 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
             if (stripSnubbers && is_numerical_snubber(comp.at("data"))) { strippedNumericalAids.insert(cname); continue; }
             if (isRedundantBodyDiode(cname, comp.at("data"))) { strippedNumericalAids.insert(cname); continue; }
             const json& data = comp.at("data");
+            const PEAS::Fidelity compFidelity = infer_fidelity(cname, data, fidelity);
             // Hoist a real magnetic's MKF subcircuit to the deck top level (once per reference); the
-            // stage body (below) only emits the X instance that references it.
-            if (data.contains("magnetic") && data.at("magnetic").is_object()
+            // stage body (below) only emits the X instance that references it. Gated on the RESOLVED
+            // per-component fidelity, not just data presence: a magnetic the user overrode to ideal
+            // must not leave its (unreferenced) .subckt in the deck nor trigger the real-deck cshunt.
+            if (compFidelity.origin == PEAS::Fidelity::Origin::MKF_MODEL
+                && data.contains("magnetic") && data.at("magnetic").is_object()
                 && data.at("magnetic").contains("modelOutputs")
                 && data.at("magnetic").at("modelOutputs").is_object()
                 && data.at("magnetic").at("modelOutputs").contains("spiceSubcircuit")) {
@@ -365,7 +393,7 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
                     magSubckts << "\n";
                 }
             }
-            json leaf = component_to_leaf(data, infer_fidelity(data, fidelity));
+            json leaf = component_to_leaf(data, compFidelity);
             const bool single = leaf.at("components").size() == 1;
             auto aname = [&](const std::string& lc) { return single ? cname : cname + "_" + lc; };
             for (const auto& lc : leaf.at("components"))

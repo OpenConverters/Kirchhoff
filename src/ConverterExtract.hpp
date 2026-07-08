@@ -19,6 +19,7 @@
 // shims that consume this KH output — see MKF's migration shim. No topology-specific code lives here.
 
 #include "MAS.hpp"
+#include "Fidelity.hpp"
 
 #include <nlohmann/json.hpp>
 #include <string>
@@ -51,8 +52,12 @@ std::vector<MagneticExtract> topology_waveforms(const nlohmann::json& tas);
 // magnetic by name; empty selects the main magnetic (the one with the most windings / flagged main).
 // ANALYTICAL returns the excitations already assembled into the TAS by the analytical build; NGSPICE runs
 // the deck (tas_to_ngspice + run_ngspice_in_process) and extracts each winding's current & voltage.
+// `fidelity` is the NGSPICE deck directive (base + per-component origin overrides); the default
+// REQUIREMENTS base still renders bound parts real through the assembler's per-component inference.
 MAS::OperatingPoint extract_operating_point(const nlohmann::json& tas, ExtractEngine engine,
-                                            const std::string& magneticName = "");
+                                            const std::string& magneticName = "",
+                                            const PEAS::Fidelity& fidelity =
+                                                PEAS::Fidelity(PEAS::Fidelity::Origin::REQUIREMENTS));
 
 // The MAS::Inputs the converter is designed around — the main magnetic (transformer / single inductor).
 // This IS "the design requirements for a MAS": a full MAS::Inputs (designRequirements + operatingPoints)

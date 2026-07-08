@@ -10,14 +10,33 @@ const props = defineProps({
   deviceWave: { type: Object, default: null }, // simulated V/I excitation for a non-magnetic device
   periods: { type: Number, default: 1 },
   context: { type: Object, default: () => ({}) }, // { topology, inputVoltage, switchingFrequency }
+  magneticModel: { type: String, default: 'auto' }, // App-owned per-magnetic model choice for THIS ref
 })
-const emit = defineEmits(['close', 'bound', 'bound-magnetic'])
+const emit = defineEmits(['close', 'bound', 'bound-magnetic', 'magnetic-model'])
 
 const rows = computed(() => requirementRows(props.part?.requirements))
 
 // Magnetics aren't catalog-matched — they're custom-designed. The drawer offers a handoff to the
 // OpenMagnetics adviser instead of a candidate table.
 const isMagnetic = computed(() => props.part?.kind === 'Inductor' || props.part?.kind === 'Transformer')
+
+// ── Per-magnetic simulation model (ideal / datasheet / MKF) ────────────────────────────────────────
+// The choice becomes a fidelity.components origin override on every deck/sim; options are gated on
+// the data actually carried by this component so the engine's loud no-fallback throw is never the
+// first feedback: 'datasheet' needs the bound part's datasheetInfo, 'mkf' needs the OM/MKF-exported
+// SPICE subcircuit. 'auto' = the engine's inference (bound → real, seed → ideal).
+const magData = computed(() => {
+  if (!props.tas || !props.part) return null
+  for (const stage of props.tas.topology?.stages ?? [])
+    for (const comp of stage.circuit?.components ?? [])
+      if (comp.name === props.part.ref && comp.data?.magnetic) return comp.data.magnetic
+  return null
+})
+const hasDatasheet = computed(() => !!magData.value?.manufacturerInfo?.datasheetInfo)
+const hasMkfModel = computed(() => !!magData.value?.modelOutputs?.spiceSubcircuit)
+function onModelPick(ev) {
+  emit('magnetic-model', { ref: props.part.ref, model: ev.target.value })
+}
 
 // ── Kelvin candidate sourcing ──────────────────────────────────────────────
 const state = ref('idle')       // idle | loading | ok | empty | error | unsupported
@@ -188,6 +207,25 @@ function fmtx(v) { return v == null ? '—' : `×${v >= 100 ? Math.round(v) : v.
 
         <!-- ── Magnetics: design via the OpenMagnetics adviser (no catalog match) ── -->
         <template v-if="isMagnetic">
+          <div class="section-label" style="margin-top: 1.2rem" data-testid="magnetic-model-section">
+            Simulation model
+            <span class="hint">how this magnetic renders in every deck &amp; re-sim</span>
+          </div>
+          <div class="mfr-restrict">
+            <label class="mfr-label">Model</label>
+            <select class="mfr-select" :value="magneticModel" @change="onModelPick"
+                    data-testid="magnetic-model-select">
+              <option value="auto">auto — {{ hasMkfModel ? 'MKF model (bound)' : hasDatasheet ? 'datasheet (bound)' : 'ideal (seed)' }}</option>
+              <option value="ideal">ideal — seed L + coupling</option>
+              <option value="datasheet" :disabled="!hasDatasheet">
+                datasheet{{ hasDatasheet ? ' — catalog per-winding L / leakage' : ' — needs a bound catalog part' }}
+              </option>
+              <option value="mkf" :disabled="!hasMkfModel">
+                MKF{{ hasMkfModel ? ' — full physical model (Rdc + AC ladder + leakage)' : ' — needs an OpenMagnetics design' }}
+              </option>
+            </select>
+          </div>
+
           <div class="section-label" style="margin-top: 1.2rem" data-testid="magnetic-section">
             Magnetic design
             <span class="hint">custom-designed by the OpenMagnetics adviser</span>

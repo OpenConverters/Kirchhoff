@@ -153,6 +153,35 @@ const realizedTas = ref(null)     // datasheet-realized TAS (real-conduction mod
 // deck fidelity (infer_fidelity keys off the per-component binding), so the fidelity arg stays default.
 const simTas = computed(() => realizedTas.value ?? result.value?.tas ?? null)
 
+// Per-magnetic model choice (ref → 'auto'|'ideal'|'datasheet'|'mkf'). 'auto' = the engine's
+// per-component inference (bound part renders real, seed renders ideal); anything else becomes an
+// explicit fidelity.components origin override the assembler enforces — asking for a model the part's
+// data can't back (datasheet without datasheetInfo, MKF without an exported subcircuit) throws
+// loudly instead of silently downgrading.
+const magneticModels = ref({})
+const ORIGIN_OF = { ideal: 'REQUIREMENTS', datasheet: 'DATASHEET', mkf: 'MKF_MODEL' }
+const simFidelity = computed(() => {
+  const components = {}
+  for (const [ref_, m] of Object.entries(magneticModels.value))
+    if (ORIGIN_OF[m]) components[ref_] = ORIGIN_OF[m]
+  return Object.keys(components).length
+    ? { origin: 'REQUIREMENTS', components }
+    : { origin: 'REQUIREMENTS' }
+})
+
+// The user picked a model for one magnetic (PartDrawer) — re-run every ngspice-derived view so the
+// verdict table / waveforms / netlist reflect it, exactly like binding a part does.
+function onMagneticModel({ ref: ref_, model }) {
+  const next = { ...magneticModels.value }
+  if (model === 'auto') delete next[ref_]
+  else next[ref_] = model
+  magneticModels.value = next
+  ngspiceOps.value = {}
+  componentWaves.value = null
+  fetchComponentWaves()
+  if (paneA.value === 'netlist' || paneB.value === 'netlist') makeDeck()
+}
+
 async function solve() {
   running.value = true
   runError.value = null
@@ -161,6 +190,7 @@ async function solve() {
   ngspiceOps.value = {}
   componentWaves.value = null
   realizedTas.value = null
+  magneticModels.value = {}   // new design -> stale per-magnetic model overrides are dropped
   try {
     const spec = buildSpec(form, topoId.value)
     lastSpec.value = spec
@@ -198,7 +228,7 @@ async function fetchComponentWaves() {
   const gen = ++cwGen
   componentBusy.value = true
   try {
-    const cw = await componentWaveforms(simTas.value)
+    const cw = await componentWaveforms(simTas.value, simFidelity.value)
     if (gen !== cwGen) return                // superseded by a newer solve — discard
     // Keep the waveform list consistent with the BOM: drop anything not in the BOM (FET body diodes,
     // which are intrinsic to their MOSFET, are excluded from the BOM) so waveforms ⊆ BOM ⊆ schematic.
@@ -508,7 +538,7 @@ async function simulateMagnetic() {
   ngspiceBusy.value = true
   runError.value = null
   try {
-    const op = await extractOperatingPoint(simTas.value, 'ngspice', waveMag.value.name)
+    const op = await extractOperatingPoint(simTas.value, 'ngspice', waveMag.value.name, simFidelity.value)
     ngspiceOps.value = { ...ngspiceOps.value, [waveMag.value.name]: op }
   } catch (e) {
     runError.value = e.message
@@ -548,7 +578,8 @@ async function makeDeck() {
       if (simStop.value) an.stopTime = simStop.value
       if (simStep.value) an.maximumTimeStep = simStep.value
     }
-    deck.value = await generateNetlist(tas, deckFlavor.value, { origin: deckFidelity.value })
+    deck.value = await generateNetlist(tas, deckFlavor.value,
+                                       { origin: deckFidelity.value, ...(simFidelity.value.components ? { components: simFidelity.value.components } : {}) })
   } catch (e) {
     deck.value = `* generation failed:\n* ${e.message}`
   } finally {
@@ -736,9 +767,10 @@ provide('kh', {
             <span class="fld-label">Models</span>
             <select class="fld-in" v-model="form.models"
                     title="ideal switches, or datasheet-derived real-conduction models (real Rds(on) / forward drop)">
+              <!-- Global semis/passives models. MAGNETIC model choice (ideal/datasheet/MKF) is
+                   per-component — click the magnetic and pick its Simulation model in the drawer. -->
               <option value="ideal">ideal</option>
               <option value="datasheet">datasheet</option>
-              <option value="mkf" disabled>MKF magnetics</option>
             </select>
           </label>
           <label class="fld" v-if="form.inputType === 'dc'">
@@ -867,9 +899,11 @@ provide('kh', {
       :device-wave="selectedPartWave"
       :periods="form.showPeriods"
       :context="kelvinContext"
+      :magnetic-model="magneticModels[selectedPart?.ref] ?? 'auto'"
       @close="selectedPart = null"
       @bound="onBound"
       @bound-magnetic="onBoundMagnetic"
+      @magnetic-model="onMagneticModel"
     />
   </div>
 </template>

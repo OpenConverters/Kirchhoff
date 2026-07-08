@@ -55,9 +55,11 @@ KH_API std::string generate_ltspice_circuit(const std::string& tasJson, const st
 KH_API std::string simulate_ngspice(const std::string& tasJson, const std::string& fidelityJson);
 
 // The extract surface (replaces MKF's simulate_and_extract trio) — all operate on the assembled TAS.
-// engine ∈ {"analytical","ngspice"}. magneticName empty = the main magnetic.
+// engine ∈ {"analytical","ngspice"}. magneticName empty = the main magnetic. fidelityJson is the
+// NGSPICE deck directive (base origin + per-component overrides), same shape as tas_to_ngspice's.
 KH_API std::string extract_operating_point(const std::string& tasJson, const std::string& engine,
-                                    const std::string& magneticName);
+                                    const std::string& magneticName,
+                                    const std::string& fidelityJson = "{\"origin\":\"REQUIREMENTS\"}");
 KH_API std::string topology_waveforms(const std::string& tasJson);   // [{name,isMain,inputs}]
 
 // Per-component time-domain waveforms for every NON-magnetic power component (switches, diodes,

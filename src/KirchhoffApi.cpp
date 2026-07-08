@@ -194,10 +194,11 @@ std::string simulate_ngspice(const std::string& tas, const std::string& fidelity
 }
 
 std::string extract_operating_point(const std::string& tas, const std::string& engine,
-                                    const std::string& magneticName) {
+                                    const std::string& magneticName, const std::string& fidelityJson) {
     return guarded([&] {
         MAS::OperatingPoint op = Kirchhoff::extract_operating_point(json::parse(tas), engine_from(engine),
-                                                                    magneticName);
+                                                                    magneticName,
+                                                                    PEAS::fidelity_from_json(json::parse(fidelityJson)));
         json j = op; return j.dump();
     });
 }

@@ -68,8 +68,10 @@ export function realizeTas(tas) {
   return callJson('realize_tas', JSON.stringify(tas))
 }
 
-export function extractOperatingPoint(tas, engine = 'analytical', magneticName = '') {
-  return callJson('extract_operating_point', JSON.stringify(tas), engine, magneticName)
+// fidelity is the NGSPICE deck directive — base origin + optional per-component origin overrides
+// ({ origin, components: { T1: 'MKF_MODEL', ... } }), same shape generateNetlist/simulateNgspice take.
+export function extractOperatingPoint(tas, engine = 'analytical', magneticName = '', fidelity = { origin: 'REQUIREMENTS' }) {
+  return callJson('extract_operating_point', JSON.stringify(tas), engine, magneticName, JSON.stringify(fidelity))
 }
 
 // ref names which magnetic to design (BOM ref == component name). '' → the main magnetic. Multi-magnetic

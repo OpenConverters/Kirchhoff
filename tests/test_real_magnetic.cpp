@@ -153,3 +153,59 @@ TEST_CASE("Real magnetic: a 2-winding (transformer) subcircuit wires P1+/-,P2+/-
     CHECK(voutReal > 0.5 * voutIdeal);   // transformer still transfers energy to the output
     CHECK(voutReal < voutIdeal + 1e-6);  // real windings (Rdc + leakage) are no less lossy than ideal
 }
+
+namespace {
+// Ref of the first magnetic component in the TAS (the boost inductor / flyback transformer).
+std::string first_magnetic_ref(const json& node) {
+    if (node.is_object()) {
+        if (node.contains("data") && node.at("data").is_object() && node.at("data").contains("magnetic")
+            && node.contains("name"))
+            return node.at("name").get<std::string>();
+        for (const auto& [k, v] : node.items())
+            if (auto r = first_magnetic_ref(v); !r.empty()) return r;
+    } else if (node.is_array()) {
+        for (const auto& e : node)
+            if (auto r = first_magnetic_ref(e); !r.empty()) return r;
+    }
+    return "";
+}
+} // namespace
+
+TEST_CASE("Per-component fidelity overrides (fidelity.components)", "[magnetic][fidelity]") {
+    json di = boost_inputs();
+    Kirchhoff::BoostDesign d = Kirchhoff::design_boost(di);
+
+    const std::string ref = "OVERRIDE_MAG";
+    std::ostringstream sk;
+    sk << ".subckt " << ref << " P1+ P1-\n"
+       << "Rdc1 P1+ nmid 0.08\n"
+       << "Lmag1 nmid P1- 150u\n"
+       << ".ends " << ref << "\n";
+    json tas = Kirchhoff::build_boost_tas(d);
+    REQUIRE(bind_magnetic_subckt(tas, sk.str(), ref));
+    const std::string magRef = first_magnetic_ref(tas);
+    REQUIRE(!magRef.empty());
+
+    // Inference alone renders the bound magnetic real (MKF_MODEL): subckt hoisted.
+    std::string inferred = Kirchhoff::tas_to_ngspice(tas, PEAS::Fidelity(PEAS::Fidelity::Origin::REQUIREMENTS));
+    CHECK(inferred.find(".subckt " + ref) != std::string::npos);
+
+    // Ideal override on the magnetic: the seed L+K model renders and the unreferenced .subckt is
+    // NOT hoisted (nor does the deck get the real-component cshunt on its account).
+    PEAS::Fidelity fIdeal(PEAS::Fidelity::Origin::REQUIREMENTS);
+    fIdeal.componentOrigins[magRef] = PEAS::Fidelity::Origin::REQUIREMENTS;
+    std::string ideal = Kirchhoff::tas_to_ngspice(tas, fIdeal);
+    CHECK(ideal.find(".subckt " + ref) == std::string::npos);
+    CHECK(ideal.find("_pri ") != std::string::npos);   // ideal per-winding inductor card
+
+    // MKF_MODEL override on an UNBOUND magnetic must throw (no silent downgrade to ideal).
+    json unbound = Kirchhoff::build_boost_tas(d);
+    PEAS::Fidelity fMkf(PEAS::Fidelity::Origin::REQUIREMENTS);
+    fMkf.componentOrigins[first_magnetic_ref(unbound)] = PEAS::Fidelity::Origin::MKF_MODEL;
+    CHECK_THROWS(Kirchhoff::tas_to_ngspice(unbound, fMkf));
+
+    // An override naming a nonexistent ref is a caller error.
+    PEAS::Fidelity fTypo(PEAS::Fidelity::Origin::REQUIREMENTS);
+    fTypo.componentOrigins["NO_SUCH_REF"] = PEAS::Fidelity::Origin::REQUIREMENTS;
+    CHECK_THROWS(Kirchhoff::tas_to_ngspice(tas, fTypo));
+}
