@@ -7,6 +7,7 @@ import { falstadExport, hasVisualSim } from './falstad.js'
 import { renderVerifiedSchematic } from './ciasSchematic.js'
 import { hasSchematic } from './schematics.js'
 import { si, pct } from './units.js'
+import { trackEvent } from './telemetry.js'
 import PartDrawer from './components/PartDrawer.vue'
 import FamilyDial from './components/FamilyDial.vue'
 import OutputPane from './components/OutputPane.vue'
@@ -107,12 +108,14 @@ function pickTopology(id) {
   topoTouched.value = true
   variantTouched.value = false   // new topology → its variants start unselected
   selectTopology(id)
+  trackEvent('topology_select', { target: id, name: topologyById(id)?.name, family: family.value })
   // a topology with a single canonical build has nothing to choose — skip straight to the spec
   stage.value = hasVariantChoice.value ? 'variant' : 'spec'
 }
 function pickVariant(id) {
   variantTouched.value = true
   form.variant = id
+  trackEvent('variant_select', { target: id, topology: topoId.value })
   stage.value = 'spec'
 }
 
@@ -191,6 +194,13 @@ async function solve() {
   componentWaves.value = null
   realizedTas.value = null
   magneticModels.value = {}   // new design -> stale per-magnetic model overrides are dropped
+  trackEvent('solve', {
+    target: topoId.value,
+    engine: form.engine,
+    models: form.models,
+    variant: form.variant,
+    outputs: form.outputs?.length,
+  })
   try {
     const spec = buildSpec(form, topoId.value)
     lastSpec.value = spec
@@ -213,6 +223,7 @@ async function solve() {
     if (!hasSchematic(topoId.value) && paneA.value === 'schematic') paneA.value = 'bom'
   } catch (e) {
     runError.value = e.message
+    trackEvent('solve_error', { target: topoId.value, engine: form.engine, message: (e.message || '').slice(0, 120) })
   } finally {
     running.value = false
   }
@@ -348,7 +359,10 @@ function schematicClick(ev) {
 }
 function openPart(ref_) {
   const row = bomRows.value.find((r) => r.ref === ref_)
-  if (row) selectedPart.value = row
+  if (row) {
+    selectedPart.value = row
+    trackEvent('component_open', { target: row.ref, kind: row.kind, topology: topoId.value })
+  }
 }
 
 // A real part was bound into a component (PartDrawer → Kelvin bind_part). Swap in the new TAS and
@@ -591,6 +605,7 @@ function copyDeck() {
 }
 function downloadDeck() {
   const ext = deckFlavor.value === 'ltspice' ? 'asc.cir' : 'cir'
+  trackEvent('export', { target: 'netlist', flavor: deckFlavor.value, topology: topoId.value })
   const a = document.createElement('a')
   a.href = URL.createObjectURL(new Blob([deck.value], { type: 'text/plain' }))
   a.download = `${topoId.value}.${ext}`
@@ -599,6 +614,7 @@ function downloadDeck() {
 }
 function downloadMagneticInputs() {
   if (!waveMag.value) return
+  trackEvent('export', { target: 'mas_inputs', topology: topoId.value, magnetic: waveMag.value.name })
   const a = document.createElement('a')
   a.href = URL.createObjectURL(
     new Blob([JSON.stringify(waveMag.value.inputs, null, 2)], { type: 'application/json' })

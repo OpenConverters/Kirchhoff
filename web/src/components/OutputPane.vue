@@ -3,11 +3,14 @@
 // Waveforms). All design state + methods come from the injected `kh` context App provides, so the pane
 // is a pure view: pick a view type from its header dropdown, render it.
 import { computed, inject, ref, watch } from 'vue'
+import { trackEvent } from '../telemetry.js'
 import WavePane from './WavePane.vue'
 
 const props = defineProps({ view: { type: String, required: true } })
 const emit = defineEmits(['update:view'])
 const view = computed({ get: () => props.view, set: (v) => emit('update:view', v) })
+// Which result view the user looks at (waveforms / diagnostics / bom / netlist / visual).
+watch(() => props.view, (v) => trackEvent('pane_view', { target: v, topology: topo?.value?.topology }))
 
 const VIEWS = [
   ['schematic', 'Schematic'],

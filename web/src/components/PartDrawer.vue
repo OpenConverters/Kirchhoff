@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { requirementRows } from '../bom.js'
 import { selectCandidates, kelvinCategoryFor, bindPart, mainMagneticInputs, enrichMagneticWaveforms, designMagneticInOpenMagnetics, suggestMagneticsInOpenMagnetics } from '../kh.js'
+import { trackEvent } from '../telemetry.js'
 import WavePane from './WavePane.vue'
 
 const props = defineProps({
@@ -99,6 +100,7 @@ async function useCandidate(c) {
   try {
     const tas = await bindPart(props.tas, props.part.ref, props.part.kind, c)
     boundMpn.value = c.mpn
+    trackEvent('part_bind', { target: c.mpn, ref: props.part.ref, kind: props.part.kind, manufacturer: c.manufacturer })
     emit('bound', { ref: props.part.ref, mpn: c.mpn, tas })  // App swaps the TAS in and re-sims
   } catch (e) {
     bindErr.value = e?.message ?? String(e)
