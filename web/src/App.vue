@@ -290,9 +290,18 @@ const schematicSvg = computed(() => {
 // Which scope set the sim shows ('overview' or 'magnetic'); changing it regenerates the URL below,
 // which reloads the iframe with the new scopes.
 const visualScopeSet = ref('overview')
+// Closed-loop, AC-input PFC topologies (single-phase PFC boost, 3-phase Vienna): the toy switching
+// simulator can't faithfully represent them — there's no fixed gate duty (the switch is driven by a
+// current/voltage control loop, not a pwm stimulus), the input is line AC not a DC bus, and the control
+// loop that IS the topology's purpose isn't a passive circuit. So we mark them unsupported WITH a reason
+// rather than draw a misleading open-loop approximation.
+const NO_TOY_SIM = {
+  pfc: 'a closed-loop PFC boost — its switch is shaped by a current-control loop off the rectified AC line, not a fixed duty, so an open-loop toy circuit would misrepresent it',
+  vienna: 'a 3-phase, 3-level PFC rectifier — three line-frequency AC inputs and per-phase control loops fall outside the single-frequency, DC-input toy simulator',
+}
 const visualSim = computed(() => {
   if (!result.value) return null
-  if (!hasVisualSim(topoId.value)) return { unsupported: true }
+  if (!hasVisualSim(topoId.value)) return { unsupported: true, reason: NO_TOY_SIM[topoId.value] || null }
   try { return falstadExport(topoId.value, result.value.tas, visualScopeSet.value) }
   catch (e) { return { error: e?.message ?? String(e) } }
 })

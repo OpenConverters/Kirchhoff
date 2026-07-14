@@ -296,7 +296,8 @@ const winding = computed(() => waveExcitations.value[windingIdx.value] ?? null)
         </template>
         <div v-else-if="visualSim?.error" class="wave-empty">Visual sim unavailable: {{ visualSim.error }}</div>
         <div v-else-if="visualSim?.unsupported" class="wave-empty">
-          No visual-sim layout for <code>{{ topo.name }}</code> yet — flyback first, more topologies coming.
+          <template v-if="visualSim.reason">No visual sim for <code>{{ topo.name }}</code> — {{ visualSim.reason }}. The schematic and waveforms still apply.</template>
+          <template v-else>No visual-sim layout for <code>{{ topo.name }}</code> yet.</template>
         </div>
         <div v-else class="wave-empty">Solve a design to see the energy conversion in action.</div>
       </div>
