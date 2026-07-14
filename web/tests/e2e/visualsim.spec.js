@@ -110,7 +110,7 @@ for (const id of ['cllc', 'clllc', 'dab']) {
 // Regression cover for the center-tapped + current-doubler layouts (LLC/SRC had NO center-tapped/doubler
 // layout at all — the default threw 'no placement for D1').
 const RECT3_CASES = [
-  ...['llc', 'src'].flatMap((id) => ['fullBridge', 'centerTapped', 'currentDoubler'].map((v) => [id, v])),
+  ...['llc', 'src', 'ahb'].flatMap((id) => ['fullBridge', 'centerTapped', 'currentDoubler'].map((v) => [id, v])),
 ]
 for (const [id, variant] of RECT3_CASES) {
   test(`${id}/${variant} visual sim converges to Vout`, async ({ page }) => {
