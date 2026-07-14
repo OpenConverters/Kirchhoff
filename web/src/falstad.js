@@ -150,6 +150,10 @@ function LLC_LAYOUT() {
   }
 }
 
+// A transformer whose design carries ≥2 secondary turns-ratios is a center-tapped (dual-secondary) core,
+// drawn with a 3-winding 406 Custom Transformer; a single ratio is one secondary (2-winding `T`).
+const isCTr = (q) => (q.req.turnsRatios?.length ?? 0) >= 2
+
 const LAYOUTS = {
   flyback: {
     place: {
@@ -623,42 +627,70 @@ const LAYOUTS = {
       Q2:   { pins: { gate: [384, 272], drain: [448, 256], source: [448, 288] }, line: () => 'f 384 272 448 272 32 1.5 50' },
       // DC-block: Cb|1 = Vin bus, Cb|2 = primary-start node (net2). Steady-state V ≈ Vin·(1−D).
       Cb:   { pins: { 1: [680, 112], 2: [680, 160] }, line: (q, c) => `c 680 112 680 160 0 ${c.C(q)} ${c.vin * (1 - c.duty)}` },
+      // T1: 2-winding transformer (full-bridge / current-doubler, single secondary) OR a 3-winding 406
+      // Custom Transformer (center-tapped: one primary spanning the left column + two stacked secondaries).
       T1: {
-        pins: { primary_start: [736, 160], primary_end: [736, 192], secondary1_start: [816, 160], secondary1_end: [816, 192] },
-        line: (q, c) => `T 736 160 816 160 0 ${c.Lm} ${1 / c.n} 0 0 0.999`,
+        pins: (q) => isCTr(q)
+          ? { primary_start: [736, 128], primary_end: [736, 208],
+              secondary1_start: [816, 128], secondary1_end: [816, 160],
+              secondary2_start: [816, 176], secondary2_end: [816, 208] }
+          : { primary_start: [736, 160], primary_end: [736, 192], secondary1_start: [816, 160], secondary1_end: [816, 192] },
+        line: (q, c) => {
+          const sec = 1 / resolveDim(q.req.turnsRatios[0], `${q.ref} turnsRatios[0]`)
+          return isCTr(q)
+            ? `406 736 128 816 128 0 ${c.Lm} 0.999 1:${sec},${sec} 3 0 0 0`
+            : `T 736 160 816 160 0 ${c.Lm} ${sec} 0 0 0.999`
+        },
       },
       // Series-RC damper across the primary: Rdmp (net2 → snubber-mid) then Cdmp (snubber-mid → sw/net1).
       Rdmp: { pins: { 1: [608, 160], 2: [608, 224] }, line: (q, c) => `r 608 160 608 224 0 ${c.R(q)}` },
       Cdmp: { pins: { 1: [608, 224], 2: [608, 272] }, line: (q, c) => `c 608 224 608 272 0 ${c.C(q)} 0` },
-      // Secondary full-wave bridge: Dr1/Dr2 anodes on the two secondary legs → rectified rail (net6);
-      // Dr3/Dr4 anodes on gnd → the same two secondary legs (cathodes).
-      Dr1:  { pins: { anode: [880, 160], cathode: [880, 96] }, line: () => 'd 880 160 880 96 2 default' },
-      Dr2:  { pins: { anode: [976, 192], cathode: [976, 96] }, line: () => 'd 976 192 976 96 2 default' },
-      // Dr3/Dr4 are the LOW legs of the 4-diode full bridge — present only in the default fullBridge
-      // rectifier. The center-tapped variant's 2-diode rectifier omits them; the oneOf below turns that
-      // absence into a clean "variant not laid out" skip instead of a hard export failure.
+      // Dr1/Dr2 RECTIFY (full-bridge & center-tapped: anode on a secondary leg, cathode → rectified rail)
+      // or FREEWHEEL (current-doubler, c.has('Lo2'): cathode on the secondary/Lo node, anode → gnd).
+      Dr1: { pins: (q, c) => c.has('Lo2') ? { anode: [816, 300], cathode: [816, 160] } : { anode: [880, 160], cathode: [880, 96] },
+             line: (q, c) => c.has('Lo2') ? 'd 816 300 816 160 2 default' : 'd 880 160 880 96 2 default' },
+      Dr2: { pins: (q, c) => c.has('Lo2') ? { anode: [848, 300], cathode: [848, 192] } : { anode: [976, 192], cathode: [976, 96] },
+             line: (q, c) => c.has('Lo2') ? 'd 848 300 848 192 2 default' : 'd 976 192 976 96 2 default' },
+      // Dr3/Dr4 — the LOW legs of the 4-diode bridge, present only in the fullBridge variant.
       Dr3:  { optional: true, pins: { anode: [880, 400], cathode: [880, 288] }, line: () => 'd 880 400 880 288 2 default' },
       Dr4:  { optional: true, pins: { anode: [976, 400], cathode: [976, 288] }, line: () => 'd 976 400 976 288 2 default' },
+      // Current-doubler second output inductor Lo2 + tiny balance resistor Rlb (Lout is the first inductor,
+      // present in every variant). Lo2 off secondary leg B, summing into Vout alongside Lout.
+      Lo2:  { optional: true, pins: { primary_start: [1040, 192], primary_end: [1168, 192] }, line: (q, c) => `l 1040 192 1168 192 0 ${c.L(q)} 0` },
+      Rlb:  { optional: true, pins: { 1: [1168, 192], 2: [1168, 96] }, line: (q, c) => `r 1168 192 1168 96 0 ${c.R(q)}` },
       Lout: { pins: { primary_start: [1040, 96], primary_end: [1168, 96] }, line: (q, c) => `l 1040 96 1168 96 0 ${c.L(q)} 0` },
       Cout: { pins: { 1: [1168, 96], 2: [1168, 400] }, line: (q, c) => `c 1168 96 1168 400 0 ${c.C(q)} ${c.vout}` },
     },
     wires: [
-      // Vin bus (net0): source top → Q1 drain, → Cb top.
+      // ── common: Vin bus, sw node, primary net2, damper, Q2 gnd, gnd-left, Vout→Rload ──
       [176, 112, 448, 112], [448, 112, 448, 144], [448, 112, 680, 112],
-      // sw node (net1): Q1 source → tap → Q2 drain; tap → T1 primary_end; tap → Cdmp bottom.
       [448, 176, 448, 192], [448, 192, 448, 256],
       [448, 192, 608, 192], [608, 192, 736, 192], [608, 192, 608, 272],
-      [384, 192, 448, 192],   // Q1 floating gate-drive reference → sw node
-      // net2 (DC-block / primary-start): Rdmp top ─ Cb bottom ─ T1 primary_start.
+      [384, 192, 448, 192],
       [608, 160, 680, 160], [680, 160, 736, 160],
-      // gnd rail (net8): Vin gnd ─ Q2 source ─ Dr3 anode ─ Dr4 anode ─ Cout bottom ─ Rload bottom.
       [448, 288, 448, 336], [448, 336, 448, 400], [384, 336, 448, 336],
-      [176, 400, 448, 400], [448, 400, 880, 400], [880, 400, 976, 400], [976, 400, 1168, 400], [1168, 400, 1232, 400],
-      // secondary legs net4 (Dr1 anode / Dr3 cathode) and net5 (Dr2 anode / Dr4 cathode).
-      [816, 160, 880, 160], [880, 160, 880, 288],
-      [816, 192, 976, 192], [976, 192, 976, 288],
-      // rectified rail net6 → Lout; Vout net7 → Rload.
-      [880, 96, 976, 96], [976, 96, 1040, 96], [1168, 96, 1232, 96],
+      [176, 400, 448, 400],
+      [1168, 96, 1232, 96],                                   // Vout (Cout|1) → Rload
+      // rectified rail → Lout: both RECTIFYING variants (full-bridge & center-tapped), never the doubler.
+      { pts: [880, 96, 976, 96], not: ['Lo2'] }, { pts: [976, 96, 1040, 96], not: ['Lo2'] },
+      // ── full-bridge (needs Dr3): T1 single secondary → 4-diode bridge → rail; Dr3/Dr4 anodes → gnd ──
+      { pts: [816, 160, 880, 160], needs: ['Dr3'] }, { pts: [880, 160, 880, 288], needs: ['Dr3'] },
+      { pts: [816, 192, 976, 192], needs: ['Dr3'] }, { pts: [976, 192, 976, 288], needs: ['Dr3'] },
+      { pts: [448, 400, 880, 400], needs: ['Dr3'] }, { pts: [880, 400, 976, 400], needs: ['Dr3'] },
+      { pts: [976, 400, 1168, 400], needs: ['Dr3'] }, { pts: [1168, 400, 1232, 400], needs: ['Dr3'] },
+      // ── center-tapped (Dr1 present, no Dr3/Lo2): 406 primary bridges → net2 / sw; outer ends → Dr1/Dr2;
+      //    center tap → gnd; Dr cathodes reuse the common rectified rail → Lout ──
+      { pts: [736, 128, 736, 160], needs: ['Dr1'], not: ['Dr3', 'Lo2'] }, { pts: [736, 208, 736, 192], needs: ['Dr1'], not: ['Dr3', 'Lo2'] },
+      { pts: [816, 128, 880, 128], needs: ['Dr1'], not: ['Dr3', 'Lo2'] }, { pts: [880, 128, 880, 160], needs: ['Dr1'], not: ['Dr3', 'Lo2'] },
+      { pts: [816, 208, 976, 208], needs: ['Dr1'], not: ['Dr3', 'Lo2'] }, { pts: [976, 208, 976, 192], needs: ['Dr1'], not: ['Dr3', 'Lo2'] },
+      { pts: [816, 160, 816, 176], needs: ['Dr1'], not: ['Dr3', 'Lo2'] }, // join the center tap
+      { pts: [816, 176, 744, 176], needs: ['Dr1'], not: ['Dr3', 'Lo2'] }, { pts: [744, 176, 744, 400], needs: ['Dr1'], not: ['Dr3', 'Lo2'] },
+      { pts: [448, 400, 744, 400], needs: ['Dr1'], not: ['Dr3', 'Lo2'] }, { pts: [744, 400, 1168, 400], needs: ['Dr1'], not: ['Dr3', 'Lo2'] }, { pts: [1168, 400, 1232, 400], needs: ['Dr1'], not: ['Dr3', 'Lo2'] },
+      // ── current-doubler (needs Lo2): single-secondary T → Lout off leg A, Lo2 off leg B; Dr1/Dr2 freewheel ──
+      { pts: [816, 160, 1040, 96], needs: ['Lo2'] },          // leg A (Dr1 cathode) → Lout start
+      { pts: [816, 192, 848, 192], needs: ['Lo2'] }, { pts: [816, 192, 1040, 192], needs: ['Lo2'] }, // leg B → Dr2 cathode / Lo2 start
+      { pts: [816, 300, 816, 400], needs: ['Lo2'] }, { pts: [848, 300, 848, 400], needs: ['Lo2'] }, // Dr1/Dr2 anodes → gnd
+      { pts: [448, 400, 816, 400], needs: ['Lo2'] }, { pts: [816, 400, 848, 400], needs: ['Lo2'] }, { pts: [848, 400, 1168, 400], needs: ['Lo2'] }, { pts: [1168, 400, 1232, 400], needs: ['Lo2'] },
     ],
     synth: (c) => [
       { line: `v 176 400 176 112 0 0 40 ${c.vin} 0 0 0.5`, posts: [[176, 400], [176, 112]], attach: { '176,112': ['Q1', 'drain'], '176,400': ['Cout', '2'] } },
@@ -678,10 +710,6 @@ const LAYOUTS = {
       rectifier: [['Dr1', 'both'], ['Dr3', 'both'], ['Lout', 'current'], ['Rload', 'voltage']],
       output:    [['Lout', 'current'], ['Rload', 'both']],
     },
-    // This layout draws the DEFAULT 4-diode full-bridge secondary. Dr3 and Dr4 exist only in that
-    // rectifier; requiring each (exactly-one of a singleton group) makes the center-tapped / current-
-    // doubler variants report as "not laid out yet" rather than exporting a wrong circuit.
-    oneOf: [['Dr3'], ['Dr4']],
   },
 
   acf: {
