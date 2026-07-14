@@ -801,21 +801,34 @@ const LAYOUTS = {
       DC2: { pins: { anode: [336, 384], cathode: [336, 304] }, line: () => 'd 336 384 336 304 2 default' },
       // Resonant/leakage inductor: flying node (net3) → net5.
       Lr: { pins: { primary_start: [640, 272], primary_end: [736, 272] }, line: (q, c) => `l 640 272 736 272 0 ${c.Lm} 0` },
+      // 2-winding transformer (full-bridge / current-doubler) or 3-winding 406 (center-tapped, dual sec).
       T1: {
-        pins: { primary_start: [800, 272], primary_end: [800, 304], secondary1_start: [880, 272], secondary1_end: [880, 304] },
-        line: (q, c) => `T 800 272 880 272 0 ${c.Lm} ${1 / resolveDim(q.req.turnsRatios[0], `${q.ref} turnsRatios[0]`)} 0 0 0.999`,
+        pins: (q) => isCTr(q)
+          ? { primary_start: [800, 240], primary_end: [800, 320],
+              secondary1_start: [880, 240], secondary1_end: [880, 272],
+              secondary2_start: [880, 288], secondary2_end: [880, 320] }
+          : { primary_start: [800, 272], primary_end: [800, 304], secondary1_start: [880, 272], secondary1_end: [880, 304] },
+        line: (q, c) => {
+          const sec = 1 / resolveDim(q.req.turnsRatios[0], `${q.ref} turnsRatios[0]`)
+          return isCTr(q)
+            ? `406 800 240 880 240 0 ${c.Lm} 0.999 1:${sec},${sec} 3 0 0 0`
+            : `T 800 272 880 272 0 ${c.Lm} ${sec} 0 0 0.999`
+        },
       },
       // Series-RC primary damper across the tank: Crc_pri (net5→net6) then Rrc_pri (net6→mid).
       Crc_pri: { pins: { 1: [744, 272], 2: [744, 288] }, line: (q, c) => `c 744 272 744 288 0 ${c.C(q)} 0` },
       Rrc_pri: { pins: { 1: [744, 288], 2: [744, 304] }, line: (q, c) => `r 744 288 744 304 0 ${c.R(q)}` },
-      // Secondary full-wave bridge: Dr1/Dr2 to the rectified rail (net9); Dr3/Dr4 from gnd to the two legs.
-      Dr1: { pins: { anode: [960, 272], cathode: [960, 176] }, line: () => 'd 960 272 960 176 2 default' },
-      Dr2: { pins: { anode: [1056, 304], cathode: [1056, 176] }, line: () => 'd 1056 304 1056 176 2 default' },
-      // Dr3/Dr4 are the LOW legs of the 4-diode bridge — present only in the default fullBridge rectifier.
-      // The center-tapped / current-doubler variants omit them; the oneOf below turns that absence into a
-      // clean "variant not laid out" skip instead of a hard export failure.
+      // Dr1/Dr2 RECTIFY (full-bridge & center-tapped) or FREEWHEEL (current-doubler, c.has('Lo2')).
+      Dr1: { pins: (q, c) => c.has('Lo2') ? { anode: [920, 430], cathode: [920, 272] } : { anode: [960, 272], cathode: [960, 176] },
+             line: (q, c) => c.has('Lo2') ? 'd 920 430 920 272 2 default' : 'd 960 272 960 176 2 default' },
+      Dr2: { pins: (q, c) => c.has('Lo2') ? { anode: [1000, 450], cathode: [1000, 304] } : { anode: [1056, 304], cathode: [1056, 176] },
+             line: (q, c) => c.has('Lo2') ? 'd 1000 450 1000 304 2 default' : 'd 1056 304 1056 176 2 default' },
+      // Dr3/Dr4 — the LOW legs of the 4-diode bridge, present only in the fullBridge variant.
       Dr3: { optional: true, pins: { anode: [960, 480], cathode: [960, 336] }, line: () => 'd 960 480 960 336 2 default' },
       Dr4: { optional: true, pins: { anode: [1056, 480], cathode: [1056, 336] }, line: () => 'd 1056 480 1056 336 2 default' },
+      // Current-doubler second inductor Lo2 + balance resistor Rlb (Lout is the first, all variants).
+      Lo2:  { optional: true, pins: { primary_start: [1120, 320], primary_end: [1248, 320] }, line: (q, c) => `l 1120 320 1248 320 0 ${c.L(q)} 0` },
+      Rlb:  { optional: true, pins: { 1: [1248, 320], 2: [1248, 176] }, line: (q, c) => `r 1248 320 1248 176 0 ${c.R(q)}` },
       Lout: { pins: { primary_start: [1120, 176], primary_end: [1248, 176] }, line: (q, c) => `l 1120 176 1248 176 0 ${c.L(q)} 0` },
       Cout: { pins: { 1: [1248, 176], 2: [1248, 480] }, line: (q, c) => `c 1248 176 1248 480 0 ${c.C(q)} ${c.vout}` },
     },
@@ -837,18 +850,28 @@ const LAYOUTS = {
       [336, 192, 448, 192], [336, 384, 448, 384],
       // Primary tank: flying node (net3) → Lr → net5 → T1 primary_start; net5 also feeds the RC damper.
       [448, 272, 640, 272], [736, 272, 744, 272], [744, 272, 800, 272],
-      // Secondary leg net7 (T1 sec1_start / Dr1 anode / Dr3 cathode).
-      [880, 272, 960, 272], [960, 272, 960, 336],
-      // Secondary leg net8 (T1 sec1_end / Dr2 anode / Dr4 cathode); crosses the net7 leg at (960,304)
-      // with no shared vertex → no short.
-      [880, 304, 1056, 304], [1056, 304, 1056, 336],
-      // Rectified rail (net9) → Lout.
-      [960, 176, 1056, 176], [1056, 176, 1120, 176],
-      // Vout rail.
+      // Vout rail (common).
       [1248, 176, 1312, 176],
-      // gnd rail (net11): source gnd ─ CsLo bottom ─ S4 source ─ Dr3 anode ─ Dr4 anode ─ Cout ─ Rload.
-      [176, 480, 272, 480], [272, 480, 448, 480], [448, 480, 960, 480],
-      [960, 480, 1056, 480], [1056, 480, 1248, 480], [1248, 480, 1312, 480],
+      // gnd-left (common): source gnd ─ CsLo bottom ─ S4 source.
+      [176, 480, 272, 480], [272, 480, 448, 480],
+      // rectified rail → Lout: rectifying variants only (full-bridge & center-tapped).
+      { pts: [960, 176, 1056, 176], not: ['Lo2'] }, { pts: [1056, 176, 1120, 176], not: ['Lo2'] },
+      // ── full-bridge (needs Dr3): secondary legs → 4-diode bridge; gnd rail through Dr3/Dr4 ──
+      { pts: [880, 272, 960, 272], needs: ['Dr3'] }, { pts: [960, 272, 960, 336], needs: ['Dr3'] },
+      { pts: [880, 304, 1056, 304], needs: ['Dr3'] }, { pts: [1056, 304, 1056, 336], needs: ['Dr3'] },
+      { pts: [448, 480, 960, 480], needs: ['Dr3'] }, { pts: [960, 480, 1056, 480], needs: ['Dr3'] }, { pts: [1056, 480, 1248, 480], needs: ['Dr3'] }, { pts: [1248, 480, 1312, 480], needs: ['Dr3'] },
+      // ── center-tapped (Dr1, no Dr3/Lo2): 406 primary bridges; outer ends → Dr1/Dr2 anodes; tap → gnd ──
+      { pts: [800, 240, 800, 272], needs: ['Dr1'], not: ['Dr3', 'Lo2'] }, { pts: [800, 320, 800, 304], needs: ['Dr1'], not: ['Dr3', 'Lo2'] },
+      { pts: [880, 240, 960, 240], needs: ['Dr1'], not: ['Dr3', 'Lo2'] }, { pts: [960, 240, 960, 272], needs: ['Dr1'], not: ['Dr3', 'Lo2'] },
+      { pts: [880, 320, 1056, 320], needs: ['Dr1'], not: ['Dr3', 'Lo2'] }, { pts: [1056, 320, 1056, 304], needs: ['Dr1'], not: ['Dr3', 'Lo2'] },
+      { pts: [880, 272, 880, 288], needs: ['Dr1'], not: ['Dr3', 'Lo2'] },
+      { pts: [880, 288, 820, 288], needs: ['Dr1'], not: ['Dr3', 'Lo2'] }, { pts: [820, 288, 820, 480], needs: ['Dr1'], not: ['Dr3', 'Lo2'] },
+      { pts: [448, 480, 820, 480], needs: ['Dr1'], not: ['Dr3', 'Lo2'] }, { pts: [820, 480, 1248, 480], needs: ['Dr1'], not: ['Dr3', 'Lo2'] }, { pts: [1248, 480, 1312, 480], needs: ['Dr1'], not: ['Dr3', 'Lo2'] },
+      // ── current-doubler (needs Lo2): single-secondary T → Lout off leg A, Lo2 off leg B; Dr1/Dr2 freewheel ──
+      { pts: [880, 272, 1120, 272], needs: ['Lo2'] }, { pts: [1120, 272, 1120, 176], needs: ['Lo2'] }, { pts: [880, 272, 920, 272], needs: ['Lo2'] },
+      { pts: [880, 304, 1120, 304], needs: ['Lo2'] }, { pts: [1120, 304, 1120, 320], needs: ['Lo2'] }, { pts: [880, 304, 1000, 304], needs: ['Lo2'] },
+      { pts: [920, 430, 920, 480], needs: ['Lo2'] }, { pts: [1000, 450, 1000, 480], needs: ['Lo2'] },
+      { pts: [448, 480, 920, 480], needs: ['Lo2'] }, { pts: [920, 480, 1000, 480], needs: ['Lo2'] }, { pts: [1000, 480, 1248, 480], needs: ['Lo2'] }, { pts: [1248, 480, 1312, 480], needs: ['Lo2'] },
     ],
     synth: (c) => [
       { line: `v 176 480 176 112 0 0 40 ${c.vin} 0 0 0.5`, posts: [[176, 480], [176, 112]], attach: { '176,112': ['S1', 'drain'], '176,480': ['CsLo', '2'] } },
@@ -870,10 +893,6 @@ const LAYOUTS = {
       rectifier: [['Dr1', 'both'], ['Dr3', 'both'], ['Lout', 'current'], ['Rload', 'voltage']],
       output:    [['Lout', 'current'], ['Rload', 'both']],
     },
-    // The layout draws the DEFAULT 4-diode full bridge. Dr3/Dr4 exist only in that rectifier; requiring
-    // exactly one of each singleton group makes the center-tapped / current-doubler variants report as
-    // "not laid out yet" rather than exporting a wrong circuit (same idiom as ahb).
-    oneOf: [['Dr3'], ['Dr4']],
   },
 
   cllc: {
