@@ -50,7 +50,7 @@ test('a topology without a visual layout reports unsupported (no garbage export)
 
 // Every isolated/bridge topology that grew a visual layout must still produce a CIAS-consistent export
 // (the exporter throws on any net drift, so a well-formed url IS the proof) with a labeled output node.
-for (const id of ['fsbb', 'ahb', 'acf', 'psfb', 'pshb', 'cllc', 'clllc', 'dab', 'forward', 'push_pull', 'weinberg']) {
+for (const id of ['fsbb', 'ahb', 'acf', 'psfb', 'pshb', 'llc', 'src', 'cllc', 'clllc', 'dab', 'forward', 'push_pull', 'weinberg']) {
   test(`${id} solve produces a CIAS-consistent falstad export`, async ({ page }) => {
     await boot(page)
     await selectTopology(page, id)
@@ -99,5 +99,42 @@ for (const id of ['cllc', 'clllc', 'dab']) {
     const vs = await page.evaluate(() => window.__bench.visualSim)
     // Math.PI stringified — the phaseShift field of the secondary SR gate-drive `v` elements.
     expect(vs.text, `${id} secondary SR drives must be π-shifted`).toContain(String(Math.PI))
+  })
+}
+
+// LLC/SRC default to the CENTER-TAPPED rectifier, drawn with a 3-winding Custom Transformer (406,
+// one primary + two center-tapped secondaries) feeding a 2-diode full-wave rectifier D1/D2. The
+// net-consistency checker validates the drawn nets but NOT where CircuitJS1 physically places the 406
+// posts — so this guard actually SIMULATES the exported circuit and asserts the output converges to the
+// design Vout (regression cover for the post geometry + winding phase). Was silently broken: LLC/SRC
+// weren't in the export loop and their default variant had no layout ('no placement for D1').
+for (const id of ['llc', 'src']) {
+  test(`${id} center-tapped rectifier simulates to Vout`, async ({ page }) => {
+    await boot(page)
+    await selectTopology(page, id)              // default variant is centerTapped
+    const err = await solve(page, 'analytical')
+    expect(err, `solve error: ${err}`).toBeNull()
+    const { url, vout, text } = await page.evaluate(() => {
+      const vs = window.__bench.visualSim
+      return { url: vs?.url, vout: vs?.vout, text: vs?.text }
+    })
+    expect(text, 'center-tapped default must emit a 406 Custom Transformer').toMatch(/(^|\n)406 /)
+    await page.goto(url)
+    await page.waitForFunction(
+      () => window.CircuitJS1?.getElements && window.CircuitJS1.getElements().length > 5,
+      null, { timeout: 30000 })
+    await page.waitForTimeout(6000)             // let the resonant tank + output settle
+    const vLoad = await page.evaluate(() => {
+      const els = window.CircuitJS1.getElements()
+      // the output load is the highest-value resistor carrying the rectified rail; read 'vout' node.
+      try { const v = window.CircuitJS1.getNodeVoltage('vout'); if (v != null) return v } catch {}
+      let best = 0
+      for (let i = 0; i < els.length; i++) { try { const v = els[i].getVoltageDiff(); if (Math.abs(v) < 100 && Math.abs(v) > best) best = Math.abs(v) } catch {} }
+      return best
+    })
+    // The toy sim converges near the design Vout (measured 11.997 V for a 12 V design). Assert it did
+    // NOT collapse to ~0 (the failure mode a wrong 406 geometry or in-phase windings would produce).
+    expect(vLoad, `${id} Vout collapsed (${vLoad} V vs design ${vout} V) — check 406 posts/phase`).toBeGreaterThan(vout * 0.7)
+    expect(vLoad).toBeLessThan(vout * 1.3)
   })
 }

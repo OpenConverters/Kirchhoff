@@ -36,6 +36,103 @@ const khColorQuery = Object.entries(KH_COLORS).map(([k, v]) => `${k}=${v}`).join
 //   T    posts (x,y) (x,y+32) primary, (x2,y) (x2,y+32) secondary; flags 4 = secondary dot at bottom
 //   f    flags 32 (body diode, no flip): gate at (x1,y1), drain (x2,y2-16), source (x2,y2+16)
 //   d    anode at (x1,y1), cathode at (x2,y2)
+
+// LLC and SRC share an identical half-bridge + series-resonant-tank primary and differ only in the
+// secondary rectifier (RECTIFIER_3 variant axis). One layout handles BOTH variants of the axis:
+//   • fullBridge   — T1 is a 2-winding transformer (`T`) into a 4-diode bridge DH1/DH2/DL1/DL2.
+//   • centerTapped — T1 is a 3-winding custom transformer (`406`, one primary + two center-tapped
+//                    secondaries) into a 2-diode full-wave rectifier D1/D2 (the DEFAULT variant).
+// The engine emits DH*/DL* for full-bridge and D1/D2 for center-tapped, so each rectifier's diodes are
+// `optional` and its wiring is gated by `needs`; the T1 pin-set + element line switch on how many
+// secondary windings the design actually has (turnsRatios length: 1 = one secondary, ≥2 = center tap).
+// currentDoubler is not laid out (its diodes are D1/D2 too but on a different secondary), so it degrades
+// to the "no placement" skip. Coordinates: 16px grid; the two rectifiers share the Cout/Rload/vout rail.
+function LLC_LAYOUT() {
+  const isCT = (q) => (q.req.turnsRatios?.length ?? 0) >= 2  // center-tapped: two secondary windings
+  return {
+    place: {
+      Q1:      { pins: { gate: [384, 160], drain: [448, 144], source: [448, 176] }, line: () => 'f 384 160 448 160 32 1.5 50' },
+      Q2:      { pins: { gate: [384, 272], drain: [448, 256], source: [448, 288] }, line: () => 'f 384 272 448 272 32 1.5 50' },
+      Chi:     { pins: { 1: [272, 112], 2: [272, 304] }, line: (q, c) => `c 272 112 272 304 0 ${c.C(q)} ${c.vin / 2}` },
+      Clo:     { pins: { 1: [272, 304], 2: [272, 400] }, line: (q, c) => `c 272 304 272 400 0 ${c.C(q)} ${c.vin / 2}` },
+      Rbal_hi: { pins: { 1: [336, 112], 2: [336, 304] }, line: (q, c) => `r 336 112 336 304 0 ${c.R(q)}` },
+      Rbal_lo: { pins: { 1: [336, 304], 2: [336, 400] }, line: (q, c) => `r 336 304 336 400 0 ${c.R(q)}` },
+      Cr:      { pins: { 1: [512, 208], 2: [624, 208] }, line: (q, c) => `c 512 208 624 208 0 ${c.C(q)} 0` },
+      Lr:      { pins: { primary_start: [624, 208], primary_end: [720, 208] }, line: (q, c) => `l 624 208 720 208 0 ${c.Lm} 0` },
+      T1: {
+        // full-bridge: 2-winding T with a single secondary (816). center-tapped: 3-winding 406 whose
+        // primary spans the left column (736: y..y+80) and the two secondaries stack on the right (848).
+        pins: (q) => isCT(q)
+          ? { primary_start: [736, 192], primary_end: [736, 272],
+              secondary1_start: [848, 192], secondary1_end: [848, 224],
+              secondary2_start: [848, 240], secondary2_end: [848, 272] }
+          : { primary_start: [736, 208], primary_end: [736, 240],
+              secondary1_start: [816, 208], secondary1_end: [816, 240] },
+        line: (q, c) => {
+          const sec = 1 / resolveDim(q.req.turnsRatios[0], `${q.ref} turnsRatios[0]`)
+          return isCT(q)
+            ? `406 736 192 848 192 0 ${c.Lm} 0.999 1:${sec},${sec} 3 0 0 0`
+            : `T 736 208 816 208 0 ${c.Lm} ${sec} 0 0 0.999`
+        },
+      },
+      // ── full-bridge secondary rectifier (DH*/DL*) — present only in the fullBridge variant ──
+      DH1:  { optional: true, pins: { anode: [880, 208], cathode: [880, 160] }, line: () => 'd 880 208 880 160 2 default' },
+      DH2:  { optional: true, pins: { anode: [976, 240], cathode: [976, 160] }, line: () => 'd 976 240 976 160 2 default' },
+      DL1:  { optional: true, pins: { anode: [880, 400], cathode: [880, 288] }, line: () => 'd 880 400 880 288 2 default' },
+      DL2:  { optional: true, pins: { anode: [976, 400], cathode: [976, 320] }, line: () => 'd 976 400 976 320 2 default' },
+      // ── center-tapped 2-diode full-wave rectifier (D1/D2) — the DEFAULT variant ──
+      // anodes at the two OUTER secondary ends, cathodes join the Vout rail; the center tap → gnd.
+      D1:   { optional: true, pins: { anode: [912, 192], cathode: [912, 160] }, line: () => 'd 912 192 912 160 2 default' },
+      D2:   { optional: true, pins: { anode: [976, 272], cathode: [976, 160] }, line: () => 'd 976 272 976 160 2 default' },
+      Cout: { pins: { 1: [1040, 160], 2: [1040, 400] }, line: (q, c) => `c 1040 160 1040 400 0 ${c.C(q)} ${c.vout}` },
+    },
+    wires: [
+      // ── common: Vin bus, half-bridge switch node, resonant tank, split-cap midpoint, gnd corner ──
+      [176, 112, 272, 112], [272, 112, 336, 112], [336, 112, 448, 112], [448, 112, 448, 144],
+      [448, 176, 448, 208], [448, 208, 448, 256],
+      [448, 208, 512, 208],
+      [384, 208, 448, 208],
+      [720, 208, 736, 208],                                   // Lr end → T1 primary-start approach
+      [272, 304, 336, 304], [336, 304, 736, 304],             // split-cap midpoint rail → T1 primary_end drop
+      [448, 288, 448, 336], [448, 336, 448, 400],
+      [384, 336, 448, 336],
+      [176, 400, 272, 400], [272, 400, 336, 400], [336, 400, 448, 400],
+      [1040, 160, 1104, 160], [1040, 400, 1104, 400],         // Cout ↔ Rload rails (shared)
+      // ── full-bridge secondary (needs DH1): T1 single secondary → 4-diode bridge → Vout/gnd rails ──
+      { pts: [736, 240, 736, 304], needs: ['DH1'] },          // primary_end(240) → midpoint rail
+      { pts: [816, 208, 880, 208], needs: ['DH1'] }, { pts: [880, 208, 880, 288], needs: ['DH1'] },
+      { pts: [816, 240, 976, 240], needs: ['DH1'] }, { pts: [976, 240, 976, 320], needs: ['DH1'] },
+      { pts: [880, 160, 976, 160], needs: ['DH1'] }, { pts: [976, 160, 1040, 160], needs: ['DH1'] },
+      { pts: [448, 400, 880, 400], needs: ['DH1'] }, { pts: [880, 400, 976, 400], needs: ['DH1'] }, { pts: [976, 400, 1040, 400], needs: ['DH1'] },
+      // ── center-tapped secondary (needs D1): 406 primary + two secondaries → D1/D2 → Vout; tap → gnd ──
+      { pts: [736, 208, 736, 192], needs: ['D1'] },           // Lr approach → 406 primary_start(192)
+      { pts: [736, 272, 736, 304], needs: ['D1'] },           // 406 primary_end(272) → midpoint rail
+      { pts: [848, 192, 912, 192], needs: ['D1'] },           // secondary1 outer end → D1 anode
+      { pts: [848, 272, 976, 272], needs: ['D1'] },           // secondary2 outer end → D2 anode
+      { pts: [848, 224, 848, 240], needs: ['D1'] },           // join the center tap (sec1_end + sec2_start)
+      { pts: [848, 240, 808, 240], needs: ['D1'] }, { pts: [808, 240, 808, 400], needs: ['D1'] }, // tap → gnd rail
+      { pts: [912, 160, 976, 160], needs: ['D1'] }, { pts: [976, 160, 1040, 160], needs: ['D1'] }, // D cathodes → Vout → Cout
+      { pts: [448, 400, 808, 400], needs: ['D1'] }, { pts: [808, 400, 1040, 400], needs: ['D1'] },  // gnd rail (tap + Cout return)
+    ],
+    synth: (c) => [
+      { line: `v 176 400 176 112 0 0 40 ${c.vin} 0 0 0.5`, posts: [[176, 400], [176, 112]], attach: { '176,112': ['Chi', '1'], '176,400': ['Clo', '2'] } },
+      { line: 'g 176 400 176 416 0', posts: [[176, 400]] },
+      { line: `v 384 208 384 160 0 2 ${c.fVis} 5 5 0 ${c.duty}`, posts: [[384, 208], [384, 160]], attach: { '384,160': ['Q1', 'gate'], '384,208': ['Q1', 'source'] } },
+      { line: `v 384 336 384 272 0 2 ${c.fVis} 5 5 0 ${1 - c.duty}`, posts: [[384, 336], [384, 272]], attach: { '384,272': ['Q2', 'gate'], '384,336': ['Q2', 'source'] } },
+      { line: `r 1104 160 1104 400 0 ${c.rload}`, tag: 'Rload', posts: [[1104, 160], [1104, 400]], attach: { '1104,160': ['Cout', '1'], '1104,400': ['Cout', '2'] } },
+      { line: '207 1040 160 1088 160 0 vout', posts: [[1040, 160]] },
+    ],
+    scopeSets: {
+      // rectifier scopes list BOTH variants' diodes; the absent one is skipped (findIndex < 0).
+      overview:  [['Q1', 'voltage'], ['D1', 'voltage'], ['DH1', 'voltage'], ['Rload', 'voltage']],
+      magnetic:  [['D1', 'voltage'], ['DH1', 'voltage'], { magI: [720, 208, 736, 208], magVtag: 'Q1' }, ['Rload', 'voltage']],
+      switch:    [['Q1', 'both'], ['Q2', 'both'], ['Rload', 'voltage']],
+      rectifier: [['D1', 'both'], ['D2', 'both'], ['DH1', 'both'], ['DL1', 'both'], ['Rload', 'voltage']],
+      output:    [['Q1', 'voltage'], ['D1', 'voltage'], ['DH1', 'voltage'], ['Rload', 'both']],
+    },
+  }
+}
+
 const LAYOUTS = {
   flyback: {
     place: {
@@ -437,57 +534,7 @@ const LAYOUTS = {
   // DL1/DL2→gnd) — rectifies both half-cycles so dot phase isn't critical (flags 0). NOTE: ctx picks the
   // FIRST magnetic (Lr) as the timescale driver so ctx.n=1; the step-down ratio is read from T1's own
   // turnsRatios. High-side Q1 floating drive; low-side Q2 ground-ref; complementary ~50/50.
-  llc: {
-    place: {
-      Q1:      { pins: { gate: [384, 160], drain: [448, 144], source: [448, 176] }, line: () => 'f 384 160 448 160 32 1.5 50' },
-      Q2:      { pins: { gate: [384, 272], drain: [448, 256], source: [448, 288] }, line: () => 'f 384 272 448 272 32 1.5 50' },
-      Chi:     { pins: { 1: [272, 112], 2: [272, 304] }, line: (q, c) => `c 272 112 272 304 0 ${c.C(q)} ${c.vin / 2}` },
-      Clo:     { pins: { 1: [272, 304], 2: [272, 400] }, line: (q, c) => `c 272 304 272 400 0 ${c.C(q)} ${c.vin / 2}` },
-      Rbal_hi: { pins: { 1: [336, 112], 2: [336, 304] }, line: (q, c) => `r 336 112 336 304 0 ${c.R(q)}` },
-      Rbal_lo: { pins: { 1: [336, 304], 2: [336, 400] }, line: (q, c) => `r 336 304 336 400 0 ${c.R(q)}` },
-      Cr:      { pins: { 1: [512, 208], 2: [624, 208] }, line: (q, c) => `c 512 208 624 208 0 ${c.C(q)} 0` },
-      Lr:      { pins: { primary_start: [624, 208], primary_end: [720, 208] }, line: (q, c) => `l 624 208 720 208 0 ${c.Lm} 0` },
-      T1: {
-        pins: { primary_start: [736, 208], primary_end: [736, 240], secondary1_start: [816, 208], secondary1_end: [816, 240] },
-        line: (q, c) => `T 736 208 816 208 0 ${c.Lm} ${1 / resolveDim(q.req.turnsRatios[0], `${q.ref} turnsRatios[0]`)} 0 0 0.999`,
-      },
-      DH1:  { pins: { anode: [880, 208], cathode: [880, 160] }, line: () => 'd 880 208 880 160 2 default' },
-      DH2:  { pins: { anode: [976, 240], cathode: [976, 160] }, line: () => 'd 976 240 976 160 2 default' },
-      DL1:  { pins: { anode: [880, 400], cathode: [880, 288] }, line: () => 'd 880 400 880 288 2 default' },
-      DL2:  { pins: { anode: [976, 400], cathode: [976, 320] }, line: () => 'd 976 400 976 320 2 default' },
-      Cout: { pins: { 1: [1040, 160], 2: [1040, 400] }, line: (q, c) => `c 1040 160 1040 400 0 ${c.C(q)} ${c.vout}` },
-    },
-    wires: [
-      [176, 112, 272, 112], [272, 112, 336, 112], [336, 112, 448, 112], [448, 112, 448, 144],
-      [448, 176, 448, 208], [448, 208, 448, 256],
-      [448, 208, 512, 208],
-      [384, 208, 448, 208],
-      [720, 208, 736, 208],
-      [736, 240, 736, 304], [272, 304, 336, 304], [336, 304, 736, 304],
-      [448, 288, 448, 336], [448, 336, 448, 400],
-      [384, 336, 448, 336],
-      [816, 208, 880, 208], [880, 208, 880, 288],
-      [816, 240, 976, 240], [976, 240, 976, 320],
-      [880, 160, 976, 160], [976, 160, 1040, 160], [1040, 160, 1104, 160],
-      [176, 400, 272, 400], [272, 400, 336, 400], [336, 400, 448, 400],
-      [448, 400, 880, 400], [880, 400, 976, 400], [976, 400, 1040, 400], [1040, 400, 1104, 400],
-    ],
-    synth: (c) => [
-      { line: `v 176 400 176 112 0 0 40 ${c.vin} 0 0 0.5`, posts: [[176, 400], [176, 112]], attach: { '176,112': ['Chi', '1'], '176,400': ['Clo', '2'] } },
-      { line: 'g 176 400 176 416 0', posts: [[176, 400]] },
-      { line: `v 384 208 384 160 0 2 ${c.fVis} 5 5 0 ${c.duty}`, posts: [[384, 208], [384, 160]], attach: { '384,160': ['Q1', 'gate'], '384,208': ['Q1', 'source'] } },
-      { line: `v 384 336 384 272 0 2 ${c.fVis} 5 5 0 ${1 - c.duty}`, posts: [[384, 336], [384, 272]], attach: { '384,272': ['Q2', 'gate'], '384,336': ['Q2', 'source'] } },
-      { line: `r 1104 160 1104 400 0 ${c.rload}`, tag: 'Rload', posts: [[1104, 160], [1104, 400]], attach: { '1104,160': ['Cout', '1'], '1104,400': ['Cout', '2'] } },
-      { line: '207 1040 160 1088 160 0 vout', posts: [[1040, 160]] },
-    ],
-    scopeSets: {
-      overview:  [['Q1', 'voltage'], ['DH1', 'voltage'], ['Rload', 'voltage']],
-      magnetic:  [['DH1', 'voltage'], { magI: [720, 208, 736, 208], magVtag: 'Q1' }, ['Rload', 'voltage']],
-      switch:    [['Q1', 'both'], ['Q2', 'both'], ['Rload', 'voltage']],
-      rectifier: [['DH1', 'both'], ['DL1', 'both'], ['Rload', 'voltage']],
-      output:    [['Q1', 'voltage'], ['DH1', 'voltage'], ['Rload', 'both']],
-    },
-  },
+  llc: LLC_LAYOUT('llc'),
 
   // Isolated SRC (series-resonant) half-bridge — identical structure to LLC (series Cr-Lr tank, full-bridge rect) (DEFAULT = full-bridge secondary rectifier). Q1 (high-side) / Q2
   // (low-side) form a half-bridge across the Vin bus; a split DC-block divider (Chi/Clo + balance Rbal)
@@ -496,57 +543,7 @@ const LAYOUTS = {
   // DL1/DL2→gnd) — rectifies both half-cycles so dot phase isn't critical (flags 0). NOTE: ctx picks the
   // FIRST magnetic (Lr) as the timescale driver so ctx.n=1; the step-down ratio is read from T1's own
   // turnsRatios. High-side Q1 floating drive; low-side Q2 ground-ref; complementary ~50/50.
-  src: {
-    place: {
-      Q1:      { pins: { gate: [384, 160], drain: [448, 144], source: [448, 176] }, line: () => 'f 384 160 448 160 32 1.5 50' },
-      Q2:      { pins: { gate: [384, 272], drain: [448, 256], source: [448, 288] }, line: () => 'f 384 272 448 272 32 1.5 50' },
-      Chi:     { pins: { 1: [272, 112], 2: [272, 304] }, line: (q, c) => `c 272 112 272 304 0 ${c.C(q)} ${c.vin / 2}` },
-      Clo:     { pins: { 1: [272, 304], 2: [272, 400] }, line: (q, c) => `c 272 304 272 400 0 ${c.C(q)} ${c.vin / 2}` },
-      Rbal_hi: { pins: { 1: [336, 112], 2: [336, 304] }, line: (q, c) => `r 336 112 336 304 0 ${c.R(q)}` },
-      Rbal_lo: { pins: { 1: [336, 304], 2: [336, 400] }, line: (q, c) => `r 336 304 336 400 0 ${c.R(q)}` },
-      Cr:      { pins: { 1: [512, 208], 2: [624, 208] }, line: (q, c) => `c 512 208 624 208 0 ${c.C(q)} 0` },
-      Lr:      { pins: { primary_start: [624, 208], primary_end: [720, 208] }, line: (q, c) => `l 624 208 720 208 0 ${c.Lm} 0` },
-      T1: {
-        pins: { primary_start: [736, 208], primary_end: [736, 240], secondary1_start: [816, 208], secondary1_end: [816, 240] },
-        line: (q, c) => `T 736 208 816 208 0 ${c.Lm} ${1 / resolveDim(q.req.turnsRatios[0], `${q.ref} turnsRatios[0]`)} 0 0 0.999`,
-      },
-      DH1:  { pins: { anode: [880, 208], cathode: [880, 160] }, line: () => 'd 880 208 880 160 2 default' },
-      DH2:  { pins: { anode: [976, 240], cathode: [976, 160] }, line: () => 'd 976 240 976 160 2 default' },
-      DL1:  { pins: { anode: [880, 400], cathode: [880, 288] }, line: () => 'd 880 400 880 288 2 default' },
-      DL2:  { pins: { anode: [976, 400], cathode: [976, 320] }, line: () => 'd 976 400 976 320 2 default' },
-      Cout: { pins: { 1: [1040, 160], 2: [1040, 400] }, line: (q, c) => `c 1040 160 1040 400 0 ${c.C(q)} ${c.vout}` },
-    },
-    wires: [
-      [176, 112, 272, 112], [272, 112, 336, 112], [336, 112, 448, 112], [448, 112, 448, 144],
-      [448, 176, 448, 208], [448, 208, 448, 256],
-      [448, 208, 512, 208],
-      [384, 208, 448, 208],
-      [720, 208, 736, 208],
-      [736, 240, 736, 304], [272, 304, 336, 304], [336, 304, 736, 304],
-      [448, 288, 448, 336], [448, 336, 448, 400],
-      [384, 336, 448, 336],
-      [816, 208, 880, 208], [880, 208, 880, 288],
-      [816, 240, 976, 240], [976, 240, 976, 320],
-      [880, 160, 976, 160], [976, 160, 1040, 160], [1040, 160, 1104, 160],
-      [176, 400, 272, 400], [272, 400, 336, 400], [336, 400, 448, 400],
-      [448, 400, 880, 400], [880, 400, 976, 400], [976, 400, 1040, 400], [1040, 400, 1104, 400],
-    ],
-    synth: (c) => [
-      { line: `v 176 400 176 112 0 0 40 ${c.vin} 0 0 0.5`, posts: [[176, 400], [176, 112]], attach: { '176,112': ['Chi', '1'], '176,400': ['Clo', '2'] } },
-      { line: 'g 176 400 176 416 0', posts: [[176, 400]] },
-      { line: `v 384 208 384 160 0 2 ${c.fVis} 5 5 0 ${c.duty}`, posts: [[384, 208], [384, 160]], attach: { '384,160': ['Q1', 'gate'], '384,208': ['Q1', 'source'] } },
-      { line: `v 384 336 384 272 0 2 ${c.fVis} 5 5 0 ${1 - c.duty}`, posts: [[384, 336], [384, 272]], attach: { '384,272': ['Q2', 'gate'], '384,336': ['Q2', 'source'] } },
-      { line: `r 1104 160 1104 400 0 ${c.rload}`, tag: 'Rload', posts: [[1104, 160], [1104, 400]], attach: { '1104,160': ['Cout', '1'], '1104,400': ['Cout', '2'] } },
-      { line: '207 1040 160 1088 160 0 vout', posts: [[1040, 160]] },
-    ],
-    scopeSets: {
-      overview:  [['Q1', 'voltage'], ['DH1', 'voltage'], ['Rload', 'voltage']],
-      magnetic:  [['DH1', 'voltage'], { magI: [720, 208, 736, 208], magVtag: 'Q1' }, ['Rload', 'voltage']],
-      switch:    [['Q1', 'both'], ['Q2', 'both'], ['Rload', 'voltage']],
-      rectifier: [['DH1', 'both'], ['DL1', 'both'], ['Rload', 'voltage']],
-      output:    [['Q1', 'voltage'], ['DH1', 'voltage'], ['Rload', 'both']],
-    },
-  },
+  src: LLC_LAYOUT('src'),
 
   // Non-isolated four-switch buck-boost (FSBB): a BUCK leg (Q1 high-side Vin→sw1, Q2 low-side sw1→gnd)
   // and a BOOST leg (Q3 high-side sw2→Vout, Q4 low-side sw2→gnd) bridged by a single inductor L between
@@ -1499,8 +1496,12 @@ export function falstadExport(topoId, tas, scopeSet = 'overview') {
   for (const [ref, q] of comps) {
     const p = layout.place[ref]
     if (!p) throw new Error(`no placement for component '${ref}' in the ${topoId} visual layout`)
-    for (const [pin, xy] of Object.entries(p.pins)) pinCoord.set(`${ref}|${pin}`, String(xy))
-    elements.push({ line: p.line(q, ctx), tag: ref, posts: Object.values(p.pins) })
+    // A component whose pin SET depends on the design (e.g. an LLC transformer with one secondary in
+    // the full-bridge variant vs a center-tapped pair in the center-tapped variant) may declare `pins`
+    // as a function of (q, ctx); a static object is the common case.
+    const pins = typeof p.pins === 'function' ? p.pins(q, ctx) : p.pins
+    for (const [pin, xy] of Object.entries(pins)) pinCoord.set(`${ref}|${pin}`, String(xy))
+    elements.push({ line: p.line(q, ctx), tag: ref, posts: Object.values(pins) })
     for (const w of p.wires ?? []) elements.push({ line: `w ${w.join(' ')} 0`, posts: [[w[0], w[1]], [w[2], w[3]]], wire: true })
   }
   for (const [ref, p] of Object.entries(layout.place)) {
