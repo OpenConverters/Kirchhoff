@@ -80,10 +80,20 @@ function LLC_LAYOUT() {
       DH2:  { optional: true, pins: { anode: [976, 240], cathode: [976, 160] }, line: () => 'd 976 240 976 160 2 default' },
       DL1:  { optional: true, pins: { anode: [880, 400], cathode: [880, 288] }, line: () => 'd 880 400 880 288 2 default' },
       DL2:  { optional: true, pins: { anode: [976, 400], cathode: [976, 320] }, line: () => 'd 976 400 976 320 2 default' },
-      // ── center-tapped 2-diode full-wave rectifier (D1/D2) — the DEFAULT variant ──
-      // anodes at the two OUTER secondary ends, cathodes join the Vout rail; the center tap → gnd.
-      D1:   { optional: true, pins: { anode: [912, 192], cathode: [912, 160] }, line: () => 'd 912 192 912 160 2 default' },
-      D2:   { optional: true, pins: { anode: [976, 272], cathode: [976, 160] }, line: () => 'd 976 272 976 160 2 default' },
+      // ── D1/D2 serve TWO variants, so their role/orientation is design-dependent (c.has('Lo1')):
+      //   • center-tapped (DEFAULT): RECTIFY — anode at a secondary outer end, cathode → Vout rail.
+      //   • current-doubler:         FREEWHEEL — cathode at a secondary end (the Lo node), anode → gnd.
+      D1: { optional: true,
+        pins: (q, c) => c.has('Lo1') ? { anode: [848, 336], cathode: [848, 208] } : { anode: [912, 192], cathode: [912, 160] },
+        line: (q, c) => c.has('Lo1') ? 'd 848 336 848 208 2 default' : 'd 912 192 912 160 2 default' },
+      D2: { optional: true,
+        pins: (q, c) => c.has('Lo1') ? { anode: [816, 336], cathode: [816, 240] } : { anode: [976, 272], cathode: [976, 160] },
+        line: (q, c) => c.has('Lo1') ? 'd 816 336 816 240 2 default' : 'd 976 272 976 160 2 default' },
+      // ── current-doubler output stage: two inductors (Lo1 off secondary end A, Lo2 off end B) sum into
+      // Cout; Rlb is a tiny series balance resistor in Lo2's leg. present only in the doubler variant.
+      Lo1: { optional: true, pins: { primary_start: [880, 208], primary_end: [1008, 208] }, line: (q, c) => `l 880 208 1008 208 0 ${c.L(q)} 0` },
+      Lo2: { optional: true, pins: { primary_start: [880, 272], primary_end: [1008, 272] }, line: (q, c) => `l 880 272 1008 272 0 ${c.L(q)} 0` },
+      Rlb: { optional: true, pins: { 1: [1008, 272], 2: [1008, 208] }, line: (q, c) => `r 1008 272 1008 208 0 ${c.R(q)}` },
       Cout: { pins: { 1: [1040, 160], 2: [1040, 400] }, line: (q, c) => `c 1040 160 1040 400 0 ${c.C(q)} ${c.vout}` },
     },
     wires: [
@@ -104,15 +114,22 @@ function LLC_LAYOUT() {
       { pts: [816, 240, 976, 240], needs: ['DH1'] }, { pts: [976, 240, 976, 320], needs: ['DH1'] },
       { pts: [880, 160, 976, 160], needs: ['DH1'] }, { pts: [976, 160, 1040, 160], needs: ['DH1'] },
       { pts: [448, 400, 880, 400], needs: ['DH1'] }, { pts: [880, 400, 976, 400], needs: ['DH1'] }, { pts: [976, 400, 1040, 400], needs: ['DH1'] },
-      // ── center-tapped secondary (needs D1): 406 primary + two secondaries → D1/D2 → Vout; tap → gnd ──
-      { pts: [736, 208, 736, 192], needs: ['D1'] },           // Lr approach → 406 primary_start(192)
-      { pts: [736, 272, 736, 304], needs: ['D1'] },           // 406 primary_end(272) → midpoint rail
-      { pts: [848, 192, 912, 192], needs: ['D1'] },           // secondary1 outer end → D1 anode
-      { pts: [848, 272, 976, 272], needs: ['D1'] },           // secondary2 outer end → D2 anode
-      { pts: [848, 224, 848, 240], needs: ['D1'] },           // join the center tap (sec1_end + sec2_start)
-      { pts: [848, 240, 808, 240], needs: ['D1'] }, { pts: [808, 240, 808, 400], needs: ['D1'] }, // tap → gnd rail
-      { pts: [912, 160, 976, 160], needs: ['D1'] }, { pts: [976, 160, 1040, 160], needs: ['D1'] }, // D cathodes → Vout → Cout
-      { pts: [448, 400, 808, 400], needs: ['D1'] }, { pts: [808, 400, 1040, 400], needs: ['D1'] },  // gnd rail (tap + Cout return)
+      // ── center-tapped secondary (D1 present, no Lo1): 406 primary + two secondaries → D1/D2 → Vout ──
+      { pts: [736, 208, 736, 192], needs: ['D1'], not: ['Lo1'] }, // Lr approach → 406 primary_start(192)
+      { pts: [736, 272, 736, 304], needs: ['D1'], not: ['Lo1'] }, // 406 primary_end(272) → midpoint rail
+      { pts: [848, 192, 912, 192], needs: ['D1'], not: ['Lo1'] }, // secondary1 outer end → D1 anode
+      { pts: [848, 272, 976, 272], needs: ['D1'], not: ['Lo1'] }, // secondary2 outer end → D2 anode
+      { pts: [848, 224, 848, 240], needs: ['D1'], not: ['Lo1'] }, // join the center tap (sec1_end + sec2_start)
+      { pts: [848, 240, 808, 240], needs: ['D1'], not: ['Lo1'] }, { pts: [808, 240, 808, 400], needs: ['D1'], not: ['Lo1'] }, // tap → gnd
+      { pts: [912, 160, 976, 160], needs: ['D1'], not: ['Lo1'] }, { pts: [976, 160, 1040, 160], needs: ['D1'], not: ['Lo1'] }, // D cathodes → Vout
+      { pts: [448, 400, 808, 400], needs: ['D1'], not: ['Lo1'] }, { pts: [808, 400, 1040, 400], needs: ['D1'], not: ['Lo1'] }, // gnd rail
+      // ── current-doubler secondary (needs Lo1): single-secondary T → two output inductors → Vout ──
+      { pts: [736, 240, 736, 304], needs: ['Lo1'] },          // single-sec primary_end(240) → midpoint rail
+      { pts: [816, 208, 848, 208], needs: ['Lo1'] }, { pts: [816, 208, 880, 208], needs: ['Lo1'] }, // node A: T1 sec_start → D1 cathode / Lo1
+      { pts: [816, 240, 880, 240], needs: ['Lo1'] }, { pts: [880, 240, 880, 272], needs: ['Lo1'] }, // node B: T1 sec_end → Lo2 (D2 cathode is on the sec_end post)
+      { pts: [1008, 208, 1008, 160], needs: ['Lo1'] }, { pts: [1008, 160, 1040, 160], needs: ['Lo1'] }, // Lo1 end / Rlb → Vout → Cout
+      { pts: [816, 336, 848, 336], needs: ['Lo1'] }, { pts: [848, 336, 848, 400], needs: ['Lo1'] }, // D1/D2 anodes → gnd rail
+      { pts: [448, 400, 848, 400], needs: ['Lo1'] }, { pts: [848, 400, 1040, 400], needs: ['Lo1'] },  // gnd rail (Cout return)
     ],
     synth: (c) => [
       { line: `v 176 400 176 112 0 0 40 ${c.vin} 0 0 0.5`, posts: [[176, 400], [176, 112]], attach: { '176,112': ['Chi', '1'], '176,400': ['Clo', '2'] } },
@@ -123,12 +140,12 @@ function LLC_LAYOUT() {
       { line: '207 1040 160 1088 160 0 vout', posts: [[1040, 160]] },
     ],
     scopeSets: {
-      // rectifier scopes list BOTH variants' diodes; the absent one is skipped (findIndex < 0).
+      // rectifier scopes list ALL variants' parts; the absent ones are skipped (findIndex < 0).
       overview:  [['Q1', 'voltage'], ['D1', 'voltage'], ['DH1', 'voltage'], ['Rload', 'voltage']],
-      magnetic:  [['D1', 'voltage'], ['DH1', 'voltage'], { magI: [720, 208, 736, 208], magVtag: 'Q1' }, ['Rload', 'voltage']],
+      magnetic:  [['Lo1', 'both'], ['D1', 'voltage'], ['DH1', 'voltage'], { magI: [720, 208, 736, 208], magVtag: 'Q1' }, ['Rload', 'voltage']],
       switch:    [['Q1', 'both'], ['Q2', 'both'], ['Rload', 'voltage']],
       rectifier: [['D1', 'both'], ['D2', 'both'], ['DH1', 'both'], ['DL1', 'both'], ['Rload', 'voltage']],
-      output:    [['Q1', 'voltage'], ['D1', 'voltage'], ['DH1', 'voltage'], ['Rload', 'both']],
+      output:    [['Lo1', 'current'], ['Q1', 'voltage'], ['D1', 'voltage'], ['DH1', 'voltage'], ['Rload', 'both']],
     },
   }
 }
@@ -1488,6 +1505,10 @@ export function falstadExport(topoId, tas, scopeSet = 'overview') {
     L: (q) => resolveDim(q.req.magnetizingInductance ?? q.req.inductance, `${q.ref} inductance`) * k,
     // A specific switch's own PWM duty (from tas.simulation.stimulus); falls back to stim[0]'s duty.
     dutyOf: (ref) => (dutyByComp.has(ref) ? dutyByComp.get(ref) : duty),
+    // Is a component present in THIS design? Lets a `place` entry pick its pins/orientation by variant
+    // (e.g. an LLC diode D1 rectifies to Vout in center-tapped but freewheels to gnd in current-doubler,
+    // distinguished by whether the doubler inductor Lo1 is present).
+    has: (ref) => comps.has(ref),
   }
 
   // ── emit elements: every CIAS power component must have a placement (loud gap otherwise) ──────
@@ -1516,15 +1537,18 @@ export function falstadExport(topoId, tas, scopeSet = 'overview') {
   }
   // Wires and synth glyphs may be gated on component presence via `needs` (variant-specific parts —
   // an SR FET, a clamp, a resonant cap — draw only when the design actually contains them).
-  const present = (needs) => (needs ?? []).every((r) => comps.has(r))
+  // present(): all `needs` refs exist AND no `not` ref exists. `not` lets variants that share a
+  // component (e.g. D1 in both center-tapped and current-doubler) gate on the DISTINGUISHING part.
+  const present = (needs, not) =>
+    (needs ?? []).every((r) => comps.has(r)) && !(not ?? []).some((r) => comps.has(r))
   for (const w of layout.wires) {
     const pts = Array.isArray(w) ? w : w.pts
-    if (!Array.isArray(w) && !present(w.needs)) continue
+    if (!Array.isArray(w) && !present(w.needs, w.not)) continue
     elements.push({ line: `w ${pts.join(' ')} 0`, posts: [[pts[0], pts[1]], [pts[2], pts[3]]], wire: true })
   }
   const attachChecks = [] // [coordKey, "ref|pin"] — synthesized posts that must land on a CIAS net
   for (const s of layout.synth(ctx)) {
-    if (!present(s.needs)) continue
+    if (!present(s.needs, s.not)) continue
     elements.push(s)
     for (const [coord, [ref, pin]] of Object.entries(s.attach ?? {})) attachChecks.push([coord, `${ref}|${pin}`])
   }

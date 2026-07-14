@@ -102,39 +102,40 @@ for (const id of ['cllc', 'clllc', 'dab']) {
   })
 }
 
-// LLC/SRC default to the CENTER-TAPPED rectifier, drawn with a 3-winding Custom Transformer (406,
-// one primary + two center-tapped secondaries) feeding a 2-diode full-wave rectifier D1/D2. The
-// net-consistency checker validates the drawn nets but NOT where CircuitJS1 physically places the 406
-// posts — so this guard actually SIMULATES the exported circuit and asserts the output converges to the
-// design Vout (regression cover for the post geometry + winding phase). Was silently broken: LLC/SRC
-// weren't in the export loop and their default variant had no layout ('no placement for D1').
-for (const id of ['llc', 'src']) {
-  test(`${id} center-tapped rectifier simulates to Vout`, async ({ page }) => {
+// The multi-variant rectifier topologies (RECTIFIER_3 axis: fullBridge / centerTapped / current-
+// Doubler) must draw a CONVERGING circuit for EVERY variant, not just the default. The net-consistency
+// checker validates the drawn nets but NOT where CircuitJS1 physically places the 406 Custom-Transformer
+// posts, nor the winding phase — so this guard actually SIMULATES each exported circuit and asserts the
+// output settles near the design Vout (a wrong 406 geometry or in-phase windings collapse it to ~0).
+// Regression cover for the center-tapped + current-doubler layouts (LLC/SRC had NO center-tapped/doubler
+// layout at all — the default threw 'no placement for D1').
+const RECT3_CASES = [
+  ...['llc', 'src'].flatMap((id) => ['fullBridge', 'centerTapped', 'currentDoubler'].map((v) => [id, v])),
+]
+for (const [id, variant] of RECT3_CASES) {
+  test(`${id}/${variant} visual sim converges to Vout`, async ({ page }) => {
     await boot(page)
-    await selectTopology(page, id)              // default variant is centerTapped
+    await selectTopology(page, id)
+    await page.evaluate((v) => { window.__bench.form.variant = v }, variant)
     const err = await solve(page, 'analytical')
     expect(err, `solve error: ${err}`).toBeNull()
-    const { url, vout, text } = await page.evaluate(() => {
+    const { url, vout, error } = await page.evaluate(() => {
       const vs = window.__bench.visualSim
-      return { url: vs?.url, vout: vs?.vout, text: vs?.text }
+      return { url: vs?.url, vout: vs?.vout, error: vs?.error || null }
     })
-    expect(text, 'center-tapped default must emit a 406 Custom Transformer').toMatch(/(^|\n)406 /)
+    expect(error, `export error: ${error}`).toBeNull()
     await page.goto(url)
     await page.waitForFunction(
       () => window.CircuitJS1?.getElements && window.CircuitJS1.getElements().length > 5,
       null, { timeout: 30000 })
-    await page.waitForTimeout(6000)             // let the resonant tank + output settle
+    await page.waitForTimeout(6000)             // let the tank + output settle
     const vLoad = await page.evaluate(() => {
-      const els = window.CircuitJS1.getElements()
-      // the output load is the highest-value resistor carrying the rectified rail; read 'vout' node.
       try { const v = window.CircuitJS1.getNodeVoltage('vout'); if (v != null) return v } catch {}
       let best = 0
-      for (let i = 0; i < els.length; i++) { try { const v = els[i].getVoltageDiff(); if (Math.abs(v) < 100 && Math.abs(v) > best) best = Math.abs(v) } catch {} }
+      for (const e of window.CircuitJS1.getElements()) { try { const v = e.getVoltageDiff(); if (Math.abs(v) < 100 && Math.abs(v) > best) best = Math.abs(v) } catch {} }
       return best
     })
-    // The toy sim converges near the design Vout (measured 11.997 V for a 12 V design). Assert it did
-    // NOT collapse to ~0 (the failure mode a wrong 406 geometry or in-phase windings would produce).
-    expect(vLoad, `${id} Vout collapsed (${vLoad} V vs design ${vout} V) — check 406 posts/phase`).toBeGreaterThan(vout * 0.7)
+    expect(vLoad, `${id}/${variant} Vout collapsed (${vLoad} V vs design ${vout} V) — check posts/phase`).toBeGreaterThan(vout * 0.7)
     expect(vLoad).toBeLessThan(vout * 1.3)
   })
 }
