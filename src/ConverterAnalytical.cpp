@@ -1058,7 +1058,22 @@ MAS::OperatingPoint analytical_fsbb(double inputVoltage, double outputVoltage,
     }
 
     double dutyForWaveform, dIL, iL_avg, primaryVoltagePtp;
-    if (mode == FsbbMode::SIMULTANEOUS) {
+    // BUCK_BOOST_AUTO: route the transition band into the SIMULTANEOUS waveform instead of
+    // failing. A 4-switch converter cannot run pure buck all the way down to Vin == Vo — the
+    // efficiency-adjusted buck duty D = Vo/(Vin·eta) saturates against maximumDutyCycle while
+    // Vin is still above Vo (window Vin < Vo/(eta·(maxDuty−0.01))), and Vo == Vin has no pure
+    // buck/boost duty at all. Real controllers (LM5176/LT8390) enter the buck-boost region
+    // there; the SIMULTANEOUS branch models exactly that and is regular at Vo == Vin. Deep
+    // boost (Vo >> Vin) stays a hard error: no mode can realize that conversion ratio.
+    bool simultaneous = (mode == FsbbMode::SIMULTANEOUS);
+    if (!simultaneous) {
+        if (outputVoltage == inputVoltage) {
+            simultaneous = true;
+        } else if (outputVoltage < inputVoltage) {
+            simultaneous = (outputVoltage / (inputVoltage * efficiency) >= maximumDutyCycle - 0.01);
+        }
+    }
+    if (simultaneous) {
         // 4-switch simultaneous buck-boost (the Kirchhoff deck's mode): all four switches commute
         // each cycle. Charge phase (Q1+Q4) applies +Vin across L for D·T; discharge phase (Q2+Q3)
         // applies −Vo for (1−D)·T. Gain M = D/(1−D) = Vo/Vin ⇒ D = Vo/(Vin+Vo). Regular at Vo==Vin.
@@ -1067,10 +1082,8 @@ MAS::OperatingPoint analytical_fsbb(double inputVoltage, double outputVoltage,
         dIL = inputVoltage * (D * period) / inductance;  // charge phase: Vin across L for D·T
         primaryVoltagePtp = inputVoltage + outputVoltage;  // +Vin (D) / −Vo (1−D), volt-second balanced
         dutyForWaveform = D;
-    } else if (outputVoltage < inputVoltage) {  // BUCK
+    } else if (outputVoltage < inputVoltage) {  // BUCK (transition band already routed above)
         double D_buck = outputVoltage / (inputVoltage * efficiency);
-        if (D_buck >= 1.0) throw std::invalid_argument("analytical_fsbb: buck D >= 1");
-        if (D_buck >= maximumDutyCycle - 0.01) throw std::invalid_argument("analytical_fsbb: buck D exceeds maximumDutyCycle");
         double tOn = D_buck * period;
         iL_avg = outputCurrent;
         dIL = (inputVoltage - outputVoltage) * tOn / inductance;
@@ -1086,7 +1099,8 @@ MAS::OperatingPoint analytical_fsbb(double inputVoltage, double outputVoltage,
         primaryVoltagePtp = outputVoltage;
         dutyForWaveform = D_boost;
     } else {
-        throw std::invalid_argument("analytical_fsbb: Vo == Vin lands in the buck-boost transition region, not ported");
+        // Unreachable: Vo == Vin and the saturated-buck window are routed to SIMULTANEOUS above.
+        throw std::logic_error("analytical_fsbb: unhandled operating region");
     }
 
     MAS::OperatingPoint operatingPoint;

@@ -294,7 +294,31 @@ TEST_CASE("analytical_fsbb SIMULTANEOUS: regular at Vo==Vin (buck-boost mode)", 
     CHECK(*processed_voltage(op, 0).get_peak_to_peak() == Catch::Approx(48.0).margin(1.0));
     // And it must NOT throw at the transition the AUTO mode rejects.
     CHECK_NOTHROW(analytical_fsbb(24, 24, 5, 100000, 20e-6, 1.0, FsbbMode::SIMULTANEOUS));
-    CHECK_THROWS(analytical_fsbb(24, 24, 5, 100000, 20e-6));   // AUTO still throws at Vo==Vin
+}
+
+TEST_CASE("analytical_fsbb AUTO routes the transition band to SIMULTANEOUS", "[analytical][solver][fsbb]") {
+    using Kirchhoff::analytical::analytical_fsbb;
+    using Kirchhoff::analytical::FsbbMode;
+    // Vo == Vin: no pure buck/boost duty exists — AUTO now produces the SIMULTANEOUS waveform
+    // (previously threw "transition region, not ported").
+    MAS::OperatingPoint atEqual = analytical_fsbb(24, 24, 5, 100000, 20e-6);
+    MAS::OperatingPoint simul   = analytical_fsbb(24, 24, 5, 100000, 20e-6, 1.0, FsbbMode::SIMULTANEOUS);
+    CHECK(*processed_current(atEqual, 0).get_average() ==
+          Catch::Approx(*processed_current(simul, 0).get_average()).margin(1e-9));
+    CHECK(*processed_current(atEqual, 0).get_peak_to_peak() ==
+          Catch::Approx(*processed_current(simul, 0).get_peak_to_peak()).margin(1e-9));
+    // Saturated-buck window (the FSBB wizard defaults that hit this live): 13.5 V -> 12 V at
+    // eta=0.92 gives D_buck = 12/(13.5*0.92) = 0.966 >= maxDuty — a real 4-switch controller
+    // runs its buck-boost region here, so AUTO must produce the SIMULTANEOUS waveform, not throw.
+    MAS::OperatingPoint window = analytical_fsbb(13.5, 12, 2, 100000, 47e-6, 0.92);
+    const double D = 12.0 / (13.5 + 12.0);
+    CHECK(*processed_current(window, 0).get_average() == Catch::Approx(2.0 / (1.0 - D)).margin(0.05));
+    CHECK(*processed_voltage(window, 0).get_peak_to_peak() == Catch::Approx(13.5 + 12.0).margin(0.5));
+    // Comfortably-buck stays pure buck: avg = Iout, not Iout/(1-D).
+    MAS::OperatingPoint buck = analytical_fsbb(18, 12, 2, 100000, 47e-6, 0.92);
+    CHECK(*processed_current(buck, 0).get_average() == Catch::Approx(2.0).margin(0.05));
+    // Deep boost beyond maximumDutyCycle remains a hard error.
+    CHECK_THROWS(analytical_fsbb(1, 24, 1, 100000, 20e-6));
 }
 
 TEST_CASE("analytical_fsbb SPLIT_PWM: lower inductor ripple than SIMULTANEOUS, on-target VSB (ABT #94)",
@@ -1215,10 +1239,17 @@ TEST_CASE("analytical maximumDutyCycle gate throws when exceeded, byte-identical
     CHECK_NOTHROW(analytical_zeta(12, 24, 1, 100000, 47e-6));                      // default 0.95
     CHECK_THROWS(analytical_zeta(12, 24, 1, 100000, 47e-6, 0.0, 1.0, 0.6));        // 0.667 > 0.606 → throw
 
-    // FSBB buck region 12->5 (D_buck=0.4167); throw fires at D >= maxDuty-0.01.
+    // FSBB buck region 12->5 (D_buck=0.4167). Unlike the single-mode topologies above, a
+    // saturated buck duty does not make the conversion infeasible for a 4-switch converter —
+    // AUTO routes it to the SIMULTANEOUS (buck-boost) waveform, whose duty D = 5/17 = 0.29
+    // sits under the same gate. So maxDuty=0.4 now yields the transition-mode waveform
+    // (iL_avg = Iout/(1-D)), not a throw.
     CHECK_NOTHROW(analytical_fsbb(12, 5, 2, 100000, 10e-6));                       // default 0.95
-    CHECK_THROWS(analytical_fsbb(12, 5, 2, 100000, 10e-6, 1.0,
-                                 Kirchhoff::analytical::FsbbMode::BUCK_BOOST_AUTO, 0.5, 0.4));  // 0.4167 >= 0.39
+    {
+        MAS::OperatingPoint routed = analytical_fsbb(12, 5, 2, 100000, 10e-6, 1.0,
+                                     Kirchhoff::analytical::FsbbMode::BUCK_BOOST_AUTO, 0.5, 0.4);  // 0.4167 >= 0.39 → SIMULTANEOUS
+        CHECK(*processed_current(routed, 0).get_average() == Catch::Approx(2.0 / (1.0 - 5.0 / 17.0)).margin(0.05));
+    }
 
     // Weinberg boost regime 24->72 (D=0.833); default 0.95 ok, 0.8 rejects.
     CHECK_NOTHROW(analytical_weinberg(24, 72, 2, 100000, 50e-6, 1));               // default 0.95
