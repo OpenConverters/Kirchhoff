@@ -23,8 +23,16 @@ const wire = (...pts) => {
   return P(d, 'sch-wire')
 }
 const dot = (x, y) => `<circle class="sch-node" cx="${x}" cy="${y}" r="3"/>`
+// This SVG string is rendered via v-html (OutputPane), so every value that comes
+// from the catalogue — a component ref-designator or a BOM part value — MUST be
+// HTML-escaped before it enters the markup. Catalogue strings are ingested from
+// vendor scrapes and are not guaranteed clean (fabricated/mis-mapped records
+// have been found), so an unescaped value could break out of a <text> node or an
+// attribute and inject script. esc() closes that; the CSP is the second layer.
+const esc = (s) =>
+  String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 const txt = (x, y, s, cls = 'sch-val', anchor = 'middle') =>
-  `<text class="${cls}" x="${x}" y="${y}" text-anchor="${anchor}">${s}</text>`
+  `<text class="${cls}" x="${x}" y="${y}" text-anchor="${anchor}">${esc(s)}</text>`
 
 // Verification hook: symbols register their electrical terminals here (ref, pin-name, coord) ONLY while
 // a connectivity check is running (`collectPins`). In normal rendering `_rec` is false, so this is a
@@ -39,7 +47,7 @@ function hot(ref, bom, box, body, labelPos) {
   const row = bom?.get(ref)
   const [lx, ly, anchor = 'middle', noVal] = labelPos
   const val = !noVal && row?.value && row.value !== '—' ? row.value : ''
-  return `<g class="sch-hot" data-ref="${ref}">
+  return `<g class="sch-hot" data-ref="${esc(ref)}">
     <rect class="sch-hitbox" x="${bx}" y="${by}" width="${bw}" height="${bh}"/>
     ${body}
     ${txt(lx, ly, ref, 'sch-ref', anchor)}
