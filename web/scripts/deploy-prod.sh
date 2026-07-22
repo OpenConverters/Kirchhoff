@@ -14,6 +14,26 @@ HOST=root@51.15.253.66
 SSH="ssh -i $HOME/.ssh/om_scaleway -o StrictHostKeyChecking=no"
 DOCROOT=/opt/kirchhoff/dist
 
+# 0. Guarantee the embedded WASM engine is CURRENT. The SPA's `sync-wasm` step only
+# COPIES build-wasm-ng/kirchhoff.js into public/ — it does NOT rebuild it — so a
+# stale local build silently ships an out-of-date engine. That bit us on 2026-07-22:
+# a WASM built before Kelvin's shard format bumped to v4 kept getting copied through
+# font/CSS redeploys, and every component selection then failed with "unsupported
+# shard format version 4" against the v4 catalogue shards. Rebuild it incrementally
+# here: a no-op when already fresh (needs no toolchain), a real rebuild when stale,
+# and a LOUD failure if it is stale but the WASM toolchain is unavailable — never a
+# silent stale deploy. Override with SKIP_WASM_BUILD=1 only if you just built it.
+WASM_DIR="$HERE/../build-wasm-ng"
+if [[ -z "${SKIP_WASM_BUILD:-}" ]]; then
+  if [[ ! -f "$WASM_DIR/build.ninja" ]]; then
+    echo "REFUSING to deploy: $WASM_DIR is not a configured emscripten build dir — the WASM" >&2
+    echo "engine cannot be verified current. Configure + build it, or set SKIP_WASM_BUILD=1." >&2
+    exit 1
+  fi
+  echo "Ensuring the WASM engine is up to date (ninja, incremental)…"
+  ninja -C "$WASM_DIR" kirchhoff.js
+fi
+
 # 1. Clean-HEAD build (refuse to ship uncommitted work — the byte-verify rule).
 if [[ -n "$(git -C "$HERE" status --porcelain -- . 2>/dev/null)" ]]; then
   echo "REFUSING to deploy: web/ has uncommitted changes (a build bundles the working tree)." >&2

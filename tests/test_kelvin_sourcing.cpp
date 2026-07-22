@@ -1,8 +1,11 @@
 // End-to-end: design a TAS -> Kelvin select_components (real TAS DB) -> bind_part -> the bound
 // component reads as a real DATASHEET part (not the "requirements-derived" fabrication), and a
 // re-select defers it as already bound. Requires the TAS data dir (KELVIN_TAS_DATA_DIR env or the
-// KELVIN_TAS_DATA_DIR compile default); skipped with a clear message if absent.
+// KELVIN_TAS_DATA_DIR compile default), READABLE from this runtime; skipped with a clear message
+// if the dir is unset or unreachable (e.g. a WASM/node sandbox with no filesystem access — the
+// real coverage then comes from the native build of this test).
 #include <cstdlib>
+#include <fstream>
 #include <functional>
 #include <string>
 
@@ -37,6 +40,16 @@ TEST_CASE("kelvin sourcing: design -> select_components -> bind_part -> DATASHEE
     std::string dir = data_dir();
     if (dir.empty()) {
         WARN("KELVIN_TAS_DATA_DIR not set — skipping real-DB sourcing test");
+        return;
+    }
+    // The dir is set at compile time, but this test needs to READ the multi-GB TAS
+    // catalogue off disk. In a WASM/node sandbox the path exists on the host yet is
+    // not reachable through the module's filesystem, so the engine reports "catalogue
+    // file does not exist". Detect that and skip (the native build has real FS access
+    // and provides the actual coverage) rather than fail on a missing precondition.
+    if (!std::ifstream(dir + "/controllers.ndjson").good()) {
+        WARN("TAS data dir '" << dir << "' not readable from this runtime (no filesystem "
+             "access, e.g. WASM/node) — skipping real-DB sourcing test");
         return;
     }
 
