@@ -20,19 +20,32 @@ using WP = OpenMagnetics::WaveformProcessor;
 
 // --- build_<topo>_tas bridge helpers (see header) ------------------------------------------------------
 namespace {
-// Emit the minimal, schema-valid processed side (current/voltage) into `dst[side]` from a SignalDescriptor.
+// Emit the schema-valid current/voltage side (processed + waveform) into `dst[side]` from a
+// SignalDescriptor.
 void emit_processed(nlohmann::json& dst, const char* side, const std::optional<MAS::SignalDescriptor>& sig) {
     if (!sig) return;
-    auto proc = sig->get_processed();
-    if (!proc) return;
-    nlohmann::json p;
-    p["label"]  = nlohmann::json(proc->get_label());   // WaveformLabel enum (required)
-    p["offset"] = proc->get_offset();                  // double (required)
-    if (proc->get_peak())         p["peak"]       = *proc->get_peak();
-    if (proc->get_rms())          p["rms"]        = *proc->get_rms();
-    if (proc->get_peak_to_peak()) p["peakToPeak"] = *proc->get_peak_to_peak();
-    if (proc->get_duty_cycle())   p["dutyCycle"]  = *proc->get_duty_cycle();
-    dst[side]["processed"] = std::move(p);
+    if (auto proc = sig->get_processed()) {
+        nlohmann::json p;
+        p["label"]  = nlohmann::json(proc->get_label());   // WaveformLabel enum (required)
+        p["offset"] = proc->get_offset();                  // double (required)
+        if (proc->get_peak())         p["peak"]       = *proc->get_peak();
+        if (proc->get_rms())          p["rms"]        = *proc->get_rms();
+        if (proc->get_peak_to_peak()) p["peakToPeak"] = *proc->get_peak_to_peak();
+        if (proc->get_duty_cycle())   p["dutyCycle"]  = *proc->get_duty_cycle();
+        dst[side]["processed"] = std::move(p);
+    }
+    // Also emit the sampled waveform. MKF reconstructs a STANDARD-label waveform (triangular,
+    // rectangular, …) from `processed` alone, but a CUSTOM one — the bipolar/dead-time transformer
+    // winding waveforms in push-pull and forward — cannot be reconstructed from stats, so
+    // calculate_advised_magnetics_fast rejects the seed with "Waveform must have at least 2 data
+    // points". The solvers already build these excitations with the full samples (WP::complete_
+    // excitation), so serialize them here rather than dropping the data.
+    if (auto wf = sig->get_waveform(); wf && wf->get_data().size() >= 2) {
+        nlohmann::json w;
+        w["data"] = wf->get_data();
+        if (auto t = wf->get_time()) w["time"] = *t;
+        dst[side]["waveform"] = std::move(w);
+    }
 }
 }  // namespace
 

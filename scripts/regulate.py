@@ -53,11 +53,20 @@ _CONTROL = {
     # complementary. The control is that outer DUTY, bounded below the inner ~0.5 (above it the outer
     # switches overlap the inner and the NPC mis-commutates). abt #66.
     "pshbDuty":  ("dutyCycle", (0.08, 0.49)),
+    # push_pull: the two switches alternate on a shared CENTER-TAPPED primary (each drives one half),
+    # so each switch's duty is physically bounded below 0.5 — beyond that the two overlap and short the
+    # primary through the center tap, COLLAPSING Vout (Vout(duty) rises to a peak near 0.5 then falls, a
+    # non-monotonic curve). The generic buck-family bracket (…, 0.96) let the bisection wander into that
+    # illegal region: with a lossy real magnetic the endpoint sample at 0.96 reads a collapsed Vout, the
+    # auto-direction detector mis-reads the slope, and the search rails to ~0.99 → "converged but 3–9 V,
+    # not 12 V". Cap below 0.5 (like pshb). This is BUCK-derived push_pull; weinberg is BOOST-derived and
+    # legitimately runs D>0.5 (overlap is its storage phase), so it stays on the generic "duty" bracket.
+    "ppDuty":    ("dutyCycle", (0.04, 0.49)),
 }
 _TOPO_CONTROL = {
     **{t: "duty" for t in ("boost", "buck", "flyback", "forward", "two_switch_forward", "sepic", "cuk",
-                           "zeta", "ahb", "acf", "fsbb", "weinberg", "isolated_buck", "isolated_buck_boost",
-                           "push_pull")},
+                           "zeta", "ahb", "acf", "fsbb", "weinberg", "isolated_buck", "isolated_buck_boost")},
+    "push_pull": "ppDuty",   # buck-derived center-tapped: per-switch duty < 0.5 (overlap shorts the primary)
     **{t: "phase" for t in ("psfb", "dab")},
     "pshb": "pshbDuty",   # 3-level NPC: control the outer-pair width, not a leg phase (abt #66)
     **{t: "frequency" for t in ("llc", "src", "cllc", "clllc")},
@@ -68,6 +77,30 @@ _TOPO_CONTROL = {
 # bisect — the operating point is "run the deck once and measure". Their two-timescale dynamics (line vs
 # switching) need LINE-cycle measurement windowing, not the switching-period windowing the DC path uses.
 _SELF_REGULATED = {"pfc", "vienna"}
+
+# Transient-solver convergence hardening, appended to EVERY regulate/attach deck (as a second
+# .options card that ngspice merges with the deck's own method=gear/reltol block). Near the duty
+# limit of a center-tapped / buck-derived secondary (push_pull, forward, …), the shrinking dead-time
+# + the real magnetic's LEAKAGE + fast rectifier diodes make the diode-commutation transient so
+# stiff that ngspice collapses the timestep to zero at the rectifier node ("Timestep too small ...
+# trouble with node sec_rect") and aborts — so the regulator stalls BELOW target on an
+# unconvergeable point (push_pull's real-magnetic realize died above D≈0.46). More Newton iterations
+# per step (itl4) plus a looser LTE / charge bound (trtol/chgtol) let the solver push THROUGH the
+# commutation. Pure solver settings — no circuit / physics / topology change; verified to recover
+# push_pull to 12 V with NO shift to a known-good buck's regulated Vout. It must be applied to BOTH
+# the bisection sim (_simulate) AND the post-regulation waveform attach (attach_simulated_
+# excitations) — the attach re-runs the SAME stiff deck, so without it the attach aborts and the
+# per-component reconstruction fails ("no simulated voltage for CCsn3").
+#
+# Merge these INTO the deck's existing `.options` card (a second standalone `.options` line is not
+# reliably honoured by libngspice here) via :func:`_harden_convergence`.
+_CONVERGENCE_OPTIONS = "itl4=1000 trtol=10 chgtol=1e-13 "
+
+
+def _harden_convergence(deck):
+    """Fold the transient-convergence options into the deck's first ``.options`` card (see
+    :data:`_CONVERGENCE_OPTIONS`). No-op if the deck has no ``.options`` line."""
+    return re.sub(r"\.options ", ".options " + _CONVERGENCE_OPTIONS, deck, count=1)
 
 
 # A schema-valid DATASHEET MOSFET/diode, for binding a seed TAS into a real-fidelity deck. HS fills its own
@@ -458,6 +491,7 @@ def attach_simulated_excitations(tas, fidelity, tag="attach"):
     cpos = deck.rfind("\n.control")
     if cpos != -1:
         deck = deck[:cpos]
+    deck = _harden_convergence(deck)          # same stiff deck as the bisection sim — harden it too
     if "savecurrents" not in deck:            # inductor current reads the savecurrents device vector @l[i]
         deck += "\n.options savecurrents\n"
 
@@ -599,6 +633,7 @@ def _simulate(tas, fidelity, tag):
     cpos = deck.rfind("\n.control")
     if cpos != -1:
         deck = deck[:cpos]
+    deck = _harden_convergence(deck)          # harden the stiff diode-commutation transient (see constant)
     # Instantaneous total output power as a behavioural source (sum over loads), then meas its AVERAGE — the
     # true average load power (avg of v*i_load), correct under ripple and load-agnostic. (`meas rms` is broken.)
     # An isolated rail (flybuck secondary) returns to its OWN node, not the primary ground 0, and floats vs 0,
@@ -737,6 +772,7 @@ def _simulate_self_regulated(tas, fidelity, line_freq, tag):
     cpos = deck.rfind("\n.control")
     if cpos != -1:
         deck = deck[:cpos]
+    deck = _harden_convergence(deck)                 # consistent solver hardening across all regulate decks
     frm, to = settle - period, settle               # the last WHOLE line cycle (averages the line ripple)
     w0 = settle - 2.0 * period
     pin_terms = " + ".join(f"{_vdiff(n1, n2)}*(-i({nm}))" for nm, n1, n2 in sources)
