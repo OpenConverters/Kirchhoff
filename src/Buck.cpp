@@ -124,7 +124,8 @@ json build_buck_tas(const BuckDesign& d) {
     json capd; capd["capacitor"] = json::object();
     capd["inputs"]["designRequirements"] = req::capacitor(
         d.outputCapacitance, d.outputVoltage / cfg::v_derate_capacitor(d.config), IcoutRms,
-        req::ESR_RIPPLE_FRACTION * d.outputVoltage / IpkL, "outputFilter");
+        cfg::get(d.config, "esrRippleFraction", req::ESR_RIPPLE_FRACTION) * d.outputVoltage / IpkL,
+        "outputFilter");
 
     // --- switching cell brick (Q high-side + L + freewheel rectifier) ---
     // DEFAULT: freewheeling diode D1 (sw_node->gnd). SYNCHRONOUS: low-side MOSFET Q2 + its body diode D2.

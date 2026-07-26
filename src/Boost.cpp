@@ -129,7 +129,8 @@ json build_boost_tas(const BoostDesign& d) {
     json capd; capd["capacitor"] = json::object();
     capd["inputs"]["designRequirements"] = req::capacitor(
         d.outputCapacitance, d.outputVoltage / cfg::v_derate_capacitor(d.config), IcoutRms,
-        req::ESR_RIPPLE_FRACTION * d.outputVoltage / IpkL, "outputFilter");
+        cfg::get(d.config, "esrRippleFraction", req::ESR_RIPPLE_FRACTION) * d.outputVoltage / IpkL,
+        "outputFilter");
 
     // The boost power stage is ONE functional block (the switching cell): inductor + switch + diode.
     // A canonical TAS power stage is a series two-port (dcBus in -> pulsatingDc out); the shunt switch

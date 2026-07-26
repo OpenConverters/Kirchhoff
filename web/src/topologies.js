@@ -253,9 +253,11 @@ const coupledBlock = () => [
 
 export const KNOBS = {
   // ── Non-Isolated DC-DC ──────────────────────────────────────────────────────
-  buck: [kPinL('Inductance', 'L', 'Pin the inductor value; the stage is sized around it.'),
+  buck: [
+    num('esrRippleFraction', 'ESR ripple budget', 0.005, { tier: 3, min: 0.0005, max: 0.05, step: 0.0005, tip: 'Filter-cap ESR budget as a fraction of the rail voltage (default 0.5%).' }),kPinL('Inductance', 'L', 'Pin the inductor value; the stage is sized around it.'),
     kRipple(0.4), kMaxIsw(), kMaxDuty(1.0), kDead(0.01), kOutRipple(0.01), kVderate()],
-  boost: [kPinL('Inductance', 'L', 'Pin the inductor value; the stage is sized around it.'),
+  boost: [
+    num('esrRippleFraction', 'ESR ripple budget', 0.005, { tier: 3, min: 0.0005, max: 0.05, step: 0.0005, tip: 'Filter-cap ESR budget as a fraction of the rail voltage (default 0.5%).' }),kPinL('Inductance', 'L', 'Pin the inductor value; the stage is sized around it.'),
     kRipple(0.4), kMaxIsw(), kMaxDuty(1.0), kDead(0.01), kOutRipple(0.01), kVderate()],
   sepic: [kPinL('Inductance L1', 'L1'), ...coupledBlock()],
   zeta: [kPinL('Inductance L1', 'L1'), ...coupledBlock()],
@@ -278,7 +280,8 @@ export const KNOBS = {
   ],
 
   // ── Isolated Forward / Flyback ────────────────────────────────────────────────
-  flyback: [kPinN(), kPinL('Magnetizing inductance', 'Lm'),
+  flyback: [
+    num('esrRippleFraction', 'ESR ripple budget', 0.005, { tier: 3, min: 0.0005, max: 0.05, step: 0.0005, tip: 'Filter-cap ESR budget as a fraction of the rail voltage (default 0.5%).' }),kPinN(), kPinL('Magnetizing inductance', 'Lm'),
     num('resonantCapacitance', 'QR valley cap', 220e-12, { tier: 1, sym: 'Cres', unit: 'F', min: 0, tip: 'Quasi-resonant valley-switching capacitance (QRM mode only).' }),
     kVderate()],
   isolated_buck: [kPinN(), kPinL('Magnetizing inductance', 'Lm'),
@@ -324,12 +327,14 @@ export const KNOBS = {
     num('leakDampR', 'Leak damper R', 10, { sym: 'R', unit: 'Ω', min: 0 }),
     num('leakDampC', 'Leak damper C', 1e-9, { sym: 'C', unit: 'F', min: 0 }), kVderate()],
   psfb: [
+    num('pinLr', 'Series inductance', null, { tier: 2, sym: 'Lr', unit: 'H', min: 0, pin: 'seriesInductance', tip: 'Pin the series (resonant + leakage) commutation inductance; the duty-loss iteration sizes the turns ratio around it.' }),
     num('commandedDuty', 'Commanded duty', 0.7, { tier: 1, sym: 'D', min: 0.05, max: 1, step: 0.01, tip: 'Effective duty = phase shift / 180°.' }),
     kPinN(), kPinL('Magnetizing inductance', 'Lm'),
     num('switchDutyFraction', 'Switch duty fraction', 0.48, { min: 0.05, max: 0.5, step: 0.01 }),
     num('inductorRippleRatio', 'Output-inductor ripple', 0.3, { sym: 'ΔIL', min: 0.01, max: 2, step: 0.05 }),
     num('cdOutputFactor', 'Current-doubler factor', 0.5, { min: 0, max: 1, step: 0.05 }), kVderate()],
   pshb: [
+    num('pinLr', 'Series inductance', null, { tier: 2, sym: 'Lr', unit: 'H', min: 0, pin: 'seriesInductance', tip: 'Pin the series (resonant + leakage) commutation inductance; the duty-loss iteration sizes the turns ratio around it.' }),
     num('commandedDuty', 'Commanded duty', 0.7, { tier: 1, sym: 'D', min: 0.05, max: 1, step: 0.01 }),
     kPinN(), kPinL('Magnetizing inductance', 'Lm'),
     num('magnetizingCurrentFraction', 'Magnetizing-current fraction', 0.3, { tier: 2, min: 0.01, max: 1, step: 0.01, tip: 'Sizes Lm.' }),

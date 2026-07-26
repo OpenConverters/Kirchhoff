@@ -97,3 +97,45 @@ TEST_CASE("advanced: LLC honors pinned resonant Lr (and Cr)", "[advanced][llc]")
     }
     CHECK(crFound == Catch::Approx(pinnedCr).epsilon(1e-3));
 }
+
+TEST_CASE("advanced: PSFB and PSHB honor a pinned series inductance (ABT #100 P3)", "[advanced][psfb]") {
+    const double pinnedLr = 8e-6;   // far above the 2 uH duty-loss-capped default
+    json spec = spec_for(400, 12, 240, 100000);
+    spec["designRequirements"]["desiredSeriesInductance"]["nominal"] = pinnedLr;
+
+    auto dPsfb = Kirchhoff::design_psfb(spec);
+    CHECK(dPsfb.seriesInductance == Catch::Approx(pinnedLr));
+    auto dPshb = Kirchhoff::design_pshb(spec);
+    CHECK(dPshb.seriesInductance == Catch::Approx(pinnedLr));
+
+    // unpinned keeps the duty-loss-capped default, and the duty-loss iteration
+    // must run WITH the pinned value: a 4x bigger Lr eats commutation duty
+    auto dFree = Kirchhoff::design_psfb(spec_for(400, 12, 240, 100000));
+    CHECK(dFree.seriesInductance <= 2e-6);
+    CHECK(dPsfb.effectiveDuty < dFree.effectiveDuty);
+}
+
+TEST_CASE("advanced: esrRippleFraction config scales the ESR budget (ABT #100 P3)", "[advanced][buck]") {
+    auto maxEsrOf = [](const json& tas) {
+        double found = -1;
+        for (const auto& st : tas.at("topology").at("stages")) {
+            if (!st.contains("circuit") || !st.at("circuit").is_object()) continue;
+            for (const auto& c : st.at("circuit").at("components")) {
+                if (!c.contains("data") || !c.at("data").is_object()) continue;
+                const auto& data = c.at("data");
+                if (!data.contains("inputs")) continue;
+                const auto& in = data.at("inputs");
+                if (in.contains("designRequirements") && in.at("designRequirements").contains("maximumEsr"))
+                    found = in.at("designRequirements").at("maximumEsr").get<double>();
+            }
+        }
+        return found;
+    };
+    json spec = spec_for(48, 12, 60, 300000);
+    json wide = spec;
+    wide["config"]["esrRippleFraction"] = 0.02;   // 4x the 0.5% default
+    double esrDefault = maxEsrOf(Kirchhoff::build_buck_tas(Kirchhoff::design_buck(spec)));
+    double esrWide = maxEsrOf(Kirchhoff::build_buck_tas(Kirchhoff::design_buck(wide)));
+    REQUIRE(esrDefault > 0);
+    CHECK(esrWide == Catch::Approx(4.0 * esrDefault).epsilon(1e-6));
+}

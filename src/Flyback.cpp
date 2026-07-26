@@ -372,7 +372,8 @@ json build_flyback_tas(const FlybackDesign& d) {
     json capCin; capCin["capacitor"] = json::object();
     capCin["inputs"]["designRequirements"] = req::capacitor(
         d.inputCapacitance, d.inputVoltageMax / cfg::v_derate_capacitor(d.config), IcinRms,
-        req::ESR_RIPPLE_FRACTION * d.inputVoltage / IpkPri, "inputFilter");
+        cfg::get(d.config, "esrRippleFraction", req::ESR_RIPPLE_FRACTION) * d.inputVoltage / IpkPri,
+        "inputFilter");
     // REAL RC clamp/snubber across the primary winding (dc+ ↔ sw = the primary, since primary_start=VIN and
     // primary_end=drain). The flyback is HARD-switched: at turn-off the leakage energy rings the drain up
     // past Vin+n·Vout, so a real RC clamp is a genuine board part here (an RCD clamp's damping network),
@@ -467,7 +468,8 @@ json build_flyback_tas(const FlybackDesign& d) {
         json capCout; capCout["capacitor"] = json::object();
         capCout["inputs"]["designRequirements"] = req::capacitor(
             leg.outputCapacitance, leg.voltage / cfg::v_derate_capacitor(d.config), IcoutRms,
-            req::ESR_RIPPLE_FRACTION * leg.voltage / IpkSec, "outputFilter");
+            cfg::get(d.config, "esrRippleFraction", req::ESR_RIPPLE_FRACTION) * leg.voltage / IpkSec,
+            "outputFilter");
 
         // transformer secondary winding -> its (sec,sec_rtn) port pair (flyback diode conducts during OFF,
         // so the secondary_end/dot-opposite end feeds the rectifier anode; the dot end returns to ground).

@@ -57,6 +57,18 @@ PshbDesign design_pshb(const json& tasInputs) {
     double nSeed = Vhb * Dcmd / (Vo + Vdtot);
     double Lr = std::min(2e-6, (Io > 0) ? 0.02 * std::max(nSeed, 0.1) * Vhb / (4.0 * Io * Fs) : 2e-6);
     Lr = std::max(Lr, 1e-7);
+    // Pinned Lr (desiredSeriesInductance / config["seriesInductance"]) overrides the duty-loss-capped
+    // default; the turns-ratio iteration sizes around the pinned value (ABT #100 P3, mirrors PSFB/DAB).
+    std::optional<double> pinnedLr = req::provided_series_inductance(dr);
+    if (!pinnedLr && d.config.is_object() && d.config.contains("seriesInductance") &&
+        d.config.at("seriesInductance").is_number())
+        pinnedLr = d.config.at("seriesInductance").get<double>();
+    if (pinnedLr) {
+        if (!(*pinnedLr > 0.0))
+            throw std::invalid_argument("design_pshb: pinned seriesInductance must be > 0, got " +
+                                        std::to_string(*pinnedLr));
+        Lr = *pinnedLr;
+    }
     d.seriesInductance = Lr;
 
     double n = nSeed, Deff = Dcmd;

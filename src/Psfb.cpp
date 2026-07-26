@@ -77,6 +77,19 @@ PsfbDesign design_psfb(const json& tasInputs) {
     double LrCap = (Io > 0) ? 0.02 * std::max(nSeed, 0.1) * Vin / (4.0 * Io * Fs) : 2e-6;
     double Lr = std::min(2e-6, LrCap);
     Lr = std::max(Lr, 1e-7);
+    // della-Pollock / MKF AdvancedPsfb: a pinned Lr (desiredSeriesInductance in designRequirements,
+    // or config["seriesInductance"]) fixes the commutation inductor and the duty-loss iteration
+    // below sizes the turns ratio around THAT value (ABT #100 P3).
+    std::optional<double> pinnedLr = req::provided_series_inductance(dr);
+    if (!pinnedLr && d.config.is_object() && d.config.contains("seriesInductance") &&
+        d.config.at("seriesInductance").is_number())
+        pinnedLr = d.config.at("seriesInductance").get<double>();
+    if (pinnedLr) {
+        if (!(*pinnedLr > 0.0))
+            throw std::invalid_argument("design_psfb: pinned seriesInductance must be > 0, got " +
+                                        std::to_string(*pinnedLr));
+        Lr = *pinnedLr;
+    }
     d.seriesInductance = Lr;
 
     // Iterate turns ratio n with duty-cycle-loss correction: Deff = Dcmd - 4*Lr*Io*Fs/(n*Vin),
