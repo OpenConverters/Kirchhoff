@@ -42,3 +42,6 @@
 	path = deps/MKF
 	url = git@github.com:OpenMagnetics/MKF.git
 	branch = main
+[submodule "deps/Kelvin"]
+	path = deps/Kelvin
+	url = https://github.com/OpenConverters/Kelvin.git
