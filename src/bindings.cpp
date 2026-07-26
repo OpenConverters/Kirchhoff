@@ -8,6 +8,7 @@
 #include "Pfc.hpp"
 #include "Vienna.hpp"
 #include "NgspiceRunner.hpp" // in-process libngspice runner (run_ngspice_console)
+#include "KirchhoffApi.hpp" // string/JSON facade (run_ngspice_ac)
 #include "Cmc.hpp"           // common-mode choke — component designer (MAS::Inputs, no TAS)
 #include "Dmc.hpp"           // differential-mode choke — component designer + LC propose
 #include "CurrentTransformer.hpp"  // current transformer — component designer
@@ -101,6 +102,13 @@ assembly/simulate steps (tas_to_ngspice / tas_to_ltspice) are topology-agnostic.
           "`.control … .endc` block (run/meas/wrdata), and return the captured console\n"
           "output. The in-process replacement for `ngspice -b <deck>` — no external\n"
           "binary. Parse `.meas` results from the returned text.");
+
+    m.def("run_ngspice_ac",
+          [](const std::string& deck) { return json::parse(Kirchhoff::api::run_ngspice_ac(deck)); },
+          py::arg("deck"),
+          "Run a RAW .ac deck IN-PROCESS via the integrated libngspice and return the\n"
+          "complex sweep: {success, error, frequenciesHz, vectors:{name:{re,im}}}.\n"
+          "Cross-engine verification entry (Hertz ABT #299).");
 
     // --- the adviser's magnetic inputs from an assembled TAS: MAS::Inputs (designRequirements +
     //     operatingPoints) for the main magnetic. Feed to PyOpenMagnetics.calculate_advised_magnetics[_fast]

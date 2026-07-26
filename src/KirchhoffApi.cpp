@@ -193,6 +193,38 @@ std::string simulate_ngspice(const std::string& tas, const std::string& fidelity
     });
 }
 
+std::string run_ngspice_ac(const std::string& deck) {
+    return guarded([&] {
+        if (!Kirchhoff::ngspice_in_process_available())
+            return json{{"success", false}, {"error", "Kirchhoff built without libngspice"}}.dump();
+        Kirchhoff::NgspiceRunResult r = Kirchhoff::run_ngspice_in_process(deck);
+        json out;
+        out["success"] = r.success;
+        out["error"] = r.error;
+        auto freq = r.vectors.find("frequency");
+        if (r.success && freq == r.vectors.end()) {
+            // a transient deck through this entry is a caller bug, not a fallback case
+            return json{{"success", false},
+                        {"error", "no frequency vector in the result — run_ngspice_ac needs an .ac deck"}}
+                .dump();
+        }
+        if (r.success) {
+            out["frequenciesHz"] = freq->second;
+            json vecs = json::object();
+            for (const auto& kv : r.vectors) {
+                if (kv.first == "frequency") continue;
+                json v;
+                v["re"] = kv.second;
+                auto im = r.vectorsImag.find(kv.first);
+                if (im != r.vectorsImag.end()) v["im"] = im->second;
+                vecs[kv.first] = v;
+            }
+            out["vectors"] = vecs;
+        }
+        return out.dump();
+    });
+}
+
 std::string extract_operating_point(const std::string& tas, const std::string& engine,
                                     const std::string& magneticName, const std::string& fidelityJson) {
     return guarded([&] {

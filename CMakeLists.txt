@@ -189,7 +189,7 @@ if (KIRCHHOFF_BUILD_PYBIND AND NOT EMSCRIPTEN)
     FetchContent_Declare(pybind11_json
         GIT_REPOSITORY https://github.com/pybind/pybind11_json.git GIT_TAG 0.2.15)
     FetchContent_MakeAvailable(pybind11 pybind11_json)
-    pybind11_add_module(PyKirchhoff src/bindings.cpp)
+    pybind11_add_module(PyKirchhoff src/bindings.cpp src/KirchhoffApi.cpp)
     target_include_directories(PyKirchhoff PRIVATE "${pybind11_json_SOURCE_DIR}/include")
     target_link_libraries(PyKirchhoff PRIVATE kirchhoff)
 

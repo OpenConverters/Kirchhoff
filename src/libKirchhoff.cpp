@@ -25,6 +25,8 @@ EMSCRIPTEN_BINDINGS(kirchhoff) {
     em::function("generate_ngspice_circuit", &api::generate_ngspice_circuit);
     em::function("generate_ltspice_circuit", &api::generate_ltspice_circuit);
     em::function("simulate_ngspice", &api::simulate_ngspice);
+    // raw .ac deck -> complex sweep (cross-engine verification, Hertz ABT #299)
+    em::function("run_ngspice_ac", &api::run_ngspice_ac);
     // the extract surface (MKF simulate_and_extract trio replacement) + diagnostics + the adviser's Inputs
     em::function("extract_operating_point", &api::extract_operating_point);
     em::function("topology_waveforms", &api::topology_waveforms);

@@ -116,3 +116,33 @@ TEST_CASE("in-process runner matches the ngspice CLI on a converter deck", "[ngs
     // Same deck, same engine — they must agree closely (small numeric diff from meas-vs-trapezoid).
     CHECK(*inproc == Catch::Approx(cli).epsilon(0.02));
 }
+
+TEST_CASE("an .ac deck returns complex vectors with the frequency sweep", "[ngspice][ac]") {
+    if (!Kirchhoff::ngspice_in_process_available()) {
+        SKIP("built without libngspice");
+    }
+    // RC low-pass, f_c = 1/(2 pi R C) = 1 kHz: |V(out)| must be -3.01 dB at the corner
+    const std::string deck =
+        "* rc lowpass ac probe\n"
+        "V1 in 0 AC 1\n"
+        "R1 in out 1k\n"
+        "C1 out 0 159.155n\n"
+        ".ac dec 20 100 100k\n"
+        ".end\n";
+    auto r = Kirchhoff::run_ngspice_in_process(deck);
+    REQUIRE(r.success);
+    REQUIRE(r.time.empty());                       // .ac has no time axis
+    REQUIRE(r.vectors.count("frequency") == 1);
+    REQUIRE(r.vectors.count("out") == 1);
+    REQUIRE(r.vectorsImag.count("out") == 1);      // complex data captured
+    const auto& f = r.vectors.at("frequency");
+    const auto& re = r.vectors.at("out");
+    const auto& im = r.vectorsImag.at("out");
+    REQUIRE(re.size() == f.size());
+    REQUIRE(im.size() == f.size());
+    size_t corner = 0;
+    for (size_t i = 1; i < f.size(); ++i)
+        if (std::abs(f[i] - 1000.0) < std::abs(f[corner] - 1000.0)) corner = i;
+    double db = 20.0 * std::log10(std::hypot(re[corner], im[corner]));
+    CHECK(db == Catch::Approx(-3.01).margin(0.1));
+}

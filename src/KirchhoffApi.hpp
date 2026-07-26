@@ -54,6 +54,13 @@ KH_API std::string generate_ltspice_circuit(const std::string& tasJson, const st
 // string) when the build has no libngspice, so callers can branch on it.
 KH_API std::string simulate_ngspice(const std::string& tasJson, const std::string& fidelityJson);
 
+// Run a RAW .ac deck string in-process and return the complex sweep:
+//   {success, error, frequenciesHz:[...], vectors:{"<name>":{re:[...], im:[...]}}}
+// The deck needs circuit + `.ac` + `.end` (any .control block is stripped by the runner; `run`
+// executes the deck's own analysis). Built for cross-engine verification (Hertz ABT #299): an
+// independent ngspice solve of the same netlist an analytical transfer-function model claims.
+KH_API std::string run_ngspice_ac(const std::string& deck);
+
 // The extract surface (replaces MKF's simulate_and_extract trio) — all operate on the assembled TAS.
 // engine ∈ {"analytical","ngspice"}. magneticName empty = the main magnetic. fidelityJson is the
 // NGSPICE deck directive (base origin + per-component overrides), same shape as tas_to_ngspice's.

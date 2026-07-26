@@ -91,6 +91,7 @@ struct Capture {
     std::mutex mtx;                                            // guards time / vectors / errorMessage / console
     std::vector<double> time;
     std::map<std::string, std::vector<double>> vectors;
+    std::map<std::string, std::vector<double>> vectorsImag;
     std::string console;                                       // full SendChar text (for .meas parsing)
     std::atomic<bool> complete{false};
     std::atomic<bool> error{false};
@@ -155,8 +156,14 @@ extern "C" int kh_send_data(pvecvaluesall vecs, int /*count*/, int /*id*/, void*
         std::string lname = to_lower(nm);
         bool isTime = (lname == "time") ||
                       (lname.size() > 5 && lname.compare(lname.size()-5, 5, ".time") == 0);
-        if (isTime) c->time.push_back(vecs->vecsa[i]->creal);
-        else        c->vectors[nm].push_back(vecs->vecsa[i]->creal);
+        if (isTime) {
+            c->time.push_back(vecs->vecsa[i]->creal);
+        } else {
+            c->vectors[nm].push_back(vecs->vecsa[i]->creal);
+            // .ac vectors are complex; keep the imaginary part so callers can
+            // form magnitudes. Transient vectors never set is_complex.
+            if (vecs->vecsa[i]->is_complex) c->vectorsImag[nm].push_back(vecs->vecsa[i]->cimag);
+        }
     }
     return 0;
 }
@@ -239,12 +246,12 @@ NgspiceRunResult run_ngspice_in_process(const std::string& deck, double timeoutS
     // callback, with a fallback (data captured + thread idle) and a hard timeout.
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::milliseconds(static_cast<long>(timeoutSeconds * 1000.0));
-    auto timeHasSamples = [&] {                                // read shared buffer under the lock
+    auto anySamples = [&] {                                    // read shared buffer under the lock
         std::lock_guard<std::mutex> lk(cap->mtx);
-        return !cap->time.empty();
+        return !cap->time.empty() || !cap->vectors.empty();    // .ac runs have no "time" vector
     };
     while (!cap->complete) {
-        if (!ngSpice_running() && timeHasSamples()) break;    // finished, callback may not have fired
+        if (!ngSpice_running() && anySamples()) break;        // finished, callback may not have fired
         if (std::chrono::steady_clock::now() > deadline) {
             // bg_halt only REQUESTS a stop; wait for the background thread to actually stop before we let
             // the circuit and capture state go, so it can never write into freed memory.
@@ -267,9 +274,11 @@ NgspiceRunResult run_ngspice_in_process(const std::string& deck, double timeoutS
         std::lock_guard<std::mutex> lk(cap->mtx);
         result.time = cap->time;
         result.vectors = cap->vectors;
+        result.vectorsImag = cap->vectorsImag;
         result.error = cap->errorMessage;
     }
-    result.success = !cap->error && !result.time.empty();
+    // an .ac run carries its sweep in `vectors` ("frequency"), never in `time`
+    result.success = !cap->error && (!result.time.empty() || !result.vectors.empty());
     return result;
 }
 
