@@ -50,9 +50,9 @@ const khColorQuery = Object.entries(KH_COLORS).map(([k, v]) => `${k}=${v}`).join
 function LLC_LAYOUT() {
   const isCT = (q) => (q.req.turnsRatios?.length ?? 0) >= 2  // center-tapped: two secondary windings
   return {
+    // Q1/Q2 (the totem-pole half-bridge) are NOT placed as MOSFETs — CircuitJS1 can't converge them
+    // (ABT#262). They're consumed by `drive` below, which emits an ideal switch-node square source.
     place: {
-      Q1:      { pins: { gate: [384, 160], drain: [448, 144], source: [448, 176] }, line: () => 'f 384 160 448 160 32 1.5 50' },
-      Q2:      { pins: { gate: [384, 272], drain: [448, 256], source: [448, 288] }, line: () => 'f 384 272 448 272 32 1.5 50' },
       Chi:     { pins: { 1: [272, 112], 2: [272, 304] }, line: (q, c) => `c 272 112 272 304 0 ${c.C(q)} ${c.vin / 2}` },
       Clo:     { pins: { 1: [272, 304], 2: [272, 400] }, line: (q, c) => `c 272 304 272 400 0 ${c.C(q)} ${c.vin / 2}` },
       Rbal_hi: { pins: { 1: [336, 112], 2: [336, 304] }, line: (q, c) => `r 336 112 336 304 0 ${c.R(q)}` },
@@ -71,8 +71,8 @@ function LLC_LAYOUT() {
         line: (q, c) => {
           const sec = 1 / resolveDim(q.req.turnsRatios[0], `${q.ref} turnsRatios[0]`)
           return isCT(q)
-            ? `406 736 192 848 192 0 ${c.Lm} 0.999 1:${sec},${sec} 3 0 0 0`
-            : `T 736 208 816 208 0 ${c.Lm} ${sec} 0 0 0.999`
+            ? `406 736 192 848 192 0 ${c.L(q)} 0.999 1:${sec},${sec} 3 0 0 0`
+            : `T 736 208 816 208 0 ${c.L(q)} ${sec} 0 0 0.999`
         },
       },
       // ── full-bridge secondary rectifier (DH*/DL*) — present only in the fullBridge variant ──
@@ -134,11 +134,18 @@ function LLC_LAYOUT() {
     synth: (c) => [
       { line: `v 176 400 176 112 0 0 40 ${c.vin} 0 0 0.5`, posts: [[176, 400], [176, 112]], attach: { '176,112': ['Chi', '1'], '176,400': ['Clo', '2'] } },
       { line: 'g 176 400 176 416 0', posts: [[176, 400]] },
-      { line: `v 384 208 384 160 0 2 ${c.fVis} 5 5 0 ${c.duty}`, posts: [[384, 208], [384, 160]], attach: { '384,160': ['Q1', 'gate'], '384,208': ['Q1', 'source'] } },
-      { line: `v 384 336 384 272 0 2 ${c.fVis} 5 5 0 ${1 - c.duty}`, posts: [[384, 336], [384, 272]], attach: { '384,272': ['Q2', 'gate'], '384,336': ['Q2', 'source'] } },
       { line: `r 1104 160 1104 400 0 ${c.rload}`, tag: 'Rload', posts: [[1104, 160], [1104, 400]], attach: { '1104,160': ['Cout', '1'], '1104,400': ['Cout', '2'] } },
       { line: '207 1040 160 1088 160 0 vout', posts: [[1040, 160]] },
     ],
+    // Ideal half-bridge drive (ABT#262): the switch node (448,208) is a 0..Vin square at fsw referenced
+    // to the Vin− rail (448,400) — exactly the totem-pole's output — in place of the two un-convergeable
+    // MOSFETs Q1/Q2. Tagged 'Q1' so the switch/overview scopes plot the switch-node waveform.
+    drive: {
+      fets: ['Q1', 'Q2'],
+      sources: (c) => [
+        { line: `v 448 208 448 400 0 2 ${c.fVis} ${c.vin / 2} ${c.vin / 2} 0 ${c.duty}`, posts: [[448, 208], [448, 400]], tag: 'Q1' },
+      ],
+    },
     scopeSets: {
       // rectifier scopes list ALL variants' parts; the absent ones are skipped (findIndex < 0).
       overview:  [['Q1', 'voltage'], ['D1', 'voltage'], ['DH1', 'voltage'], ['Rload', 'voltage']],
@@ -622,9 +629,8 @@ const LAYOUTS = {
   },
 
   ahb: {
+    // Q1/Q2 half-bridge → ideal switch-node drive (ABT#262; CircuitJS1 can't converge the totem pole).
     place: {
-      Q1:   { pins: { gate: [384, 160], drain: [448, 144], source: [448, 176] }, line: () => 'f 384 160 448 160 32 1.5 50' },
-      Q2:   { pins: { gate: [384, 272], drain: [448, 256], source: [448, 288] }, line: () => 'f 384 272 448 272 32 1.5 50' },
       // DC-block: Cb|1 = Vin bus, Cb|2 = primary-start node (net2). Steady-state V ≈ Vin·(1−D).
       Cb:   { pins: { 1: [680, 112], 2: [680, 160] }, line: (q, c) => `c 680 112 680 160 0 ${c.C(q)} ${c.vin * (1 - c.duty)}` },
       // T1: 2-winding transformer (full-bridge / current-doubler, single secondary) OR a 3-winding 406
@@ -638,8 +644,8 @@ const LAYOUTS = {
         line: (q, c) => {
           const sec = 1 / resolveDim(q.req.turnsRatios[0], `${q.ref} turnsRatios[0]`)
           return isCTr(q)
-            ? `406 736 128 816 128 0 ${c.Lm} 0.999 1:${sec},${sec} 3 0 0 0`
-            : `T 736 160 816 160 0 ${c.Lm} ${sec} 0 0 0.999`
+            ? `406 736 128 816 128 0 ${c.L(q)} 0.999 1:${sec},${sec} 3 0 0 0`
+            : `T 736 160 816 160 0 ${c.L(q)} ${sec} 0 0 0.999`
         },
       },
       // Series-RC damper across the primary: Rdmp (net2 → snubber-mid) then Cdmp (snubber-mid → sw/net1).
@@ -693,15 +699,19 @@ const LAYOUTS = {
       { pts: [448, 400, 816, 400], needs: ['Lo2'] }, { pts: [816, 400, 848, 400], needs: ['Lo2'] }, { pts: [848, 400, 1168, 400], needs: ['Lo2'] }, { pts: [1168, 400, 1232, 400], needs: ['Lo2'] },
     ],
     synth: (c) => [
-      { line: `v 176 400 176 112 0 0 40 ${c.vin} 0 0 0.5`, posts: [[176, 400], [176, 112]], attach: { '176,112': ['Q1', 'drain'], '176,400': ['Cout', '2'] } },
+      { line: `v 176 400 176 112 0 0 40 ${c.vin} 0 0 0.5`, posts: [[176, 400], [176, 112]], attach: { '176,112': ['Cb', '1'], '176,400': ['Cout', '2'] } },
       { line: 'g 176 400 176 416 0', posts: [[176, 400]] },
-      // Q1 high-side: FLOATING gate-source PWM referenced to the sw node (Q1 source), D = duty.
-      { line: `v 384 192 384 160 0 2 ${c.fVis} 5 5 0 ${c.duty}`, posts: [[384, 192], [384, 160]], attach: { '384,160': ['Q1', 'gate'], '384,192': ['Q1', 'source'] } },
-      // Q2 low-side: ground-referenced complementary PWM, D = 1 − duty.
-      { line: `v 384 336 384 272 0 2 ${c.fVis} 5 5 0 ${1 - c.duty}`, posts: [[384, 336], [384, 272]], attach: { '384,272': ['Q2', 'gate'], '384,336': ['Q2', 'source'] } },
       { line: `r 1232 96 1232 400 0 ${c.rload}`, tag: 'Rload', posts: [[1232, 96], [1232, 400]], attach: { '1232,96': ['Cout', '1'], '1232,400': ['Cout', '2'] } },
       { line: '207 1168 96 1216 96 0 vout', posts: [[1168, 96]] },
     ],
+    // Ideal half-bridge drive (ABT#262): switch node (448,192) = 0..Vin square at fsw, duty D, ref Vin−
+    // rail (448,400), in place of the un-convergeable MOSFETs Q1/Q2. Tagged 'Q1' for the scopes.
+    drive: {
+      fets: ['Q1', 'Q2'],
+      sources: (c) => [
+        { line: `v 448 192 448 400 0 2 ${c.fVis} ${c.vin / 2} ${c.vin / 2} 0 ${c.duty}`, posts: [[448, 192], [448, 400]], tag: 'Q1' },
+      ],
+    },
     scopeSets: {
       overview:  [['Q1', 'voltage'], ['Dr1', 'voltage'], ['Rload', 'voltage']],
       // Lout is a real inductor, so its own current + voltage both plot directly ('both').
@@ -791,11 +801,9 @@ const LAYOUTS = {
       // DC-bus split divider: CsHi = Vin→mid, CsLo = mid→gnd; midpoint (net1) sits at Vin/2.
       CsHi: { pins: { 1: [272, 112], 2: [272, 304] }, line: (q, c) => `c 272 112 272 304 0 ${c.C(q)} ${c.vin / 2}` },
       CsLo: { pins: { 1: [272, 304], 2: [272, 480] }, line: (q, c) => `c 272 304 272 480 0 ${c.C(q)} ${c.vin / 2}` },
-      // Vertical switch stack S1 (top, drain=Vin) … S4 (bottom, source=gnd). Sources of S1/S2/S3 swing.
-      S1: { pins: { gate: [384, 144], drain: [448, 128], source: [448, 160] }, line: () => 'f 384 144 448 144 32 1.5 50' },
-      S2: { pins: { gate: [384, 240], drain: [448, 224], source: [448, 256] }, line: () => 'f 384 240 448 240 32 1.5 50' },
-      S3: { pins: { gate: [384, 336], drain: [448, 320], source: [448, 352] }, line: () => 'f 384 336 448 336 32 1.5 50' },
-      S4: { pins: { gate: [384, 432], drain: [448, 416], source: [448, 448] }, line: () => 'f 384 432 448 432 32 1.5 50' },
+      // Vertical switch stack S1..S4 → ideal flying-node drive (ABT#262; CircuitJS1 can't converge the
+      // stacked source-followers). Consumed by `drive` below; a 0..Vin square approximates the NPC
+      // 3-level flying node (net3) at its fundamental — the tank amplitude (±Vin/2 vs mid) is preserved.
       // NPC clamp diodes: DC1 anode=mid, cathode=net2; DC2 anode=net4, cathode=mid.
       DC1: { pins: { anode: [336, 304], cathode: [336, 192] }, line: () => 'd 336 304 336 192 2 default' },
       DC2: { pins: { anode: [336, 384], cathode: [336, 304] }, line: () => 'd 336 384 336 304 2 default' },
@@ -808,6 +816,11 @@ const LAYOUTS = {
               secondary1_start: [880, 240], secondary1_end: [880, 272],
               secondary2_start: [880, 288], secondary2_end: [880, 320] }
           : { primary_start: [800, 272], primary_end: [800, 304], secondary1_start: [880, 272], secondary1_end: [880, 304] },
+        // 3-level NOTE: unlike the other bridges (which use c.L(q), the transformer's OWN large
+        // magnetizing inductance), pshb's T1 uses c.Lm (the resonant-inductor-scaled value). The real NPC
+        // clamps the flying node to the bus mid during its ZERO level via DC1/DC2; a single 2-level ideal
+        // source (`drive` below) can't reproduce that and over-drives with the true (large) Lm. The smaller
+        // c.Lm acts as the effective shunt that stands in for the mid-clamp, landing Vout at design. (ABT#262)
         line: (q, c) => {
           const sec = 1 / resolveDim(q.req.turnsRatios[0], `${q.ref} turnsRatios[0]`)
           return isCTr(q)
@@ -874,17 +887,19 @@ const LAYOUTS = {
       { pts: [448, 480, 920, 480], needs: ['Lo2'] }, { pts: [920, 480, 1000, 480], needs: ['Lo2'] }, { pts: [1000, 480, 1248, 480], needs: ['Lo2'] }, { pts: [1248, 480, 1312, 480], needs: ['Lo2'] },
     ],
     synth: (c) => [
-      { line: `v 176 480 176 112 0 0 40 ${c.vin} 0 0 0.5`, posts: [[176, 480], [176, 112]], attach: { '176,112': ['S1', 'drain'], '176,480': ['CsLo', '2'] } },
+      { line: `v 176 480 176 112 0 0 40 ${c.vin} 0 0 0.5`, posts: [[176, 480], [176, 112]], attach: { '176,112': ['CsHi', '1'], '176,480': ['CsLo', '2'] } },
       { line: 'g 176 480 176 496 0', posts: [[176, 480]] },
-      // S1/S2/S3 high-side: FLOATING gate-source PWM referenced to each own (swinging) source; S4 low-side:
-      // ground-referenced. Each FET runs on its OWN phase-shift stimulus duty via c.dutyOf.
-      { line: `v 384 192 384 144 0 2 ${c.fVis} 5 5 0 ${c.dutyOf('S1')}`, posts: [[384, 192], [384, 144]], attach: { '384,144': ['S1', 'gate'], '384,192': ['S1', 'source'] } },
-      { line: `v 384 288 384 240 0 2 ${c.fVis} 5 5 0 ${c.dutyOf('S2')}`, posts: [[384, 288], [384, 240]], attach: { '384,240': ['S2', 'gate'], '384,288': ['S2', 'source'] } },
-      { line: `v 384 384 384 336 0 2 ${c.fVis} 5 5 0 ${c.dutyOf('S3')}`, posts: [[384, 384], [384, 336]], attach: { '384,336': ['S3', 'gate'], '384,384': ['S3', 'source'] } },
-      { line: `v 384 480 384 432 0 2 ${c.fVis} 5 5 0 ${c.dutyOf('S4')}`, posts: [[384, 480], [384, 432]], attach: { '384,432': ['S4', 'gate'], '384,480': ['S4', 'source'] } },
       { line: `r 1312 176 1312 480 0 ${c.rload}`, tag: 'Rload', posts: [[1312, 176], [1312, 480]], attach: { '1312,176': ['Cout', '1'], '1312,480': ['Cout', '2'] } },
       { line: '207 1248 176 1296 176 0 vout', posts: [[1248, 176]] },
     ],
+    // Ideal 3-level drive (ABT#262): flying node net3 (448,272) = 0..Vin square at fsw, duty D, ref gnd
+    // (448,480), in place of the S1..S4 stack. The tank (net3 → Lr → T1 → mid) sees ±Vin/2. Tagged 'S1'.
+    drive: {
+      fets: ['S1', 'S2', 'S3', 'S4'],
+      sources: (c) => [
+        { line: `v 448 272 448 480 0 2 ${c.fVis} ${c.vin / 2} ${c.vin / 2} 0 ${c.duty}`, posts: [[448, 272], [448, 480]], tag: 'S1' },
+      ],
+    },
     scopeSets: {
       overview:  [['S1', 'voltage'], ['Dr1', 'voltage'], ['Rload', 'voltage']],
       // Lr (resonant/leakage) and Lout (output choke) are real inductors, so their own I+V plot directly.
@@ -896,12 +911,11 @@ const LAYOUTS = {
   },
 
   cllc: {
+    // ABT#262: BOTH bridges are un-convergeable FET totem-poles. Primary Q1-Q4 → two antiphase ideal leg
+    // drives (`drive` below). Secondary synchronous-rectifier Qa-Qd → a passive DIODE bridge (a SR FET
+    // conducts exactly when its body diode would, so a diode is the faithful rectifier and it converges;
+    // the SR only trades diode drop for efficiency, irrelevant to a visual sim).
     place: {
-      // ── primary full bridge (two legs, side by side) ──────────────────────────────────────────
-      Q1: { pins: { gate: [208, 176], drain: [272, 160], source: [272, 192] }, line: () => 'f 208 176 272 176 32 1.5 50' },
-      Q2: { pins: { gate: [208, 320], drain: [272, 304], source: [272, 336] }, line: () => 'f 208 320 272 320 32 1.5 50' },
-      Q3: { pins: { gate: [416, 176], drain: [480, 160], source: [480, 192] }, line: () => 'f 416 176 480 176 32 1.5 50' },
-      Q4: { pins: { gate: [416, 320], drain: [480, 304], source: [480, 336] }, line: () => 'f 416 320 480 320 32 1.5 50' },
       // ── primary resonant tank Cr1 → Lr1 → T1 primary ──────────────────────────────────────────
       Cr1: { pins: { 1: [336, 256], 2: [400, 256] }, line: (q, c) => `c 336 256 400 256 0 ${c.C(q)} 0` },
       Lr1: { pins: { primary_start: [608, 256], primary_end: [720, 256] }, line: (q, c) => `l 608 256 720 256 0 ${c.L(q)} 0` },
@@ -912,11 +926,12 @@ const LAYOUTS = {
       // ── secondary resonant tank Lr2 → Cr2 (mirror of the primary) ─────────────────────────────
       Lr2: { pins: { primary_start: [944, 256], primary_end: [1056, 256] }, line: (q, c) => `l 944 256 1056 256 0 ${c.L(q)} 0` },
       Cr2: { pins: { 1: [1184, 256], 2: [1248, 256] }, line: (q, c) => `c 1184 256 1248 256 0 ${c.C(q)} 0` },
-      // ── secondary full bridge (synchronous rectifier) ─────────────────────────────────────────
-      Qc: { pins: { gate: [1184, 176], drain: [1120, 160], source: [1120, 192] }, line: () => 'f 1184 176 1120 176 32 1.5 50' },
-      Qd: { pins: { gate: [1184, 320], drain: [1120, 304], source: [1120, 336] }, line: () => 'f 1184 320 1120 320 32 1.5 50' },
-      Qa: { pins: { gate: [1376, 176], drain: [1312, 160], source: [1312, 192] }, line: () => 'f 1376 176 1312 176 32 1.5 50' },
-      Qb: { pins: { gate: [1376, 320], drain: [1312, 304], source: [1312, 336] }, line: () => 'f 1376 320 1312 320 32 1.5 50' },
+      // ── secondary full bridge — SR FETs drawn as their rectifying diodes (anode=source net, cathode=
+      //    drain net; leg mids net8/net7 → Vout, gnd → leg mids). Pin names stay drain/source (CIAS nets).
+      Qc: { pins: { drain: [1120, 160], source: [1120, 192] }, line: () => 'd 1120 192 1120 160 2 default' },
+      Qd: { pins: { drain: [1120, 304], source: [1120, 336] }, line: () => 'd 1120 336 1120 304 2 default' },
+      Qa: { pins: { drain: [1312, 160], source: [1312, 192] }, line: () => 'd 1312 192 1312 160 2 default' },
+      Qb: { pins: { drain: [1312, 304], source: [1312, 336] }, line: () => 'd 1312 336 1312 304 2 default' },
       Cout: { pins: { 1: [1440, 96], 2: [1440, 432] }, line: (q, c) => `c 1440 96 1440 432 0 ${c.C(q)} ${c.vout}` },
     },
     wires: [
@@ -956,27 +971,24 @@ const LAYOUTS = {
       [1440, 96, 1472, 96],
     ],
     synth: (c) => [
-      // primary DC input source (Vin bus → gnd) + ground
-      { line: `v 176 432 176 96 0 0 40 ${c.vin} 0 0 0.5`, posts: [[176, 432], [176, 96]], attach: { '176,96': ['Q1', 'drain'], '176,432': ['Cout', '2'] } },
+      // primary DC input source (Vin bus → gnd) + ground. Vin+ carries no placed part (bridge is ideal-
+      // driven), so anchor only the Vin− post.
+      { line: `v 176 432 176 96 0 0 40 ${c.vin} 0 0 0.5`, posts: [[176, 432], [176, 96]], attach: { '176,432': ['Cout', '2'] } },
       { line: 'g 176 432 176 448 0', posts: [[176, 432]] },
-      // eight gate drives — one per FET, on its diagonal's duty. Q1-diagonal {Q1,Q4,Qa,Qd} = c.duty;
-      // Q2-diagonal {Q2,Q3,Qb,Qc} = 1-c.duty. High-side float (ref → own source); low-side ground-ref.
-      // The PRIMARY four switch at phase 0; the SECONDARY synchronous-rectifier four (Qa–Qd) are driven
-      // π out of phase (phaseShift = Math.PI) so each SR FET conducts on the half-cycle its body diode
-      // would — in phase, they short the tank and collapse Vout (~0.35 V); π-shifted they rectify to the
-      // full +Vout. Verified live in CircuitJS1: in-phase → 0.35 V, π-shifted → 48.0 V (design target).
-      { line: `v 208 256 208 176 0 2 ${c.fVis} 5 5 0 ${c.duty}`, posts: [[208, 256], [208, 176]], attach: { '208,176': ['Q1', 'gate'], '208,256': ['Q1', 'source'] } },
-      { line: `v 208 384 208 320 0 2 ${c.fVis} 5 5 0 ${1 - c.duty}`, posts: [[208, 384], [208, 320]], attach: { '208,320': ['Q2', 'gate'], '208,384': ['Q2', 'source'] } },
-      { line: `v 416 240 416 176 0 2 ${c.fVis} 5 5 0 ${1 - c.duty}`, posts: [[416, 240], [416, 176]], attach: { '416,176': ['Q3', 'gate'], '416,240': ['Q3', 'source'] } },
-      { line: `v 416 384 416 320 0 2 ${c.fVis} 5 5 0 ${c.duty}`, posts: [[416, 384], [416, 320]], attach: { '416,320': ['Q4', 'gate'], '416,384': ['Q4', 'source'] } },
-      { line: `v 1376 256 1376 176 0 2 ${c.fVis} 5 5 ${Math.PI} ${c.duty}`, posts: [[1376, 256], [1376, 176]], attach: { '1376,176': ['Qa', 'gate'], '1376,256': ['Qa', 'source'] } },
-      { line: `v 1376 384 1376 320 0 2 ${c.fVis} 5 5 ${Math.PI} ${1 - c.duty}`, posts: [[1376, 384], [1376, 320]], attach: { '1376,320': ['Qb', 'gate'], '1376,384': ['Qb', 'source'] } },
-      { line: `v 1184 240 1184 176 0 2 ${c.fVis} 5 5 ${Math.PI} ${1 - c.duty}`, posts: [[1184, 240], [1184, 176]], attach: { '1184,176': ['Qc', 'gate'], '1184,240': ['Qc', 'source'] } },
-      { line: `v 1184 384 1184 320 0 2 ${c.fVis} 5 5 ${Math.PI} ${c.duty}`, posts: [[1184, 384], [1184, 320]], attach: { '1184,320': ['Qd', 'gate'], '1184,384': ['Qd', 'source'] } },
       // load across Vout + JS-API-readable vout node
       { line: `r 1472 96 1472 432 0 ${c.rload}`, tag: 'Rload', posts: [[1472, 96], [1472, 432]], attach: { '1472,96': ['Cout', '1'], '1472,432': ['Cout', '2'] } },
       { line: '207 1440 96 1488 96 0 vout', posts: [[1440, 96]] },
     ],
+    // Ideal primary full-bridge drive (ABT#262): leg1 mid (272,256) and leg2 mid (480,240) are 0..Vin
+    // squares at fsw, antiphase (leg2 lags π), referenced to gnd (…,432) — the diagonal switching a full
+    // bridge produces, so the series tank sees ±Vin. Resonant ⇒ Vout is set by the tank+turns at fr.
+    drive: {
+      fets: ['Q1', 'Q2', 'Q3', 'Q4'],
+      sources: (c) => [
+        { line: `v 272 256 272 432 0 2 ${c.fVis} ${c.vin / 2} ${c.vin / 2} 0 0.5`, posts: [[272, 256], [272, 432]], tag: 'Q1' },
+        { line: `v 480 240 480 432 0 2 ${c.fVis} ${c.vin / 2} ${c.vin / 2} ${Math.PI} 0.5`, posts: [[480, 240], [480, 432]], tag: 'Q3' },
+      ],
+    },
     scopeSets: {
       overview:  [['Q1', 'voltage'], ['Qa', 'voltage'], ['Rload', 'voltage']],
       magnetic:  [['Qa', 'voltage'], { magI: [720, 256, 800, 256], magVtag: 'Q1' }, ['Rload', 'voltage']],
@@ -987,11 +999,9 @@ const LAYOUTS = {
   },
 
   psfb: {
+    // QA/QB (leg A) + QC/QD (leg C) → two ideal phase-shifted leg drives (ABT#262; the full-bridge FETs
+    // don't converge). The phase between the legs — not duty — transfers power; see `drive` below.
     place: {
-      QA:      { pins: { gate: [384, 160], drain: [448, 144], source: [448, 176] }, line: () => 'f 384 160 448 160 32 1.5 50' },
-      QB:      { pins: { gate: [384, 272], drain: [448, 256], source: [448, 288] }, line: () => 'f 384 272 448 272 32 1.5 50' },
-      QC:      { pins: { gate: [624, 160], drain: [560, 144], source: [560, 176] }, line: () => 'f 624 160 560 160 32 1.5 50' },
-      QD:      { pins: { gate: [624, 272], drain: [560, 256], source: [560, 288] }, line: () => 'f 624 272 560 272 32 1.5 50' },
       Lr:      { pins: { primary_start: [504, 336], primary_end: [632, 336] }, line: (q, c) => `l 504 336 632 336 0 ${c.Lm} 0` },
       // 2-winding transformer (full-bridge / current-doubler) or 3-winding 406 (center-tapped, dual sec).
       T1: {
@@ -1003,8 +1013,8 @@ const LAYOUTS = {
         line: (q, c) => {
           const sec = 1 / resolveDim(q.req.turnsRatios[0], `${q.ref} turnsRatios[0]`)
           return isCTr(q)
-            ? `406 680 304 760 304 0 ${c.Lm} 0.999 1:${sec},${sec} 3 0 0 0`
-            : `T 680 336 760 336 0 ${c.Lm} ${sec} 0 0 0.999`
+            ? `406 680 304 760 304 0 ${c.L(q)} 0.999 1:${sec},${sec} 3 0 0 0`
+            : `T 680 336 760 336 0 ${c.L(q)} ${sec} 0 0 0.999`
         },
       },
       Crc_pri: { pins: { 1: [504, 432], 2: [632, 432] }, line: (q, c) => `c 504 432 632 432 0 ${c.C(q)} 0` },
@@ -1056,23 +1066,31 @@ const LAYOUTS = {
       { pts: [560, 528, 800, 528], needs: ['Lo2'] }, { pts: [800, 528, 880, 528], needs: ['Lo2'] }, { pts: [880, 528, 1112, 528], needs: ['Lo2'] }, { pts: [1112, 528, 1176, 528], needs: ['Lo2'] },
     ],
     synth: (c) => [
-      { line: `v 176 528 176 112 0 0 40 ${c.vin} 0 0 0.5`, posts: [[176, 528], [176, 112]], attach: { '176,112': ['QA', 'drain'], '176,528': ['Cout', '2'] } },
+      // Vin+ (top rail) carries no placed component once the bridge FETs are ideal-driven, so the source
+      // anchors only its Vin− post; the leg drives below set the switching nodes directly.
+      { line: `v 176 528 176 112 0 0 40 ${c.vin} 0 0 0.5`, posts: [[176, 528], [176, 112]], attach: { '176,528': ['Cout', '2'] } },
       { line: 'g 176 528 176 544 0', posts: [[176, 528]] },
-      // Leg A — QA high-side FLOATING drive (ref wired to the leg-A mid), phase 0; QB low-side, complementary
-      // (INVERTED via a π phase offset), ground-referenced. Both ~50% duty.
-      { line: `v 384 208 384 160 0 2 ${c.fVis} 5 5 0 0.5`, posts: [[384, 208], [384, 160]], attach: { '384,160': ['QA', 'gate'], '384,208': ['QA', 'source'] } },
-      { line: 'w 384 208 448 208 0', posts: [[384, 208], [448, 208]], wire: true },
-      { line: `v 384 336 384 272 0 2 ${c.fVis} 5 5 3.14 0.5`, posts: [[384, 336], [384, 272]], attach: { '384,272': ['QB', 'gate'], '384,336': ['QB', 'source'] } },
-      { line: 'w 384 336 448 336 0', posts: [[384, 336], [448, 336]], wire: true },
-      // Leg C — PHASE-SHIFTED by ~2.2 rad (≈126°): this phase, not the duty, transfers power. QC high-side
-      // FLOATING drive (ref = leg-C mid) at phase 2.2; QD low-side, complementary (2.2 + π = 5.34).
-      { line: `v 624 208 624 160 0 2 ${c.fVis} 5 5 2.2 0.5`, posts: [[624, 208], [624, 160]], attach: { '624,160': ['QC', 'gate'], '624,208': ['QC', 'source'] } },
-      { line: 'w 600 208 624 208 0', posts: [[600, 208], [624, 208]], wire: true },
-      { line: `v 624 336 624 272 0 2 ${c.fVis} 5 5 5.34 0.5`, posts: [[624, 336], [624, 272]], attach: { '624,272': ['QD', 'gate'], '624,336': ['QD', 'source'] } },
-      { line: 'w 560 336 624 336 0', posts: [[560, 336], [624, 336]], wire: true },
       { line: `r 1176 288 1176 528 0 ${c.rload}`, tag: 'Rload', posts: [[1176, 288], [1176, 528]], attach: { '1176,288': ['Cout', '1'], '1176,528': ['Cout', '2'] } },
       { line: '207 1112 288 1160 288 0 vout', posts: [[1112, 288]] },
     ],
+    // Ideal phase-shifted full-bridge drive (ABT#262): leg-A mid (448,208) and leg-C mid (560,208) are
+    // each a 0..Vin square at fsw (50% duty) referenced to gnd (…,528); the phase, not duty, sets the tank
+    // volt-seconds. Buck-derived, so Vout = Vin·(Ns/Np)·D_eff with D_eff = θ/π → θ = π·Vout·(Np/Ns)/Vin;
+    // deriving θ from the design (vs a fixed guess) lands the output at design Vout. Replaces QA/QB/QC/QD.
+    drive: {
+      fets: ['QA', 'QB', 'QC', 'QD'],
+      sources: (c) => {
+        // Vout = Vin·(Ns/Np)·D_eff / rect, where rect=2 for the current-doubler (it halves the output
+        // voltage to double the current) and 1 for full-bridge/center-tapped. So D_eff (=θ/π) scales by
+        // `rect` to keep the output at design Vout across variants. Doubler ⇒ Lo2 present.
+        const rect = c.has('Lo2') ? 2 : 1
+        const theta = Math.min(Math.PI, Math.max(0.05, Math.PI * c.vout * c.nOut * rect / c.vin))
+        return [
+          { line: `v 448 208 448 528 0 2 ${c.fVis} ${c.vin / 2} ${c.vin / 2} 0 0.5`, posts: [[448, 208], [448, 528]], tag: 'QA' },
+          { line: `v 560 208 560 528 0 2 ${c.fVis} ${c.vin / 2} ${c.vin / 2} ${theta} 0.5`, posts: [[560, 208], [560, 528]], tag: 'QC' },
+        ]
+      },
+    },
     scopeSets: {
       overview:  [['QA', 'voltage'], ['Dr1', 'voltage'], ['Rload', 'voltage']],
       // Lout is a real inductor (own current+voltage 'both'); the transformer PRIMARY current is read from
@@ -1100,12 +1118,8 @@ const LAYOUTS = {
   // picks the first magnetic (Lr1) as the timescale driver so ctx.n=1; every L uses c.L(q) and T1's
   // step-down ratio is read from its own turnsRatios. Vout ≈ Vin·Ns/Np ≈ +48 V at resonance (positive).
   clllc: {
+    // ABT#262 (as cllc): primary Q1-Q4 → two antiphase ideal leg drives; secondary SR QE-QH → diode bridge.
     place: {
-      // PRIMARY full bridge — left leg Q1/Q2 (mid net1), right leg Q3/Q4 (mid net2).
-      Q1: { pins: { gate: [240, 160], drain: [304, 144], source: [304, 176] }, line: () => 'f 240 160 304 160 32 1.5 50' },
-      Q2: { pins: { gate: [240, 272], drain: [304, 256], source: [304, 288] }, line: () => 'f 240 272 304 272 32 1.5 50' },
-      Q3: { pins: { gate: [416, 160], drain: [480, 144], source: [480, 176] }, line: () => 'f 416 160 480 160 32 1.5 50' },
-      Q4: { pins: { gate: [416, 272], drain: [480, 256], source: [480, 288] }, line: () => 'f 416 272 480 272 32 1.5 50' },
       // Primary tank on the overhead lane: net1 → Cr1 → Lr1 → T1.primary_start (net4). Seed Cr1 at 0.
       Cr1: { pins: { 1: [352, 64], 2: [448, 64] }, line: (q, c) => `c 352 64 448 64 0 ${c.C(q)} 0` },
       Lr1: { pins: { primary_start: [448, 64], primary_end: [544, 64] }, line: (q, c) => `l 448 64 544 64 0 ${c.L(q)} 0` },
@@ -1117,11 +1131,12 @@ const LAYOUTS = {
       Lr2: { pins: { primary_start: [688, 64], primary_end: [784, 64] }, line: (q, c) => `l 688 64 784 64 0 ${c.L(q)} 0` },
       Cr2: { pins: { 1: [784, 64], 2: [880, 64] }, line: (q, c) => `c 784 64 880 64 0 ${c.C(q)} 0` },
       Rsense: { pins: { 1: [880, 64], 2: [976, 64] }, line: (q, c) => `r 880 64 976 64 0 ${c.R(q)}` },
-      // SECONDARY full bridge — near leg QG/QH (mid net9), far leg QE/QF (mid net8).
-      QG: { pins: { gate: [752, 160], drain: [816, 144], source: [816, 176] }, line: () => 'f 752 160 816 160 32 1.5 50' },
-      QH: { pins: { gate: [752, 272], drain: [816, 256], source: [816, 288] }, line: () => 'f 752 272 816 272 32 1.5 50' },
-      QE: { pins: { gate: [944, 160], drain: [1008, 144], source: [1008, 176] }, line: () => 'f 944 160 1008 160 32 1.5 50' },
-      QF: { pins: { gate: [944, 272], drain: [1008, 256], source: [1008, 288] }, line: () => 'f 944 272 1008 272 32 1.5 50' },
+      // SECONDARY full bridge — SR FETs drawn as their rectifying diodes (near leg QG/QH → net9, far leg
+      // QE/QF → net8; leg mids → Vout, gnd → leg mids). Pin names stay drain/source (CIAS nets).
+      QG: { pins: { drain: [816, 144], source: [816, 176] }, line: () => 'd 816 176 816 144 2 default' },
+      QH: { pins: { drain: [816, 256], source: [816, 288] }, line: () => 'd 816 288 816 256 2 default' },
+      QE: { pins: { drain: [1008, 144], source: [1008, 176] }, line: () => 'd 1008 176 1008 144 2 default' },
+      QF: { pins: { drain: [1008, 256], source: [1008, 288] }, line: () => 'd 1008 288 1008 256 2 default' },
       Cout: { pins: { 1: [1120, 112], 2: [1120, 400] }, line: (q, c) => `c 1120 112 1120 400 0 ${c.C(q)} ${c.vout}` },
     },
     wires: [
@@ -1158,22 +1173,20 @@ const LAYOUTS = {
       [1120, 112, 1200, 112], [1120, 400, 1200, 400],
     ],
     synth: (c) => [
-      { line: `v 160 400 160 112 0 0 40 ${c.vin} 0 0 0.5`, posts: [[160, 400], [160, 112]], attach: { '160,112': ['Q1', 'drain'], '160,400': ['Cout', '2'] } },
+      { line: `v 160 400 160 112 0 0 40 ${c.vin} 0 0 0.5`, posts: [[160, 400], [160, 112]], attach: { '160,400': ['Cout', '2'] } },
       { line: 'g 160 400 160 416 0', posts: [[160, 400]] },
-      // Diagonal 1 (Q1,Q4,QE,QH) at duty; diagonal 2 (Q2,Q3,QF,QG) complementary (1−duty). The SECONDARY
-      // SR four (QE,QF,QG,QH) run π out of phase (phaseShift = Math.PI) so each conducts on the half-cycle
-      // its body diode would — in phase they short the tank and collapse Vout (cllc-class bug).
-      { line: `v 240 208 240 160 0 2 ${c.fVis} 5 5 0 ${c.duty}`, posts: [[240, 208], [240, 160]], attach: { '240,160': ['Q1', 'gate'], '240,208': ['Q1', 'source'] } },
-      { line: `v 240 336 240 272 0 2 ${c.fVis} 5 5 0 ${1 - c.duty}`, posts: [[240, 336], [240, 272]], attach: { '240,272': ['Q2', 'gate'], '240,336': ['Q2', 'source'] } },
-      { line: `v 416 208 416 160 0 2 ${c.fVis} 5 5 0 ${1 - c.duty}`, posts: [[416, 208], [416, 160]], attach: { '416,160': ['Q3', 'gate'], '416,208': ['Q3', 'source'] } },
-      { line: `v 416 336 416 272 0 2 ${c.fVis} 5 5 0 ${c.duty}`, posts: [[416, 336], [416, 272]], attach: { '416,272': ['Q4', 'gate'], '416,336': ['Q4', 'source'] } },
-      { line: `v 944 208 944 160 0 2 ${c.fVis} 5 5 ${Math.PI} ${c.duty}`, posts: [[944, 208], [944, 160]], attach: { '944,160': ['QE', 'gate'], '944,208': ['QE', 'source'] } },
-      { line: `v 944 336 944 272 0 2 ${c.fVis} 5 5 ${Math.PI} ${1 - c.duty}`, posts: [[944, 336], [944, 272]], attach: { '944,272': ['QF', 'gate'], '944,336': ['QF', 'source'] } },
-      { line: `v 752 208 752 160 0 2 ${c.fVis} 5 5 ${Math.PI} ${1 - c.duty}`, posts: [[752, 208], [752, 160]], attach: { '752,160': ['QG', 'gate'], '752,208': ['QG', 'source'] } },
-      { line: `v 752 336 752 272 0 2 ${c.fVis} 5 5 ${Math.PI} ${c.duty}`, posts: [[752, 336], [752, 272]], attach: { '752,272': ['QH', 'gate'], '752,336': ['QH', 'source'] } },
       { line: `r 1200 112 1200 400 0 ${c.rload}`, tag: 'Rload', posts: [[1200, 112], [1200, 400]], attach: { '1200,112': ['Cout', '1'], '1200,400': ['Cout', '2'] } },
       { line: '207 1120 112 1168 112 0 vout', posts: [[1120, 112]] },
     ],
+    // Ideal primary full-bridge drive (ABT#262): leg1 mid (304,208) phase 0, leg2 mid (480,208) antiphase
+    // (π), 0..Vin at fsw, ref gnd (…,400). The series tank sees ±Vin; resonant ⇒ Vout set at fr.
+    drive: {
+      fets: ['Q1', 'Q2', 'Q3', 'Q4'],
+      sources: (c) => [
+        { line: `v 304 208 304 400 0 2 ${c.fVis} ${c.vin / 2} ${c.vin / 2} 0 0.5`, posts: [[304, 208], [304, 400]], tag: 'Q1' },
+        { line: `v 480 208 480 400 0 2 ${c.fVis} ${c.vin / 2} ${c.vin / 2} ${Math.PI} 0.5`, posts: [[480, 208], [480, 400]], tag: 'Q3' },
+      ],
+    },
     scopeSets: {
       overview:  [['Q1', 'voltage'], ['QE', 'voltage'], ['Rload', 'voltage']],
       magnetic:  [['QE', 'voltage'], { magI: [544, 64, 608, 64], magVtag: 'Q1' }, ['Rload', 'voltage']],
@@ -1198,12 +1211,9 @@ const LAYOUTS = {
   // ~48 V. No CIAS load resistor ⇒ synthesize Rload. (Falstad wires join ONLY at shared endpoints, so the
   // long net2/net6 return runs may cross a leg or bias lane mid-span without forming a node.)
   dab: {
+    // ABT#262 (as cllc): primary QA-QD → two antiphase ideal leg drives; secondary SR QE-QH → diode bridge.
+    // (A DAB's secondary FETs conduct exactly on their body-diode half-cycle here, so a diode is faithful.)
     place: {
-      // ── primary full bridge: leg C (net2) on the left, leg A (net1) on the right (nearer the tank) ──
-      QC: { pins: { gate: [320, 160], drain: [384, 144], source: [384, 176] }, line: () => 'f 320 160 384 160 32 1.5 50' },
-      QD: { pins: { gate: [320, 272], drain: [384, 256], source: [384, 288] }, line: () => 'f 320 272 384 272 32 1.5 50' },
-      QA: { pins: { gate: [528, 160], drain: [592, 144], source: [592, 176] }, line: () => 'f 528 160 592 160 32 1.5 50' },
-      QB: { pins: { gate: [528, 272], drain: [592, 256], source: [592, 288] }, line: () => 'f 528 272 592 272 32 1.5 50' },
       // Series tank inductor (net1 → net4) — a plain inductor, so c.L(q) (its own scaled L).
       Lr: { pins: { primary_start: [720, 208], primary_end: [784, 208] }, line: (q, c) => `l 720 208 784 208 0 ${c.L(q)} 0` },
       // Transformer: primary net4(start)→net2(end), secondary net5(start)→net6(end). Ratio from T1's own turnsRatios.
@@ -1214,11 +1224,12 @@ const LAYOUTS = {
       // Parallel RC damper across the primary AC port: Crc_pri (net1 → net3) then Rrc_pri (net3 → net2).
       Crc_pri: { pins: { 1: [592, 224], 2: [512, 224] }, line: (q, c) => `c 592 224 512 224 0 ${c.C(q)} 0` },
       Rrc_pri: { pins: { 1: [512, 224], 2: [384, 224] }, line: (q, c) => `r 512 224 384 224 0 ${c.R(q)}` },
-      // ── secondary full bridge: leg E (net5) then leg G (net6), rectifying into Cout ──
-      QE: { pins: { gate: [880, 160], drain: [944, 144], source: [944, 176] }, line: () => 'f 880 160 944 160 32 1.5 50' },
-      QF: { pins: { gate: [880, 272], drain: [944, 256], source: [944, 288] }, line: () => 'f 880 272 944 272 32 1.5 50' },
-      QG: { pins: { gate: [1072, 160], drain: [1136, 144], source: [1136, 176] }, line: () => 'f 1072 160 1136 160 32 1.5 50' },
-      QH: { pins: { gate: [1072, 272], drain: [1136, 256], source: [1136, 288] }, line: () => 'f 1072 272 1136 272 32 1.5 50' },
+      // ── secondary full bridge — SR FETs drawn as their rectifying diodes (leg E → net5, leg G → net6;
+      //    leg mids → Vout, gnd → leg mids). Pin names stay drain/source (CIAS nets). ──
+      QE: { pins: { drain: [944, 144], source: [944, 176] }, line: () => 'd 944 176 944 144 2 default' },
+      QF: { pins: { drain: [944, 256], source: [944, 288] }, line: () => 'd 944 288 944 256 2 default' },
+      QG: { pins: { drain: [1136, 144], source: [1136, 176] }, line: () => 'd 1136 176 1136 144 2 default' },
+      QH: { pins: { drain: [1136, 256], source: [1136, 288] }, line: () => 'd 1136 288 1136 256 2 default' },
       Cout: { pins: { 1: [1264, 112], 2: [1264, 400] }, line: (q, c) => `c 1264 112 1264 400 0 ${c.C(q)} ${c.vout}` },
       // ── gate-bias dividers (bus→mid, mid→gnd) — one dedicated x-lane per leg ──
       RbiasA_hi: { pins: { 1: [656, 112], 2: [656, 208] }, line: (q, c) => `r 656 112 656 208 0 ${c.R(q)}` },
@@ -1264,22 +1275,22 @@ const LAYOUTS = {
       [320, 336, 384, 336], [528, 336, 592, 336], [880, 336, 944, 336], [1072, 336, 1136, 336],
     ],
     synth: (c) => [
-      { line: `v 176 400 176 112 0 0 40 ${c.vin} 0 0 0.5`, posts: [[176, 400], [176, 112]], attach: { '176,112': ['QC', 'drain'], '176,400': ['Cout', '2'] } },
+      { line: `v 176 400 176 112 0 0 40 ${c.vin} 0 0 0.5`, posts: [[176, 400], [176, 112]], attach: { '176,400': ['Cout', '2'] } },
       { line: 'g 176 400 176 416 0', posts: [[176, 400]] },
-      // primary bridge — legs A and C ANTI-phase (real AC across the tank), phase 0. HS float / LS ground-ref.
-      { line: `v 528 208 528 160 0 2 ${c.fVis} 5 5 0 ${c.duty}`, posts: [[528, 208], [528, 160]], attach: { '528,160': ['QA', 'gate'], '528,208': ['QA', 'source'] } },
-      { line: `v 528 336 528 272 0 2 ${c.fVis} 5 5 0 ${1 - c.duty}`, posts: [[528, 336], [528, 272]], attach: { '528,272': ['QB', 'gate'], '528,336': ['QB', 'source'] } },
-      { line: `v 320 208 320 160 0 2 ${c.fVis} 5 5 0 ${1 - c.duty}`, posts: [[320, 208], [320, 160]], attach: { '320,160': ['QC', 'gate'], '320,208': ['QC', 'source'] } },
-      { line: `v 320 336 320 272 0 2 ${c.fVis} 5 5 0 ${c.duty}`, posts: [[320, 336], [320, 272]], attach: { '320,272': ['QD', 'gate'], '320,336': ['QD', 'source'] } },
-      // secondary bridge — legs E and G ANTI-phase, whole bridge π-shifted from the primary (synchronous
-      // rectification; in phase they short the tank and collapse Vout, per cllc's verified note).
-      { line: `v 880 208 880 160 0 2 ${c.fVis} 5 5 ${Math.PI} ${c.duty}`, posts: [[880, 208], [880, 160]], attach: { '880,160': ['QE', 'gate'], '880,208': ['QE', 'source'] } },
-      { line: `v 880 336 880 272 0 2 ${c.fVis} 5 5 ${Math.PI} ${1 - c.duty}`, posts: [[880, 336], [880, 272]], attach: { '880,272': ['QF', 'gate'], '880,336': ['QF', 'source'] } },
-      { line: `v 1072 208 1072 160 0 2 ${c.fVis} 5 5 ${Math.PI} ${1 - c.duty}`, posts: [[1072, 208], [1072, 160]], attach: { '1072,160': ['QG', 'gate'], '1072,208': ['QG', 'source'] } },
-      { line: `v 1072 336 1072 272 0 2 ${c.fVis} 5 5 ${Math.PI} ${c.duty}`, posts: [[1072, 336], [1072, 272]], attach: { '1072,272': ['QH', 'gate'], '1072,336': ['QH', 'source'] } },
       { line: `r 1328 112 1328 400 0 ${c.rload}`, tag: 'Rload', posts: [[1328, 112], [1328, 400]], attach: { '1328,112': ['Cout', '1'], '1328,400': ['Cout', '2'] } },
       { line: '207 1264 112 1312 112 0 vout', posts: [[1264, 112]] },
     ],
+    // Ideal primary full-bridge drive (ABT#262): leg A mid (592,208) phase 0, leg C mid (384,208) antiphase
+    // (π), 0..Vin at fsw, ref gnd (…,400). The series tank sees ±Vin; secondary diode bridge rectifies to
+    // Vout ≈ Vin·Ns/Np. (The DAB's phase-shift-controlled bidirectional flow degrades to a diode rectifier
+    // in the visual sim — faithful for the default forward-power operating point.)
+    drive: {
+      fets: ['QA', 'QB', 'QC', 'QD'],
+      sources: (c) => [
+        { line: `v 592 208 592 400 0 2 ${c.fVis} ${c.vin / 2} ${c.vin / 2} 0 0.5`, posts: [[592, 208], [592, 400]], tag: 'QA' },
+        { line: `v 384 208 384 400 0 2 ${c.fVis} ${c.vin / 2} ${c.vin / 2} ${Math.PI} 0.5`, posts: [[384, 208], [384, 400]], tag: 'QC' },
+      ],
+    },
     scopeSets: {
       overview:  [['QA', 'voltage'], ['QE', 'voltage'], ['Rload', 'voltage']],
       // T1 reports no device current ⇒ read the primary/tank current from the wire feeding Lr, overlaid with QA's node voltage.
@@ -1553,9 +1564,14 @@ export function falstadExport(topoId, tas, scopeSet = 'overview') {
   const Lreq = mag.req.magnetizingInductance ?? mag.req.inductance
   if (Lreq === undefined) throw new Error(`${mag.ref} has no magnetizingInductance/inductance`)
   const k = fsw / VISUAL_HZ // similarity transform: fsw/k, L*k, C*k -> identical waveforms, stretched in time
+  // The isolation transformer's step-down ratio (Np/Ns). In resonant/bridge topologies the timescale
+  // driver `mag` is a bare inductor (Lr, no turnsRatios), so the transformer is a SEPARATE magnetic —
+  // find the one that carries turnsRatios. A `drive` uses this to derive the phase/level for design Vout.
+  const xfmr = [...comps.values()].find((x) => x.data?.magnetic !== undefined && (x.req.turnsRatios?.length ?? 0) > 0)
+  const nOut = xfmr ? resolveDim(xfmr.req.turnsRatios[0], `${xfmr.ref} turnsRatios[0]`) : n
 
   const ctx = {
-    vin, vout, n, duty, fVis: VISUAL_HZ, rload: vout * vout / pout,
+    vin, vout, n, nOut, duty, fVis: VISUAL_HZ, rload: vout * vout / pout,
     Lm: resolveDim(Lreq, `${mag.ref} inductance`) * k,
     C: (q) => resolveDim(q.req.capacitance, `${q.ref} capacitance`) * k,
     R: (q) => resolveDim(q.req.resistance, `${q.ref} resistance`),
@@ -1573,7 +1589,13 @@ export function falstadExport(topoId, tas, scopeSet = 'overview') {
   // ── emit elements: every CIAS power component must have a placement (loud gap otherwise) ──────
   const elements = [] // { line, tag?, posts: [[x,y],...] }
   const pinCoord = new Map() // "ref|pin" -> "x,y"
+  // ABT#262: a layout may declare a `drive` — an IDEAL square-wave source that stands in for a FET
+  // bridge CircuitJS1 can't converge (see the drive-emit block below). Its FETs are "consumed": they
+  // skip placement here and their gate drives skip below, since the source already sets the node.
+  const drive = layout.drive
+  const driven = new Set(drive?.fets ?? [])
   for (const [ref, q] of comps) {
+    if (driven.has(ref)) continue // represented by the layout's ideal drive source, not a MOSFET
     const p = layout.place[ref]
     if (!p) throw new Error(`no placement for component '${ref}' in the ${topoId} visual layout`)
     // A component whose pin SET depends on the design (e.g. an LLC transformer with one secondary in
@@ -1605,9 +1627,19 @@ export function falstadExport(topoId, tas, scopeSet = 'overview') {
     if (!Array.isArray(w) && !present(w.needs, w.not)) continue
     elements.push({ line: `w ${pts.join(' ')} 0`, posts: [[pts[0], pts[1]], [pts[2], pts[3]]], wire: true })
   }
+  // ABT#262: CircuitJS1's `f` MOSFET cannot converge in a totem-pole half-/full-bridge — the high-side
+  // N-channel is a floating-source follower, so the nonlinear Newton solve fails at t=0 and the WHOLE
+  // sim freezes with "Convergence failed" (the pre-charged Cout=vout only makes it LOOK alive). Proven
+  // by bisection: strip the FETs and drive the switch node with an IDEAL square-wave source (0..Vin at
+  // fsw — exactly what the bridge produces) and the tank + rectifier converge and settle to design Vout.
+  // So resonant/bridge layouts declare a `drive`; the ideal source(s) replace the FETs (drive.fets),
+  // which skipped placement above and skip their gate drives below.
+  if (drive) for (const s of drive.sources(ctx)) elements.push(s)
   const attachChecks = [] // [coordKey, "ref|pin"] — synthesized posts that must land on a CIAS net
   for (const s of layout.synth(ctx)) {
     if (!present(s.needs, s.not)) continue
+    // skip the gate drives of FETs consumed by an ideal `drive` (the source already sets their node)
+    if (s.attach && Object.values(s.attach).some(([ref, pin]) => pin === 'gate' && driven.has(ref))) continue
     elements.push(s)
     for (const [coord, [ref, pin]] of Object.entries(s.attach ?? {})) attachChecks.push([coord, `${ref}|${pin}`])
   }

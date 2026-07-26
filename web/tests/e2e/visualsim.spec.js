@@ -85,20 +85,42 @@ test('the CircuitJS1 host page ships the 406 cold-parse self-heal', async ({ pag
   expect(html).toContain("importCircuit('$ 1 0.000005 10 50 5 50')")
 })
 
-// Regression guard for the synchronous-rectifier phase fix: the active-SR bridges (CLLC, CLLLC, DAB)
-// drive their SECONDARY FETs π out of phase with the primary. In phase, the SR FETs short the tank and
-// the live output collapses to ~0 (caught on CLLC: 0.35 V vs 48 V). The emitted CircuitJS1 text must
-// therefore carry Math.PI as the phaseShift on the secondary gate drives — assert it can't silently
-// regress to in-phase. (Passive-diode-secondary topologies deliberately have no such marker.)
+// The active-SR bridges (CLLC, CLLLC, DAB) have un-convergeable FET totem-poles on BOTH sides (ABT#262):
+// CircuitJS1 can't solve the high-side N-channel source-followers, so the WHOLE sim froze at t=0 with
+// "Convergence failed" (the pre-charged Cout=vout only made it LOOK alive). The exporter now drives each
+// PRIMARY bridge with two ideal antiphase leg sources and draws the SECONDARY synchronous rectifier as its
+// equivalent DIODE bridge (a SR FET conducts exactly on its body-diode half-cycle, so the diode is
+// faithful and converges). Assert each actually RUNS (isRunning + time advancing — a frozen Cout would
+// fool a bare Vout read) and settles near design Vout.
 for (const id of ['cllc', 'clllc', 'dab']) {
-  test(`${id} drives its synchronous rectifier π out of phase (no tank short)`, async ({ page }) => {
+  test(`${id} visual sim converges to Vout (ideal-driven primary + diode SR)`, async ({ page }) => {
     await boot(page)
     await selectTopology(page, id)
     const err = await solve(page, 'analytical')
     expect(err, `solve error: ${err}`).toBeNull()
-    const vs = await page.evaluate(() => window.__bench.visualSim)
-    // Math.PI stringified — the phaseShift field of the secondary SR gate-drive `v` elements.
-    expect(vs.text, `${id} secondary SR drives must be π-shifted`).toContain(String(Math.PI))
+    const { url, vout, error } = await page.evaluate(() => {
+      const vs = window.__bench.visualSim
+      return { url: vs?.url, vout: vs?.vout, error: vs?.error || null }
+    })
+    expect(error, `export error: ${error}`).toBeNull()
+    await page.goto(url)
+    await page.waitForFunction(
+      () => window.CircuitJS1?.getElements && window.CircuitJS1.getElements().length > 5,
+      null, { timeout: 30000 })
+    const t0 = await page.evaluate(() => (window.CircuitJS1.getTime?.() ?? 0))
+    await page.waitForTimeout(6000)
+    const { running, dt } = await page.evaluate((t0) => ({
+      running: !!window.CircuitJS1.isRunning?.(),
+      dt: (window.CircuitJS1.getTime?.() ?? 0) - t0,
+    }), t0)
+    expect(running, `${id} sim not running (DC-singular / totem-pole freeze?)`).toBe(true)
+    expect(dt, `${id} sim time not advancing (frozen at t=0)`).toBeGreaterThan(0)
+    const vLoad = await page.evaluate(() => {
+      try { const v = window.CircuitJS1.getNodeVoltage('vout'); if (v != null) return v } catch {}
+      return 0
+    })
+    expect(vLoad, `${id} Vout collapsed (${vLoad} V vs design ${vout} V)`).toBeGreaterThan(vout * 0.7)
+    expect(vLoad).toBeLessThan(vout * 1.3)
   })
 }
 
@@ -128,7 +150,17 @@ for (const [id, variant] of RECT3_CASES) {
     await page.waitForFunction(
       () => window.CircuitJS1?.getElements && window.CircuitJS1.getElements().length > 5,
       null, { timeout: 30000 })
+    // The DC-singular resonant freeze presents as isRunning=false / getTime() stuck at 0 while a
+    // frozen Cout still reads =Vout (which fooled a pure getNodeVoltage check). Prove the solver is
+    // actually ALIVE — running AND advancing time — before trusting the output voltage.
+    const t0 = await page.evaluate(() => (window.CircuitJS1.getTime?.() ?? 0))
     await page.waitForTimeout(6000)             // let the tank + output settle
+    const { running, dt } = await page.evaluate((t0) => ({
+      running: !!window.CircuitJS1.isRunning?.(),
+      dt: (window.CircuitJS1.getTime?.() ?? 0) - t0,
+    }), t0)
+    expect(running, `${id}/${variant} sim not running (DC-singular freeze?)`).toBe(true)
+    expect(dt, `${id}/${variant} sim time not advancing (frozen at t=0)`).toBeGreaterThan(0)
     const vLoad = await page.evaluate(() => {
       try { const v = window.CircuitJS1.getNodeVoltage('vout'); if (v != null) return v } catch {}
       let best = 0
