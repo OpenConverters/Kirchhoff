@@ -1334,3 +1334,29 @@ TEST_CASE("design_zeta maximumSwitchCurrent sizes L1 so its peak current hits th
     const double refRipple = vinMax * dMax / (dRef.inductanceL1 * fsw);
     CHECK(refRipple == Catch::Approx(0.4 * iL1avg).epsilon(1e-6));
 }
+
+TEST_CASE("analytical_flyback secondary voltage follows the dot/start-end convention (ABT #101)", "[analytical][solver][flyback]") {
+    using Kirchhoff::analytical::analytical_flyback;
+    // The ngspice extraction reads every winding as V(start)-V(end): the flyback secondary is
+    // +Vin/n while the switch conducts and -(Vout+Vd) while the rectifier does. The analytical
+    // view must agree so the web engine toggle no longer flips the trace sign.
+    const double vin = 48, vout = 12, n = 2;
+    // NB: MAS getters return optionals BY VALUE — copy the waveform out (a reference would
+    // dangle) — and complete_excitation stores the RESAMPLED equidistant waveform, so sample
+    // by index fraction, not by the original PWL corner times.
+    auto secondary_v_at = [](const MAS::OperatingPoint& op, double frac) {
+        const MAS::Waveform w = *op.get_excitations_per_winding().at(1).get_voltage()->get_waveform();
+        const auto& data = w.get_data();
+        REQUIRE(data.size() >= 8);
+        return data.at(std::min(data.size() - 1, static_cast<size_t>(frac * data.size())));
+    };
+    // CCM (Lp = 200 uH)
+    MAS::OperatingPoint ccm = analytical_flyback(vin, {vout}, {2}, {n}, 100000, 200e-6);
+    const double dCcm = n * vout / (n * vout + vin);
+    CHECK(secondary_v_at(ccm, dCcm * 0.5) == Catch::Approx(vin / n).epsilon(0.1));    // switch on: +24 V
+    CHECK(secondary_v_at(ccm, dCcm + 0.5 * (1 - dCcm)) < 0.0);                        // rectifier on: -(Vout+Vd)
+    // DCM (Lp = 10 uH): same signs during t_on / t_reset
+    MAS::OperatingPoint dcm = analytical_flyback(vin, {vout}, {2}, {n}, 100000, 10e-6);
+    CHECK(secondary_v_at(dcm, 0.05) == Catch::Approx(vin / n).epsilon(0.1));
+    CHECK(secondary_v_at(dcm, 0.35) < 0.0);   // reset phase early in the period for this deep-DCM point
+}

@@ -398,19 +398,32 @@ MAS::OperatingPoint analytical_flyback(double inputVoltage,
         MAS::Waveform currentWaveform, voltageWaveform;
         if (modeIsCcm) {
             voltageWaveform = WP::create_waveform(Lbl::SECONDARY_RECTANGULAR, secondaryVoltagePeaktoPeak, switchingFrequency, dutyCycle, 0, deadTime);
+            // ABT #101: dot/start−end convention, matching the ngspice extraction (V(start)−V(end)
+            // for every winding): the flyback secondary reads +Vin/n while the switch conducts and
+            // −(Vout+Vd) while the rectifier does. MKF's SECONDARY_RECTANGULAR is rectifier-
+            // conduction-positive, so NEGATE it — CCM volt-second balance makes the negated levels
+            // exactly the physical ±values (+Vin/n / −(Vout+Vd)). Label goes CUSTOM: the data no
+            // longer matches the library shape the label names.
+            {
+                auto vdata = voltageWaveform.get_data();
+                for (auto& v : vdata) v = -v;
+                voltageWaveform.set_data(vdata);
+                voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
+            }
             currentWaveform = WP::create_waveform(Lbl::FLYBACK_SECONDARY, secondaryCurrentPeaktoPeak, switchingFrequency, dutyCycle, secondaryCurrentOffset, deadTime);
         } else {
-            // DCM/boundary secondary voltage: −Vin/N_i while the switch conducts, +(Vout_i+Vd) while the
-            // rectifier conducts (t_reset), then the idle tail — flat 0 (plain DCM) or the mirrored QR
-            // valley arc +(Vout_i+Vd)·cos falling to −(Vout_i+Vd) at turn-on. Exact mirror of the
-            // primary's custom shape, on the same timeline (the old SECONDARY_RECTANGULAR_WITH_DEADTIME
+            // DCM/boundary secondary voltage in the dot/start−end convention (ABT #101, matching the
+            // ngspice extraction): +Vin/N_i while the switch conducts, −(Vout_i+Vd) while the
+            // rectifier conducts (t_reset), then the idle tail — flat 0 (plain DCM) or the QR valley
+            // arc −(Vout_i+Vd)·cos rising to +(Vout_i+Vd) at turn-on. Exact mirror of the primary's
+            // custom shape, on the same timeline (the old SECONDARY_RECTANGULAR_WITH_DEADTIME
             // rendering put the on/off transition at a volt-second-fudged duty, out of sync with the
             // current waveform, and had no zero segment).
-            std::vector<double> vdata{minimumSecondaryVoltage, minimumSecondaryVoltage,
-                                      maximumSecondaryVoltage, maximumSecondaryVoltage};
+            std::vector<double> vdata{-minimumSecondaryVoltage, -minimumSecondaryVoltage,
+                                      -maximumSecondaryVoltage, -maximumSecondaryVoltage};
             std::vector<double> vtime{0, tOn, tOn, tOn + tReset};
             if (qrRing) {
-                append_arc(vdata, vtime, maximumSecondaryVoltage, [](double p) { return std::cos(p); });
+                append_arc(vdata, vtime, -maximumSecondaryVoltage, [](double p) { return std::cos(p); });
             } else {
                 vdata.insert(vdata.end(), {0.0, 0.0});
                 vtime.insert(vtime.end(), {tOn + tReset, period});
