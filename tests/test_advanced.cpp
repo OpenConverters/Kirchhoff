@@ -139,3 +139,26 @@ TEST_CASE("advanced: esrRippleFraction config scales the ESR budget (ABT #100 P3
     REQUIRE(esrDefault > 0);
     CHECK(esrWide == Catch::Approx(4.0 * esrDefault).epsilon(1e-6));
 }
+
+TEST_CASE("LLC/SRC center-tapped: one leakage entry per secondary half (ABT #172)", "[advanced][llc]") {
+    auto leakEntries = [](const json& tas) -> size_t {
+        for (const auto& st : tas.at("topology").at("stages")) {
+            if (!st.contains("circuit") || !st.at("circuit").is_object()) continue;
+            for (const auto& c : st.at("circuit").at("components")) {
+                if (!c.contains("data") || !c.at("data").is_object()) continue;
+                const auto& data = c.at("data");
+                if (!data.contains("magnetic") || !data.contains("inputs")) continue;
+                const auto& dr = data.at("inputs").at("designRequirements");
+                if (dr.contains("leakageInductance") && dr.contains("turnsRatios") &&
+                    dr.at("turnsRatios").size() >= 2)
+                    return dr.at("leakageInductance").size();
+            }
+        }
+        return 0;
+    };
+    // default LLC rectifier is CENTER_TAPPED: 2 secondary halves -> 2 symmetric entries
+    json tas = Kirchhoff::build_llc_tas(Kirchhoff::design_llc(spec_for(400, 12, 120, 100000)));
+    CHECK(leakEntries(tas) == 2);
+    json tasSrc = Kirchhoff::build_src_tas(Kirchhoff::design_src(spec_for(400, 12, 120, 100000)));
+    CHECK(leakEntries(tasSrc) == 2);
+}

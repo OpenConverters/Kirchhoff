@@ -285,8 +285,14 @@ json build_src_tas(const SrcDesign& d) {
     t1["inputs"] = req::magnetic_inputs(d.magnetizingInductance, 0.1, turnsRatios, isoSides,
         std::nullopt, 25.0, windings);
     { const double kCpl = cfg::get(d.config, "transformerCoupling", 0.999);
-      t1["inputs"]["designRequirements"]["leakageInductance"] =
-          json::array({ json{{"nominal", (1.0 - kCpl*kCpl) * d.magnetizingInductance}} }); }
+      // ABT #172: ONE leakage entry PER SECONDARY winding — the CIAS emitter maps entry i to
+      // secondary i+1 and defaults missing entries to near-ideal coupling, so the old single
+      // entry gave a center-tapped transformer asymmetric halves (KT1_01=0.999, KT1_02≈1).
+      // Symmetric halves are the physical intent; each entry carries the same referred leakage.
+      json leaks = json::array();
+      for (size_t w = 0; w < turnsRatios.size(); ++w)
+          leaks.push_back(json{{"nominal", (1.0 - kCpl*kCpl) * d.magnetizingInductance}});
+      t1["inputs"]["designRequirements"]["leakageInductance"] = leaks; }
 
     auto busCap = [&]() { json c; c["capacitor"] = json::object();
         c["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::get(d.config, "busSplitCap", 10e-6);
