@@ -213,6 +213,12 @@ if (EMSCRIPTEN)
         "-sMODULARIZE=1" "-sEXPORT_NAME=createKirchhoffModule"
         "-sENVIRONMENT=web,worker,node" "-sALLOW_MEMORY_GROWTH=1"
         "-sEXPORT_ES6=1" "-sSINGLE_FILE=1"
+        # No eval()/new Function() anywhere in the glue: embind generates its
+        # invokers without dynamic code so the module loads under a strict CSP
+        # (script-src 'self' 'wasm-unsafe-eval'). Hertz embeds this engine for the
+        # ngspice round-trip and its vhost enforces exactly that policy — without
+        # this the module dies at load with a CSP violation, not a warning.
+        "-sDYNAMIC_EXECUTION=0"
         # ngspice is stack- and memory-hungry: match WebLibMKF's proven sizing (the emscripten default
         # 64 KB stack blows out mid-simulation -> "memory access out of bounds"). Harmless when ngspice
         # is off, required when it is on.
