@@ -498,9 +498,9 @@ function forward(bom) {
   const T = xfmr3('T1', bom, 330, 180, { labelDy: -22 })
   return svg(820, 400, [
     srcDC(60, 180),
-    wire(60, 165, 60, 60, 250, 60),   // Vin+ rail (feeds Q1 drain + Ddemag cathode)
+    wire(60, 165, 60, 60, 220, 60),   // Vin+ rail (feeds Q1 drain + Ddemag cathode) — ends at Q1 drain, its last tap
     wire(60, 195, 60, 320, 320, 320), gnd(120, 320), // primary return rail + earth (ends under T1)
-    wire(340, 320, 700, 320), isoGnd(430, 320),      // isolated secondary/output return (separate rail)
+    wire(340, 320, 640, 320), isoGnd(430, 320),      // isolated secondary/output return — ends under the load, its last tap
     // high-side switch: Q1 drain → Vin, source → primary top (pri_node); primary bottom → gnd
     mosfetV('Q1', bom, 220, 90), wire(220, 64, 220, 60), dot(220, 60),
     wire(220, 116, 220, 110, T.p0[0], 110),   // Q1 source → primary top p0
