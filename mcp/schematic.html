@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Kirchhoff schematic</title>
+    <style>
+      :root {
+        --fg: #1c1f24; --muted: #6b7280; --line: #d7dbe0;
+        --card: rgba(0,0,0,.04); --on: #1d6fd8;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: #e7e9ee; --muted: #9aa3b0; --line: #333a44;
+          --card: rgba(255,255,255,.06); --on: #5aa9ff;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; background: transparent; color: var(--fg);
+        font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      .wrap { padding: 10px 12px 12px; }
+      h1 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: -.01em; }
+      .sub { color: var(--muted); font-size: 12.5px; margin: 3px 0 8px; }
+      .err {
+        background: rgba(255,93,85,.12); border-radius: 6px;
+        padding: 6px 9px; font-size: 12.5px; margin-bottom: 8px;
+      }
+      .readout {
+        margin-top: 8px; font-size: 12.5px; background: var(--card);
+        border-radius: 6px; padding: 6px 9px;
+      }
+      .readout.muted { color: var(--muted); }
+      .tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 6px; }
+      .tbl th {
+        text-align: left; font-weight: 600; color: var(--muted);
+        border-bottom: 1px solid var(--line); padding: 4px 6px;
+      }
+      .tbl td { padding: 4px 6px; border-bottom: 1px solid var(--line); }
+      .tbl tr.bound td { background: rgba(19, 170, 81, .10); }
+      .tbl button, .foot button {
+        font: inherit; font-size: 11.5px; padding: 2px 8px; border-radius: 5px;
+        border: 1px solid var(--line); background: var(--card); color: var(--fg); cursor: pointer;
+      }
+      .tbl button:disabled, .foot button:disabled { opacity: .45; cursor: default; }
+      .tag { font-size: 11px; color: #13aa51; font-weight: 600; }
+      .muted { color: var(--muted); font-size: 12px; }
+      .foot { margin-top: 8px; display: flex; gap: 8px; align-items: center; }
+      svg { width: 100%; height: auto; display: block; }
+      /* Every CIAS component is drawn with a data-ref hotspot — make it feel
+         clickable. A symbol is strokes with GAPS between them, and by default a
+         <g> only receives pointer events on the marks themselves: a click that
+         lands inside the component but between two strokes falls through to the
+         SVG background and selects nothing. bounding-box makes the whole symbol
+         a hit target, which is what a user aiming at "the MOSFET" expects. */
+      svg [data-ref] { cursor: pointer; pointer-events: bounding-box; }
+      svg [data-ref]:hover { opacity: .72; }
+      svg [data-ref].sel { outline: none; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/schematic.js"></script>
+  </body>
+</html>

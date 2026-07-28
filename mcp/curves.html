@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Kirchhoff waveforms</title>
+    <style>
+      :root {
+        --fg: #1c1f24; --muted: #6b7280; --line: #d7dbe0;
+        --card: rgba(0,0,0,.04); --on: #1d6fd8;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: #e7e9ee; --muted: #9aa3b0; --line: #333a44;
+          --card: rgba(255,255,255,.06); --on: #5aa9ff;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; background: transparent; color: var(--fg);
+        font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      .wrap { padding: 10px 12px 12px; }
+      h1 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: -.01em; }
+      .sub { color: var(--muted); font-size: 12.5px; margin: 3px 0 8px; }
+      .err {
+        background: rgba(255,93,85,.12); border-radius: 6px;
+        padding: 6px 9px; font-size: 12.5px; margin-bottom: 8px;
+      }
+      .readout {
+        margin-top: 8px; font-size: 12.5px; background: var(--card);
+        border-radius: 6px; padding: 6px 9px;
+      }
+      .readout.muted { color: var(--muted); }
+      .tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 6px; }
+      .tbl th {
+        text-align: left; font-weight: 600; color: var(--muted);
+        border-bottom: 1px solid var(--line); padding: 4px 6px;
+      }
+      .tbl td { padding: 4px 6px; border-bottom: 1px solid var(--line); }
+      svg { width: 100%; height: auto; display: block; }
+      /* Every CIAS component is drawn with a data-ref hotspot — make it feel clickable. */
+      svg [data-ref] { cursor: pointer; }
+      svg [data-ref]:hover { opacity: .72; }
+      svg [data-ref].sel { outline: none; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/curves.js"></script>
+  </body>
+</html>

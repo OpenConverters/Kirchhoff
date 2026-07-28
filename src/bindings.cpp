@@ -15,6 +15,7 @@
 #include "ConverterExtract.hpp"  // main_magnetic_inputs — the adviser's MAS::Inputs from a TAS
 #include "JsonUtil.hpp"      // strip_nulls — schema-valid serialization of typed MAS objects
 #include "KirchhoffApi.hpp"  // api::select_components / api::bind_part (Kelvin sourcing facade)
+#include "CrossRef.hpp"      // kelvin::crossref — deterministic substitute ranker (no LLM)
 
 namespace py = pybind11;
 using json = nlohmann::json;
@@ -259,6 +260,114 @@ assembly/simulate steps (tas_to_ngspice / tas_to_ltspice) are topology-agnostic.
           },
           py::arg("tas"), py::arg("ref"), py::arg("envelope"),
           "Stamp a chosen candidate envelope into a component (DATASHEET fidelity).");
+
+    // --- parity with the embind surface the web app drives (web/src/kh.js) ---
+    // These were reachable only from WASM, so a Python consumer (the MCP server)
+    // could not offer the flows the browser already has. All four are thin
+    // wrappers over the same KirchhoffApi facade embind calls.
+    m.def("process_converter",
+          [unwrap](const std::string& topology, const json& spec, const std::string& engine) {
+              return unwrap(Kirchhoff::api::process_converter(topology, spec.dump(), engine));
+          },
+          py::arg("topology"), py::arg("spec"), py::arg("engine") = std::string("analytical"),
+          "One-shot design: spec -> {topology, inputs, operatingPoint, diagnostics, tas}.\n"
+          "Topology-dispatching entry point — the generic form of design_<topo>_tas.");
+
+    m.def("simulate_ngspice",
+          [unwrap](const json& tas, const json& fidelity) {
+              return unwrap(Kirchhoff::api::simulate_ngspice(tas.dump(), fidelity.dump()));
+          },
+          py::arg("tas"), py::arg("fidelity") = json{{"origin", "REQUIREMENTS"}},
+          "Assemble and run a TAS through the IN-PROCESS libngspice, returning the parsed\n"
+          "transient result rather than raw console text.");
+
+    m.def("component_waveforms",
+          [unwrap](const json& tas, const json& fidelity) {
+              return unwrap(Kirchhoff::api::component_waveforms(tas.dump(), fidelity.dump()));
+          },
+          py::arg("tas"), py::arg("fidelity") = json{{"origin", "REQUIREMENTS"}},
+          "Per-component V/I (switches, diodes, caps, resistors) from ONE ngspice run →\n"
+          "{engine, referencePeriod, components:[...]}.");
+
+    m.def("realize_tas",
+          [unwrap](const json& tas) { return unwrap(Kirchhoff::api::realize_tas(tas.dump())); },
+          py::arg("tas"),
+          "Add requirements-derived datasheet models (real Rds(on)/Vf) to every semiconductor\n"
+          "so a DATASHEET-fidelity deck renders real-conduction devices. Returns the new TAS.");
+
+    m.def("extract_operating_point",
+          [unwrap](const json& tas, const std::string& engine, const std::string& magnetic,
+                   const json& fidelity) {
+              return unwrap(Kirchhoff::api::extract_operating_point(tas.dump(), engine, magnetic,
+                                                                    fidelity.dump()));
+          },
+          py::arg("tas"), py::arg("engine") = std::string("analytical"),
+          py::arg("magnetic") = std::string(""),
+          py::arg("fidelity") = json{{"origin", "REQUIREMENTS"}},
+          "A magnetic's MAS operating point, computed analytically or from an ngspice run.\n"
+          "engine in {'analytical','ngspice'}; magnetic '' picks the main one.");
+
+    m.def("diagnostics", [unwrap](const json& tas) {
+              return unwrap(Kirchhoff::api::diagnostics(tas.dump()));
+          },
+          py::arg("tas"), "Design diagnostics for an assembled TAS.");
+
+    // Kelvin's per-COMPONENT selector (the entry point web/src/kh.js drives):
+    // load a family's prebuilt index shard once, then rank against one
+    // component's design requirements with converter context. Distinct from
+    // select_components, which walks a whole TAS off the raw NDJSON catalogue.
+    m.def("kelvin_load_shard",
+          [unwrap](const std::string& family, const py::bytes& shard) {
+              return unwrap(Kirchhoff::api::kelvin_load_shard(family, std::string(shard)));
+          },
+          py::arg("family"), py::arg("shard_bytes"),
+          "Load a prebuilt .kidx index shard for a component family →\n"
+          "{family, rowCount, buildId}. Required before kelvin_select on that family.");
+    m.def("kelvin_select",
+          [unwrap](const std::string& category, const json& requirements, const json& options) {
+              return unwrap(Kirchhoff::api::kelvin_select(category, requirements.dump(),
+                                                          options.dump()));
+          },
+          py::arg("category"), py::arg("requirements"), py::arg("options") = json::object(),
+          "Rank one family's parts against a component's design requirements →\n"
+          "SelectionResult, or {error:'NoCandidates', rejections, ...}. Candidates carry\n"
+          "the record's byte span, not the full envelope.");
+
+    m.def("design_magnetic_inputs",
+          [unwrap](const std::string& topology, const json& spec) {
+              return unwrap(Kirchhoff::api::design_magnetic_inputs(topology, spec.dump()));
+          },
+          py::arg("topology"), py::arg("spec"),
+          "spec -> the magnetic's MAS Inputs for ANY topology, WITHOUT carrying a TAS —\n"
+          "the entry point the OpenMagnetics wizards consume.");
+
+    m.def("design_tas_full",
+          [unwrap](const std::string& topology, const json& spec) {
+              return unwrap(Kirchhoff::api::design_tas_full(topology, spec.dump()));
+          },
+          py::arg("topology"), py::arg("spec"),
+          "Design and assemble in one call, returning the full document set.");
+
+    m.def("determine_pfc_mode",
+          [unwrap](const json& spec, double inductance) {
+              return unwrap(Kirchhoff::api::determine_pfc_mode(spec.dump(), inductance));
+          },
+          py::arg("spec"), py::arg("inductance"),
+          "Conduction mode (CCM/BCM/DCM) a PFC stage runs in for a given boost inductor.");
+
+    // Kelvin's deterministic cross-reference ranker (no LLM) — header-only, and
+    // Kelvin's own pybind module self-disables inside the Kirchhoff build, so it
+    // is surfaced here rather than left WASM-only.
+    m.def("cross_reference",
+          [](const std::string& category, const json& original, const json& candidates,
+             const json& options) {
+              return kelvin::crossref::cross_reference_json(category, original, candidates, options);
+          },
+          py::arg("category"), py::arg("original"), py::arg("candidates"),
+          py::arg("options") = json::object(),
+          "Scored drop-in substitutes for an original part, ranked best-first →\n"
+          "{category, original_verified, candidates:[{mpn, status, penalty, params, ...}]}.\n"
+          "options: {original_verified: bool, max_results: int}.");
 }
 
 #undef BIND_DESIGN

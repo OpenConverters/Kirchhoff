@@ -1,0 +1,21 @@
+{
+  "name": "kirchhoff-mcp-app",
+  "version": "0.1.0",
+  "description": "Kirchhoff MCP App — CIAS schematic + waveform widgets",
+  "scripts": {
+    "build": "rm -rf dist && INPUT=schematic.html vite build && INPUT=curves.html vite build",
+    "dev": "vite"
+  },
+  "license": "ISC",
+  "type": "module",
+  "private": "true",
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "^1.7.5",
+    "@vitejs/plugin-vue": "^6.0.8",
+    "vue": "^3.5.40"
+  },
+  "devDependencies": {
+    "vite": "^8.1.5",
+    "vite-plugin-singlefile": "^2.3.3"
+  }
+}
