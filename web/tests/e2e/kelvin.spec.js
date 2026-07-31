@@ -29,6 +29,34 @@ test.describe('Kelvin candidate sourcing', () => {
     expect(topMpn.trim().length, 'top candidate has an MPN').toBeGreaterThan(0)
   })
 
+  test('a drawer sources parts even when the shard cannot be cached', async ({ page }) => {
+    // The Cache API is an OPTIMISATION and its failure must not cost correctness.
+    // kh.js awaited cache.put() unguarded, so a rejected put propagated out of the
+    // shard loader and the whole category failed with the bytes already fetched.
+    // Chrome refuses Cache entries for large responses under some quota conditions,
+    // and the capacitor shard (31.7 MB) is exactly that case, while the MOSFET shard
+    // (1.5 MB) caches fine — which is why in the wild this only shows on a big
+    // family. Here put() is forced to fail for EVERY shard, so the MOSFET flow
+    // exercises the same code path without depending on which parts a flyback BOM
+    // happens to contain. Same defect and fix as Kelvin 3b5c32d / ABT #418.
+    await page.addInitScript(() => {
+      // Break ONLY put(); match()/keys() must keep working or the loader fails for
+      // an unrelated reason and the test proves nothing.
+      Cache.prototype.put = async () => {
+        throw new DOMException('forced for test', 'NetworkError')
+      }
+    })
+    await boot(page)
+    await selectTopology(page, 'flyback')
+    expect(await solve(page, 'analytical'), 'solve error').toBeNull()
+
+    await openKind(page, 'MOSFET')
+    await page.getByTestId('find-parts').click()
+    await expect(page.getByTestId('kelvin-candidates')).toBeVisible({ timeout: 30000 })
+    const n = await page.getByTestId('kelvin-candidate').count()
+    expect(n, 'candidates load despite an uncacheable shard').toBeGreaterThan(0)
+  })
+
   test('binding a MOSFET candidate Range-fetches its record and re-sims the design', async ({ page }) => {
     await boot(page)
     await selectTopology(page, 'flyback')
