@@ -362,7 +362,7 @@ function fmtx(v) { return v == null ? '—' : `×${v >= 100 ? Math.round(v) : v.
              (where it sits alongside the OpenMagnetics custom-design adviser above as a second option). -->
         <template v-if="category">
         <div class="section-label" style="margin-top: 1.2rem" data-testid="kelvin-section">
-          {{ isMagnetic ? 'or pick a real catalog magnetic' : 'TAS DB candidates' }}
+          {{ isMagnetic ? 'or pick a real catalog magnetic' : 'Kelvin DB candidates' }}
           <span v-if="state === 'ok'" class="hint">{{ alternatives }} of {{ considered }} parts fit</span>
         </div>
 
