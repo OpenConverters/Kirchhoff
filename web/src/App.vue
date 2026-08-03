@@ -74,6 +74,11 @@ const familyTopologies = computed(() => [
   ...TOPOLOGIES.filter((t) => t.family === family.value),
   ...PLANNED.filter((t) => t.family === family.value).map((t) => ({ ...t, planned: true })),
 ])
+// Header count: topologies AND their variants (e.g. flyback's 4 conduction modes count as 4;
+// a topology with no variant axis counts as 1 via the STANDARD single-option axis).
+const topologyVariantCount = computed(() =>
+  TOPOLOGIES.reduce((sum, t) => sum + variantAxis(t.id).options.length, 0),
+)
 // Turning the dial to a new family auto-selects that family's first converter (unless the current one
 // already belongs to it — e.g. on first mount).
 watch(family, (f) => {
@@ -679,7 +684,7 @@ provide('kh', {
             </tr>
             <tr>
               <td>TOPOLOGIES</td>
-              <td class="v">{{ TOPOLOGIES.length }}</td>
+              <td class="v">{{ topologyVariantCount }}</td>
               <td>SHEET</td>
               <td class="v">01 / 01</td>
             </tr>
