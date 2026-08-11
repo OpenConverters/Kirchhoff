@@ -21,7 +21,9 @@ IsolatedBuckBoostDesign design_isolated_buck_boost(const json& tasInputs) {
         throw std::runtime_error("isolated_buck_boost design: needs 2 outputs (primary + isolated secondary)");
     IsolatedBuckBoostDesign d{};
     d.config = cfg::object_of(tasInputs);
-    d.primaryVoltage   = nominal(dr.at("outputs").at(0).at("voltage"));   // magnitude (rail is inverting)
+    // The primary rail INVERTS, so the requirement may declare it with either sign; the design math
+    // works on the magnitude (same treatment as the secondary below). build_*_tas emits it back SIGNED.
+    d.primaryVoltage   = std::abs(nominal(dr.at("outputs").at(0).at("voltage")));
     d.secondaryVoltage = std::abs(nominal(dr.at("outputs").at(1).at("voltage")));  // magnitude (rail may be inverting)
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 1.0);
@@ -207,7 +209,10 @@ json build_isolated_buck_boost_tas(const IsolatedBuckBoostDesign& d) {
     dreq["inputType"] = "dc";
     dreq["inputVoltage"] = {{"minimum", d.inputVoltageMin}, {"nominal", d.inputVoltage}, {"maximum", d.inputVoltageMax}};
     dreq["switchingFrequency"]["nominal"] = d.switchingFrequency;
-    { json o; o["name"] = "vpri"; o["voltage"]["nominal"] = d.primaryVoltage; o["regulation"] = "voltage";
+    // The primary is the INVERTING rail (node "vout"/"Vout" swings negative — see the cell comment
+    // below), so the requirement it emits must carry that sign, exactly as Cuk emits -outputVoltageMag.
+    // Emitting the bare magnitude declared a polarity opposite to the circuit this very function builds.
+    { json o; o["name"] = "vpri"; o["voltage"]["nominal"] = -d.primaryVoltage; o["regulation"] = "voltage";
       dreq["outputs"] = json::array({o}); }
     { json op; op["name"] = "full_load"; op["inputVoltage"] = d.inputVoltage; op["ambientTemperature"] = 25.0;
       json o; o["name"] = "vpri"; o["power"] = d.primaryPower; op["outputs"] = json::array({o});
@@ -347,7 +352,8 @@ static json build_isolated_buck_boost_tas_multi(const IsolatedBuckBoostDesign& d
     dreq["inputVoltage"] = {{"minimum", d.inputVoltageMin}, {"nominal", d.inputVoltage}, {"maximum", d.inputVoltageMax}};
     dreq["switchingFrequency"]["nominal"] = d.switchingFrequency;
     json opDoc; opDoc["name"] = "full_load"; opDoc["inputVoltage"] = d.inputVoltage; opDoc["ambientTemperature"] = 25.0;
-    { json o; o["name"] = "vpri"; o["voltage"]["nominal"] = d.primaryVoltage; o["regulation"] = "voltage";
+    // Signed: the primary is the inverting rail (see the single-output builder above).
+    { json o; o["name"] = "vpri"; o["voltage"]["nominal"] = -d.primaryVoltage; o["regulation"] = "voltage";
       dreq["outputs"] = json::array({o});
       json oo; oo["name"] = "vpri"; oo["power"] = d.primaryPower; opDoc["outputs"] = json::array({oo}); }
     for (size_t i = 0; i < nSec; ++i) {
