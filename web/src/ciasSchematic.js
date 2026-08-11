@@ -15,7 +15,7 @@
 // The coordinates below are transcribed from the proven hand-authored flyback layout in schematics.js,
 // so the generated art is identical in quality; the difference is that components/values/wiring are
 // now driven and continuously verified by CIAS rather than hand-listed.
-import { symbols as S, hasSchematic, collectPins } from './schematics.js'
+import { symbols as S, hasSchematic, collectPins, withPinRecording } from './schematics.js'
 import { ciasComponents } from './cias.js'
 import { extractBom } from './bom.js'
 import { checkSchematic } from './schematicCheck.js'
@@ -37,7 +37,10 @@ const LAYOUTS = {
       Cres:  { draw: (b) => capV('Cres', b, 205, 215, 'left') },     // QRM only — absent in CCM/DCM/BCM
       T1:    { draw: (b) => xfmr('T1', b, 260, 140, { opp: true, labelDy: -30 }),
                pins: [['p0', 250, 100], ['p1', 250, 180], ['s0', 270, 100], ['s1', 270, 180]] },
-      Q1:    { draw: (b) => mosfetV('Q1', b, 250, 228),
+      // +14: the secondary return runs down x=270, straight through "Q1" and its RDS(on) value. The
+      // hand-authored flyback in schematics.js carries the same offset — this layout is a transcription
+      // of it, and the app renders THIS one, so a fix applied only there never reaches the user.
+      Q1:    { draw: (b) => mosfetV('Q1', b, 250, 228, 'right', false, false, 14),
                pins: [['drain', 250, 202], ['source', 250, 254], ['gate', 224, 228]] },
       D1:    { draw: (b) => diode('D1', b, 360, 90, 'right'),
                pins: [['anode', 340, 90], ['cathode', 380, 90]] },
@@ -92,6 +95,20 @@ export function hasCiasSchematic(topologyId) { return topologyId in LAYOUTS || h
 //   • native generator layout (flyback) — components/values/wiring generated from CIAS, then checked;
 //   • hand-authored layout (every other topology) — drawn from the CIAS-derived BOM, then checked with
 //     the SAME connectivity/isolation rules so it can never silently drift from the netlist either.
+// EXACTLY what the app renders, plus the anchor pins the offline checkers need.
+//
+// The app calls renderVerifiedSchematic, which prefers a CIAS layout when one exists and otherwise
+// falls back to the hand-authored art. The offline gates used to call collectPins() directly, i.e. the
+// hand-authored path ALWAYS — so for a topology with a CIAS layout (flyback) every audit measured a
+// drawing the product never shows, and a label fix applied to schematics.js silently never reached the
+// user. Every gate must go through here so the two can never diverge again.
+export function renderForAudit(topologyId, tas, variant, bomRows) {
+  if (topologyId in LAYOUTS) return renderCiasSchematicWithPins(topologyId, tas)
+  if (!hasSchematic(topologyId)) return null
+  const rows = bomRows ?? extractBom(tas)
+  return collectPins(topologyId, rows, variant)
+}
+
 // Throws on any anchored-net mismatch (see the file header caveat). Returns null if no schematic exists.
 export function renderVerifiedSchematic(topologyId, tas, variant, bomRows) {
   if (topologyId in LAYOUTS) return renderCiasSchematic(topologyId, tas)
@@ -119,15 +136,20 @@ export function renderCiasSchematic(topologyId, tas) {
   const has = (needs) => (needs ?? []).every((r) => present.has(r))
   const parts = []
   const pins = []
-  for (const [ref, p] of Object.entries(layout.place)) {
-    if (!present.has(ref)) continue
-    parts.push(p.draw(bom))
-    for (const [pin, x, y] of p.pins ?? []) pins.push({ ref, pin, x, y })
-  }
-  for (const w of layout.wires) if (has(w.needs)) parts.push(poly(w.pts))
-  for (const d of layout.dots) if (has(d.needs)) parts.push(dot(d.x, d.y))
-  parts.push(...layout.synth(bom))
+  // Draw with terminal recording on: `place[].pins`/`synthPins` name the ANCHORS the netlist check
+  // needs, while the recorded terminals give the dangling-wire check every symbol's real endpoints.
+  const recorded = withPinRecording(() => {
+    for (const [ref, p] of Object.entries(layout.place)) {
+      if (!present.has(ref)) continue
+      parts.push(p.draw(bom))
+      for (const [pin, x, y] of p.pins ?? []) pins.push({ ref, pin, x, y })
+    }
+    for (const w of layout.wires) if (has(w.needs)) parts.push(poly(w.pts))
+    for (const d of layout.dots) if (has(d.needs)) parts.push(dot(d.x, d.y))
+    parts.push(...layout.synth(bom))
+  }).pins
   for (const [ref, pin, x, y] of layout.synthPins) pins.push({ ref, pin, x, y })
+  pins.push(...recorded.filter((r) => r.ref.startsWith('@')))
 
   const [w, h] = layout.size
   const svgStr = svg(w, h, parts.join(''))
@@ -144,4 +166,29 @@ export function renderCiasSchematic(topologyId, tas) {
   if (problems.length) throw new Error(`ciasSchematic '${topologyId}' netlist mismatch: ${problems.join(' | ')}`)
 
   return svgStr
+}
+
+// Same render, returning the anchor pins too (renderCiasSchematic keeps them internal because the app
+// only needs the SVG). Used by renderForAudit so the offline gates get the app's drawing WITH pins.
+export function renderCiasSchematicWithPins(topologyId, tas) {
+  const svgStr = renderCiasSchematic(topologyId, tas)
+  if (!svgStr) return null
+  const layout = LAYOUTS[topologyId]
+  const bom = new Map(extractBom(tas).map((r) => [r.ref, r]))
+  const present = new Set(ciasComponents(tas).map((c) => c.ref))
+  const has = (needs) => (needs ?? []).every((r) => present.has(r))
+  const pins = []
+  const recorded = withPinRecording(() => {
+    for (const [ref, p] of Object.entries(layout.place)) {
+      if (!present.has(ref)) continue
+      p.draw(bom)
+      for (const [pin, x, y] of p.pins ?? []) pins.push({ ref, pin, x, y })
+    }
+    for (const w of layout.wires) if (has(w.needs)) poly(w.pts)
+    for (const d of layout.dots) if (has(d.needs)) dot(d.x, d.y)
+    layout.synth(bom)
+  }).pins
+  for (const [ref, pin, x, y] of layout.synthPins) pins.push({ ref, pin, x, y })
+  pins.push(...recorded.filter((r) => r.ref.startsWith('@')))
+  return { svg: svgStr, pins }
 }

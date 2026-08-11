@@ -31,6 +31,14 @@ const dot = (x, y) => `<circle class="sch-node" cx="${x}" cy="${y}" r="3"/>`
 // attribute and inject script. esc() closes that; the CSP is the second layer.
 const esc = (s) =>
   String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+// Schematic text size is set in CSS (style.css), which inside an SVG is already in USER UNITS — a
+// CSS `px` here is a viewBox unit, not a device pixel, so labels DO scale with the drawing.
+//
+// Do not "fix" this by moving font-size to a presentation attribute: it is a no-op (measured — the
+// rendered geometry is byte-identical either way). The ~14% variation in a label's measured user-unit
+// width between a 1600 px and an 800 px window is Chromium quantising glyph advances to whole device
+// pixels at different rasterisation scales. No choice of units removes it, which is why label
+// clearances must not be tuned to 2 px and why the live-app gate runs at two viewport widths.
 const txt = (x, y, s, cls = 'sch-val', anchor = 'middle') =>
   `<text class="${cls}" x="${x}" y="${y}" text-anchor="${anchor}">${esc(s)}</text>`
 
@@ -41,6 +49,16 @@ const txt = (x, y, s, cls = 'sch-val', anchor = 'middle') =>
 const _pins = []
 let _rec = false
 const regPin = (ref, pin, x, y) => { if (_rec) _pins.push({ ref, pin, x: Math.round(x), y: Math.round(y) }) }
+
+// Invisible footprint marker for glyphs that are NOT BOM parts (source, ground, port, load). hot()
+// gives every real part a hitbox the legibility audit can measure; these had none, so a label lying
+// across the VAC source symbol was invisible to every rule. `owner` is the glyph's own caption text,
+// which is never counted as a collision with itself.
+const fp = (x, y, w, h, owner = '') =>
+  // fill/stroke none INLINE, not via CSS: an SVG rect defaults to a solid black fill, and these markers
+  // are emitted into every schematic — as a class alone they painted black boxes over the load, ground
+  // and source glyphs in any consumer that does not ship the stylesheet.
+  `<rect class="sch-fp" data-owner="${owner}" fill="none" stroke="none" x="${x}" y="${y}" width="${w}" height="${h}"/>`
 
 function hot(ref, bom, box, body, labelPos) {
   const [bx, by, bw, bh] = box
@@ -61,7 +79,9 @@ function hot(ref, bom, box, body, labelPos) {
 // body tie with the N-channel arrow, and the classic enclosure circle.
 // flip=true mirrors vertically so the SOURCE is on TOP (y-26) and DRAIN on the bottom — needed where
 // the FET's body-diode / source node must face upward (e.g. Vienna's common-source bidirectional switch).
-function mosfetV(ref, bom, x, y, labelSide = 'right', noVal = false, flip = false) {
+// labelDx nudges the ref/value block along x (same idea as xfmr's) for the case where the clear side
+// still has a wire running down it a few px from the default anchor.
+function mosfetV(ref, bom, x, y, labelSide = 'right', noVal = false, flip = false, labelDx = 0, labelDy = 0) {
   const inner =
     `<circle class="sch-sym" cx="${x - 8.7}" cy="${y}" r="17.3"/>` +
     // channel: three dashes
@@ -77,7 +97,7 @@ function mosfetV(ref, bom, x, y, labelSide = 'right', noVal = false, flip = fals
     P(`M ${x} ${y + 8.7} L ${x - 13} ${y + 8.7}`) +
     `<polygon class="sch-fill" points="${x - 10.8},${y} ${x - 4.3},${y - 4.3} ${x - 4.3},${y + 4.3}"/>`
   const body = flip ? `<g transform="matrix(1,0,0,-1,0,${2 * y})">${inner}</g>` : inner
-  const lab = labelSide === 'right' ? [x + 12, y - 2, 'start', noVal] : [x - 29, y - 2, 'end', noVal]
+  const lab = labelSide === 'right' ? [x + 12 + labelDx, y - 2 + labelDy, 'start', noVal] : [x - 29 + labelDx, y - 2 + labelDy, 'end', noVal]
   regPin(ref, 'drain', x, flip ? y + 26 : y - 26); regPin(ref, 'source', x, flip ? y - 26 : y + 26); regPin(ref, 'gate', x - 26, y)
   return hot(ref, bom, [x - 27, y - 26, 46, 52], body, lab)
 }
@@ -86,7 +106,7 @@ function mosfetV(ref, bom, x, y, labelSide = 'right', noVal = false, flip = fals
 // Same ported geometry, transposed (u,v) -> (v,-u) so the channel sits under the rail.
 // flip=true mirrors the symbol horizontally so the SOURCE is on the LEFT (x-26) and DRAIN on the right —
 // needed where a synchronous rectifier's body diode must face a specific way (source toward the sw node).
-function mosfetH(ref, bom, x, y, noVal = false, flip = false) {
+function mosfetH(ref, bom, x, y, noVal = false, flip = false, labelSide = 'above') {
   const inner =
     `<circle class="sch-sym" cx="${x}" cy="${y + 8.7}" r="17.3"/>` +
     P(`M ${x - 11.9} ${y + 13} L ${x - 5.5} ${y + 13}`) +
@@ -100,12 +120,12 @@ function mosfetH(ref, bom, x, y, noVal = false, flip = false) {
     `<polygon class="sch-fill" points="${x},${y + 10.8} ${x - 4.3},${y + 4.3} ${x + 4.3},${y + 4.3}"/>`
   const body = flip ? `<g transform="matrix(-1,0,0,1,${2 * x},0)">${inner}</g>` : inner
   regPin(ref, 'drain', flip ? x + 26 : x - 26, y); regPin(ref, 'source', flip ? x - 26 : x + 26, y); regPin(ref, 'gate', x, y + 26)
-  return hot(ref, bom, [x - 26, y - 12, 52, 40], body, [x, y - 26, 'middle', noVal])
+  return hot(ref, bom, [x - 26, y - 12, 52, 40], body, [x, labelSide === 'below' ? y + 70 : y - 26, 'middle', noVal])
 }
 
 // Diode centered at (x, y), leads spanning 40 along `dir` (current flow direction).
 // Outline triangle + bar, proportions from Diode-COM-Standard (×0.267).
-function diode(ref, bom, x, y, dir, labelSide = 'above', noVal = false) {
+function diode(ref, bom, x, y, dir, labelSide = 'above', noVal = false, labelDx = 0, labelDy = 0) {
   const t = 6.7, hh = 8.3, bh = 9.1
   let body
   if (dir === 'right' || dir === 'left') {
@@ -125,8 +145,8 @@ function diode(ref, bom, x, y, dir, labelSide = 'above', noVal = false) {
   }
   const lab =
     dir === 'right' || dir === 'left'
-      ? labelSide === 'above' ? [x, y - 26, 'middle', noVal] : [x, y + 24, 'middle', noVal]
-      : labelSide === 'left' ? [x - 14, y - 2, 'end', noVal] : [x + 14, y - 2, 'start', noVal]
+      ? labelSide === 'above' ? [x + labelDx, y - 26 + labelDy, 'middle', noVal] : [x + labelDx, y + 24 + labelDy, 'middle', noVal]
+      : labelSide === 'left' ? [x - 14 + labelDx, y - 2 + labelDy, 'end', noVal] : [x + 14 + labelDx, y - 2 + labelDy, 'start', noVal]
   // anode = triangle base (current-source end), cathode = bar end, per `dir` (anode→cathode flow)
   const ends = { right: [[-20, 0], [20, 0]], left: [[20, 0], [-20, 0]], down: [[0, -20], [0, 20]], up: [[0, 20], [0, -20]] }[dir]
   regPin(ref, 'anode', x + ends[0][0], y + ends[0][1]); regPin(ref, 'cathode', x + ends[1][0], y + ends[1][1])
@@ -146,8 +166,8 @@ const coilV = (x, y0, n = 4, w = 14, h = 8.4, side = 1) => {
   return d
 }
 
-function indH(ref, bom, x, y, labelSide = 'above') {
-  const lab = labelSide === 'above' ? [x, y - 24, 'middle'] : [x, y + 20, 'middle']
+function indH(ref, bom, x, y, labelSide = 'above', labelDx = 0, labelDy = 0) {
+  const lab = labelSide === 'above' ? [x + labelDx, y - 24 + labelDy, 'middle'] : [x + labelDx, y + 20 + labelDy, 'middle']
   regPin(ref, 'p0', x - 28, y); regPin(ref, 'p1', x + 28, y)
   return hot(ref, bom, [x - 28, y - 14, 56, 20], P(coilH(x - 28, y)), lab)
 }
@@ -159,23 +179,25 @@ function indV(ref, bom, x, y, labelSide = 'right') {
 }
 
 // IEC non-polarized: two straight plates (Capacitor-IEC-NonPolarized ×0.267).
-function capV(ref, bom, x, y, labelSide = 'right') {
+function capV(ref, bom, x, y, labelSide = 'right', labelDx = 0, labelDy = 0) {
+  regPin(ref, 'p0', x, y - 20); regPin(ref, 'p1', x, y + 20)
   const body =
     P(`M ${x} ${y - 20} L ${x} ${y - 2.5}`) +
     P(`M ${x - 8.3} ${y - 2.5} L ${x + 8.3} ${y - 2.5}`) +
     P(`M ${x - 8.3} ${y + 2.5} L ${x + 8.3} ${y + 2.5}`) +
     P(`M ${x} ${y + 2.5} L ${x} ${y + 20}`)
-  const lab = labelSide === 'right' ? [x + 13, y - 2, 'start'] : [x - 13, y - 2, 'end']
+  const lab = labelSide === 'right' ? [x + 13 + labelDx, y - 2 + labelDy, 'start'] : [x - 13 + labelDx, y - 2 + labelDy, 'end']
   return hot(ref, bom, [x - 12, y - 20, 24, 40], body, lab)
 }
 
-function capH(ref, bom, x, y, labelSide = 'above') {
+function capH(ref, bom, x, y, labelSide = 'above', labelDx = 0, labelDy = 0) {
+  regPin(ref, 'p0', x - 20, y); regPin(ref, 'p1', x + 20, y)
   const body =
     P(`M ${x - 20} ${y} L ${x - 2.5} ${y}`) +
     P(`M ${x - 2.5} ${y - 8.3} L ${x - 2.5} ${y + 8.3}`) +
     P(`M ${x + 2.5} ${y - 8.3} L ${x + 2.5} ${y + 8.3}`) +
     P(`M ${x + 2.5} ${y} L ${x + 20} ${y}`)
-  const lab = labelSide === 'above' ? [x, y - 26, 'middle'] : [x, y + 24, 'middle']
+  const lab = labelSide === 'above' ? [x + labelDx, y - 26 + labelDy, 'middle'] : [x + labelDx, y + 24 + labelDy, 'middle']
   return hot(ref, bom, [x - 20, y - 12, 40, 24], body, lab)
 }
 
@@ -185,8 +207,9 @@ const zigzagV = (x, y) =>
   ` L ${x + 6.7} ${y - 1.8} L ${x - 6.7} ${y + 1.8} L ${x + 6.7} ${y + 5.4}` +
   ` L ${x - 6.7} ${y + 8.9} L ${x} ${y + 11.7} L ${x} ${y + 20}`
 
-function resV(ref, bom, x, y, labelSide = 'right') {
-  const lab = labelSide === 'right' ? [x + 13, y - 2, 'start'] : [x - 13, y - 2, 'end']
+function resV(ref, bom, x, y, labelSide = 'right', labelDx = 0, labelDy = 0) {
+  regPin(ref, 'p0', x, y - 20); regPin(ref, 'p1', x, y + 20)
+  const lab = labelSide === 'right' ? [x + 13 + labelDx, y - 2 + labelDy, 'start'] : [x - 13 + labelDx, y - 2 + labelDy, 'end']
   return hot(ref, bom, [x - 8, y - 20, 16, 40], P(zigzagV(x, y)), lab)
 }
 
@@ -195,8 +218,9 @@ const zigzagH = (x, y) =>
   ` L ${x - 1.8} ${y + 6.7} L ${x + 1.8} ${y - 6.7} L ${x + 5.4} ${y + 6.7}` +
   ` L ${x + 8.9} ${y - 6.7} L ${x + 11.7} ${y} L ${x + 20} ${y}`
 
-function resH(ref, bom, x, y, labelSide = 'above') {
-  const lab = labelSide === 'above' ? [x, y - 26, 'middle'] : [x, y + 24, 'middle']
+function resH(ref, bom, x, y, labelSide = 'above', labelDx = 0, labelDy = 0) {
+  regPin(ref, 'p0', x - 20, y); regPin(ref, 'p1', x + 20, y)
+  const lab = labelSide === 'above' ? [x + labelDx, y - 26 + labelDy, 'middle'] : [x + labelDx, y + 24 + labelDy, 'middle']
   return hot(ref, bom, [x - 20, y - 10, 40, 20], P(zigzagH(x, y)), lab)
 }
 
@@ -204,13 +228,13 @@ function resH(ref, bom, x, y, labelSide = 'above') {
 // Signal net-label flag: a short dashed stub ending in a named label. Two flags carrying the same
 // label are the same control net — standard schematic net-label practice; this is how the gate-drive
 // wiring is drawn without routing dashed spaghetti across the power path.
-function sig(x, y, label, dir = 'left') {
+function sig(x, y, label, dir = 'left', labelDx = 0, labelDy = 0) {
   const [dx, dy] = { left: [-13, 0], right: [13, 0], up: [0, -12], down: [0, 12] }[dir]
   const lab = {
     left: [x + dx - 3, y + 3, 'end'], right: [x + dx + 3, y + 3, 'start'],
     up: [x, y + dy - 4, 'middle'], down: [x, y + dy + 11, 'middle'],
   }[dir]
-  return P(`M ${x} ${y} L ${x + dx} ${y + dy}`, 'sch-ctl') + txt(lab[0], lab[1], label, 'sch-sig', lab[2])
+  return P(`M ${x} ${y} L ${x + dx} ${y + dy}`, 'sch-ctl') + txt(lab[0] + labelDx, lab[1] + labelDy, label, 'sch-sig', lab[2])
 }
 
 // Controller / control-block IC: a rectangle with named pin stubs (left/right sides, top-to-bottom).
@@ -277,7 +301,9 @@ function xfmr(ref, bom, x, y, opts = {}) {
 
 // Source-COM-DC: drawn +/− marks (plus toward the top terminal), ×0.3 of the tile.
 function srcDC(x, y, label = 'VIN') {
+  regPin('@src', 'p0', x, y - 15); regPin('@src', 'p1', x, y + 15)
   return (
+    fp(x - 15, y - 15, 30, 30, label) +
     `<circle class="sch-sym" cx="${x}" cy="${y}" r="15"/>` +
     P(`M ${x - 3.75} ${y - 7.5} L ${x + 3.75} ${y - 7.5} M ${x} ${y - 11.25} L ${x} ${y - 3.75}`) +
     P(`M ${x - 3.75} ${y + 7.5} L ${x + 3.75} ${y + 7.5}`) +
@@ -287,7 +313,9 @@ function srcDC(x, y, label = 'VIN') {
 
 // Source-COM-AC: one full sine cycle across the circle.
 function srcAC(x, y, label = 'VAC') {
+  regPin('@src', 'p0', x, y - 15); regPin('@src', 'p1', x, y + 15)
   return (
+    fp(x - 15, y - 15, 30, 30, label) +
     `<circle class="sch-sym" cx="${x}" cy="${y}" r="15"/>` +
     P(`M ${x - 11} ${y} q 5.5 -9 11 0 q 5.5 9 11 0`) +
     txt(x - 22, y + 3, label, 'sch-port', 'end')
@@ -298,7 +326,7 @@ function srcAC(x, y, label = 'VAC') {
 // it connects to so the top bar never overlaps the rail line.
 function gnd(x, y) {
   regPin('@gnd', 'gnd', x, y)   // primary-side ground; all @gnd symbols are the same net by convention
-  return P(
+  return fp(x - 10, y, 20, 16) + P(
     `M ${x} ${y} L ${x} ${y + 6}` +
     ` M ${x - 10} ${y + 6} H ${x + 10} M ${x - 5} ${y + 11} H ${x + 5} M ${x - 1.25} ${y + 16} H ${x + 1.25}`
   )
@@ -310,7 +338,7 @@ function gnd(x, y) {
 // one node, and tagged @sgnd so the net checker can enforce that no wire bridges the isolation barrier.
 function isoGnd(x, y) {
   regPin('@sgnd', 'sgnd', x, y)
-  return P(
+  return fp(x - 9, y, 18, 16) + P(
     `M ${x} ${y} L ${x} ${y + 6}` +                                   // stem
     ` M ${x - 9} ${y + 6} L ${x + 9} ${y + 6} L ${x} ${y + 16} Z`     // downward hollow triangle
   )
@@ -320,17 +348,19 @@ function isoGnd(x, y) {
 // columns to make the galvanic boundary explicit on the schematic.
 const isoBar = (x, y0, y1) => P(`M ${x} ${y0} L ${x} ${y1}`, 'sch-ctl')
 
-function loadR(x, y, top, bot) {
+function loadR(x, y, top, bot, labelDx = 0) {
+  regPin('@load', 'p0', x, y - 20); regPin('@load', 'p1', x, y + 20)
   return (
+    fp(x - 8, y - 20, 16, 40, 'LOAD') +
     wire(x, top, x, y - 20) + wire(x, y + 20, x, bot) +
     P(zigzagV(x, y)) +
-    txt(x + 12, y + 2, 'LOAD', 'sch-val', 'start')
+    txt(x + 12 + labelDx, y + 2, 'LOAD', 'sch-val', 'start')
   )
 }
 
 function port(x, y, label, anchor = 'start') {
   regPin('@port', label, x, y)   // external port; label maps to a netlist @-node (VOUT→@vout, …)
-  return `<circle class="sch-sym" cx="${x}" cy="${y}" r="3"/>` + txt(anchor === 'start' ? x + 8 : x - 8, y + 4, label, 'sch-port', anchor)
+  return fp(x - 3, y - 3, 6, 6, label) + `<circle class="sch-sym" cx="${x}" cy="${y}" r="3"/>` + txt(anchor === 'start' ? x + 8 : x - 8, y + 4, label, 'sch-port', anchor)
 }
 
 const svg = (w, h, inner) =>
@@ -370,19 +400,19 @@ function boost(bom, variant) {
   const rect =
     variant === 'synchronous'
       ? [
-          wire(240, 80, 284, 80), mosfetH('Q2', bom, 310, 80, true, true), wire(336, 80, 560, 80),
+          wire(240, 80, 284, 80), mosfetH('Q2', bom, 310, 80, true, true, 'below'), wire(336, 80, 560, 80),
           diode('D2', bom, 310, 40, 'right', 'above', true), wire(284, 80, 284, 40, 290, 40), wire(330, 40, 336, 40, 336, 80),
         ]
       : [diode('D1', bom, 310, 80, 'right'), wire(240, 80, 290, 80), wire(330, 80, 560, 80)]
   return svg(720, 300, [
     srcDC(70, 150), wire(70, 135, 70, 80, 122, 80), wire(70, 165, 70, 220, 520, 220),
     indH('L1', bom, 150, 80), wire(178, 80, 240, 80), dot(240, 80),
-    mosfetV('Q1', bom, 240, 150), wire(240, 80, 240, 124), wire(240, 176, 240, 220), dot(240, 220),
+    mosfetV('Q1', bom, 240, 150, 'left'), wire(240, 80, 240, 124), wire(240, 176, 240, 220), dot(240, 220),
     ...rect, dot(430, 80),
     capV('Cout', bom, 430, 150), wire(430, 80, 430, 130), wire(430, 170, 430, 220), dot(430, 220),
     loadR(520, 150, 80, 220), dot(520, 80), dot(520, 220),
     gnd(300, 220), port(600, 80, 'VOUT'), wire(560, 80, 600, 80),
-    sig(214, 150, 'g1'),
+    sig(214, 150, 'g1', 'down'),
     ...(variant === 'synchronous' ? [sig(310, 106, 'g2', 'down')] : []),
     ctrlIC(bom, 640, 240, variant === 'synchronous' ? ['g1', 'g2'] : ['g1']),
   ].join(''))
@@ -407,12 +437,13 @@ function cuk(bom) {
   return svg(760, 300, [
     srcDC(70, 150), wire(70, 135, 70, 80, 122, 80), wire(70, 165, 70, 220, 580, 220),
     indH('L1', bom, 150, 80), wire(178, 80, 230, 80), dot(230, 80),
-    mosfetV('Q1', bom, 230, 150), wire(230, 80, 230, 124), wire(230, 176, 230, 220), dot(230, 220),
-    // real RC snubber across Q1 (sw node → Crc_sw → Rrc_sw → gnd), per the cukCell nets
-    wire(195, 80, 230, 80), capV('Crc_sw', bom, 195, 105, 'left'), wire(195, 80, 195, 85),
-    resV('Rrc_sw', bom, 195, 150, 'left'), wire(195, 125, 195, 130),
-    wire(195, 170, 195, 220), dot(195, 220),
+    mosfetV('Q1', bom, 230, 150, 'left'), wire(230, 80, 230, 124), wire(230, 176, 230, 220), dot(230, 220),
     capH('C1', bom, 290, 80), wire(230, 80, 270, 80), wire(310, 80, 360, 80), dot(360, 80),
+    // real RC snubber, per the cukCell nets: it hangs off the C1/D1/L2 node (NOT Q1's drain, where it
+    // used to be drawn) and the RESISTOR is the node-side element — node → Rrc_sw → Crc_sw → gnd.
+    dot(320, 80), resV('Rrc_sw', bom, 320, 130, 'left'), wire(320, 80, 320, 110),
+    capV('Crc_sw', bom, 320, 185, 'left'), wire(320, 150, 320, 165),
+    wire(320, 205, 320, 220), dot(320, 220),
     diode('D1', bom, 360, 150, 'down', 'right'), wire(360, 80, 360, 130), wire(360, 170, 360, 220), dot(360, 220),
     indH('L2', bom, 428, 80), wire(360, 80, 400, 80), wire(456, 80, 620, 80), dot(500, 80),
     capV('Cout', bom, 500, 150), wire(500, 80, 500, 130), wire(500, 170, 500, 220), dot(500, 220),
@@ -473,7 +504,9 @@ function flyback(bom) {
     srcDC(70, 160), wire(70, 145, 70, 70, 240, 70), wire(70, 175, 70, 260, 250, 260),
     capV('Cin', bom, 150, 165, 'left'), wire(150, 70, 150, 145), wire(150, 185, 150, 260), dot(150, 70), dot(150, 260),
     xfmr('T1', bom, 260, 140, { opp: true, labelDy: -30 }), wire(240, 70, 250, 70, 250, 100), wire(250, 180, 250, 202),
-    mosfetV('Q1', bom, 250, 228), wire(250, 254, 250, 260),
+    // Q1's label starts at x=262 by default, and the secondary return runs down x=270 — straight
+    // through "Q1" and its RDS(on) value. +14 puts the whole block clear to the right of that column.
+    mosfetV('Q1', bom, 250, 228, 'right', false, false, 14), wire(250, 254, 250, 260),
     // RC clamp across the primary (dc+ → Cclmp → Rclmp → drain): the real leakage-ring damper,
     // wired exactly as the TAS primary-switch stage (dc_pos / clmp_mid / sw).
     dot(205, 70), capV('Cclmp', bom, 205, 90, 'left'), resV('Rclmp', bom, 205, 130, 'left'),
@@ -495,18 +528,21 @@ function flyback(bom) {
 }
 
 function forward(bom) {
-  const T = xfmr3('T1', bom, 330, 180, { labelDy: -22 })
+  const T = xfmr3('T1', bom, 330, 180, { labelDy: -40 })   // centred: offset right, T1's own label sat nearer Dfwd than T1
   return svg(820, 400, [
     srcDC(60, 180),
     wire(60, 165, 60, 60, 220, 60),   // Vin+ rail (feeds Q1 drain + Ddemag cathode) — ends at Q1 drain, its last tap
     wire(60, 195, 60, 320, 320, 320), gnd(120, 320), // primary return rail + earth (ends under T1)
     wire(340, 320, 640, 320), isoGnd(430, 320),      // isolated secondary/output return — ends under the load, its last tap
     // high-side switch: Q1 drain → Vin, source → primary top (pri_node); primary bottom → gnd
-    mosfetV('Q1', bom, 220, 90), wire(220, 64, 220, 60), dot(220, 60),
+    // Label RIGHT and lifted 12 px: the left lane (Vin riser x=60 .. Ddemag x=165) is only 105 px, too
+    // narrow for the RDS(on) string at some design points, and at its default height the right-hand label
+    // clips T1's footprint. y-12 parks it in the open band between the Vin rail (y=60) and T1's top (y=94).
+    mosfetV('Q1', bom, 220, 90, 'right', false, false, 0, -12), wire(220, 64, 220, 60), dot(220, 60),
     wire(220, 116, 220, 110, T.p0[0], 110),   // Q1 source → primary top p0
     // reset/demag winding returns the magnetizing energy to Vin through Ddemag
-    diode('Ddemag', bom, 165, 110, 'up', 'left'), wire(165, 90, 165, 60), dot(165, 60),
-    wire(165, 130, 165, 190, T.r0[0], 190),   // Ddemag anode → reset top r0 (demag_in)
+    diode('Ddemag', bom, 165, 140, 'up', 'left'), wire(165, 120, 165, 60), dot(165, 60),
+    wire(165, 160, 165, 190, T.r0[0], 190),   // Ddemag anode → reset top r0 (demag_in)
     T.el,
     wire(T.p1[0], T.p1[1], 270, 170, 270, 320), dot(270, 320),  // primary bottom p1 → gnd (crosses r0 lead, no dot)
     wire(T.r1[0], T.r1[1], 320, 320), dot(320, 320),            // reset bottom r1 → gnd
@@ -514,30 +550,30 @@ function forward(bom) {
     wire(T.s0[0], T.s0[1], 340, 90, 400, 90), diode('Dfwd', bom, 420, 90, 'right'),
     wire(440, 90, 470, 90), dot(470, 90),
     wire(T.s1[0], T.s1[1], 340, 320), dot(340, 320),            // secondary bottom s1 → gnd
-    diode('Dfw', bom, 470, 180, 'up', 'right'), wire(470, 90, 470, 160), wire(470, 200, 470, 320),
+    diode('Dfw', bom, 470, 180, 'up', 'right'), wire(470, 90, 470, 160), wire(470, 200, 470, 320), dot(470, 320),
     indH('Lout', bom, 530, 90), wire(470, 90, 502, 90), wire(558, 90, 660, 90), dot(580, 90),
     capV('Cout', bom, 580, 180), wire(580, 90, 580, 160), wire(580, 200, 580, 320), dot(580, 320),
     loadR(640, 180, 90, 320), dot(640, 90), dot(640, 320),
     port(690, 90, 'VOUT'), wire(660, 90, 690, 90),
-    sig(194, 90, 'g1'), ctrlIC(bom, 250, 360, ['g1']),
+    sig(194, 90, 'g1'), ctrlIC(bom, 250, 360, ['g1']),   // 'left' (house style for a vertical FET): 'down' ran the stub along the device outline
   ].join(''))
 }
 
 function pushPull(bom) {
   return svg(880, 430, [
-    srcDC(60, 170), wire(60, 155, 60, 90, 175, 90, 175, 170, 256, 170), // VIN+ → primary center tap (clear of the winding-end rails)
+    srcDC(60, 170), wire(60, 155, 60, 90, 160, 90, 160, 170, 256, 170), // VIN+ → primary center tap (clear of the winding-end rails AND of Q1's gate lead at x=174)
     wire(60, 185, 60, 320, 200, 320),
     // center-tapped primary: each half drives its own switch; Q1 source routes LEFT to gnd (NOT through Q2)
-    xfmr('T1', bom, 280, 170, { h: 130, ct: 'both', labelDy: -14 }),
+    xfmr('T1', bom, 280, 170, { h: 130, ct: 'both', labelDy: -14, labelDx: -32 }),   // -32: centred, the value ran across the damper riser at x=250
     wire(270, 105, 200, 105, 200, 104), // winding top end → Q1 drain (pri_top rail at y=105)
     mosfetV('Q1', bom, 200, 130, 'right', true),
-    wire(200, 156, 200, 185, 150, 185, 150, 320), dot(150, 320), // Q1 source → left → gnd
+    wire(200, 156, 200, 185, 140, 185, 140, 320), dot(140, 320), // Q1 source → left → gnd (x=140, not 150: that column ran through the g2 gate flag)
     wire(270, 235, 200, 235, 200, 240), // winding bottom end → Q2 drain (pri_bot rail at y=235)
     mosfetV('Q2', bom, 200, 266, 'right', true),
-    wire(200, 292, 200, 320), dot(200, 320), gnd(130, 320),
+    wire(200, 292, 200, 320), dot(200, 320), gnd(110, 320),
     sig(174, 130, 'g1'), sig(174, 266, 'g2'),
     // real RC damper across the primary (pri_top → Rdmp → Cdmp → pri_bot) — loop on the left, clear of VIN+
-    dot(250, 105), wire(250, 105, 250, 55, 105, 55, 105, 100),
+    dot(250, 105), wire(250, 105, 250, 55, 105, 55, 105, 110),
     resV('Rdmp', bom, 105, 130, 'left'), capV('Cdmp', bom, 105, 200, 'left'), wire(105, 150, 105, 180),
     wire(105, 220, 105, 235, 200, 235), dot(200, 235),
     // secondary full-wave rectifier: both winding ends → Dtop / Dbot → output rail
@@ -566,7 +602,7 @@ function outTail(bom, x0, yTop, retY, lout) {
   const els = []
   let px = x0
   if (lout) { els.push(wire(x0, yTop, x0 + 12, yTop), indH(lout, bom, x0 + 40, yTop), wire(x0 + 68, yTop, x0 + 80, yTop)); px = x0 + 80 }
-  const cX = px + 44, lX = cX + 58, pX = cX + 112, cY = (yTop + retY) / 2
+  const cX = px + 44, lX = cX + 58, pX = cX + 112, cY = (yTop + retY) / 2   // cX = Cout's column
   els.push(
     wire(px, yTop, cX + 88, yTop), dot(cX, yTop),
     capV('Cout', bom, cX, cY), wire(cX, yTop, cX, cY - 10), wire(cX, cY + 10, cX, retY), dot(cX, retY),
@@ -574,7 +610,7 @@ function outTail(bom, x0, yTop, retY, lout) {
     port(pX, yTop, 'VOUT'), wire(cX + 88, yTop, pX, yTop),
     isoGnd(cX, retY),   // isolated secondary return (distinct from primary earth; no wire crosses the barrier)
   )
-  return { els, retX: lX }
+  return { els, retX: lX, coutX: cX }
 }
 
 // Center-tapped full-wave: two half-windings (transformer drawn ct:'right'), diodes o.d1/o.d2, tap →
@@ -600,16 +636,20 @@ function secFB(bom, tx, ty, h, o = {}) {
   const yM = ty, yP = ty - h / 2 - 30, yN = ty + h / 2 + 90
   const xA = tx + 90, xB = tx + 160
   const t = outTail(bom, xB, yP, yN, o.lout)
+  const wrapX = Math.min(xB + 44, t.coutX - 22)
   return [
     wire(tx + 10, ty - h / 2, tx + 10, yM, xA, yM), dot(xA, yM),
-    wire(tx + 10, ty + h / 2, tx + 40, ty + h / 2, tx + 40, yN + 34, xB + 44, yN + 34, xB + 44, yM, xB, yM), dot(xB, yM),
+    // sec_b wraps under the bridge and climbs a lane that must stay CLEAR of Cout's column: with no
+    // output inductor in the tail (llc/src) xB+44 lands exactly on it, and the wrap was drawn straight
+    // down through Cout — shorting VOUT to the secondary return.
+    wire(tx + 10, ty + h / 2, tx + 40, ty + h / 2, tx + 40, yN + 34, wrapX, yN + 34, wrapX, yM, xB, yM), dot(xB, yM),
     // ref-only labels (4 packed diodes) — VF ratings live in the BOM / part drawer
     diode(ds[0], bom, xA, (yP + yM) / 2, 'up', 'left', true), wire(xA, (yP + yM) / 2 - 20, xA, yP), wire(xA, (yP + yM) / 2 + 20, xA, yM),
     diode(ds[1], bom, xA, (yN + yM) / 2, 'up', 'left', true), wire(xA, (yN + yM) / 2 - 20, xA, yM), wire(xA, (yN + yM) / 2 + 20, xA, yN),
     diode(ds[2], bom, xB, (yP + yM) / 2, 'up', 'right', true), wire(xB, (yP + yM) / 2 - 20, xB, yP), wire(xB, (yP + yM) / 2 + 20, xB, yM),
-    diode(ds[3], bom, xB, (yN + yM) / 2, 'up', 'right', true), wire(xB, (yN + yM) / 2 - 20, xB, yM), wire(xB, (yN + yM) / 2 + 20, xB, yN),
+    diode(ds[3], bom, xB, (yN + yM) / 2, 'up', 'right', true, -16), wire(xB, (yN + yM) / 2 - 20, xB, yM), wire(xB, (yN + yM) / 2 + 20, xB, yN),
     dot(xA, yP), dot(xB, yP), wire(xA, yP, xB, yP),
-    wire(xA, yN, t.retX, yN),   // secondary return rail → isolated return drawn by outTail
+    wire(xA, yN, t.retX, yN), dot(xB, yN),   // secondary return rail → isolated return drawn by outTail
     ...t.els,
   ]
 }
@@ -617,17 +657,21 @@ function secFB(bom, tx, ty, h, o = {}) {
 // Current-doubler: single winding, two output inductors o.lo1/o.lo2, two catch diodes o.d1/o.d2.
 function secCD(bom, tx, ty, h, o = {}) {
   const lo1 = o.lo1 || 'Lo1', lo2 = o.lo2 || 'Lo2', d1 = o.d1 || 'D1', d2 = o.d2 || 'D2'
-  const yT = ty - h / 2, yB = ty + h / 2, retY = yB + 90, voX = tx + 150
+  const yT = ty - h / 2, yB = ty + h / 2, retY = yB + 90, voX = tx + 190
   const t = outTail(bom, voX, yT, retY, null)
+  // The two freewheel diodes get their OWN columns between the winding terminals and the chokes, with
+  // their bodies parked in the lane below yB. d2 used to reuse the CHOKE column, so its cathode wire
+  // ended in the middle of Lo2's coil — connected to nothing — and d1's body sat on the Lo2 feed line.
+  const dX1 = tx + 35, dX2 = tx + 80, dY = (yB + retY) / 2, loX = tx + 120
   return [
-    indH(lo1, bom, tx + 90, yT), wire(tx + 10, yT, tx + 62, yT), wire(tx + 118, yT, voX, yT), dot(voX, yT),
-    indH(lo2, bom, tx + 90, yB), wire(tx + 10, yB, tx + 62, yB), wire(tx + 118, yB, voX, yB),
+    indH(lo1, bom, loX, yT), wire(tx + 10, yT, loX - 28, yT), wire(loX + 28, yT, voX, yT), dot(voX, yT),
+    indH(lo2, bom, loX, yB), wire(tx + 10, yB, loX - 28, yB), wire(loX + 28, yB, voX, yB),
     // Rlb: series loop-breaker between Lo2's output and the vout node (functional aid that
     // survives to the real deck — a real BOM row, so it is drawn in its electrical position)
-    resV('Rlb', bom, voX, ty, 'right'), wire(voX, yT, voX, ty - 20), wire(voX, ty + 20, voX, yB),
-    diode(d1, bom, tx + 40, (yT + retY) / 2, 'up', 'left'), wire(tx + 40, (yT + retY) / 2 - 20, tx + 40, yT), wire(tx + 40, (yT + retY) / 2 + 20, tx + 40, retY),
-    diode(d2, bom, tx + 90, (yB + retY) / 2, 'up'), wire(tx + 90, (yB + retY) / 2 - 20, tx + 90, yB), wire(tx + 90, (yB + retY) / 2 + 20, tx + 90, retY),
-    wire(tx + 40, retY, t.retX, retY),   // secondary return rail → isolated return drawn by outTail
+    resV('Rlb', bom, voX, ty, 'left'), wire(voX, yT, voX, ty - 20), wire(voX, ty + 20, voX, yB),   // 'left': right of it only ~31 px separate the label from Cout's column, so wider values crossed it
+    diode(d1, bom, dX1, dY, 'up', 'left', false, o.d1dx ?? -34, -8), wire(dX1, dY - 20, dX1, yT), dot(dX1, yT), wire(dX1, dY + 20, dX1, retY),   // clear of the choke lane and the return rail
+    diode(d2, bom, dX2, dY, 'up'), wire(dX2, dY - 20, dX2, yB), dot(dX2, yB), wire(dX2, dY + 20, dX2, retY),
+    wire(dX1, retY, t.retX, retY), dot(dX2, retY),   // secondary return rail → isolated return drawn by outTail
     ...t.els,
   ]
 }
@@ -662,7 +706,9 @@ function halfBridgeSplitBus(bom, top, gy) {
     capV('Chi', bom, 120, (top + mid) / 2, 'left'), wire(120, top, 120, (top + mid) / 2 - 20), wire(120, (top + mid) / 2 + 20, 120, mid), dot(120, mid),
     capV('Clo', bom, 120, (mid + gy) / 2, 'left'), wire(120, mid, 120, (mid + gy) / 2 - 20), wire(120, (mid + gy) / 2 + 20, 120, gy),
     resV('Rbal_hi', bom, 170, (top + mid) / 2, 'right'), wire(170, top, 170, (top + mid) / 2 - 20), dot(170, top), wire(170, (top + mid) / 2 + 20, 170, mid), dot(170, mid),
-    resV('Rbal_lo', bom, 170, (mid + gy) / 2, 'right'), wire(170, mid, 170, (mid + gy) / 2 - 20), wire(170, (mid + gy) / 2 + 20, 170, gy), dot(170, gy),
+    resV('Rbal_lo', bom, 170, (mid + gy) / 2, 'right', -26), wire(170, mid, 170, (mid + gy) / 2 - 20), wire(170, (mid + gy) / 2 + 20, 170, gy), dot(170, gy),   // -26: right of the anchor the label sat on the tank lane (x=220) and +40 ran it into the g2 flag.
+    // -26 (not -14): the app measures this ref ~12% wider than the Node harness does, so a 2 px margin
+    // is not a margin — it passed here and collided in the product.
     wire(120, top, 170, top), wire(120, gy, 170, gy), wire(120, mid, 170, mid),
     // Q1/Q2 half bridge, switch node = mid
     mosfetV('Q1', bom, 300, mid - 65, 'right', true), wire(300, top, 300, mid - 91), dot(300, top), wire(300, mid - 39, 300, mid), dot(300, mid),
@@ -697,15 +743,15 @@ function dab(bom) {
   // one bridge leg: hi FET (rail→mid) + lo FET (mid→rail return) at column x, with a parallel
   // balancing divider (bias<hi>/bias<lo>) in a clear lane at bx. `flip` mirrors the gate flag/bias
   // lane to the right for the second leg of a bridge so labels never collide with the neighbour.
-  const leg = (qh, ql, rh, rl, x, bx) => {
+  const leg = (qh, ql, rh, rl, x, bx, qdx = 0, bdx = 0) => {   // qdx/bdx nudge the FET + bias labels off a lane that crosses them
     const bside = bx < x ? 'left' : 'right'
     return [
-      mosfetV(qh, bom, x, 140, 'right', true), wire(x, top, x, 114), wire(x, 166, x, mid), dot(x, mid), dot(x, top),
-      mosfetV(ql, bom, x, 250, 'right', true), wire(x, mid, x, 224), wire(x, 276, x, gy), dot(x, gy),
+      mosfetV(qh, bom, x, 140, 'right', true, false, qdx), wire(x, top, x, 114), wire(x, 166, x, mid), dot(x, mid), dot(x, top),
+      mosfetV(ql, bom, x, 250, 'right', true, false, qdx), wire(x, mid, x, 224), wire(x, 276, x, gy), dot(x, gy),
       sig(x - 26, 140, gateOf(qh)), sig(x - 26, 250, gateOf(ql)),
       // balancing divider in its own lane
-      resV(rh, bom, bx, 140, bside), wire(bx, top, bx, 120), dot(bx, top), wire(bx, 160, bx, mid), dot(bx, mid),
-      resV(rl, bom, bx, 250, bside), wire(bx, mid, bx, 230), wire(bx, 270, bx, gy), dot(bx, gy),
+      resV(rh, bom, bx, 140, bside, bdx), wire(bx, top, bx, 120), dot(bx, top), wire(bx, 160, bx, mid), dot(bx, mid),
+      resV(rl, bom, bx, 250, bside, bdx), wire(bx, mid, bx, 230), wire(bx, 270, bx, gy), dot(bx, gy),
       wire(Math.min(bx, x), mid, Math.max(bx, x), mid),
     ]
   }
@@ -714,7 +760,9 @@ function dab(bom) {
     gnd(50, gy),
     // ---- primary full bridge: leg A (QA/QB) + leg C (QC/QD) ----
     ...leg('QA', 'QB', 'RbiasA_hi', 'RbiasA_lo', 230, 130),
-    ...leg('QC', 'QD', 'RbiasC_hi', 'RbiasC_lo', 350, 450),
+    // +14: QD's ref sat on the snubber drop at x=370. -13 on the bias labels: they sat on the Lr->p0
+    // riser at x=520, and moving THAT riser instead T-joined it to the primary return at (540,215/235).
+    ...leg('QC', 'QD', 'RbiasC_hi', 'RbiasC_lo', 350, 450, 14, -13),
     // series Lr: midA → (right, down, across) → Lr → T1 pri-top; T1 pri-bot → midC. Drop to y=380 at
     // x=270 (a clean column) — NOT down x=230, which would pass through QB's source-to-gnd junction dot
     // at (230,300) and short midA/Lr to ground.
@@ -723,43 +771,46 @@ function dab(bom) {
     // through T1's primary-bottom terminal p1 at (560,235) and short the primary winding to midC.
     wire(556, 380, 556, 360, 520, 360, 520, 155, 560, 155),
     xfmr('T1', bom, 570, mid, { h: 80, labelDy: -26 }),
-    wire(560, 235, 350, 235, 350, mid),
+    wire(560, 235, 540, 235, 540, 215, 350, 215), dot(350, 215),   // clear of RbiasC_lo's body and of QD's drain wire
     // RC snubber across the primary (midC → Crc_pri → Rrc_pri → midA lane), clear lane below. Drop from
     // midC to the snubber at x=370 — NOT straight down x=350, which would overlap QD's source-to-gnd
     // drop (350,276→300) and short the whole primary to ground.
-    dot(350, mid), capH('Crc_pri', bom, 400, 330), wire(420, 330, 440, 330),
-    resH('Rrc_pri', bom, 460, 330, 'below'), wire(350, mid, 370, mid, 370, 330, 380, 330), wire(480, 330, 500, 330, 500, mid), dot(500, mid),
-    wire(500, mid, 500, 380),
+    dot(370, mid), resH('Rrc_pri', bom, 400, 330, 'below'), wire(420, 330, 440, 330),
+    capH('Crc_pri', bom, 460, 330, 'below'), wire(370, mid, 370, 330, 380, 330),   // 'below': above, the label sat on the primary return rail at y=300
+    wire(480, 330, 500, 330, 500, 380),   // ends on Lr's own pin (= midA): up-and-back-down redrew the feed
     // ---- secondary full bridge: leg E (QE/QF) + leg G (QG/QH) ----
-    ...leg('QE', 'QF', 'RbiasE_hi', 'RbiasE_lo', 770, 660),
-    ...leg('QG', 'QH', 'RbiasG_hi', 'RbiasG_lo', 890, 990),
+    ...leg('QE', 'QF', 'RbiasE_hi', 'RbiasE_lo', 770, 700),
+    ...leg('QG', 'QH', 'RbiasG_hi', 'RbiasG_lo', 890, 990, 0, 14),   // +14: the bias labels sat on Cout's column at x=1010
     // T1 sec-top → midE ; T1 sec-bot → midG. Approach each bridge midpoint horizontally at mid level:
     // s0 must NOT run down x=770 (it would overlap QE's drain-to-vout riser at 770,90–114 → vout short);
     // s1 must NOT rise up x=890 (it would pass through QH's source-to-gnd dot at 890,300 → gnd short).
-    wire(580, 155, 600, 155, 600, mid, 770, mid),
-    wire(580, 235, 620, 235, 620, 340, 840, 340, 840, mid, 890, mid),
+    wire(580, 155, 600, 155, 600, mid, 700, mid),   // stop at the bias-lane mid pin; running on to 770 redrew the leg tie
+    wire(580, 235, 620, 235, 620, 340, 820, 340, 820, mid, 890, mid),   // x=820, not 840: that riser ran through the gH gate flag
     // output: bridge legs' rails (spanning bias E lane at 660 → bias G at 990) → Cout ∥ load → VOUT
-    dot(770, top), dot(890, top), wire(660, top, 1090, top), dot(1010, top),
-    dot(770, gy), dot(890, gy), wire(660, gy, 1050, gy), isoGnd(960, gy), // isolated secondary return
+    dot(770, top), dot(890, top), wire(700, top, 1090, top), dot(1010, top),
+    dot(770, gy), dot(890, gy), wire(700, gy, 1090, gy), dot(1090, gy), isoGnd(960, gy), // isolated secondary return (must REACH the load lead at 1090)
     capV('Cout', bom, 1010, mid), wire(1010, top, 1010, mid - 20), wire(1010, mid + 20, 1010, gy), dot(1010, gy),
     loadR(1090, mid, top, gy), dot(1090, top),
     port(1150, top, 'VOUT'), wire(1090, top, 1150, top),
-    // controllers: primary PWM + secondary SR driver, gate nets by label
-    ctrlIC(bom, 300, 415, ['gA', 'gB', 'gC', 'gD']),
+    // controllers: primary PWM + secondary SR driver, gate nets by label.
+    // U1 sits at x=180, NOT 300: centred on 300 its body spans x[268,332] y[375,455], and the midA -> Lr
+    // lane runs along y=380 from x=270 — straight across the block's top, reading as if the primary
+    // mid-node landed on the PWM. x=180 puts the whole block clear of that lane.
+    ctrlIC(bom, 180, 415, ['gA', 'gB', 'gC', 'gD']),
     icBox('UDR', bom, 830, 415, 70, 76, [], ['gE', 'gF', 'gG', 'gH'], 'SR DRV'),
   ].join(''))
 }
 
 // ── two-switch forward: Q1/Q2 sandwich the primary, D1/D2 clamp the reset to the bus ─────
 function twoSwitchForward(bom) {
-  return svg(880, 400, [
+  return svg(910, 400, [   // 910 wide: at 880 the VOUT port label ran off the edge
     srcDC(60, 200), wire(60, 185, 60, 70, 320, 70),
     wire(60, 215, 60, 320, 320, 320), gnd(150, 320),   // primary return rail + earth (ends under T1)
-    wire(480, 320, 810, 320), isoGnd(540, 320),        // isolated secondary/output return (separate rail)
+    wire(480, 320, 800, 320), isoGnd(540, 320),        // isolated secondary/output return (separate rail)
     // Q1 (high) and Q2 (low) sandwich the primary; the T1 primary sits to their right (in series)
     mosfetV('Q1', bom, 320, 120, 'right', true), wire(320, 70, 320, 94), dot(320, 70), wire(320, 146, 320, 165), dot(320, 165),
     mosfetV('Q2', bom, 320, 290, 'right', true), wire(320, 245, 320, 264), dot(320, 245), wire(320, 316, 320, 320),
-    sig(294, 120, 'g1'), sig(294, 290, 'g2'),
+    sig(294, 120, 'g1', 'down'), sig(294, 290, 'g2'),
     xfmr('T1', bom, 430, 205, { h: 80, labelDy: -24 }),
     wire(320, 165, 420, 165), wire(320, 245, 420, 245), // Q1 source → pri top ; Q2 drain → pri bottom
     // reset/clamp diodes: D1 (gnd → primary top), D2 (primary bottom → Vin) — own column, ref-only
@@ -770,7 +821,7 @@ function twoSwitchForward(bom) {
     diode('Dfwd', bom, 540, 130, 'right'), wire(560, 130, 600, 130), dot(600, 130),
     diode('Dfw', bom, 600, 200, 'up', 'right'), wire(600, 130, 600, 180), wire(600, 220, 600, 320), dot(600, 320),
     wire(440, 245, 480, 245, 480, 320), dot(480, 320),
-    indH('Lout', bom, 670, 130), wire(600, 130, 642, 130), wire(698, 130, 760, 130), dot(720, 130),
+    indH('Lout', bom, 670, 130), wire(600, 130, 642, 130), wire(698, 130, 800, 130), dot(720, 130),
     capV('Cout', bom, 720, 220), wire(720, 130, 720, 200), wire(720, 240, 720, 320), dot(720, 320),
     loadR(800, 220, 130, 320), dot(800, 130), dot(800, 320),
     port(850, 130, 'VOUT'), wire(800, 130, 850, 130),
@@ -781,12 +832,12 @@ function twoSwitchForward(bom) {
 // ── active-clamp forward: clamp leg Sc+Cc resets the core; synchronous rectifiers ────────
 function acf(bom) {
   return svg(920, 400, [
-    srcDC(60, 190), wire(60, 175, 60, 70, 340, 70),
+    srcDC(60, 190), wire(60, 175, 60, 70, 320, 70),
     wire(60, 205, 60, 300, 320, 300), gnd(150, 300),   // primary return rail + earth (ends under T1)
-    wire(440, 300, 800, 300), isoGnd(500, 300),        // isolated secondary/output return (separate rail)
+    wire(440, 300, 770, 300), isoGnd(500, 300),        // isolated secondary/output return (separate rail)
     // main switch Q1 in series with the primary (VIN → Q1 → sw → T1 pri → gnd)
     mosfetV('Q1', bom, 320, 145, 'right', true), wire(320, 70, 320, 119), dot(320, 70), wire(320, 171, 320, 185),
-    xfmr('T1', bom, 380, 195, { h: 90, labelDx: -18, labelDy: -22 }),
+    xfmr('T1', bom, 380, 195, { h: 90, labelDy: -22 }),   // centred (middle-anchored, so a wide value grows both ways and clears Q1's riser); offset right it sat nearer SRfwd than T1
     wire(320, 185, 370, 185, 370, 150), dot(320, 185),          // sw node → T1 primary top p0 (reach the terminal)
     wire(370, 240, 320, 240, 320, 300), dot(320, 300),          // T1 primary bottom p1 → gnd
     // active-clamp leg: Sc (Vin → clamp node) in series with Cc (clamp node → switch node)
@@ -799,11 +850,11 @@ function acf(bom) {
     mosfetV('SRfw', bom, 570, 195, 'right', true), wire(570, 120, 570, 169), wire(570, 221, 570, 300), dot(570, 300),
     wire(390, 235, 440, 235, 440, 300), dot(440, 300),
     sig(500, 146, 'sr1', 'down'), sig(544, 195, 'sr2'),
-    indH('Lout', bom, 640, 120), wire(570, 120, 612, 120), wire(668, 120, 750, 120), dot(700, 120),
+    indH('Lout', bom, 640, 120), wire(570, 120, 612, 120), wire(668, 120, 770, 120), dot(700, 120),
     capV('Cout', bom, 700, 210), wire(700, 120, 700, 190), wire(700, 230, 700, 300), dot(700, 300),
     loadR(770, 210, 120, 300), dot(770, 120), dot(770, 300),
     port(830, 120, 'VOUT'), wire(770, 120, 830, 120),
-    ctrlIC(bom, 160, 355, ['g1', 'gc', 'sr1', 'sr2']),
+    ctrlIC(bom, 400, 355, ['g1', 'gc', 'sr1', 'sr2']),   // x=400: at 160 the 'U1' ref sat on the primary return rail (y=300, x 60-320)
   ].join(''))
 }
 
@@ -814,22 +865,24 @@ function isolatedBuck(bom) {
     // sync half bridge QS1/QS2 (refs right, gate flags left)
     mosfetV('QS1', bom, 230, 110, 'right', true), wire(230, 70, 230, 84), dot(230, 70), wire(230, 136, 230, 180),
     mosfetV('QS2', bom, 230, 250, 'right', true), wire(230, 180, 230, 224), wire(230, 276, 230, 300), dot(230, 300),
-    dot(230, 180), sig(204, 110, 'g1'), sig(204, 250, 'g2'),
+    dot(230, 180), sig(204, 110, 'g1', 'down'), sig(204, 250, 'g2', 'down'),
     // discrete antiparallel diodes across the sync FETs (DS1: sw→vin, DS2: gnd→sw) — own column left of QS
-    wire(230, 70, 160, 70), diode('DS1', bom, 160, 125, 'up', 'left'), wire(160, 70, 160, 105),
+    dot(160, 70), diode('DS1', bom, 160, 125, 'up', 'left'), wire(160, 70, 160, 105),
     wire(160, 145, 160, 180, 230, 180),
     diode('DS2', bom, 160, 235, 'up', 'left'), wire(160, 180, 160, 215), dot(160, 180),
     wire(160, 255, 160, 300), dot(160, 300),
     xfmr('T1', bom, 360, 185, { h: 90, labelDy: -24 }),
     wire(230, 180, 300, 180, 300, 140, 350, 140), // sw node → primary top
-    // primary buck rail = main output (Vpri)
-    wire(350, 230, 420, 230), dot(420, 230),
-    capV('Cpri', bom, 420, 265, 'left'), wire(420, 230, 420, 245), wire(420, 285, 420, 300), dot(420, 300),
-    port(490, 230, 'VOUT'), wire(420, 230, 490, 230),
+    // Primary buck rail = main output (Vpri). It leaves T1's primary terminal DOWNWARD first: run
+    // straight right at y=230 and it passes through T1's SECONDARY terminal at (370,230) — a wire
+    // across the isolation barrier.
+    wire(350, 230, 350, 245, 420, 245),
+    capV('Cpri', bom, 420, 265, 'left'), wire(420, 285, 420, 300), dot(420, 300),
+    port(490, 230, 'VOUT'), wire(420, 245, 420, 230, 490, 230),
     // isolated secondary rail: own floating return (isoGnd, distinct from primary earth), single flyback
     // rectifier + preload/bleed Rsec
     wire(370, 140, 370, 118, 720, 118), isoGnd(720, 118),
-    wire(370, 230, 370, 258, 600, 258), diode('Dsec', bom, 620, 258, 'right'), wire(640, 258, 680, 258), dot(680, 258),
+    wire(370, 230, 370, 215, 600, 215, 600, 258), diode('Dsec', bom, 620, 258, 'right', 'below'), wire(640, 258, 680, 258), dot(680, 258),
     resV('Rsec', bom, 645, 188, 'left'), wire(645, 118, 645, 168), dot(645, 118), wire(645, 208, 645, 258), dot(645, 258),
     capV('Csec', bom, 680, 188), wire(680, 168, 680, 118), dot(680, 118), wire(680, 208, 680, 258),
     port(760, 258, 'VISO'), wire(680, 258, 760, 258),
@@ -840,22 +893,24 @@ function isolatedBuck(bom) {
 // ── isolated buck-boost: single-switch inverting flyback with a second isolated rail ─────
 function isolatedBuckBoost(bom) {
   return svg(860, 360, [
-    srcDC(60, 180), wire(60, 165, 60, 70, 280, 70), wire(60, 195, 60, 300, 280, 300), gnd(100, 300), // primary earth (rail ends at T1 pri-bottom)
+    srcDC(60, 180), wire(60, 165, 60, 70, 210, 70), wire(60, 195, 60, 300, 280, 300), gnd(100, 300), // rails end at QS1's drain / T1 pri-bottom
     mosfetV('QS1', bom, 210, 100, 'right', true), wire(210, 70, 210, 74), dot(210, 70), wire(210, 126, 210, 140, 280, 140),
     xfmr('T1', bom, 290, 180, { h: 80, opp: true, labelDy: -24 }), dot(280, 140),
     wire(280, 220, 280, 300), dot(280, 300),
     // inverting primary rail via Dpri
-    diode('Dpri', bom, 170, 180, 'up', 'left'), wire(170, 160, 170, 140, 280, 140), wire(170, 200, 170, 240, 150, 240),
+    diode('Dpri', bom, 170, 180, 'up', 'left'), wire(170, 160, 170, 140, 210, 140), dot(210, 140), wire(170, 200, 170, 240, 150, 240),
     capV('Cpri', bom, 150, 270, 'left'), wire(150, 240, 150, 250), dot(150, 240), wire(150, 290, 150, 300), dot(150, 300),
-    port(120, 240, 'VOUT(−)', 'end'), wire(150, 240, 120, 240),
+    // Port at 135, not 120: end-anchored, its label grows LEFT, and in a narrow window (where labels
+    // are ~14% wider relative to the drawing) it reached the Vin- riser at x=60.
+    port(135, 240, 'VOUT(−)', 'end'), wire(150, 240, 135, 240),
     // isolated secondary rail: its OWN floating return (ISO-RTN), galvanically separate from primary
     // ground — the two are joined only through T1. + preload/bleed Rsec.
     wire(300, 140, 300, 110, 690, 110), isoGnd(690, 110),
-    wire(300, 220, 300, 250, 520, 250), diode('Dsec', bom, 540, 250, 'right'), wire(560, 250, 600, 250), dot(600, 250),
+    wire(300, 220, 300, 250, 520, 250), diode('Dsec', bom, 540, 250, 'right', 'below'), wire(560, 250, 600, 250), dot(600, 250),
     resV('Rsec', bom, 565, 178, 'left'), wire(565, 110, 565, 158), dot(565, 110), wire(565, 198, 565, 250), dot(565, 250),
     capV('Csec', bom, 600, 178), wire(600, 158, 600, 110), dot(600, 110), wire(600, 198, 600, 250),
-    port(760, 250, 'VISO', 'end'), wire(600, 250, 760, 250),
-    sig(184, 100, 'g1'), ctrlIC(bom, 140, 330, ['g1']),
+    port(760, 250, 'VISO'), wire(600, 250, 760, 250),   // 'start': end-anchored, the label sat on top of its own feed wire
+    sig(184, 100, 'g1'), ctrlIC(bom, 340, 330, ['g1']),   // x=340: at 140 the 'U1' ref sat on the return rail (y=300, x 60-280)
   ].join(''))
 }
 
@@ -863,17 +918,20 @@ function isolatedBuckBoost(bom) {
 // (left, each fed by its own coupled-inductor winding — NOT joined at a shared tap) and two secondary
 // half-windings (right, center-tapped output). Returns terminal coords keyed by winding:
 //   pA{top,bot} pB{top,bot} sC{top,bot} sD{top,bot}, plus the svg body under data-ref=ref.
-function xfmr4(ref, bom, x, y) {
+function xfmr4(ref, bom, x, y, opts = {}) {
   const cL = x - 2, cR = x + 2, top = y - 100, bot = y + 100
   // winding vertical extents (2 stacked coils per side, gap at the core middle)
   const yA = [top + 10, top + 80], yB = [bot - 80, bot - 10]
   const body =
     P(coilV(x - 10, yA[0], 3, (yA[1] - yA[0]) / 3, 8.4, -1)) + P(coilV(x - 10, yB[0], 3, (yB[1] - yB[0]) / 3, 8.4, -1)) +
     P(coilV(x + 10, yA[0], 3, (yA[1] - yA[0]) / 3, 8.4, 1)) + P(coilV(x + 10, yB[0], 3, (yB[1] - yB[0]) / 3, 8.4, 1)) +
-    P(`M ${cL} ${top} L ${cL} ${bot}`, 'sch-wire') + P(`M ${cR} ${top} L ${cR} ${bot}`, 'sch-wire') +
+    // Core bars are 'sch-sym', never 'sch-wire' — same rule (and same reason) as the 2-winding xfmr:
+    // as wires they are 200 px conductors in the middle of the symbol, drawn in the wire colour and
+    // fed to the connectivity checker as real net pieces.
+    P(`M ${cL} ${top} L ${cL} ${bot}`, 'sch-sym') + P(`M ${cR} ${top} L ${cR} ${bot}`, 'sch-sym') +
     `<circle class="sch-fill" cx="${x - 7}" cy="${yA[0] + 5}" r="2.3"/>` +
     `<circle class="sch-fill" cx="${x + 7}" cy="${yA[0] + 5}" r="2.3"/>`
-  const el = hot(ref, bom, [x - 22, top - 6, 44, bot - top + 12], body, [x, top - 12, 'middle'])
+  const el = hot(ref, bom, [x - 22, top - 6, 44, bot - top + 12], body, [x + (opts.labelDx ?? 0), top - 12 + (opts.labelDy ?? 0), 'middle'])
   regPin(ref, 'a0', x - 10, yA[0]); regPin(ref, 'a1', x - 10, yA[1]); regPin(ref, 'b0', x - 10, yB[0]); regPin(ref, 'b1', x - 10, yB[1])
   regPin(ref, 'c0', x + 10, yA[0]); regPin(ref, 'c1', x + 10, yA[1]); regPin(ref, 'd0', x + 10, yB[0]); regPin(ref, 'd1', x + 10, yB[1])
   return { el, pA: { top: [x - 10, yA[0]], bot: [x - 10, yA[1]] }, pB: { top: [x - 10, yB[0]], bot: [x - 10, yB[1]] },
@@ -889,14 +947,16 @@ function xfmr3(ref, bom, x, y, opts = {}) {
   const coil = (cx, yy, dir) => P(coilV(cx, yy[0], 3, (yy[1] - yy[0]) / 3, 8.4, dir))
   const body =
     coil(x - 10, yP, -1) + coil(x - 10, yR, -1) + coil(x + 10, yS, 1) +
-    P(`M ${cL} ${top} L ${cL} ${bot}`, 'sch-wire') + P(`M ${cR} ${top} L ${cR} ${bot}`, 'sch-wire') +
+    P(`M ${cL} ${top} L ${cL} ${bot}`, 'sch-sym') + P(`M ${cR} ${top} L ${cR} ${bot}`, 'sch-sym') +   // core, not a conductor
     `<circle class="sch-fill" cx="${x - 7}" cy="${yP[0] + 5}" r="2.3"/>` +   // primary dot (top)
     `<circle class="sch-fill" cx="${x + 7}" cy="${yS[0] + 5}" r="2.3"/>` +   // secondary dot (top → same sense = forward transfer)
     `<circle class="sch-fill" cx="${x - 7}" cy="${yR[1] - 5}" r="2.3"/>`     // reset dot (bottom → opposite = magnetizing reset
   regPin(ref, 'p0', x - 10, yP[0]); regPin(ref, 'p1', x - 10, yP[1])
   regPin(ref, 'r0', x - 10, yR[0]); regPin(ref, 'r1', x - 10, yR[1])
   regPin(ref, 's0', x + 10, yS[0]); regPin(ref, 's1', x + 10, yS[1])
-  const el = hot(ref, bom, [x - 22, top - 6, 44, bot - top + 12], body, [x, top - 12 + (opts.labelDy ?? 0), 'middle'])
+  const ly3 = top - 12 + (opts.labelDy ?? 0)
+  const el = hot(ref, bom, [x - 22, top - 6, 44, bot - top + 12], body,
+    opts.labelDx ? [x + opts.labelDx, ly3, 'end'] : [x, ly3, 'middle'])
   return { el, p0: [x - 10, yP[0]], p1: [x - 10, yP[1]], r0: [x - 10, yR[0]], r1: [x - 10, yR[1]], s0: [x + 10, yS[0]], s1: [x + 10, yS[1]] }
 }
 
@@ -905,28 +965,37 @@ function xfmr3(ref, bom, x, y, opts = {}) {
 //    NOT joined at a shared center tap. Each primary half is switched to ground by S1/S2. ────────────
 function weinberg(bom) {
   const gy = 380
-  const T = xfmr4('T1', bom, 560, 230)
+  const T = xfmr4('T1', bom, 560, 230, { labelDx: -29 })   // -29: centred, the value sat on the sec_c riser at x=600
   const [pAt, pAb] = [T.pA.top, T.pA.bot], [pBt, pBb] = [T.pB.top, T.pB.bot]
   const [sCt, sCb] = [T.sC.top, T.sC.bot], [sDt, sDb] = [T.sD.top, T.sD.bot]
   return svg(1000, 440, [
-    srcDC(60, 210), wire(60, 195, 60, 90, 190, 90),
+    srcDC(60, 210), wire(60, 195, 60, 90, 220, 90),   // rail must REACH both L1 winding taps (200/220)
     wire(60, 225, 60, gy, 470, gy),          // primary return rail (ends under T1)
     wire(610, gy, 900, gy), isoGnd(700, gy), // isolated secondary/output return (separate rail)
     // coupled input choke L1 (two windings), both fed from VIN+; each winding returns through its DCR
     // loop-breaker to a DIFFERENT primary half of T1 (the defining dual-inductor structure)
-    xfmr('L1', bom, 210, 170, { h: 80, labelDx: -18, labelDy: -20 }),
+    xfmr('L1', bom, 210, 170, { h: 80, labelDx: -18, labelDy: -34 }),   // -34: at -20 the value sat on the Vin rail at y=90
     wire(200, 130, 200, 90), dot(200, 90), wire(220, 130, 220, 90), dot(220, 90),
-    wire(200, 210, 200, 250, 250, 250), resH('Rdcra', bom, 280, 250, 'above'), wire(310, 250, pAb[0], 250, pAb[0], pAb[1]), // L1a → Rdcra → pri A bottom
-    wire(220, 210, 220, 320, 250, 320), resH('Rdcrb', bom, 280, 320, 'below'), wire(310, 320, pBt[0], 320, pBt[0], pBt[1]), // L1b → Rdcrb → pri B top
+    // Each feed turns up its OWN clear column and enters its terminal horizontally: run along the
+    // neighbour's lane (y=250 is pri-B-top, y=320 is pri-B-bottom) and the corner lands ON that
+    // terminal, shorting the two primary halves together.
+    wire(200, 210, 200, 250, 260, 250), resH('Rdcra', bom, 280, 250, 'above'),
+    wire(300, 250, 520, 250, 520, pAb[1], pAb[0], pAb[1]),                       // L1a → Rdcra → pri A bottom
+    wire(220, 210, 220, 320, 260, 320), resH('Rdcrb', bom, 280, 320, 'below'),
+    wire(300, 320, 320, 320, 320, 290, 530, 290, 530, pBt[1], pBt[0], pBt[1]),   // L1b → Rdcrb → pri B top
     T.el,
     // each primary half's outer end → its own switch → ground
-    mosfetV('S1', bom, 470, 180, 'right', true), wire(pAt[0], pAt[1], 470, pAt[1], 470, 154), wire(470, 206, 470, gy), dot(470, gy),
-    mosfetV('S2', bom, 470, 330, 'right', true), wire(pBb[0], pBb[1], 470, pBb[1], 470, 304), wire(470, 356, 470, gy),
+    // S1's source drops at x=430 (the earth symbol's column) — straight down x=470 it ran through S2's
+    // body and shorted S2's drain / T1 primary-B bottom to the ground rail.
+    mosfetV('S1', bom, 470, 180, 'right', true), wire(pAt[0], pAt[1], 470, pAt[1], 470, 154),
+    wire(470, 206, 430, 206, 430, gy), dot(430, gy),
+    mosfetV('S2', bom, 470, 330, 'right', true, false, 0, 8), wire(pBb[0], pBb[1], 470, pBb[1], 470, 304), wire(470, 356, 470, gy),   // +8y: the ref sat on the y=320 rail
     gnd(430, gy), sig(444, 180, 'g1'), sig(444, 330, 'g2'),
     // center-tapped full-wave secondary: outer ends → Dpos / Dneg, inner ends → CT (ground) → Cout ∥ load
-    wire(sCt[0], sCt[1], 600, sCt[1], 600, 110, 640, 110), diode('Dpos', bom, 660, 110, 'right'), wire(680, 110, 740, 110), dot(740, 110),
-    wire(sDb[0], sDb[1], 600, sDb[1], 600, 350, 640, 350), diode('Dneg', bom, 660, 350, 'right', 'below'), wire(680, 350, 740, 350), wire(740, 350, 740, 110),
-    wire(sCb[0], sCb[1], 610, sCb[1], 610, sDt[1], sDt[0], sDt[1]), wire(610, (sCb[1] + sDt[1]) / 2, 610, gy), dot(610, gy), // CT → gnd
+    wire(sCt[0], sCt[1], 600, sCt[1], 600, 110, 640, 110), diode('Dpos', bom, 660, 110, 'right', 'below'), wire(680, 110, 740, 110), dot(740, 110),
+    wire(sDb[0], sDb[1], 600, sDb[1], 600, 350, 640, 350), diode('Dneg', bom, 660, 350, 'right', 'below', false, 0, 25), wire(680, 350, 740, 350), wire(740, 350, 740, 110),   // +10y: the VF value sat on the y=380 return
+    wire(sCb[0], sCb[1], 610, sCb[1], 610, sDt[1], sDt[0], sDt[1]),
+    wire(610, sDt[1], 610, gy), dot(610, sDt[1]), dot(610, gy), // CT → gnd (drops from the tap corner, not from mid-wire)
     wire(740, 110, 900, 110), dot(820, 110),
     capV('Cout', bom, 820, 245), wire(820, 110, 820, 225), wire(820, 265, 820, gy), dot(820, gy),
     loadR(900, 245, 110, gy), dot(900, 110), dot(900, gy),
@@ -939,7 +1008,7 @@ function weinberg(bom) {
 function ahb(bom, variant = 'fullBridge') {
   const tx = 540, ty = 200, h = 90
   return svg(1120, 420, [
-    srcDC(60, 190), wire(60, 175, 60, 80, 300, 80), wire(60, 205, 60, 330, 200, 330),
+    srcDC(60, 190), wire(60, 175, 60, 80, 300, 80), wire(60, 205, 60, 330, 180, 330),
     // Q1/Q2 half bridge — ref right, gate flag left (no collision)
     mosfetV('Q1', bom, 180, 128, 'right', true), wire(180, 102, 180, 80), dot(180, 80), wire(180, 154, 180, 200), dot(180, 200),
     mosfetV('Q2', bom, 180, 250, 'right', true), wire(180, 200, 180, 224), wire(180, 276, 180, 330), dot(180, 330), gnd(120, 330),
@@ -960,30 +1029,41 @@ function ahb(bom, variant = 'fullBridge') {
 function psfb(bom, variant = 'fullBridge') {
   const tx = 330, ty = 195, h = 90
   return svg(1040, 430, [
-    srcDC(60, 175), wire(60, 160, 60, 80, 320, 80), wire(60, 190, 60, 320, 280, 320), // ground rail spans both legs
+    // Vin+ rail stops AT the leg-C drain column (280) — an overshoot past the last leg reads as a
+    // dangling wire; the return rail below already ends at the same column.
+    srcDC(60, 175), wire(60, 160, 60, 80, 280, 80), wire(60, 190, 60, 340, 280, 340), // ground rail spans both legs (y=340, not 320: at 320 it ran through Rrc_pri's label)
     mosfetV('QA', bom, 150, 128, 'right', true), wire(150, 102, 150, 80), dot(150, 80), wire(150, 154, 150, 200), dot(150, 200),
-    mosfetV('QB', bom, 150, 246, 'right', true), wire(150, 200, 150, 220), wire(150, 272, 150, 320), dot(150, 320),
+    mosfetV('QB', bom, 150, 246, 'right', true), wire(150, 200, 150, 220), wire(150, 272, 150, 340), dot(150, 340),
     mosfetV('QC', bom, 280, 128, 'right', true), wire(280, 102, 280, 80), dot(280, 80), wire(280, 154, 280, 195),
-    mosfetV('QD', bom, 280, 246, 'right', true), wire(280, 195, 280, 220), wire(280, 272, 280, 320), dot(280, 320), gnd(110, 320),
+    mosfetV('QD', bom, 280, 246, 'right', true, false, 8, 60), wire(280, 195, 280, 220), wire(280, 272, 280, 340), dot(280, 340), gnd(110, 340),   // +8/+30: the lane between the re-entry column (x=295) and T1's body (x=308) is 13 px — narrower
+    // than the ref itself — so no horizontal offset fits. Dropping it 30 px clears T1's body entirely.
     // leg-A mid → series Lr → transformer primary; primary return → leg-C mid
     wire(150, 200, 200, 200), indH('Lr', bom, 228, 200), wire(256, 200, 300, 200, 300, 150, 320, 150), // reach T1 primary top
-    xfmr('T1', bom, tx, ty, { h, ct: ctOpt(variant), labelDy: -24 }),
+    xfmr('T1', bom, tx, ty, { h, ct: ctOpt(variant), labelDy: -70 }),   // Centred (a +130 offset parked it over the rectifier, nearer Dr1/Lout than T1) and raised to -70:
+    // centred at -46 the value string reached QC's drain riser at x=280 once labels widen in a narrow window.
     // primary return (p1) → leg-C mid. Enter midC from the right at its own y-band (y=210, inside the
     // 195–220 drain node) so the wire never runs down the x=280 line, where QD's source-to-gnd drop
     // (280,272→320) sits — routing through it silently shorted the primary return to ground.
     wire(tx - 10, 240, tx - 10, 270, 295, 270, 295, 210, 280, 210), dot(280, 210),
     // real RC snubber between the two leg midpoints (midA → Crc_pri → Rrc_pri → midC), per psfbCell;
     // its return also enters midC at y=210 from the left, clear of the QD source-to-gnd drop
-    dot(178, 200), wire(178, 200, 178, 240), capV('Crc_pri', bom, 178, 260, 'right'),
-    wire(178, 280, 178, 300, 200, 300), resH('Rrc_pri', bom, 220, 300, 'below'),
+    dot(190, 200), wire(190, 200, 190, 250), capV('Crc_pri', bom, 190, 270, 'right', -13),   // -13: right of the anchor the label hit the snubber return at x=240, left of it QB's body
+    wire(190, 290, 190, 300, 200, 300), resH('Rrc_pri', bom, 220, 300, 'below'),
     wire(240, 300, 240, 210, 280, 210),
-    // secondary bleed/balance resistors from each winding end to the secondary return (Rbsa/Rbsb) —
-    // dropped low so labels clear the transformer winding
-    dot(390, 195), wire(390, 195, 390, 285), resV('Rbsa', bom, 390, 305, 'left'),
-    wire(390, 325, 420, 325),
-    dot(534, 240), wire(534, 240, 590, 240, 590, 285), resV('Rbsb', bom, 590, 305, 'right'),
-    wire(590, 325, 560, 325), dot(560, 325),
-    ...secondaryFor(bom, tx, ty, h, variant, bridgeRefs(variant)),
+    // Secondary bleed/balance resistors from each winding end to the secondary return (Rbsa/Rbsb) —
+    // dropped low so labels clear the transformer winding. They exist ONLY in the full-bridge
+    // secondary (Psfb.cpp adds them with Dr3/Dr4); the center-tapped/current-doubler secondaries have
+    // their own DC path, so drawing them there invented parts the BOM does not have and left their
+    // return wires hanging in a rail that isn't at y=330. Both ends land ON the secFB return rail.
+    ...(variant === 'fullBridge' ? [
+      // Column at 380: 390 ran through Dr3's ref, and 370 is secFB's own sec_b wrap lane (putting it
+      // there T-joined Rbsa onto the wrap). The label is pushed clear of the Dr3/Dr4 diode column.
+      dot(380, 195), wire(380, 195, 380, 290), resV('Rbsa', bom, 380, 310, 'right', 49),
+      wire(380, 330, 420, 330),
+      dot(534, 240), wire(534, 240, 590, 240, 590, 290), resV('Rbsb', bom, 590, 310, 'left'),   // 'left': on the right the label ran across the riser at x=614
+      dot(590, 330),
+    ] : []),
+    ...secondaryFor(bom, tx, ty, h, variant, { ...bridgeRefs(variant), d1dx: 0 }),
     sig(124, 128, 'gA'), sig(124, 246, 'gB'), sig(254, 128, 'gC'), sig(254, 246, 'gD'),
     ctrlIC(bom, 90, 385, ['gA', 'gB', 'gC', 'gD']),
   ].join(''))
@@ -993,27 +1073,36 @@ function psfb(bom, variant = 'fullBridge') {
 function pshb(bom, variant = 'fullBridge') {
   const tx = 540, ty = 240, h = 90
   return svg(1140, 460, [
-    srcDC(60, 180), wire(60, 165, 60, 70, 150, 70), wire(60, 195, 60, 340, 200, 340), gnd(110, 340), // primary return
+    srcDC(60, 180), wire(60, 165, 60, 70, 150, 70), wire(60, 195, 60, 340, 190, 340), gnd(110, 340), // primary return (ends at 190, where S4's source column now meets it)
     // split input caps CsHi / CsLo about the neutral (mid)
-    capV('CsHi', bom, 150, 100, 'left'), wire(150, 70, 150, 80), dot(150, 70), wire(150, 120, 150, 170), dot(150, 170),
-    capV('CsLo', bom, 150, 260, 'left'), wire(150, 170, 150, 240), wire(150, 280, 150, 340), dot(150, 340),
+    capV('CsHi', bom, 150, 90, 'left'), dot(150, 70), wire(150, 110, 150, 170), dot(150, 170),
+    capV('CsLo', bom, 150, 260, 'right', -10), wire(150, 170, 150, 240), wire(150, 280, 150, 340), dot(150, 340),   // right+(-10): on the left the label crossed DC2's lane (x=120), unshifted it ran into the g3 flag
     // NPC stack S1..S4
     mosfetV('S1', bom, 250, 100, 'right', true), wire(250, 74, 250, 70, 150, 70), wire(250, 126, 250, 140), dot(250, 140),
     mosfetV('S2', bom, 250, 180, 'right', true), wire(250, 154, 250, 140), wire(250, 206, 250, 225), dot(250, 225),
     mosfetV('S3', bom, 250, 270, 'right', true), wire(250, 244, 250, 225), wire(250, 296, 250, 310), dot(250, 310),
-    mosfetV('S4', bom, 250, 350, 'right', true), wire(250, 324, 250, 310), wire(250, 376, 250, 340, 200, 340),
+    // S4 straddles the y=340 primary return (its body spans y≈333–367), so its source must reach the
+    // rail's end BELOW the device: routing source→(250,340)→(200,340) drove the return wire up into S4
+    // and then straight across its body for 23 px.
+    mosfetV('S4', bom, 250, 350, 'right', true), wire(250, 324, 250, 310), wire(250, 376, 250, 400, 190, 400, 190, 340),   // x=190, not 200: that column ran through the g4 gate flag
     // clamp diodes tie inner nodes to the neutral (mid)
     // DC1: neutral → upper inner node (anode=neutral); DC2: lower inner node → neutral (anode=lower)
-    diode('DC1', bom, 200, 140, 'right'), wire(180, 140, 150, 140, 150, 170), wire(220, 140, 250, 140),
-    diode('DC2', bom, 200, 310, 'left', 'below'), wire(180, 310, 150, 310, 150, 170), wire(220, 310, 250, 310),
+    diode('DC1', bom, 180, 140, 'right'), wire(160, 140, 150, 140), dot(150, 140), wire(200, 140, 250, 140),
+    // DC2's anode reaches the neutral up a CLEAR lane at x=120: up x=150 it ran through CsLo's body.
+    // DC2 sits a column left with its label ABOVE: at x=200 with a label below, "VF ≤ 1.2 V" was
+    // printed across the earth rail and into S4's body, with the g4 gate flag on top of it.
+    diode('DC2', bom, 180, 310, 'left', 'above'), wire(160, 310, 120, 310, 120, 170, 150, 170), wire(200, 310, 250, 310),
     // stack output (bridge_a) → series Lr → primary; primary return → neutral (mid)
     wire(250, 225, 312, 225), indH('Lr', bom, 340, 225), wire(368, 225, 440, 225, 440, 195, tx - 10, 195),
     xfmr('T1', bom, tx, ty, { h, ct: ctOpt(variant), labelDy: -24 }),
-    wire(tx - 10, 285, tx - 10, 300, 150, 300, 150, 170),
+    // T1 primary_end → neutral: out to a clear column (280) between the switch stack and the snubber,
+    // then along the free band above S3/below Lr into the neutral rail. Running it down x=150 crossed
+    // CsLo's body (shorting the midpoint to earth) and clipped DC2 and Rrc_pri on the way.
+    wire(tx - 10, 285, tx - 10, 300, 280, 300, 280, 235, 150, 235), dot(150, 235),
     // real RC snubber across the primary (pri_x → Crc_pri → Rrc_pri → neutral) — own column, labels
     // toward the clear gap before T1
-    dot(450, 195), wire(450, 195, 450, 215), capV('Crc_pri', bom, 450, 235, 'right'), wire(450, 255, 450, 262),
-    resV('Rrc_pri', bom, 450, 282, 'right'), wire(450, 302, 450, 300), dot(450, 300),
+    dot(450, 195), wire(450, 195, 450, 215), capV('Crc_pri', bom, 450, 235, 'right'), wire(450, 255, 450, 260),
+    resV('Rrc_pri', bom, 450, 280, 'right'), dot(450, 300),   // bottom pin lands ON the y=300 return lane
     ...secondaryFor(bom, tx, ty, h, variant, bridgeRefs(variant)),
     sig(224, 100, 'g1'), sig(224, 180, 'g2'), sig(224, 270, 'g3'), sig(224, 350, 'g4'),
     ctrlIC(bom, 90, 400, ['g1', 'g2', 'g3', 'g4']),
@@ -1047,11 +1136,11 @@ function srBridgeOut(bom, nx, ny, ny2, refs) {
     wire(nx, ny, xA, ny), dot(xA, ny),
     wire(nx, ny2, nx + 30, ny2, nx + 30, 330, xB + 48, 330, xB + 48, ny2, xB, ny2), dot(xB, ny2),
     mosfetV(refs[0], bom, xA, 130, 'right', true), wire(xA, 104, xA, yP), wire(xA, 156, xA, ny),
-    mosfetV(refs[1], bom, xA, 250, 'right', true), wire(xA, 224, xA, ny), wire(xA, 276, xA, yN),
-    mosfetV(refs[2], bom, xB, 130, 'right', true), wire(xB, 104, xB, yP), wire(xB, 156, xB, ny2),
-    mosfetV(refs[3], bom, xB, 250, 'right', true), wire(xB, 224, xB, ny2), wire(xB, 276, xB, yN),
+    mosfetV(refs[1], bom, xA, 250, 'right', true), wire(xA, 224, xA, 156), wire(xA, 276, xA, yN),
+    mosfetV(refs[2], bom, xB, 130, 'right', true), wire(xB, 104, xB, yP), wire(xB, 156, xB, 224),
+    mosfetV(refs[3], bom, xB, 250, 'right', true, false, 0, 8), wire(xB, 224, xB, ny2), wire(xB, 276, xB, yN),   // +8y: the ref sat on the ny2 return at y=240
     dot(xA, yP), dot(xB, yP), wire(xA, yP, lx, yP), // VOUT+ rail spans the bridge → Cout → load
-    wire(xA, yN, lx, yN),
+    wire(xA, yN, lx, yN), dot(xB, yN),
     dot(cx, yP), capV('Cout', bom, cx, 190), wire(cx, yP, cx, 170), wire(cx, 210, cx, yN), dot(cx, yN),
     loadR(lx, 190, yP, yN), dot(lx, yP), dot(lx, yN),
     port(lx + 60, yP, 'VOUT'), wire(lx, yP, lx + 60, yP),
@@ -1062,37 +1151,44 @@ function srBridgeOut(bom, nx, ny, ny2, refs) {
 // ── CLLC: full bridge + primary tank Cr1–Lr1, symmetric secondary tank Lr2–Cr2, SR bridge ─
 function cllc(bom) {
   return svg(1040, 430, [
-    srcDC(60, 175), wire(60, 160, 60, 80, 300, 80), wire(60, 190, 60, 320, 280, 320), // ground rail spans both legs
+    srcDC(60, 175), wire(60, 160, 60, 80, 280, 80), wire(60, 190, 60, 320, 280, 320), // rails span exactly both legs
     mosfetV('Q1', bom, 150, 128, 'right', true), wire(150, 102, 150, 80), dot(150, 80), wire(150, 154, 150, 205), dot(150, 205),
     mosfetV('Q2', bom, 150, 250, 'right', true), wire(150, 205, 150, 224), wire(150, 276, 150, 320), dot(150, 320),
-    mosfetV('Q3', bom, 280, 128, 'right', true), wire(280, 102, 280, 80), dot(280, 80), wire(280, 154, 280, 205), // Q3.source → node_b (leg mid / T1.primary_end)
-    mosfetV('Q4', bom, 280, 250, 'right', true), wire(280, 205, 280, 224), wire(280, 276, 280, 320), dot(280, 320), gnd(110, 320),
-    // node_a → Cr1 → Lr1 → primary; primary return (node_b) → leg 3/4 mid
-    wire(150, 205, 175, 205), capH('Cr1', bom, 200, 205), indH('Lr1', bom, 268, 205), wire(225, 205, 240, 205),
-    wire(296, 205, 310, 205, 310, 150, 330, 150), // reach T1 primary top
-    xfmr('T1', bom, 340, 195, { h: 90, labelDy: -24 }),
+    mosfetV('Q3', bom, 280, 128, 'right', true), wire(280, 102, 280, 80), dot(280, 80),
+    // ONE unbroken leg-mid column (Q3.source → Q4.drain = node_b). Drawn as two segments meeting at
+    // y=205 it put a vertex exactly where the tank lane crosses, which reads as a junction.
+    mosfetV('Q4', bom, 280, 250, 'right', true), wire(280, 154, 280, 224), wire(280, 276, 280, 320), dot(280, 320), gnd(110, 320),
+    // node_a → Cr1 → Lr1 → primary; primary return (node_b) → leg 3/4 mid.
+    // The tank ends at x=266 and steps up to y=175 to cross the leg-3/4 column as a plain un-dotted
+    // crossing. Centred at 268 the coil spanned x[240,296] — straddling that column, so node_b was drawn
+    // straight THROUGH Lr1's windings, reading as if the tank inductor tapped the bridge mid-point.
+    wire(150, 205, 178, 205), capH('Cr1', bom, 190, 205), wire(202, 205, 210, 205), indH('Lr1', bom, 238, 205),
+    wire(266, 205, 270, 205, 270, 175, 310, 175, 310, 150, 330, 150), // cross the leg column at y=175, then T1 primary top
+    xfmr('T1', bom, 340, 195, { h: 90, labelDy: -46 }),   // centred and raised: offset right, T1's own label sat nearer Lr2 than T1
     wire(330, 240, 330, 265, 305, 265, 305, 215, 280, 215), dot(280, 215),
     // secondary tank Lr2 → Cr2 into the SR bridge
-    wire(350, 150, 380, 150), indH('Lr2', bom, 408, 150), wire(436, 150, 460, 150), capH('Cr2', bom, 486, 150), wire(508, 150, 540, 150),
+    wire(350, 150, 380, 150), indH('Lr2', bom, 408, 150), wire(436, 150, 466, 150), capH('Cr2', bom, 486, 150), wire(506, 150, 540, 150),
     wire(350, 240, 540, 240),
     ...srBridgeOut(bom, 540, 150, 240, ['Qa', 'Qb', 'Qc', 'Qd']),
     sig(124, 128, 'g1'), sig(124, 250, 'g2'), sig(254, 128, 'g3'), sig(254, 250, 'g4'),
-    sig(594, 130, 'sa'), sig(594, 250, 'sb'), sig(704, 130, 'sc'), sig(704, 250, 'sd'),
-    icBox('U1', bom, 120, 380, 64, 80, ['g1', 'g2', 'g3', 'g4'], ['sa', 'sb', 'sc', 'sd'], 'PWM'),
+    sig(594, 130, 'sa'), sig(594, 250, 'sb', 'left', -12), sig(704, 130, 'sc'), sig(704, 250, 'sd'),
+    icBox('U1', bom, 220, 380, 64, 80, ['g1', 'g2', 'g3', 'g4'], ['sa', 'sb', 'sc', 'sd'], 'PWM'),   // x=220: at 120 the ref and the g* pin labels sat on the earth symbol
   ].join(''))
 }
 
 // ── CLLLC: like CLLC but with a discrete secondary resonant inductor path (QE..QH SR) ────
 function clllc(bom) {
   return svg(1040, 430, [
-    srcDC(60, 175), wire(60, 160, 60, 80, 300, 80), wire(60, 190, 60, 320, 280, 320), // ground rail spans both legs
+    srcDC(60, 175), wire(60, 160, 60, 80, 280, 80), wire(60, 190, 60, 320, 280, 320), // rails span exactly both legs
     mosfetV('Q1', bom, 150, 128, 'right', true), wire(150, 102, 150, 80), dot(150, 80), wire(150, 154, 150, 205), dot(150, 205),
     mosfetV('Q2', bom, 150, 250, 'right', true), wire(150, 205, 150, 224), wire(150, 276, 150, 320), dot(150, 320),
-    mosfetV('Q3', bom, 280, 128, 'right', true), wire(280, 102, 280, 80), dot(280, 80), wire(280, 154, 280, 205), // Q3.source → node_b (leg mid / T1.primary_end)
-    mosfetV('Q4', bom, 280, 250, 'right', true), wire(280, 205, 280, 224), wire(280, 276, 280, 320), dot(280, 320), gnd(110, 320),
-    wire(150, 205, 175, 205), capH('Cr1', bom, 200, 205), indH('Lr1', bom, 268, 205), wire(225, 205, 240, 205),
-    wire(296, 205, 310, 205, 310, 150, 330, 150), // reach T1 primary top
-    xfmr('T1', bom, 340, 195, { h: 90, labelDy: -24 }),
+    mosfetV('Q3', bom, 280, 128, 'right', true), wire(280, 102, 280, 80), dot(280, 80),
+    // Same re-route as cllc: one unbroken leg-mid column, and the tank steps up to y=175 to cross it
+    // instead of Lr1 being centred on top of it (see cllc for the full note).
+    mosfetV('Q4', bom, 280, 250, 'right', true), wire(280, 154, 280, 224), wire(280, 276, 280, 320), dot(280, 320), gnd(110, 320),
+    wire(150, 205, 178, 205), capH('Cr1', bom, 190, 205), wire(202, 205, 210, 205), indH('Lr1', bom, 238, 205),
+    wire(266, 205, 270, 205, 270, 175, 310, 175, 310, 150, 330, 150), // cross the leg column at y=175, then T1 primary top
+    xfmr('T1', bom, 340, 195, { h: 90, labelDy: -46 }),   // centred and raised: offset right, T1's own label sat nearer Lr2 than T1
     wire(330, 240, 330, 265, 305, 265, 305, 215, 280, 215), dot(280, 215),
     // secondary tank Lr2 → Cr2, then the SR current-sense shunt Rsense into the bridge (senseP/senseM
     // feed the SR controller, per the clllcPower/srControl nets)
@@ -1103,8 +1199,8 @@ function clllc(bom) {
     wire(350, 240, 540, 240),
     ...srBridgeOut(bom, 540, 150, 240, ['QE', 'QF', 'QG', 'QH']),
     sig(124, 128, 'g1'), sig(124, 250, 'g2'), sig(254, 128, 'g3'), sig(254, 250, 'g4'),
-    sig(594, 130, 'gA'), sig(594, 250, 'gB'), sig(704, 130, 'gB'), sig(704, 250, 'gA'),
-    ctrlIC(bom, 120, 380, ['g1', 'g2', 'g3', 'g4']),
+    sig(594, 130, 'gA'), sig(594, 250, 'gB', 'left', -12), sig(704, 130, 'gB'), sig(704, 250, 'gA'),
+    ctrlIC(bom, 220, 380, ['g1', 'g2', 'g3', 'g4']),   // x=220: at 120 the ref sat on the earth symbol
     icBox('SR', bom, 450, 390, 70, 64, ['sP', 'sM'], ['gA', 'gB'], 'SR CTRL'),
   ].join(''))
 }
@@ -1117,26 +1213,27 @@ function pfc(bom) {
     wire(70, 185, 120, 185, 120, 235, 180, 235),
     wire(70, 215, 95, 215, 95, 360, 290, 360, 290, 235, 250, 235), // acNeutral wraps under the bridge
     dot(180, 235), dot(250, 235),
-    diode('D1', bom, 180, 197, 'up'), wire(180, 177, 180, 150), wire(180, 217, 180, 235),
+    diode('D1', bom, 180, 197, 'up', 'left', false, 0, -30), wire(180, 177, 180, 150), wire(180, 217, 180, 235),   // -30y: at y=197 the value sat on the bus lane (x=120); shifted left it landed on the VAC source
     diode('D3', bom, 180, 273, 'up', 'left'), wire(180, 253, 180, 235), wire(180, 293, 180, 320),
     diode('D2', bom, 250, 197, 'up'), wire(250, 177, 250, 150), wire(250, 217, 250, 235),
-    diode('D4', bom, 250, 273, 'up'), wire(250, 253, 250, 235), wire(250, 293, 250, 320),
+    diode('D4', bom, 250, 273, 'up', 'above', false, 29), wire(250, 253, 250, 235), wire(250, 293, 250, 320), dot(250, 320),   // +29: the VF value sat on the riser at x=290
     dot(180, 150), dot(250, 150), wire(180, 150, 250, 150),
     wire(180, 320, 660, 320), gnd(180, 320),
     // Rref bleeds the acNeutral reference to ground (per pfcPower nets)
-    dot(130, 360), resV('Rref', bom, 130, 340, 'left'), wire(130, 320, 180, 320), dot(130, 320),
+    dot(130, 360), resV('Rref', bom, 130, 340, 'left', -25), wire(130, 320, 180, 320), dot(130, 320),   // -25: the label sat on the reference riser at x=95
     // boost cell: rectified bus → Rsense (current shunt) → L → switch node; SW shunt, D5 into the bus cap
     wire(250, 150, 260, 150), resH('Rsense', bom, 280, 150, 'above'),
-    sig(255, 150, 'busP', 'down'), sig(303, 150, 'nL', 'down'),
+    sig(255, 150, 'busP', 'down', 10), sig(303, 150, 'nL', 'down'),   // +10: the flag text sat on D2's riser at x=250
     indH('L', bom, 340, 150), wire(300, 150, 312, 150), wire(368, 150, 410, 150), dot(410, 150),
     mosfetV('SW', bom, 410, 225), wire(410, 150, 410, 199), wire(410, 251, 410, 320), dot(410, 320),
-    diode('D5', bom, 480, 150, 'right'), wire(410, 150, 460, 150), wire(500, 150, 600, 150), dot(560, 150),
+    diode('D5', bom, 480, 150, 'right'), wire(410, 150, 460, 150), wire(500, 150, 630, 150), dot(560, 150),
     capV('Cout', bom, 560, 235), wire(560, 150, 560, 215), wire(560, 255, 560, 320), dot(560, 320),
-    loadR(630, 235, 150, 320), dot(630, 150), dot(630, 320),
+    loadR(630, 235, 150, 320, 21), dot(630, 150), dot(630, 320),   // +21: the LOAD caption sat on the divider tap at x=660
     port(690, 150, 'VBUS'), wire(630, 150, 690, 150),
     // output-voltage divider feeding the control law (vout → Rv1 → vs → Rv2 → gnd)
-    dot(660, 150), wire(660, 150, 660, 170), resV('Rv1', bom, 660, 190, 'left'),
-    sig(660, 226, 'vs', 'right'), wire(660, 210, 660, 242), resV('Rv2', bom, 660, 262, 'left'),
+    dot(660, 150), wire(660, 150, 660, 170), resV('Rv1', bom, 660, 190, 'right'),   // 'right': on the left the labels sat on the load column at x=630
+    // 'vs' flag points LEFT: on the right its text collided with the LOAD caption.
+    sig(660, 226, 'vs', 'left', -26), wire(660, 210, 660, 242), resV('Rv2', bom, 660, 262, 'right'),
     wire(660, 282, 660, 320), dot(660, 320),
     sig(384, 225, 'g'),
     // ── control law (average-current-mode PFC), signal nets by label: vs → ∫/EA → ×busP → PWM vs nL ──
@@ -1164,7 +1261,7 @@ function viennaLeg(bom, x, ph) {
     wire(x, X, sx, X),
     mosfetV(`SW${ph}`, bom, sx, 160, 'right', true), wire(sx, 134, sx, X), wire(sx, 186, sx, 194),
     mosfetV(`SQ${ph}`, bom, sx, 220, 'right', true, true), wire(sx, 246, sx, neu), dot(sx, neu), // flipped: common source with SW
-    sig(sx - 26, 160, `g${ph}`), sig(sx - 26, 220, `g${ph}`),
+    sig(sx - 26, 160, `g${ph}`, 'left', -10), sig(sx - 26, 220, `g${ph}`, 'left', -10),   // -10: the flags sat on the Dn riser at x=x
   ]
 }
 function vienna(bom) {
@@ -1172,16 +1269,16 @@ function vienna(bom) {
   // per-phase current-loop block chain (Gvm/Sub/Sum/Add/Mul/Cmp), nets by label per viennaControl
   const phaseRow = (ph, y) => [
     icBox(`Gvm${ph}`, bom, 150, y, 60, 56, [ph, 'gcond'], [`gvp${ph}`], '×'),
-    icBox(`Sub${ph}`, bom, 280, y, 60, 56, [`nl${ph}`, ph], [`nmp${ph}`], '−'),
-    icBox(`Sum${ph}`, bom, 410, y, 60, 56, [`nmp${ph}`, `gvp${ph}`], [`err${ph}`], 'Σ'),
-    icBox(`Add${ph}`, bom, 540, y, 60, 56, [`err${ph}`, 'bal'], [`errp${ph}`], '+'),
-    icBox(`Mul${ph}`, bom, 670, y, 60, 56, [ph, `errp${ph}`], [`m${ph}`], '×'),
-    icBox(`Cmp${ph}`, bom, 800, y, 60, 56, [`m${ph}`, 'gnd'], [`g${ph}`], 'PWM'),
+    icBox(`Sub${ph}`, bom, 305, y, 60, 56, [`nl${ph}`, ph], [`nmp${ph}`], '−'),
+    icBox(`Sum${ph}`, bom, 460, y, 60, 56, [`nmp${ph}`, `gvp${ph}`], [`err${ph}`], 'Σ'),
+    icBox(`Add${ph}`, bom, 615, y, 60, 56, [`err${ph}`, 'bal'], [`errp${ph}`], '+'),
+    icBox(`Mul${ph}`, bom, 770, y, 60, 56, [ph, `errp${ph}`], [`m${ph}`], '×'),
+    icBox(`Cmp${ph}`, bom, 925, y, 60, 56, [`m${ph}`, 'gnd'], [`g${ph}`], 'PWM'),
   ].join('')
-  return svg(940, 830, [
-    wire(95, 60, 780, 60), wire(95, 270, 780, 270), wire(95, 340, 780, 340), // busP / neutral / busN
+  return svg(1010, 880, [
+    wire(155, 60, 790, 60), wire(203, 270, 720, 270), wire(155, 340, 790, 340), // busP / neutral / busN — each spans exactly its own junctions
     ...cols.flatMap((c) => viennaLeg(bom, c.x, c.ph)),
-    txt(110, 264, 'N', 'sch-port', 'end'),
+    txt(196, 264, 'N', 'sch-port', 'end'),
     sig(770, 60, 'busP', 'up'), sig(770, 340, 'busN', 'down'),
     // split caps Cp (busP→neutral) and Cn (neutral→busN) + load across the full bus
     capV('Cp', bom, 720, 165, 'right'), wire(720, 60, 720, 145), dot(720, 60), wire(720, 185, 720, 270), dot(720, 270),
@@ -1192,12 +1289,12 @@ function vienna(bom) {
     // ── control law: bus-voltage loop + imbalance loop (shared), then one current loop per phase ──
     txt(60, 505, 'CONTROL — bus-voltage + balance loops, per-phase current loops', 'sch-blk', 'start'),
     icBox('Svs', bom, 150, 560, 60, 56, ['busP', 'busN'], ['vbus'], 'G'),
-    icBox('Ivolt', bom, 280, 560, 60, 56, ['vbus'], ['vint'], '∫'),
-    icBox('Sg', bom, 410, 560, 60, 56, ['vint', 'vbus'], ['gcond'], 'EA'),
-    icBox('Simb', bom, 540, 560, 60, 56, ['busP', 'busN'], ['imb'], '−'),
-    icBox('Ibal', bom, 670, 560, 60, 56, ['imb'], ['bal'], 'G'),
-    ctrlIC(bom, 810, 560, ['ga', 'gb', 'gc'], 'U1', 'CTRL'),
-    phaseRow('a', 650), phaseRow('b', 720), phaseRow('c', 790),
+    icBox('Ivolt', bom, 305, 560, 60, 56, ['vbus'], ['vint'], '∫'),
+    icBox('Sg', bom, 460, 560, 60, 56, ['vint', 'vbus'], ['gcond'], 'EA'),
+    icBox('Simb', bom, 615, 560, 60, 56, ['busP', 'busN'], ['imb'], '−'),
+    icBox('Ibal', bom, 770, 560, 60, 56, ['imb'], ['bal'], 'G'),
+    ctrlIC(bom, 900, 560, ['ga', 'gb', 'gc'], 'U1', 'CTRL'),
+    phaseRow('a', 650), phaseRow('b', 730), phaseRow('c', 810),
   ].join(''))
 }
 
@@ -1240,6 +1337,15 @@ export function renderSchematic(topologyId, bomRows, variant) {
 // Verification hook: render once with terminal recording on, returning { svg, pins } where pins is a
 // list of { ref, pin, x, y } for every registered electrical terminal (MOSFET drain/source/gate, diode
 // anode/cathode, ground symbols, external ports). Used by the netlist-vs-drawing connectivity checker.
+// Run an arbitrary drawing function with terminal recording on, returning { out, pins }. The CIAS
+// generator uses this so rule E (no wire may end in mid-air) sees EVERY symbol's terminals — including
+// the synthesized source/load glyphs, whose pins no layout metadata lists.
+export function withPinRecording(fn) {
+  _pins.length = 0
+  _rec = true
+  try { return { out: fn(), pins: _pins.slice() } } finally { _rec = false }
+}
+
 export function collectPins(topologyId, bomRows, variant) {
   _pins.length = 0
   _rec = true
