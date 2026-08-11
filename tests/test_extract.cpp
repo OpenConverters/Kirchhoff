@@ -149,10 +149,10 @@ TEST_CASE("extract: bad TAS throws (no silent fallback)", "[extract][errors]") {
 }
 
 TEST_CASE("api: full analytical waveforms captured out-of-band", "[extract][api][waveforms]") {
-    // The builders strip waveforms when baking the TAS (excitations_processed); the named variant
-    // captures the FULL operating point per magnetic, exposed via api::design_tas_full /
-    // api::process_converter. LLC is the acid test: its labels are `custom`, so WITHOUT this capture
-    // no time-domain data exists anywhere for it analytically.
+    // The named excitations_processed(op, component) variant captures the FULL operating point per
+    // magnetic, exposed via api::design_tas_full / api::process_converter. LLC is the acid test: its
+    // labels are `custom`, so WITHOUT this capture no time-domain data exists anywhere for it
+    // analytically. (What the TAS itself embeds is asserted further down.)
     const std::string spec = spec_for(400, 12, 120, 100000).dump();
     const std::string out = Kirchhoff::api::design_tas_full("llc", spec);
     REQUIRE(out.rfind("Exception:", 0) != 0);
@@ -172,21 +172,35 @@ TEST_CASE("api: full analytical waveforms captured out-of-band", "[extract][api]
         REQUIRE(wf.at("data").size() == wf.at("time").size());
     }
 
-    // the TAS itself stays stripped (minimal, schema-valid): no waveform key inside baked excitations
-    // (tas.simulation.stimulus[].waveform — the PWM gate drive — is a different, legitimate key)
-    std::function<void(const json&)> checkStripped = [&](const json& node) {
+    // The TAS's OWN baked excitations. This block used to assert they carried NO waveform ("the TAS
+    // stays stripped"), which was true when this test was written (96482b9, 2026-07-02) but was
+    // superseded three weeks later by 332619c: emit_processed now serializes the sampled waveform
+    // whenever the solver produced one, because MKF reconstructs a STANDARD-label waveform from
+    // `processed` alone but a CUSTOM one cannot be — calculate_advised_magnetics_fast rejects the seed
+    // with "Waveform must have at least 2 data points". Every one of the 24 topologies emits samples
+    // now, so the old assertion was simply stale (it only ever FAILED here because LLC is the topology
+    // this test builds). What still matters, and is what this asserts, is that whatever the TAS carries
+    // is USABLE by MKF: stats always present, and any embedded waveform a real ≥2-point signal with
+    // matching data/time — never a stub. The FULL operating point (harmonics, conditions) still lives
+    // out-of-band in analyticalWaveforms, which the block above proves.
+    std::function<void(const json&)> checkUsable = [&](const json& node) {
         if (node.is_object()) {
             if (node.contains("excitationsPerWinding"))
-                for (const auto& e : node.at("excitationsPerWinding")) {
-                    if (e.contains("current")) CHECK_FALSE(e.at("current").contains("waveform"));
-                    if (e.contains("voltage")) CHECK_FALSE(e.at("voltage").contains("waveform"));
-                }
-            for (const auto& [k, v] : node.items()) checkStripped(v);
+                for (const auto& e : node.at("excitationsPerWinding"))
+                    for (const char* side : {"current", "voltage"}) {
+                        if (!e.contains(side)) continue;
+                        CHECK(e.at(side).contains("processed"));
+                        if (!e.at(side).contains("waveform")) continue;
+                        const auto& wf = e.at(side).at("waveform");
+                        CHECK(wf.at("data").size() >= 2);
+                        if (wf.contains("time")) CHECK(wf.at("data").size() == wf.at("time").size());
+                    }
+            for (const auto& [k, v] : node.items()) checkUsable(v);
         } else if (node.is_array()) {
-            for (const auto& v : node) checkStripped(v);
+            for (const auto& v : node) checkUsable(v);
         }
     };
-    checkStripped(j.at("tas"));
+    checkUsable(j.at("tas"));
 
     // a second build must not leak the first build's captures (registry cleared per build)
     const json j2 = json::parse(Kirchhoff::api::design_tas_full("buck", spec_for(24, 12, 60, 100000).dump()));
