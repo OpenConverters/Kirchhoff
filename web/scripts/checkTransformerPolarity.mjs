@@ -74,3 +74,4 @@ for (const t of TOPOLOGIES) {
 console.log('\n— phasing is a design choice for these; dots verified present, sign needs human sign-off —')
 for (const c of convention) console.log('  ' + c)
 console.log(fail ? `\n${fail} HARD-RULE polarity violation(s)` : '\nAll hard-rule (flyback/forward) transformer phasings correct; dots present on every isolated transformer')
+process.exit(fail ? 1 : 0)   // a gate that cannot fail is not a gate

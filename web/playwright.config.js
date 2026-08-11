@@ -28,6 +28,14 @@ export default defineConfig({
     { name: 'knobs', testMatch: /(serialization|physics)\.spec\.js/, use: { ...devices['Desktop Chrome'] } },
     { name: 'kelvin', testMatch: /kelvin\.spec\.js/, use: { ...devices['Desktop Chrome'] } },
     { name: 'visualsim', testMatch: /visualsim\.spec\.js/, use: { ...devices['Desktop Chrome'] } },
+    // Measures the schematic in the LIVE app (real stylesheet, real fonts) — every other schematic
+    // gate measures a reconstruction of it.
+    { name: 'schematic', testMatch: /schematic\.spec\.js/, use: { ...devices['Desktop Chrome'] } },
+    // ...and again in a NARROW window. SVG text is sized in CSS px, so it does NOT scale with the
+    // drawing: the smaller the pane, the larger every label is relative to the circuit (measured up to
+    // +14% in user units at 800 px). A layout tuned at one width is therefore not proven at another.
+    { name: 'schematic-narrow', testMatch: /schematic\.spec\.js/,
+      use: { ...devices['Desktop Chrome'], viewport: { width: 900, height: 900 } } },
   ],
   webServer: {
     command: 'npm run build && npm run preview -- --port 4173',

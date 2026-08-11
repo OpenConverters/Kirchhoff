@@ -9,9 +9,15 @@
     "build": "npm run sync-wasm && vite build",
     "preview": "vite preview",
     "test:unit": "node --test 'tests/lib/*.test.js'",
+    "check:nets": "node scripts/checkSchematicNets.mjs && node scripts/checkCiasSchematicNets.mjs && node scripts/checkFalstadNets.mjs && node scripts/checkTransformerPolarity.mjs && node scripts/checkComponentRatings.mjs",
+    "check:drawing": "node scripts/auditSchematics.mjs && node scripts/auditSchematicLabels.mjs",
+    "check:equivalence": "node scripts/checkEquivalence.mjs",
+    "check:sweep": "node scripts/checkSweep.mjs   # slow: 9 design points x every topology/variant",
+    "check": "npm run check:nets && npm run check:drawing && npm run check:anchoring && npm run check:equivalence",
     "test:e2e": "playwright test",
     "test:e2e:smoke": "playwright test smoke",
-    "test": "npm run test:unit && npm run test:e2e"
+    "test": "npm run check && npm run test:unit && npm run test:e2e",
+    "check:anchoring": "node scripts/checkLabelAnchoring.mjs"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.3.0",

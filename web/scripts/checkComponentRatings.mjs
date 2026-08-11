@@ -98,3 +98,4 @@ for (const t of TOPOLOGIES) {
   }
 }
 console.log(flagged ? `\n${flagged} topology/variant combos with rating problems` : '\nAll component ratings sane (no negatives, no absurd current/power, every semiconductor typed)')
+process.exit(flagged ? 1 : 0)   // a gate that cannot fail is not a gate

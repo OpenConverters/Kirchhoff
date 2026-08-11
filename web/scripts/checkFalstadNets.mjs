@@ -3,8 +3,10 @@
 // For every topology that has a falstad visual layout, design every variant through the real WASM
 // and run falstadExport. The exporter itself verifies the drawn wiring against the flattened CIAS
 // nets (the same nets the ngspice deck simulates) and THROWS on any split net, short, missing
-// placement or unplaceable component — so "it exported" IS the consistency proof. This script just
-// makes that proof repeatable outside the browser, like checkSchematicNets.mjs does for the SVG.
+// placement or unplaceable component — so "it exported" IS the consistency proof. It also refuses to
+// draw a broken PICTURE: a post touched by only one element (CircuitJS1's own "N bad connections") or
+// two collinear spans overlapping (a wire drawn through a part). This script just makes that proof
+// repeatable outside the browser, like checkSchematicNets.mjs does for the SVG.
 import init from '../../build-wasm-ng/kirchhoff.js'
 import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
 import { falstadExport, hasVisualSim } from '../src/falstad.js'

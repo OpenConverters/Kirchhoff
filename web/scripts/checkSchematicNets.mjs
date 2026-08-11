@@ -25,6 +25,10 @@ import init from '../../build-wasm-ng/kirchhoff.js'
 import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
 import { extractBom } from '../src/bom.js'
 import { collectPins, hasSchematic } from '../src/schematics.js'
+// Renders through the SAME entry point the app uses: for a topology with a CIAS layout the product
+// draws THAT, not the hand-authored art, so auditing collectPins() directly measured a drawing the
+// user never sees (see renderForAudit in ciasSchematic.js).
+import { renderForAudit } from '../src/ciasSchematic.js'
 import { checkSchematic } from '../src/schematicCheck.js'
 const M = await init()
 
@@ -40,10 +44,11 @@ for (const t of TOPOLOGIES) {
     const out = M.design_tas_full(t.id, JSON.stringify(spec))
     if (out.startsWith('Exception')) continue
     const tas = JSON.parse(out).tas
-    const { svg, pins } = collectPins(t.id, extractBom(tas), opt ?? 'standard')
+    const { svg, pins } = renderForAudit(t.id, tas, opt ?? 'standard')
     const problems = checkSchematic({ svg, pins, tas })
     if (problems.length) { flagged++; console.log((t.id + (opt ? '/' + opt : '')).padEnd(26), problems.join('  |  ')) }
   }
 }
 
 console.log(flagged ? `\n${flagged} topology/variant combos flagged` : '\nAll nets + magnetic windings consistent with the flattened netlist')
+process.exit(flagged ? 1 : 0)   // a gate that cannot fail is not a gate

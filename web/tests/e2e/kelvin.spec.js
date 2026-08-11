@@ -12,6 +12,22 @@ async function openKind(page, kind) {
   return ref
 }
 
+// Wait for the candidate table — but if the drawer reached one of its OTHER terminal states, fail
+// with what it actually says. Waiting on `kelvin-candidates` alone reports "element not found",
+// which is the same message for a product regression and for a stale local .kidx (the shards are
+// gitignored build artifacts, so a Kelvin format bump silently leaves yours behind: the drawer said
+// "unsupported shard format version 4" on screen while all five tests reported only a missing
+// element). The assertion is unchanged — the table must still appear; only the diagnosis improves.
+async function expectCandidates(page, timeout = 15000) {
+  const table = page.getByTestId('kelvin-candidates')
+  const err = page.getByTestId('kelvin-error')
+  const empty = page.getByTestId('kelvin-empty')
+  await expect(table.or(err).or(empty), 'the drawer settled into some terminal state').toBeVisible({ timeout })
+  if (await err.count()) throw new Error(`Kelvin sourcing failed: ${(await err.innerText()).trim()}`)
+  if (await empty.count()) throw new Error(`Kelvin found no part: ${(await empty.innerText()).trim().slice(0, 300)}`)
+  await expect(table).toBeVisible()
+}
+
 test.describe('Kelvin candidate sourcing', () => {
   test('flyback MOSFET drawer sources real parts', async ({ page }) => {
     await boot(page)
@@ -22,7 +38,7 @@ test.describe('Kelvin candidate sourcing', () => {
     await page.getByTestId('find-parts').click()
 
     // Candidate table renders with ≥1 real part; top row is the deterministic default.
-    await expect(page.getByTestId('kelvin-candidates')).toBeVisible({ timeout: 15000 })
+    await expectCandidates(page)
     const n = await page.getByTestId('kelvin-candidate').count()
     expect(n, 'at least one candidate').toBeGreaterThan(0)
     const topMpn = await page.getByTestId('kelvin-candidate').first().locator('.mpn').innerText()
@@ -52,7 +68,7 @@ test.describe('Kelvin candidate sourcing', () => {
 
     await openKind(page, 'MOSFET')
     await page.getByTestId('find-parts').click()
-    await expect(page.getByTestId('kelvin-candidates')).toBeVisible({ timeout: 30000 })
+    await expectCandidates(page, 30000)
     const n = await page.getByTestId('kelvin-candidate').count()
     expect(n, 'candidates load despite an uncacheable shard').toBeGreaterThan(0)
   })
@@ -64,7 +80,7 @@ test.describe('Kelvin candidate sourcing', () => {
 
     const ref = await openKind(page, 'MOSFET')
     await page.getByTestId('find-parts').click()
-    await expect(page.getByTestId('kelvin-candidates')).toBeVisible({ timeout: 15000 })
+    await expectCandidates(page)
 
     const topMpn = (await page.getByTestId('kelvin-candidate').first().locator('.mpn').innerText()).trim()
 
@@ -128,7 +144,7 @@ test.describe('Kelvin candidate sourcing', () => {
 
     await openKind(page, 'MOSFET')
     await page.getByTestId('find-parts').click()
-    await expect(page.getByTestId('kelvin-candidates')).toBeVisible({ timeout: 15000 }) // select unaffected
+    await expectCandidates(page) // select unaffected
 
     await page.getByTestId('use-part').first().click()
     await expect(page.getByTestId('kelvin-bind-error')).toContainText('version mismatch', { timeout: 15000 })
@@ -142,7 +158,7 @@ test.describe('Kelvin candidate sourcing', () => {
 
     await openKind(page, 'Capacitor')
     await page.getByTestId('find-parts').click()
-    await expect(page.getByTestId('kelvin-candidates')).toBeVisible({ timeout: 20000 })
+    await expectCandidates(page, 20000)
     expect(await page.getByTestId('kelvin-candidate').count()).toBeGreaterThan(0)
 
     // Manufacturer diversity cap (maxManufacturerFraction=0.2) must actually take effect in the WASM:
