@@ -20,7 +20,7 @@ import { ciasComponents } from './cias.js'
 import { extractBom } from './bom.js'
 import { checkSchematic } from './schematicCheck.js'
 
-const { svg, wire, dot, mosfetV, mosfetH, diode, indH, indV, capV, capH, resV, resH, xfmr, srcDC, gnd, loadR, port, sig, ctrlIC } = S
+const { svg, wire, dot, mosfetV, mosfetH, diode, indH, indV, capV, capH, resV, resH, xfmr, xfmr3, xfmr4, srcDC, gnd, isoGnd, loadR, port, sig, ctrlIC } = S
 
 // wire(...pts) helper takes a flat point list; our layout stores polylines as flat arrays.
 const poly = (pts) => wire(...pts)
@@ -245,6 +245,311 @@ const LAYOUTS = {
       srcDC(60, 195), loadR(680, 195, 70, 320), gnd(330, 320), port(770, 70, 'VOUT'),
       sig(194, 132, 'g1'), sig(194, 248, 'g2'), sig(414, 132, 'g3'), sig(414, 248, 'g4'),
       ctrlIC(b, 500, 390, ['g1', 'g2', 'g3', 'g4']),
+    ],
+  },
+  // ── isolated: buck with an auxiliary isolated rail (flybuck) ──────────────
+  isolated_buck: {
+    size: [900, 400],
+    place: {
+      QS1:  { draw: (b) => mosfetV('QS1', b, 230, 110, 'right', true) },
+      QS2:  { draw: (b) => mosfetV('QS2', b, 230, 250, 'right', true) },
+      T1:   { draw: (b) => xfmr('T1', b, 360, 185, { h: 90, labelDy: -24 }) },
+      Cpri: { draw: (b) => capV('Cpri', b, 420, 265, 'left') },
+      Dsec: { draw: (b) => diode('Dsec', b, 620, 258, 'right', 'below') },
+      Rsec: { draw: (b) => resV('Rsec', b, 645, 188, 'left') },
+      Csec: { draw: (b) => capV('Csec', b, 680, 188) },
+    },
+    wires: [
+      { from: '@src.p0', to: 'QS1.drain', via: [[60, 70], [230, 70]] },
+      { from: '@src.p1', to: [420, 300], via: [[60, 300]] },                    // primary (buck) earth rail
+      { from: 'QS1.source', to: 'QS2.drain' },                                  // sw node
+      { from: 'QS2.source', to: [230, 300] },
+      // discrete antiparallel diodes across the sync FETs, in a column of their own
+      { from: 'DS1.cathode', to: [160, 70] },
+      { from: 'DS1.anode', to: [230, 180], via: [[160, 180]] },
+      { from: 'DS2.cathode', to: [160, 180] },
+      { from: 'DS2.anode', to: [160, 300] },
+      { from: [230, 180], to: 'T1.p0', via: [[300, 180], [300, 140]] },         // sw node → primary top
+      // The primary buck rail leaves T1's primary terminal DOWNWARD first: run straight right at y=230
+      // and it passes through T1's SECONDARY terminal — a wire across the isolation barrier.
+      { from: 'T1.p1', to: 'Cpri.p0', via: [[350, 245]] },
+      { from: 'Cpri.p0', to: '@port.VOUT', via: [[420, 230]] },
+      { from: 'Cpri.p1', to: [420, 300] },
+      // isolated secondary: its own floating return, one rectifier, preload Rsec
+      { from: 'T1.s0', to: '@sgnd.sgnd', via: [[370, 118]] },
+      { from: 'T1.s1', to: 'Dsec.anode', via: [[370, 215], [600, 215]] },
+      { from: 'Dsec.cathode', to: '@port.VISO' },
+      { from: 'Rsec.p0', to: [645, 118] },
+      { from: 'Rsec.p1', to: [645, 258] },
+      { from: 'Csec.p0', to: [680, 118] },
+      { from: 'Csec.p1', to: [680, 258] },
+    ],
+    synth: (b) => [
+      srcDC(60, 180), gnd(110, 300), isoGnd(720, 118), port(490, 230, 'VOUT'), port(760, 258, 'VISO'),
+      // DS1/DS2 are the sync FETs' antiparallel diodes: TAS components (role bodyDiode), filtered out
+      // of the BOM because they are intrinsic, so they are drawn here rather than placed as bricks.
+      diode('DS1', b, 160, 125, 'up', 'left'), diode('DS2', b, 160, 235, 'up', 'left'),
+      sig(204, 110, 'g1', 'down'), sig(204, 250, 'g2', 'down'),
+      ctrlIC(b, 140, 350, ['g1', 'g2']),
+    ],
+  },
+  // ── isolated: buck-boost with an auxiliary isolated rail ──────────────────
+  isolated_buck_boost: {
+    size: [860, 360],
+    place: {
+      QS1:  { draw: (b) => mosfetV('QS1', b, 210, 100, 'right', true) },
+      T1:   { draw: (b) => xfmr('T1', b, 290, 180, { h: 80, opp: true, labelDy: -24 }) },
+      Dpri: { draw: (b) => diode('Dpri', b, 170, 180, 'up', 'left') },
+      Cpri: { draw: (b) => capV('Cpri', b, 150, 270, 'left') },
+      Dsec: { draw: (b) => diode('Dsec', b, 540, 250, 'right', 'below') },
+      Rsec: { draw: (b) => resV('Rsec', b, 565, 178, 'left') },
+      Csec: { draw: (b) => capV('Csec', b, 600, 178) },
+    },
+    wires: [
+      { from: '@src.p0', to: 'QS1.drain', via: [[60, 70], [210, 70]] },
+      { from: '@src.p1', to: [280, 300], via: [[60, 300]] },
+      { from: 'QS1.source', to: 'T1.p0', via: [[210, 140]] },                   // sw node → primary top
+      { from: 'T1.p1', to: [280, 300] },                                        // primary bottom → return rail
+      // inverting primary rail via Dpri: switch node → diode → VOUT(−) with its own cap
+      { from: 'Dpri.cathode', to: [210, 140], via: [[170, 140]] },
+      { from: 'Dpri.anode', to: [150, 240], via: [[170, 240]] },
+      { from: 'Cpri.p0', to: [150, 240] },
+      { from: [150, 240], to: '@port.VOUT(−)' },
+      { from: 'Cpri.p1', to: [150, 300] },
+      // isolated secondary with its own floating return, joined to the primary only through T1
+      { from: 'T1.s0', to: '@sgnd.sgnd', via: [[300, 110]] },
+      { from: 'T1.s1', to: 'Dsec.anode', via: [[300, 250]] },
+      { from: 'Dsec.cathode', to: '@port.VISO' },
+      { from: 'Rsec.p0', to: [565, 110] },
+      { from: 'Rsec.p1', to: [565, 250] },
+      { from: 'Csec.p0', to: [600, 110] },
+      { from: 'Csec.p1', to: [600, 250] },
+    ],
+    synth: (b) => [
+      srcDC(60, 180), gnd(100, 300), isoGnd(690, 110),
+      // Port at 135, not 120: end-anchored, its label grows LEFT, and in a narrow window (where labels
+      // are ~14 % wider relative to the drawing) it reached the Vin− riser at x=60.
+      port(135, 240, 'VOUT(−)', 'end'), port(760, 250, 'VISO'),
+      sig(184, 100, 'g1'), ctrlIC(b, 340, 330, ['g1']),   // x=340: at 140 the 'U1' ref sat on the return rail
+    ],
+  },
+  // ── isolated: single-switch forward ───────────────────────────────────────
+  forward: {
+    size: [820, 400],
+    place: {
+      // Label right and lifted 12 px: the left lane (Vin riser .. Ddemag column) is too narrow for the
+      // RDS(on) string, and at its default height the right-hand label clips T1's footprint.
+      Q1:     { draw: (b) => mosfetV('Q1', b, 220, 90, 'right', false, false, 0, -12) },
+      Ddemag: { draw: (b) => diode('Ddemag', b, 165, 140, 'up', 'left') },
+      T1:     { draw: (b) => xfmr3('T1', b, 330, 180, { labelDy: -40 }).el },
+      Dfwd:   { draw: (b) => diode('Dfwd', b, 420, 90, 'right') },
+      Dfw:    { draw: (b) => diode('Dfw', b, 470, 180, 'up', 'right') },
+      Lout:   { draw: (b) => indH('Lout', b, 530, 90) },
+      Cout:   { draw: (b) => capV('Cout', b, 580, 180) },
+    },
+    wires: [
+      { from: '@src.p0', to: 'Q1.drain', via: [[60, 60], [220, 60]] },       // Vin+ rail (Ddemag taps it)
+      { from: '@src.p1', to: [320, 320], via: [[60, 320]] },                 // primary return rail
+      { from: 'Q1.source', to: 'T1.p0', via: [[220, 110]] },
+      // the reset winding returns the magnetising energy to Vin through Ddemag
+      { from: 'Ddemag.cathode', to: [165, 60] },
+      { from: 'Ddemag.anode', to: 'T1.r0', via: [[165, 190]] },
+      { from: 'T1.p1', to: [270, 320], via: [[270, 170]] },
+      { from: 'T1.r1', to: [320, 320] },
+      // secondary: forward diode, freewheel, output LC on their own isolated return
+      { from: 'T1.s0', to: 'Dfwd.anode', via: [[340, 90]] },
+      { from: 'T1.s1', to: [640, 320], via: [[340, 320]] },
+      { from: 'Dfwd.cathode', to: [470, 90] },
+      { from: 'Dfw.cathode', to: [470, 90] },
+      { from: 'Dfw.anode', to: [470, 320] },
+      { from: 'Lout.p0', to: [470, 90] },
+      { from: 'Lout.p1', to: '@port.VOUT', via: [[690, 90]] },
+      { from: 'Cout.p0', to: [580, 90] },
+      { from: 'Cout.p1', to: [580, 320] },
+    ],
+    synth: (b) => [
+      srcDC(60, 180), gnd(120, 320), isoGnd(430, 320), loadR(640, 180, 90, 320), port(690, 90, 'VOUT'),
+      sig(194, 90, 'g1'), ctrlIC(b, 250, 360, ['g1']),   // 'left' (house style for a vertical FET): 'down' ran the stub along the device outline
+    ],
+  },
+  // ── isolated: two-switch forward ──────────────────────────────────────────
+  two_switch_forward: {
+    size: [910, 400],   // 910 wide: at 880 the VOUT port label ran off the edge
+    place: {
+      Q1:   { draw: (b) => mosfetV('Q1', b, 320, 120, 'right', true) },
+      Q2:   { draw: (b) => mosfetV('Q2', b, 320, 290, 'right', true) },
+      D1:   { draw: (b) => diode('D1', b, 230, 210, 'up', 'left', true) },   // clamp: gnd → primary top
+      D2:   { draw: (b) => diode('D2', b, 270, 110, 'up', 'left', true) },   // clamp: primary bottom → Vin
+      T1:   { draw: (b) => xfmr('T1', b, 430, 205, { h: 80, labelDy: -24 }) },
+      Dfwd: { draw: (b) => diode('Dfwd', b, 540, 130, 'right') },
+      Dfw:  { draw: (b) => diode('Dfw', b, 600, 200, 'up', 'right') },
+      Lout: { draw: (b) => indH('Lout', b, 670, 130) },
+      Cout: { draw: (b) => capV('Cout', b, 720, 220) },
+    },
+    wires: [
+      { from: '@src.p0', to: 'Q1.drain', via: [[60, 70], [320, 70]] },       // Vin+ rail (D2 taps it)
+      { from: '@src.p1', to: [320, 320], via: [[60, 320]] },                 // primary return rail (D1 taps it)
+      { from: 'Q1.source', to: 'T1.p0', via: [[320, 165]] },
+      { from: 'T1.p1', to: 'Q2.drain', via: [[320, 245]] },
+      { from: 'Q2.source', to: [320, 320] },
+      { from: 'D1.cathode', to: [320, 165], via: [[230, 165]] },
+      { from: 'D1.anode', to: [230, 320] },
+      { from: 'D2.cathode', to: [270, 70] },
+      { from: 'D2.anode', to: [320, 245], via: [[270, 245]] },
+      // secondary: forward diode + freewheel into Lout / Cout, on their own isolated return
+      { from: 'T1.s0', to: 'Dfwd.anode', via: [[480, 165], [480, 130]] },
+      { from: 'T1.s1', to: [800, 320], via: [[480, 245], [480, 320]] },
+      { from: 'Dfwd.cathode', to: [600, 130] },
+      { from: 'Dfw.cathode', to: [600, 130] },
+      { from: 'Dfw.anode', to: [600, 320] },
+      { from: 'Lout.p0', to: [600, 130] },
+      { from: 'Lout.p1', to: '@port.VOUT', via: [[850, 130]] },
+      { from: 'Cout.p0', to: [720, 130] },
+      { from: 'Cout.p1', to: [720, 320] },
+    ],
+    synth: (b) => [
+      srcDC(60, 200), gnd(150, 320), isoGnd(540, 320), loadR(800, 220, 130, 320), port(850, 130, 'VOUT'),
+      sig(294, 120, 'g1', 'down'), sig(294, 290, 'g2'),
+      ctrlIC(b, 470, 360, ['g1', 'g2']),
+    ],
+  },
+  // ── isolated: active-clamp forward ────────────────────────────────────────
+  acf: {
+    size: [920, 400],
+    place: {
+      Q1:    { draw: (b) => mosfetV('Q1', b, 320, 145, 'right', true) },
+      Sc:    { draw: (b) => mosfetV('Sc', b, 220, 110, 'right', true) },      // active-clamp switch
+      Cc:    { draw: (b) => capV('Cc', b, 220, 170, 'left') },
+      // centred (middle-anchored, so a wide value grows both ways and clears Q1's riser); offset right
+      // it sat nearer SRfwd than T1
+      T1:    { draw: (b) => xfmr('T1', b, 380, 195, { h: 90, labelDy: -22 }) },
+      SRfwd: { draw: (b) => mosfetH('SRfwd', b, 500, 120, true, true) },
+      SRfw:  { draw: (b) => mosfetV('SRfw', b, 570, 195, 'right', true) },
+      Lout:  { draw: (b) => indH('Lout', b, 640, 120) },
+      Cout:  { draw: (b) => capV('Cout', b, 700, 210) },
+    },
+    wires: [
+      { from: '@src.p0', to: 'Q1.drain', via: [[60, 70], [320, 70]] },        // Vin+ rail (Sc taps it)
+      { from: '@src.p1', to: [320, 300], via: [[60, 300]] },                  // primary return rail
+      { from: 'Q1.source', to: [320, 185] },                                  // sw node
+      { from: [320, 185], to: 'T1.p0', via: [[370, 185]] },
+      { from: 'T1.p1', to: [320, 300], via: [[320, 240]] },
+      // active-clamp leg: Sc (Vin → clamp node) in series with Cc (clamp node → switch node)
+      { from: 'Sc.drain', to: [220, 70] },
+      { from: 'Sc.source', to: 'Cc.p0' },
+      { from: 'Cc.p1', to: [320, 185], via: [[260, 190], [260, 185]] },
+      // secondary: synchronous forward + freewheel FETs into Lout / Cout, on their own isolated return
+      { from: 'T1.s0', to: 'SRfwd.source', via: [[440, 150], [440, 120]] },
+      { from: 'SRfwd.drain', to: [570, 120] },
+      { from: 'T1.s1', to: [770, 300], via: [[440, 240], [440, 300]] },
+      { from: 'SRfw.drain', to: [570, 120] },
+      { from: 'SRfw.source', to: [570, 300] },
+      { from: 'Lout.p0', to: [570, 120] },
+      { from: 'Lout.p1', to: '@port.VOUT', via: [[830, 120]] },
+      { from: 'Cout.p0', to: [700, 120] },
+      { from: 'Cout.p1', to: [700, 300] },
+    ],
+    synth: (b) => [
+      srcDC(60, 190), gnd(150, 300), isoGnd(500, 300), loadR(770, 210, 120, 300), port(830, 120, 'VOUT'),
+      sig(294, 145, 'g1'), sig(194, 110, 'gc'), sig(500, 146, 'sr1', 'down'), sig(544, 195, 'sr2'),
+      ctrlIC(b, 400, 355, ['g1', 'gc', 'sr1', 'sr2']),   // x=400: at 160 the 'U1' ref sat on the primary return rail
+    ],
+  },
+  // ── isolated: push-pull (centre-tapped primary and secondary) ─────────────
+  push_pull: {
+    size: [880, 430],
+    place: {
+      // -32: centred, the value ran across the damper riser at x=250
+      T1:   { draw: (b) => xfmr('T1', b, 280, 170, { h: 130, ct: 'both', labelDy: -14, labelDx: -32 }) },
+      Q1:   { draw: (b) => mosfetV('Q1', b, 200, 130, 'right', true) },
+      Q2:   { draw: (b) => mosfetV('Q2', b, 200, 266, 'right', true) },
+      Rdmp: { draw: (b) => resV('Rdmp', b, 105, 130, 'left') },
+      Cdmp: { draw: (b) => capV('Cdmp', b, 105, 200, 'left') },
+      Dtop: { draw: (b) => diode('Dtop', b, 400, 90, 'right') },
+      Dbot: { draw: (b) => diode('Dbot', b, 400, 250, 'right', 'below') },
+      Lout: { draw: (b) => indH('Lout', b, 540, 90) },
+      Cout: { draw: (b) => capV('Cout', b, 620, 190) },
+    },
+    wires: [
+      // VIN+ → primary centre tap, clear of the winding-end rails AND of Q1's gate lead at x=174
+      { from: '@src.p0', to: 'T1.pct', via: [[60, 90], [160, 90], [160, 170]] },
+      { from: '@src.p1', to: [200, 320], via: [[60, 320]] },
+      // centre-tapped primary: each half drives its own switch; Q1's source routes LEFT to gnd,
+      // NOT through Q2
+      { from: 'T1.p0', to: 'Q1.drain', via: [[200, 105]] },
+      { from: 'Q1.source', to: [140, 320], via: [[200, 185], [140, 185]] },
+      { from: 'T1.p1', to: 'Q2.drain', via: [[200, 235]] },
+      { from: 'Q2.source', to: [200, 320] },
+      // real RC damper across the primary (pri_top → Rdmp → Cdmp → pri_bot), looped left of VIN+
+      { from: 'Rdmp.p0', to: [250, 105], via: [[105, 55], [250, 55]] },
+      { from: 'Rdmp.p1', to: 'Cdmp.p0' },
+      { from: 'Cdmp.p1', to: [200, 235], via: [[105, 235]] },
+      // secondary full-wave rectifier: both winding ends → Dtop / Dbot → the output rail
+      { from: 'T1.s0', to: 'Dtop.anode', via: [[290, 90]] },
+      { from: 'Dtop.cathode', to: [480, 90] },
+      { from: 'T1.s1', to: 'Dbot.anode', via: [[290, 250]] },
+      { from: 'Dbot.cathode', to: [480, 90], via: [[480, 250]] },
+      // secondary centre tap = the output return, isolated from the primary earth
+      { from: 'T1.sct', to: [700, 330], via: [[340, 170], [340, 330]] },
+      { from: 'Lout.p0', to: [480, 90] },
+      { from: 'Lout.p1', to: '@port.VOUT', via: [[760, 90]] },
+      { from: 'Cout.p0', to: [620, 90] },
+      { from: 'Cout.p1', to: [620, 330] },
+    ],
+    synth: (b) => [
+      srcDC(60, 170), gnd(110, 320), isoGnd(450, 330), loadR(700, 190, 90, 330), port(760, 90, 'VOUT'),
+      sig(174, 130, 'g1'), sig(174, 266, 'g2'), ctrlIC(b, 400, 390, ['g1', 'g2']),
+    ],
+  },
+  // ── isolated: Weinberg (coupled input choke + centre-tapped secondary) ────
+  weinberg: {
+    size: [1000, 440],
+    place: {
+      // -34: at -20 the value sat on the Vin rail at y=90
+      L1:    { draw: (b) => xfmr('L1', b, 210, 170, { h: 80, labelDx: -18, labelDy: -34 }) },
+      Rdcra: { draw: (b) => resH('Rdcra', b, 280, 250, 'above') },
+      Rdcrb: { draw: (b) => resH('Rdcrb', b, 280, 320, 'below') },
+      // -29: centred, the value sat on the sec_c riser at x=600. -18: at the default the value line sat
+      // ON the top of the core it names — a 4-winding block is 200 px tall, so its label needs the room.
+      T1:    { draw: (b) => xfmr4('T1', b, 560, 230, { labelDx: -29, labelDy: -18 }).el },
+      S1:    { draw: (b) => mosfetV('S1', b, 470, 180, 'right', true) },
+      S2:    { draw: (b) => mosfetV('S2', b, 470, 330, 'right', true, false, 0, 8) },   // +8y: the ref sat on the y=320 rail
+      Dpos:  { draw: (b) => diode('Dpos', b, 660, 110, 'right', 'below') },
+      Dneg:  { draw: (b) => diode('Dneg', b, 660, 350, 'right', 'below', false, 0, 25) },
+      Cout:  { draw: (b) => capV('Cout', b, 820, 245) },
+    },
+    wires: [
+      { from: '@src.p0', to: [220, 90], via: [[60, 90]] },                    // Vin+ rail reaches both L1 taps
+      { from: '@src.p1', to: [470, 380], via: [[60, 380]] },                  // primary return rail
+      { from: 'L1.p0', to: [200, 90] },
+      { from: 'L1.s0', to: [220, 90] },
+      // Each choke winding returns through its OWN DCR loop-breaker to a DIFFERENT primary half — the
+      // defining dual-inductor structure. Each feed turns up its own clear column and enters its
+      // terminal horizontally: run along the neighbour's lane and the corner lands ON that terminal,
+      // shorting the two primary halves together.
+      { from: 'L1.p1', to: 'Rdcra.p0', via: [[200, 250]] },
+      { from: 'Rdcra.p1', to: 'T1.a1', via: [[520, 250], [520, 210]] },
+      { from: 'L1.s1', to: 'Rdcrb.p0', via: [[220, 320]] },
+      { from: 'Rdcrb.p1', to: 'T1.b0', via: [[320, 320], [320, 290], [530, 290], [530, 250]] },
+      // each primary half's outer end → its own switch → ground. S1's source drops at x=430 (the earth
+      // symbol's column): straight down x=470 it ran through S2's body.
+      { from: 'T1.a0', to: 'S1.drain', via: [[470, 140]] },
+      { from: 'S1.source', to: [430, 380], via: [[430, 206]] },
+      { from: 'T1.b1', to: 'S2.drain', via: [[470, 320]] },
+      { from: 'S2.source', to: [470, 380] },
+      // centre-tapped full-wave secondary: outer ends → Dpos / Dneg, inner ends → CT → isolated return
+      { from: 'T1.c0', to: 'Dpos.anode', via: [[600, 140], [600, 110]] },
+      { from: 'T1.d1', to: 'Dneg.anode', via: [[600, 320], [600, 350]] },
+      { from: 'Dpos.cathode', to: '@port.VOUT', via: [[960, 110]] },
+      { from: 'Dneg.cathode', to: [740, 110], via: [[740, 350]] },
+      { from: 'T1.c1', to: 'T1.d0', via: [[610, 210], [610, 250]] },
+      { from: [610, 250], to: [900, 380], via: [[610, 380]] },                // CT → isolated return rail
+      { from: 'Cout.p0', to: [820, 110] },
+      { from: 'Cout.p1', to: [820, 380] },
+    ],
+    synth: (b) => [
+      srcDC(60, 210), gnd(430, 380), isoGnd(700, 380), loadR(900, 245, 110, 380), port(960, 110, 'VOUT'),
+      sig(444, 180, 'g1'), sig(444, 330, 'g2'), ctrlIC(b, 620, 60, ['g1', 'g2']),
     ],
   },
   // ── non-isolated: buck ────────────────────────────────────────────────────
