@@ -25,11 +25,21 @@ export async function selectTopology(page, id) {
   // Open the topology stage so the card is laid out and its click handler reliably fires — selecting
   // (even re-selecting the same id) runs the app's selectTopology, which resets knob overrides.
   await page.getByTestId('stage-topology').click({ force: true })
-  await page.getByTestId(`topo-${id}`).click({ force: true })
-  await page.waitForFunction((tid) => window.__bench.topologyId === tid, id)
+  // The card click is force:true (the card sits inside a stage Playwright can consider occluded), which
+  // means NO actionability check — so a click that lands mid-layout is simply lost. The wait that
+  // followed had no timeout, so a lost click hung until the 120 s TEST budget ran out and reported
+  // nothing but "timeout exceeded": ABT #679, seen on src, boost and ahb, never reproducible alone.
+  // Click, wait a bounded 15 s, click again; after three tries fail saying exactly what did not happen.
+  let selected = false
+  for (let attempt = 1; attempt <= 3 && !selected; attempt++) {
+    await page.getByTestId(`topo-${id}`).click({ force: true })
+    selected = await page.waitForFunction((tid) => window.__bench.topologyId === tid, id, { timeout: 15_000 })
+      .then(() => true, () => false)
+  }
+  if (!selected) throw new Error(`topology card '${id}' clicked 3× and window.__bench.topologyId never became '${id}'`)
   // Confirm a clean knob slate (re-selection reset every override to auto).
   await page.waitForFunction(() =>
-    window.__bench.form?.knobs && Object.values(window.__bench.form.knobs).every((k) => !k.on))
+    window.__bench.form?.knobs && Object.values(window.__bench.form.knobs).every((k) => !k.on), null, { timeout: 15_000 })
   // A topology with a variant lands on the variant stage; open the spec stage where knobs + solve live.
   await page.getByTestId('stage-spec').click({ force: true })
 }
