@@ -92,7 +92,7 @@ const winding = computed(() => waveExcitations.value[windingIdx.value] ?? null)
         </div>
         <template v-else-if="schematicSvg">
           <div class="schematic-frame fit" v-html="schematicSvg" @click="schematicClick"></div>
-          <div class="sch-caption">Power-path sketch (generated from the CIAS netlist) — click any component for its details.</div>
+          <div class="sch-caption">Power-path sketch, checked against the CIAS netlist — click any component for its details.</div>
         </template>
         <div v-else class="wave-empty">
           No schematic sketch for <code>{{ topo.name }}</code> yet — see the BOM view for every component.
