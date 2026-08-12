@@ -851,9 +851,9 @@ function acf(bom) {
     wire(220, 190, 260, 190, 260, 185, 320, 185),
     sig(294, 145, 'g1'), sig(194, 110, 'gc'),
     // secondary synchronous rectifiers SRfwd (series) + SRfw (freewheel)
-    wire(390, 155, 440, 155, 440, 120, 474, 120), mosfetH('SRfwd', bom, 500, 120, true, true), wire(526, 120, 570, 120), dot(570, 120),
+    wire(390, 150, 440, 150, 440, 120, 474, 120), mosfetH('SRfwd', bom, 500, 120, true, true), wire(526, 120, 570, 120), dot(570, 120),   // starts AT s0 (150), not 5 px short of it
     mosfetV('SRfw', bom, 570, 195, 'right', true), wire(570, 120, 570, 169), wire(570, 221, 570, 300), dot(570, 300),
-    wire(390, 235, 440, 235, 440, 300), dot(440, 300),
+    wire(390, 240, 440, 240, 440, 300), dot(440, 300),   // starts AT s1 (240), not 5 px short of it
     sig(500, 146, 'sr1', 'down'), sig(544, 195, 'sr2'),
     indH('Lout', bom, 640, 120), wire(570, 120, 612, 120), wire(668, 120, 770, 120), dot(700, 120),
     capV('Cout', bom, 700, 210), wire(700, 120, 700, 190), wire(700, 230, 700, 300), dot(700, 300),

@@ -93,6 +93,99 @@ export function danglingEnds(svg, pins) {
 
 const netLabel = (id) => String(id).replace(/^[CPX]:/, '').replace(/\|.*/, '')
 
+// G. Nets that NO anchor identifies — the node between two passives (an RC snubber's midpoint, a
+// resonant tank's Cr–Lr join). Rules A/B only see nets with a MOSFET/diode/port terminal on them, and
+// rule F only rejects a passive terminal that lands on an *identified* net, so everything about a
+// passive-only node was taken on trust: two series parts drawn 5 px apart read as connected and passed,
+// and two different passive-only nodes bonded together passed.
+//
+// Identify them instead: seed every drawn node that an anchor names, then propagate through each
+// two-terminal passive — if one end sits on net X and the netlist says the part spans {X, Y}, its other
+// end IS net Y. Then apply rule A's own test to the result: a net may not appear on two distinct drawn
+// nodes (unless the pieces are joined by ground/port symbols, the split rule A already allows), and a
+// node may not carry two nets.
+function passiveOnlyNets({ g, pins, pinNet, magRefs, refRoots, twoTerm }) {
+  const problems = []
+  // A drawn "node" is a wire piece, or — for leads that butt together with no wire between them, which
+  // is how a series pair is drawn — the terminal point itself, shared by anything within TOUCH px.
+  const TOUCH = 4
+  const synth = []
+  const nodeOf = (c) => {
+    const r = g.rootAt(c, TOUCH)
+    if (r !== null) return 'W' + r
+    let i = synth.findIndex((s) => Math.abs(s[0] - c[0]) <= TOUCH && Math.abs(s[1] - c[1]) <= TOUCH)
+    if (i < 0) { i = synth.length; synth.push(c) }
+    return 'T' + i
+  }
+  // A piece carrying a ground/port symbol may legitimately be one of several drawn for the same net
+  // (rule A's own exemption), so it is never evidence of a conflict.
+  const isRef = (node) => String(node).startsWith('W') && refRoots.has(Number(String(node).slice(1)))
+  const label = new Map()
+  const setLabel = (node, net, who) => {
+    const had = label.get(node)
+    if (had === undefined) { label.set(node, net); return true }
+    if (had !== net && !isRef(node)) problems.push(`${who}: drawn node carries both ${netLabel(had)} and ${netLabel(net)}`)
+    return false
+  }
+  for (const p of pins) {
+    if (p.ref.startsWith('@') || magRefs.has(p.ref) || p.pin === 'gate') continue
+    const net = pinNet.get(`${p.ref}|${p.pin}`)
+    if (net) setLabel(nodeOf([p.x, p.y]), net, p.ref)
+  }
+  // propagate through the passives until nothing new is learned
+  const parts = [...twoTerm].map(([ref, terms]) => ({ ref, terms, own: [pinNet.get(`${ref}|1`), pinNet.get(`${ref}|2`)] }))
+    .filter((p) => p.terms.length === 2 && p.own[0] && p.own[1] && p.own[0] !== p.own[1])
+  for (let pass = 0; pass < parts.length + 1; pass++) {
+    let learned = false
+    for (const { ref, terms, own } of parts) {
+      const [n0, n1] = terms.map(nodeOf)
+      const [l0, l1] = [label.get(n0), label.get(n1)]
+      // A known end that carries a net this part does not belong to is the foreign-net case rule F can
+      // only catch on an ANCHORED piece. Propagation reaches the unanchored ones, so say so here rather
+      // than blindly assign the other net and lose the evidence.
+      for (const [n, l] of [[n0, l0], [n1, l1]])
+        if (l !== undefined && !own.includes(l)) { label.set(n, l); problems.push(`${ref}: terminal on foreign net ${netLabel(l)}`) }
+      if (l0 !== undefined && own.includes(l0) && l1 === undefined) learned = setLabel(n1, own[0] === l0 ? own[1] : own[0], ref) || learned
+      else if (l1 !== undefined && own.includes(l1) && l0 === undefined) learned = setLabel(n0, own[0] === l1 ? own[1] : own[0], ref) || learned
+    }
+    if (!learned) break
+  }
+  // The other direction, and the one that needs no labels at all: two parts that SHARE a net must share
+  // a drawn node. Nothing else asks this of a passive-only net, so a series pair drawn 5 px apart — the
+  // exact "wired short of its rail" defect the dangling-wire rule exists to catch, but between two
+  // symbol leads instead of a wire end — read as connected and passed every check.
+  const nodesOf = new Map()
+  for (const p of pins) {
+    if (p.ref.startsWith('@') || p.pin === 'gate') continue
+    ;(nodesOf.get(p.ref) || nodesOf.set(p.ref, new Set()).get(p.ref)).add(nodeOf([p.x, p.y]))
+  }
+  const refsOfNet = new Map()
+  for (const [k, net] of pinNet) {
+    const [ref, pin] = k.split('|')
+    if (pin === 'gate' || !nodesOf.has(ref)) continue          // control blocks declare pins but draw no terminals
+    ;(refsOfNet.get(net) || refsOfNet.set(net, new Set()).get(net)).add(ref)
+  }
+  for (const [net, refs] of refsOfNet) {
+    const list = [...refs]
+    for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
+      const [a, b] = [nodesOf.get(list[i]), nodesOf.get(list[j])]
+      if ([...a].some((n) => b.has(n))) continue
+      // a net may legally be drawn as several pieces joined by ground/port symbols (rule A allows it)
+      if ([...a].some(isRef) && [...b].some(isRef)) continue
+      problems.push(`${netLabel(net)}: ${list[i]} and ${list[j]} share this net but no drawn node`)
+    }
+  }
+  // rule A's test, now over the identified nodes: one net, one node (bar reference-joined pieces)
+  const nodesOfNet = new Map()
+  for (const [node, net] of label) {
+    if (String(node).startsWith('W') && refRoots.has(Number(String(node).slice(1)))) continue
+    ;(nodesOfNet.get(net) || nodesOfNet.set(net, new Set()).get(net)).add(node)
+  }
+  for (const [net, nodes] of nodesOfNet)
+    if (nodes.size > 1) problems.push(`${netLabel(net)}: drawn as ${nodes.size} separate nodes (parts that share it are not connected)`)
+  return [...new Set(problems)]
+}
+
 // { svg, pins:[{ref,pin,x,y}], tas } -> string[] problems. Mirrors checkSchematicNets.mjs exactly.
 export function checkSchematic({ svg, pins, tas }) {
   const g = wireGraph(svg)
@@ -133,7 +226,10 @@ export function checkSchematic({ svg, pins, tas }) {
       rootOwner.set(a.r, net)
     }
   }
-  const TOL = 8
+  // 4 px, not 8: at 8 a winding terminal counted as reaching a wire that stopped 5 px short of it, which
+  // is exactly how acf's secondary sat unconnected to its rectifier while every check passed. The whole
+  // file now uses one tolerance for "this terminal touches that wire".
+  const TOL = 4
   for (const [Mref, terms] of magTerms) {
     const netlistNets = new Set([...pinNet].filter(([k]) => k.startsWith(Mref + '|')).map(([, n]) => n))
     const reached = new Set(); let floating = 0
@@ -172,6 +268,7 @@ export function checkSchematic({ svg, pins, tas }) {
       if (n && !own.has(n)) problems.push(`${ref}: terminal on foreign net ${netLabel(n)}`)
     }
   }
+  problems.push(...passiveOnlyNets({ g, pins, pinNet, magRefs, refRoots, twoTerm }))
 
   problems.push(...danglingEnds(svg, pins))
   return problems
