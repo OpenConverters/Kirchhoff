@@ -20,69 +20,308 @@ import { ciasComponents } from './cias.js'
 import { extractBom } from './bom.js'
 import { checkSchematic } from './schematicCheck.js'
 
-const { svg, wire, dot, mosfetV, diode, capV, resV, xfmr, srcDC, gnd, loadR, port, sig, ctrlIC } = S
+const { svg, wire, dot, mosfetV, mosfetH, diode, indH, indV, capV, capH, resV, resH, xfmr, srcDC, gnd, loadR, port, sig, ctrlIC } = S
 
 // wire(...pts) helper takes a flat point list; our layout stores polylines as flat arrays.
 const poly = (pts) => wire(...pts)
 
+// ── layout primitives ───────────────────────────────────────────────────────
+// A wire is authored as `{ from: 'Q1.drain', to: 'T1.p1', via: [[x, y], …] }`: its ENDS are terminal
+// names, resolved against the coordinates the symbols themselves registered while drawing, and only the
+// corners in between are typed. That removes the defect class hand-typed endpoints kept producing —
+// acf's transformer secondary sat 5 px from the wire that was supposed to reach it, and passed every
+// check for as long as the tolerance was 8 px. Here the wire cannot miss: it IS the terminal.
+// `{ pts: [...] }` is still accepted for a run between two bare coordinates (a rail corner, a port).
+const resolveRoute = (topologyId, w, at) => {
+  const raw = w.pts ? [...w.pts] : [...at(w.from), ...(w.via ?? []).flat(), ...at(w.to)]
+  // A via that lands exactly on the terminal it leads to would leave a zero-length segment behind.
+  const pts = []
+  for (let i = 0; i < raw.length; i += 2)
+    if (pts.length < 2 || raw[i] !== pts[pts.length - 2] || raw[i + 1] !== pts[pts.length - 1]) pts.push(raw[i], raw[i + 1])
+  for (let i = 2; i < pts.length; i += 2) {
+    // Every segment must be axis-aligned: the netlist checker, the label rules and the visual-sim
+    // exporter all assume orthogonal routing, and a stray diagonal would be invisible to all three.
+    if (pts[i] !== pts[i - 2] && pts[i + 1] !== pts[i - 1])
+      throw new Error(`ciasSchematic '${topologyId}': wire ${w.from ?? '?'}→${w.to ?? '?'} has a diagonal segment ` +
+                      `(${pts[i - 2]},${pts[i - 1]})→(${pts[i]},${pts[i + 1]}) — add a via to turn the corner`)
+  }
+  return pts
+}
+
+// Junction dots are DERIVED, not listed. A dot means "three or more conductors meet here", so it is a
+// property of the finished wiring rather than something to remember to add: the T-DOT rule in
+// auditSchematics.mjs looks for exactly this, and the FALSE-DOT rule rejects one at a pure crossing.
+// Counted per point: a polyline END contributes one conductor, an interior CORNER two (its two
+// segments), a segment passing THROUGH two, and a component terminal one — its own lead.
+// Every drawn wire is counted, not just the routed ones, because a symbol may draw its own run to a
+// rail (loadR does), and that run joins the node exactly like any other.
+const deriveDots = (svgParts, terminals) => {
+  const key = (x, y) => `${x},${y}`
+  const count = new Map()
+  const bump = (k, n) => count.set(k, (count.get(k) ?? 0) + n)
+  const polys = [...svgParts.matchAll(/<path class="sch-wire" d="([^"]+)"/g)]
+    .map((m) => [...m[1].matchAll(/[ML]\s*(-?[\d.]+)\s+(-?[\d.]+)/g)].map((z) => [+z[1], +z[2]]))
+  const segs = []
+  for (const n of polys) {
+    for (let i = 1; i < n.length; i++) segs.push([n[i - 1], n[i]])
+    n.forEach((pt, i) => bump(key(pt[0], pt[1]), i === 0 || i === n.length - 1 ? 1 : 2))
+  }
+  for (const t of terminals) bump(key(t.x, t.y), 1)
+  for (const k of [...count.keys()]) {
+    const [x, y] = k.split(',').map(Number)
+    for (const [a, b] of segs) {
+      const inside = (a[0] === b[0] && x === a[0] && y > Math.min(a[1], b[1]) && y < Math.max(a[1], b[1])) ||
+                     (a[1] === b[1] && y === a[1] && x > Math.min(a[0], b[0]) && x < Math.max(a[0], b[0]))
+      if (inside) bump(k, 2)
+    }
+  }
+  return [...count].filter(([, n]) => n >= 3).map(([k]) => k.split(',').map(Number))
+}
+
 const LAYOUTS = {
+  // ── non-isolated: boost ───────────────────────────────────────────────────
+  boost: {
+    size: [720, 300],
+    place: {
+      L1:   { draw: (b) => indH('L1', b, 150, 80) },
+      Q1:   { draw: (b) => mosfetV('Q1', b, 240, 150, 'left') },
+      D1:   { draw: (b) => diode('D1', b, 310, 80, 'right') },                        // diode variant
+      Q2:   { draw: (b) => mosfetH('Q2', b, 310, 80, true, true, 'below') },          // synchronous variant
+      Cout: { draw: (b) => capV('Cout', b, 430, 150) },
+    },
+    wires: [
+      { from: '@src.p0', to: 'L1.p0', via: [[70, 80]] },
+      { from: '@src.p1', to: [520, 220], via: [[70, 220]] },
+      // switch node: one horizontal run from L1 to the rectifier, tapped from below by Q1
+      { from: 'L1.p1', to: 'D1.anode', needs: ['D1'] },
+      { from: 'L1.p1', to: 'Q2.source', needs: ['Q2'] },
+      { from: 'Q1.drain', to: [240, 80] },
+      { from: 'Q1.source', to: [240, 220] },
+      { from: 'Cout.p0', to: [430, 80] },
+      { from: 'Cout.p1', to: [430, 220] },
+      // rectifier: a diode, or the high-side FET with its body diode drawn above it
+      { from: 'D1.cathode', to: '@port.VOUT', via: [[600, 80]], needs: ['D1'] },
+      { from: 'Q2.drain', to: '@port.VOUT', via: [[600, 80]], needs: ['Q2'] },
+      { from: 'D2.anode', to: [284, 80], via: [[284, 40]], needs: ['Q2'] },
+      { from: 'D2.cathode', to: [336, 80], via: [[336, 40]], needs: ['Q2'] },
+    ],
+    synth: (b, present) => [
+      srcDC(70, 150), loadR(520, 150, 80, 220), gnd(300, 220), port(600, 80, 'VOUT'),
+      ...(present.has('Q2') ? [diode('D2', b, 310, 40, 'right', 'above', true), sig(310, 106, 'g2', 'down')] : []),
+      sig(214, 150, 'g1', 'down'),
+      ctrlIC(b, 640, 240, present.has('Q2') ? ['g1', 'g2'] : ['g1']),
+    ],
+  },
+  // ── non-isolated: SEPIC ───────────────────────────────────────────────────
+  sepic: {
+    size: [760, 300],
+    place: {
+      L1:   { draw: (b) => indH('L1', b, 150, 80) },
+      Q1:   { draw: (b) => mosfetV('Q1', b, 230, 150) },
+      Cs:   { draw: (b) => capH('Cs', b, 290, 80) },
+      L2:   { draw: (b) => indV('L2', b, 360, 150) },
+      D1:   { draw: (b) => diode('D1', b, 430, 80, 'right') },
+      Cout: { draw: (b) => capV('Cout', b, 500, 150) },
+    },
+    wires: [
+      { from: '@src.p0', to: 'L1.p0', via: [[70, 80]] },
+      { from: '@src.p1', to: [580, 220], via: [[70, 220]] },
+      { from: 'L1.p1', to: 'Cs.p0' },                                                 // switch node run (Q1 taps it)
+      { from: 'Q1.drain', to: [230, 80] },
+      { from: 'Q1.source', to: [230, 220] },
+      { from: 'Cs.p1', to: 'D1.anode' },                                              // L2 taps this run
+      { from: 'L2.p0', to: [360, 80] },
+      { from: 'L2.p1', to: [360, 220] },
+      { from: 'D1.cathode', to: '@port.VOUT', via: [[660, 80]] },
+      { from: 'Cout.p0', to: [500, 80] },
+      { from: 'Cout.p1', to: [500, 220] },
+    ],
+    synth: (b) => [
+      srcDC(70, 150), loadR(580, 150, 80, 220), gnd(300, 220), port(660, 80, 'VOUT'),
+      sig(204, 150, 'g1'), ctrlIC(b, 680, 240, ['g1']),
+    ],
+  },
+  // ── non-isolated: Ćuk ─────────────────────────────────────────────────────
+  cuk: {
+    size: [760, 300],
+    place: {
+      L1:      { draw: (b) => indH('L1', b, 150, 80) },
+      Q1:      { draw: (b) => mosfetV('Q1', b, 230, 150, 'left') },
+      C1:      { draw: (b) => capH('C1', b, 290, 80) },
+      Rrc_sw:  { draw: (b) => resV('Rrc_sw', b, 320, 130, 'left') },   // snubber: node → R → C → gnd
+      Crc_sw:  { draw: (b) => capV('Crc_sw', b, 320, 185, 'left') },
+      D1:      { draw: (b) => diode('D1', b, 360, 150, 'down', 'right') },
+      L2:      { draw: (b) => indH('L2', b, 428, 80) },
+      Cout:    { draw: (b) => capV('Cout', b, 500, 150) },
+    },
+    wires: [
+      { from: '@src.p0', to: 'L1.p0', via: [[70, 80]] },
+      { from: '@src.p1', to: [580, 220], via: [[70, 220]] },
+      { from: 'L1.p1', to: 'C1.p0' },                                  // switch node run (Q1 taps it)
+      { from: 'Q1.drain', to: [230, 80] },
+      { from: 'Q1.source', to: [230, 220] },
+      { from: 'C1.p1', to: 'L2.p0' },                                  // C1/D1/L2 node (snubber + D1 tap it)
+      { from: 'Rrc_sw.p0', to: [320, 80] },
+      { from: 'Rrc_sw.p1', to: 'Crc_sw.p0' },
+      { from: 'Crc_sw.p1', to: [320, 220] },
+      { from: 'D1.anode', to: [360, 80] },       // Ćuk's catch diode conducts node → ground: anode up
+      { from: 'D1.cathode', to: [360, 220] },
+      { from: 'L2.p1', to: '@port.VOUT (−)', via: [[660, 80]] },   // the Ćuk output is inverting, and the port says so
+      { from: 'Cout.p0', to: [500, 80] },
+      { from: 'Cout.p1', to: [500, 220] },
+    ],
+    synth: (b) => [
+      srcDC(70, 150), loadR(580, 150, 80, 220), gnd(300, 220), port(660, 80, 'VOUT (−)'),
+      sig(204, 150, 'g1', 'down'), ctrlIC(b, 680, 250, ['g1']),
+    ],
+  },
+  // ── non-isolated: Zeta ────────────────────────────────────────────────────
+  zeta: {
+    size: [760, 300],
+    place: {
+      Q1:   { draw: (b) => mosfetH('Q1', b, 180, 80) },
+      L1:   { draw: (b) => indV('L1', b, 260, 150) },
+      Cc:   { draw: (b) => capH('Cc', b, 320, 80) },
+      D1:   { draw: (b) => diode('D1', b, 390, 150, 'up', 'right') },
+      L2:   { draw: (b) => indH('L2', b, 458, 80) },
+      Cout: { draw: (b) => capV('Cout', b, 530, 150) },
+    },
+    wires: [
+      { from: '@src.p0', to: 'Q1.drain', via: [[70, 80]] },
+      { from: '@src.p1', to: [600, 220], via: [[70, 220]] },
+      { from: 'Q1.source', to: 'Cc.p0' },                              // switch node run (L1 taps it)
+      { from: 'L1.p0', to: [260, 80] },
+      { from: 'L1.p1', to: [260, 220] },
+      { from: 'Cc.p1', to: 'L2.p0' },                                  // Cc/D1/L2 node
+      { from: 'D1.cathode', to: [390, 80] },
+      { from: 'D1.anode', to: [390, 220] },
+      { from: 'L2.p1', to: '@port.VOUT', via: [[660, 80]] },
+      { from: 'Cout.p0', to: [530, 80] },
+      { from: 'Cout.p1', to: [530, 220] },
+    ],
+    synth: (b) => [
+      srcDC(70, 150), loadR(600, 150, 80, 220), gnd(300, 220), port(660, 80, 'VOUT'),
+      sig(180, 106, 'g1', 'down'), ctrlIC(b, 680, 250, ['g1']),
+    ],
+  },
+  // ── non-isolated: four-switch buck-boost ──────────────────────────────────
+  fsbb: {
+    size: [860, 450],
+    place: {
+      Q1:       { draw: (b) => mosfetV('Q1', b, 220, 132, 'right', true) },
+      Q2:       { draw: (b) => mosfetV('Q2', b, 220, 248, 'right', true) },
+      Crc_sw1:  { draw: (b) => capV('Crc_sw1', b, 150, 222, 'left') },
+      Rrc_sw1:  { draw: (b) => resV('Rrc_sw1', b, 150, 274, 'left') },
+      L:        { draw: (b) => indH('L', b, 340, 190) },
+      Q3:       { draw: (b) => mosfetV('Q3', b, 440, 132, 'right', true) },
+      Q4:       { draw: (b) => mosfetV('Q4', b, 440, 248, 'right', true) },
+      Crc_sw2:  { draw: (b) => capV('Crc_sw2', b, 510, 222, 'right') },
+      Rrc_sw2:  { draw: (b) => resV('Rrc_sw2', b, 510, 274, 'right') },
+      Cout:     { draw: (b) => capV('Cout', b, 620, 195) },
+    },
+    wires: [
+      { from: '@src.p0', to: 'Q1.drain', via: [[60, 70], [220, 70]] },       // Vin+ rail → left leg
+      { from: '@src.p1', to: [680, 320], via: [[60, 320]] },                 // continuous ground rail
+      // left leg: switch node sw1 between Q1 and Q2, with its RC snubber in a column of its own
+      { from: 'Q1.source', to: 'Q2.drain' },
+      { from: 'Q2.source', to: [220, 320] },
+      { from: 'Crc_sw1.p0', to: [220, 190], via: [[150, 190]] },
+      { from: 'Crc_sw1.p1', to: 'Rrc_sw1.p0' },
+      { from: 'Rrc_sw1.p1', to: [150, 320] },
+      // the inductor bridges the two switch nodes
+      { from: 'L.p0', to: [220, 190] },
+      { from: 'L.p1', to: [440, 190] },
+      // right leg: sw2 between Q3 and Q4, its own snubber column, Vout off Q3's drain
+      { from: 'Q3.source', to: 'Q4.drain' },
+      { from: 'Q4.source', to: [440, 320] },
+      { from: 'Crc_sw2.p0', to: [440, 190], via: [[510, 190]] },
+      { from: 'Crc_sw2.p1', to: 'Rrc_sw2.p0' },
+      { from: 'Rrc_sw2.p1', to: [510, 320] },
+      { from: 'Q3.drain', to: '@port.VOUT', via: [[440, 70]] },              // up out of the leg, then the Vout rail
+      { from: 'Cout.p0', to: [620, 70] },
+      { from: 'Cout.p1', to: [620, 320] },
+    ],
+    synth: (b) => [
+      srcDC(60, 195), loadR(680, 195, 70, 320), gnd(330, 320), port(770, 70, 'VOUT'),
+      sig(194, 132, 'g1'), sig(194, 248, 'g2'), sig(414, 132, 'g3'), sig(414, 248, 'g4'),
+      ctrlIC(b, 500, 390, ['g1', 'g2', 'g3', 'g4']),
+    ],
+  },
+  // ── non-isolated: buck ────────────────────────────────────────────────────
+  buck: {
+    size: [720, 300],
+    place: {
+      Q1:   { draw: (b) => mosfetH('Q1', b, 180, 80) },
+      L1:   { draw: (b) => indH('L1', b, 348, 80) },
+      D1:   { draw: (b) => diode('D1', b, 240, 150, 'up', 'right') },        // diode variant
+      Q2:   { draw: (b) => mosfetV('Q2', b, 240, 150, 'right', true) },      // synchronous variant
+      Cout: { draw: (b) => capV('Cout', b, 430, 150) },
+    },
+    wires: [
+      { from: '@src.p0', to: 'Q1.drain', via: [[70, 80]] },                  // Vin+ rail → high-side switch
+      { from: '@src.p1', to: [520, 220], via: [[70, 220]] },                 // return rail → load bottom
+      { from: 'Q1.source', to: 'L1.p0' },                                    // switch node (the rectifier taps it)
+      { from: 'L1.p1', to: '@port.VOUT', via: [[600, 80]] },                 // Vout rail (Cout + load tap it)
+      { from: 'Cout.p0', to: [430, 80], needs: ['Cout'] },
+      { from: 'Cout.p1', to: [430, 220], needs: ['Cout'] },
+      // free-wheeling path: a diode, or the low-side FET with its body diode drawn beside it
+      { from: 'D1.cathode', to: [240, 80], needs: ['D1'] },
+      { from: 'D1.anode', to: [240, 220], needs: ['D1'] },
+      { from: 'Q2.drain', to: [240, 80], needs: ['Q2'] },
+      { from: 'Q2.source', to: [240, 220], needs: ['Q2'] },
+      { from: 'D2.cathode', to: [290, 80], needs: ['Q2'] },
+      { from: 'D2.anode', to: [290, 220], needs: ['Q2'] },
+    ],
+    synth: (b, present) => [
+      srcDC(70, 150), loadR(520, 150, 80, 220), gnd(300, 220), port(600, 80, 'VOUT'),
+      // Q2's intrinsic body diode is a TAS component with role bodyDiode — real, and filtered out of the
+      // BOM precisely because it is intrinsic, so it is drawn here rather than placed as a CIAS brick.
+      ...(present.has('Q2') ? [diode('D2', b, 290, 150, 'up', 'right', true), sig(214, 150, 'g2')] : []),
+      sig(180, 106, 'g1', 'down'),
+      ctrlIC(b, 640, 220, present.has('Q2') ? ['g1', 'g2'] : ['g1']),
+    ],
+  },
   flyback: {
     size: [760, 350],
-    // CIAS ref -> { draw(bom), pins? }. `pins` (only for anchors the checker records: MOSFET
-    // drain/source/gate, diode anode/cathode, magnetic winding terminals) feed the netlist check.
+    // CIAS ref -> { draw(bom) }. The symbol registers its own terminals while drawing, so the wiring
+    // below names them ('Q1.drain') instead of repeating their coordinates.
     place: {
       Cin:   { draw: (b) => capV('Cin', b, 150, 165, 'left') },
       Cclmp: { draw: (b) => capV('Cclmp', b, 205, 90, 'left') },
       Rclmp: { draw: (b) => resV('Rclmp', b, 205, 130, 'left') },
       Cres:  { draw: (b) => capV('Cres', b, 205, 215, 'left') },     // QRM only — absent in CCM/DCM/BCM
-      T1:    { draw: (b) => xfmr('T1', b, 260, 140, { opp: true, labelDy: -30 }),
-               pins: [['p0', 250, 100], ['p1', 250, 180], ['s0', 270, 100], ['s1', 270, 180]] },
-      // +14: the secondary return runs down x=270, straight through "Q1" and its RDS(on) value. The
-      // hand-authored flyback in schematics.js carries the same offset — this layout is a transcription
-      // of it, and the app renders THIS one, so a fix applied only there never reaches the user.
-      Q1:    { draw: (b) => mosfetV('Q1', b, 250, 228, 'right', false, false, 14),
-               pins: [['drain', 250, 202], ['source', 250, 254], ['gate', 224, 228]] },
-      D1:    { draw: (b) => diode('D1', b, 360, 90, 'right'),
-               pins: [['anode', 340, 90], ['cathode', 380, 90]] },
+      T1:    { draw: (b) => xfmr('T1', b, 260, 140, { opp: true, labelDy: -30 }) },
+      // +14: the secondary return runs down x=270, straight through "Q1" and its RDS(on) value.
+      Q1:    { draw: (b) => mosfetV('Q1', b, 250, 228, 'right', false, false, 14) },
+      D1:    { draw: (b) => diode('D1', b, 360, 90, 'right') },
       Cout:  { draw: (b) => capV('Cout', b, 470, 180) },
     },
-    // Net-realizing wire polylines. `needs` gates each on the presence of its owning CIAS components,
-    // so removing a component (e.g. Cres outside QRM) drops its wiring automatically.
+    // Net-realizing wires. Ends name terminals; `via` carries the corners. `needs` gates each on the
+    // presence of its owning CIAS components, so removing a component (e.g. Cres outside QRM) drops its
+    // wiring automatically. Junction dots are derived from these routes, never listed.
     wires: [
-      { pts: [70, 145, 70, 70, 240, 70] },                       // Vin+ rail: source -> T1 primary feed
-      { pts: [70, 175, 70, 260, 250, 260] },                     // primary return rail (earth side)
-      { pts: [150, 70, 150, 145], needs: ['Cin'] },              // Cin top -> Vin rail
-      { pts: [150, 185, 150, 260], needs: ['Cin'] },             // Cin bottom -> return rail
-      { pts: [240, 70, 250, 70, 250, 100], needs: ['T1'] },      // Vin -> T1 primary_start (p0)
-      { pts: [250, 180, 250, 202], needs: ['T1', 'Q1'] },        // T1 primary_end (p1) -> Q1 drain
-      { pts: [250, 254, 250, 260], needs: ['Q1'] },              // Q1 source -> return rail
-      { pts: [205, 150, 205, 195, 250, 195], needs: ['Rclmp'] }, // RC clamp -> drain (sw) node
-      { pts: [205, 235, 205, 260], needs: ['Cres'] },            // Cres bottom -> return rail
-      { pts: [270, 100, 270, 90, 340, 90], needs: ['T1', 'D1'] }, // T1 secondary_end (s0) -> D1 anode
-      { pts: [380, 90, 620, 90], needs: ['D1'] },                // D1 cathode -> Vout rail
-      { pts: [270, 180, 270, 268, 620, 268], needs: ['T1'] },    // T1 secondary_start (s1) -> sec return rail
-      { pts: [470, 90, 470, 160], needs: ['Cout'] },             // Cout top -> Vout rail
-      { pts: [470, 200, 470, 268], needs: ['Cout'] },            // Cout bottom -> sec return rail
-      { pts: [620, 90, 660, 90] },                               // Vout rail -> VOUT port
-      { pts: [620, 268, 660, 268] },                             // sec return rail -> RTN port
-    ],
-    dots: [
-      { x: 150, y: 70, needs: ['Cin'] }, { x: 150, y: 260, needs: ['Cin'] },
-      { x: 205, y: 70, needs: ['Cclmp'] }, { x: 250, y: 195, needs: ['Rclmp'] },
-      { x: 205, y: 195, needs: ['Cres'] }, { x: 205, y: 260, needs: ['Cres'] },
-      { x: 470, y: 90, needs: ['Cout'] }, { x: 470, y: 268, needs: ['Cout'] },
-      { x: 560, y: 90 }, { x: 560, y: 268 },
+      { from: '@src.p0', to: 'T1.p0', via: [[70, 70], [250, 70]] },                    // Vin+ rail → T1 primary_start
+      { from: '@src.p1', to: 'Q1.source', via: [[70, 260], [250, 260]] },              // primary return rail (earth side)
+      { from: 'Cin.p0', to: [150, 70], via: [], needs: ['Cin'] },                      // Cin top → Vin rail
+      { from: 'Cin.p1', to: [150, 260], needs: ['Cin'] },                              // Cin bottom → return rail
+      { from: 'T1.p1', to: 'Q1.drain', needs: ['T1', 'Q1'] },                          // primary_end → drain (sw)
+      { from: 'Rclmp.p1', to: [250, 195], via: [[205, 195]], needs: ['Rclmp'] },       // RC clamp → sw node
+      { from: 'Cres.p1', to: [205, 260], needs: ['Cres'] },                            // Cres bottom → return rail
+      { from: 'T1.s0', to: 'D1.anode', via: [[270, 90]], needs: ['T1', 'D1'] },        // secondary_end → D1 anode
+      { from: 'D1.cathode', to: '@port.VOUT', via: [[660, 90]], needs: ['D1'] },       // D1 cathode → Vout rail → port
+      { from: 'T1.s1', to: '@port.RTN', via: [[270, 268]], needs: ['T1'] },            // secondary_start → return rail → port
+      { from: 'Cout.p0', to: [470, 90], needs: ['Cout'] },                             // Cout top → Vout rail
+      { from: 'Cout.p1', to: [470, 268], needs: ['Cout'] },                            // Cout bottom → sec return rail
     ],
     // Non-CIAS glyphs synthesized around the bricks — the dual of what the TAS assembler adds: the
     // input source, the output load (Rload = Vout^2/Pout), primary earth, the isolated secondary
-    // return + Vout ports, and the gate-drive net-label + controller IC.
+    // return + Vout ports, and the gate-drive net-label + controller IC. Each registers its own
+    // terminals, so the wires above reach them by name too.
     synth: (b) => [
       srcDC(70, 160), loadR(560, 180, 90, 268), gnd(180, 260),
       port(660, 90, 'VOUT'), port(660, 268, 'RTN'),
       sig(224, 228, 'g1', 'down'), ctrlIC(b, 400, 315, ['g1']),
     ],
-    // Recorded reference-glyph terminals for the checker (primary earth + secondary return + Vout).
-    synthPins: [['@gnd', 'gnd', 180, 260], ['@port', 'VOUT', 660, 90], ['@port', 'RTN', 660, 268]],
   },
 }
 
@@ -122,9 +361,11 @@ export function renderVerifiedSchematic(topologyId, tas, variant, bomRows) {
   return svg
 }
 
-// Generate the CIAS-driven SVG for a solved TAS. Returns the SVG string, or throws with the exact
-// reason (unplaced component, netlist mismatch, undrawn part) — never a silently-wrong drawing.
-export function renderCiasSchematic(topologyId, tas) {
+// Build the drawing ONCE: draw every present part with terminal recording on, resolve each wire against
+// the terminals that drawing produced, derive the junction dots, and hand back the SVG together with
+// every recorded terminal. Both public entry points wrap this — they used to run the whole layout twice,
+// once for the SVG and once to recover the pins, which is two chances to disagree about one drawing.
+function buildCias(topologyId, tas) {
   const layout = LAYOUTS[topologyId]
   if (!layout) return null
   const bom = new Map(extractBom(tas).map((r) => [r.ref, r]))
@@ -135,27 +376,30 @@ export function renderCiasSchematic(topologyId, tas) {
 
   const has = (needs) => (needs ?? []).every((r) => present.has(r))
   const parts = []
-  const pins = []
-  // Draw with terminal recording on: `place[].pins`/`synthPins` name the ANCHORS the netlist check
-  // needs, while the recorded terminals give the dangling-wire check every symbol's real endpoints.
-  const recorded = withPinRecording(() => {
-    for (const [ref, p] of Object.entries(layout.place)) {
-      if (!present.has(ref)) continue
-      parts.push(p.draw(bom))
-      for (const [pin, x, y] of p.pins ?? []) pins.push({ ref, pin, x, y })
-    }
-    for (const w of layout.wires) if (has(w.needs)) parts.push(poly(w.pts))
-    for (const d of layout.dots) if (has(d.needs)) parts.push(dot(d.x, d.y))
-    parts.push(...layout.synth(bom))
+  // PASS 1 — the symbols. Recording is on, so every terminal coordinate below comes from the symbol
+  // itself rather than from a second hand-typed copy of it.
+  const pins = withPinRecording(() => {
+    for (const [ref, p] of Object.entries(layout.place)) if (present.has(ref)) parts.push(p.draw(bom))
+    parts.push(...layout.synth(bom, present))
   }).pins
-  for (const [ref, pin, x, y] of layout.synthPins) pins.push({ ref, pin, x, y })
-  // EVERY recorded terminal, not just the synthesized '@' ones. Keeping only '@' pins silently killed
-  // rule F for this whole rendering path: with no p0/p1 terminals for the passives, a capacitor or
-  // resistor could be wired to the wrong node and nothing complained. Proven by returning flyback's RC
-  // clamp to earth instead of the switch node — the check stayed green until this line changed.
-  // Declared anchors win, so a ref never contributes the same pin twice.
-  const declared = new Set(pins.map((p) => `${p.ref}|${p.pin}`))
-  pins.push(...recorded.filter((r) => !declared.has(`${r.ref}|${r.pin}`)))
+  // A wire end is either a terminal name ('Q1.drain') or a bare point ([x, y]) for a rail corner that
+  // belongs to no symbol. Naming a terminal that nothing registered is a layout bug, not a coordinate
+  // to invent, so it throws.
+  const at = (spec) => {
+    if (Array.isArray(spec)) return spec
+    const [ref, pin] = String(spec).split('.')
+    const p = pins.find((q) => q.ref === ref && q.pin === pin)
+    if (!p) throw new Error(`ciasSchematic '${topologyId}': wire end '${spec}' names a terminal no drawn symbol registered`)
+    return [p.x, p.y]
+  }
+  // PASS 2 — the wiring, then the dots it implies.
+  const routes = layout.wires.filter((w) => has(w.needs)).map((w) => resolveRoute(topologyId, w, at))
+  for (const pts of routes) parts.push(poly(pts))
+  // Ground/return/port glyphs are references, not conductors joining a node: their own symbol says the
+  // wire connects there, and house style across every hand-authored layout puts no dot on them. The
+  // source and the load ARE two-terminal parts and do attract one where they tap a rail mid-run.
+  const conductor = (p) => !['@gnd', '@sgnd', '@port'].includes(p.ref) && (present.has(p.ref) || p.ref.startsWith('@'))
+  for (const [x, y] of deriveDots(parts.join(''), pins.filter(conductor))) parts.push(dot(x, y))
 
   const [w, h] = layout.size
   const svgStr = svg(w, h, parts.join(''))
@@ -166,41 +410,21 @@ export function renderCiasSchematic(topologyId, tas) {
   if (missing.length) throw new Error(`ciasSchematic '${topologyId}': CIAS components not drawn: ${missing.join(', ')}`)
 
   // Equivalence guarantee: the generated drawing must pass the SAME netlist/isolation checker the
-  // hand-authored layouts pass. Any problem on an anchored net means the layout drifted from the CIAS
-  // netlist (see the file header on the purely-passive-net blind spot inherited from that checker).
+  // hand-authored layouts pass — including rule G, which identifies the passive-only nodes (a snubber
+  // midpoint, a tank's Cr–Lr join) that no anchor names.
   const problems = checkSchematic({ svg: svgStr, pins, tas })
   if (problems.length) throw new Error(`ciasSchematic '${topologyId}' netlist mismatch: ${problems.join(' | ')}`)
 
-  return svgStr
+  return { svg: svgStr, pins }
 }
 
-// Same render, returning the anchor pins too (renderCiasSchematic keeps them internal because the app
-// only needs the SVG). Used by renderForAudit so the offline gates get the app's drawing WITH pins.
+// The SVG alone (what the app renders), or null when this topology has no native layout.
+export function renderCiasSchematic(topologyId, tas) {
+  return buildCias(topologyId, tas)?.svg ?? null
+}
+
+// Same render, with the terminals the checkers need. Used by renderForAudit so every offline gate
+// measures the drawing the app shows.
 export function renderCiasSchematicWithPins(topologyId, tas) {
-  const svgStr = renderCiasSchematic(topologyId, tas)
-  if (!svgStr) return null
-  const layout = LAYOUTS[topologyId]
-  const bom = new Map(extractBom(tas).map((r) => [r.ref, r]))
-  const present = new Set(ciasComponents(tas).map((c) => c.ref))
-  const has = (needs) => (needs ?? []).every((r) => present.has(r))
-  const pins = []
-  const recorded = withPinRecording(() => {
-    for (const [ref, p] of Object.entries(layout.place)) {
-      if (!present.has(ref)) continue
-      p.draw(bom)
-      for (const [pin, x, y] of p.pins ?? []) pins.push({ ref, pin, x, y })
-    }
-    for (const w of layout.wires) if (has(w.needs)) poly(w.pts)
-    for (const d of layout.dots) if (has(d.needs)) dot(d.x, d.y)
-    layout.synth(bom)
-  }).pins
-  for (const [ref, pin, x, y] of layout.synthPins) pins.push({ ref, pin, x, y })
-  // EVERY recorded terminal, not just the synthesized '@' ones. Keeping only '@' pins silently killed
-  // rule F for this whole rendering path: with no p0/p1 terminals for the passives, a capacitor or
-  // resistor could be wired to the wrong node and nothing complained. Proven by returning flyback's RC
-  // clamp to earth instead of the switch node — the check stayed green until this line changed.
-  // Declared anchors win, so a ref never contributes the same pin twice.
-  const declared = new Set(pins.map((p) => `${p.ref}|${p.pin}`))
-  pins.push(...recorded.filter((r) => !declared.has(`${r.ref}|${r.pin}`)))
-  return { svg: svgStr, pins }
+  return buildCias(topologyId, tas)
 }

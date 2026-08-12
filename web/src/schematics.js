@@ -1386,10 +1386,45 @@ export function withPinRecording(fn) {
   try { return { out: fn(), pins: _pins.slice() } } finally { _rec = false }
 }
 
+// Junction dots the layout did not draw, derived from the finished wiring. A dot means "three or more
+// conductors meet here", which is a property of the drawing rather than something an author has to
+// remember: a polyline END is one conductor, an interior CORNER two (the same wire turning, which is why
+// a plain corner earns none), a segment passing THROUGH two, a component terminal one. Ground/port
+// glyphs are references, not conductors, and a gate pin is driven by a net-label flag.
+// Thirteen junctions across these layouts had no dot — two wires and a transformer's centre tap all
+// arriving at one point, three wire ends meeting on a return rail — and every one of them read as
+// "these wires cross, they do not connect". The CIAS layouts derive their dots the same way.
+function derivedDots(svg, pins) {
+  const count = new Map()
+  const bump = (k, n) => count.set(k, (count.get(k) ?? 0) + n)
+  const segs = []
+  for (const m of svg.matchAll(/<path class="sch-wire" d="([^"]+)"/g)) {
+    const n = [...m[1].matchAll(/[ML]\s*(-?[\d.]+)\s+(-?[\d.]+)/g)].map((z) => [+z[1], +z[2]])
+    for (let i = 1; i < n.length; i++) segs.push([n[i - 1], n[i]])
+    n.forEach((pt, i) => bump(`${pt[0]},${pt[1]}`, i === 0 || i === n.length - 1 ? 1 : 2))
+  }
+  for (const p of pins)
+    if (p.pin !== 'gate' && !['@gnd', '@sgnd', '@port'].includes(p.ref)) bump(`${p.x},${p.y}`, 1)
+  for (const k of [...count.keys()]) {
+    const [x, y] = k.split(',').map(Number)
+    for (const [a, b] of segs) {
+      const inside = (a[0] === b[0] && x === a[0] && y > Math.min(a[1], b[1]) && y < Math.max(a[1], b[1])) ||
+                     (a[1] === b[1] && y === a[1] && x > Math.min(a[0], b[0]) && x < Math.max(a[0], b[0]))
+      if (inside) bump(k, 2)
+    }
+  }
+  const drawn = new Set([...svg.matchAll(/<circle class="sch-node" cx="([-\d.]+)" cy="([-\d.]+)"/g)].map((m) => `${m[1]},${m[2]}`))
+  return [...count].filter(([k, n]) => n >= 3 && !drawn.has(k)).map(([k]) => k.split(',').map(Number))
+}
+
 export function collectPins(topologyId, bomRows, variant) {
   _pins.length = 0
   _rec = true
   let svg
   try { svg = renderSchematic(topologyId, bomRows, variant) } finally { _rec = false }
+  if (svg) {
+    const extra = derivedDots(svg, _pins).map(([x, y]) => dot(x, y)).join('')
+    if (extra) svg = svg.replace('</svg>', `${extra}</svg>`)
+  }
   return { svg, pins: _pins.slice() }
 }

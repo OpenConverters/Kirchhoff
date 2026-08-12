@@ -151,6 +151,26 @@ export function auditDrawing(svg, tasRefs, pins = []) {
       const tee = S.some((o) => o !== s && onSpan(e, o))
       if (tee && !D.some((d) => near(d, e, 4))) problems.push(`T-DOT junction at (${e}) has no dot`)
     }
+    // The other way three conductors meet: not a wire ending inside another's span, but several ENDS
+    // arriving at one point — two wire ends plus a component terminal is a part tapping the corner where
+    // two wires join, and that is a junction. T-DOT above cannot see it. Counted the way the CIAS
+    // generator derives its dots: a polyline END is one conductor, an interior CORNER is two (it is the
+    // same wire turning, which is why a plain corner never earns a dot), a terminal is one. A gate pin is
+    // driven by a net-label flag, not a wire, and a ground/port glyph is a reference rather than a
+    // conductor joining the node — house style puts no dot on either.
+    const meet = new Map()
+    const bump = (k, n) => meet.set(k, (meet.get(k) ?? 0) + n)
+    for (const m of svg.matchAll(/<path class="sch-wire" d="([^"]+)"/g)) {
+      const n = [...m[1].matchAll(/[ML]\s*(-?[\d.]+)\s+(-?[\d.]+)/g)].map((z) => [+z[1], +z[2]])
+      n.forEach((pt, i) => bump(`${pt[0]},${pt[1]}`, i === 0 || i === n.length - 1 ? 1 : 2))
+    }
+    for (const q of pins)
+      if (q.pin !== 'gate' && !['@gnd', '@sgnd', '@port'].includes(q.ref)) bump(`${q.x},${q.y}`, 1)
+    for (const [k, n] of meet) {
+      if (n < 3) continue
+      const e = k.split(',').map(Number)
+      if (!D.some((d) => near(d, e, 4))) problems.push(`T-DOT ${n} conductors meet at (${e}) with no dot`)
+    }
     for (const d of D) if (!S.some((s) => onSpan(d, s) || near(d, s[0], 3) || near(d, s[1], 3)))
       problems.push(`DOT at (${d}) sits on no wire`)
     // CROSS-DOT. A reader resolves a crossing by looking for a dot, so a crossing is only unambiguous
