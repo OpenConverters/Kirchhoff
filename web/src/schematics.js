@@ -647,6 +647,9 @@ function secFB(bom, tx, ty, h, o = {}) {
     diode(ds[0], bom, xA, (yP + yM) / 2, 'up', 'left', true), wire(xA, (yP + yM) / 2 - 20, xA, yP), wire(xA, (yP + yM) / 2 + 20, xA, yM),
     diode(ds[1], bom, xA, (yN + yM) / 2, 'up', 'left', true), wire(xA, (yN + yM) / 2 - 20, xA, yM), wire(xA, (yN + yM) / 2 + 20, xA, yN),
     diode(ds[2], bom, xB, (yP + yM) / 2, 'up', 'right', true), wire(xB, (yP + yM) / 2 - 20, xB, yP), wire(xB, (yP + yM) / 2 + 20, xB, yM),
+    // ds[3] labels LEFT: on the right it lands on the sec_b wrap lane wherever that lane falls (llc/src
+    // put it at 802, straight through "DL2"), and nudging it back off the lane printed it on its own
+    // body. Left of the column is clear in every variant.
     diode(ds[3], bom, xB, (yN + yM) / 2, 'up', 'left', true), wire(xB, (yN + yM) / 2 - 20, xB, yM), wire(xB, (yN + yM) / 2 + 20, xB, yN),
     dot(xA, yP), dot(xB, yP), wire(xA, yP, xB, yP),
     wire(xA, yN, t.retX, yN), dot(xB, yN),   // secondary return rail → isolated return drawn by outTail
@@ -662,15 +665,23 @@ function secCD(bom, tx, ty, h, o = {}) {
   // The two freewheel diodes get their OWN columns between the winding terminals and the chokes, with
   // their bodies parked in the lane below yB. d2 used to reuse the CHOKE column, so its cathode wire
   // ended in the middle of Lo2's coil — connected to nothing — and d1's body sat on the Lo2 feed line.
-  const dX1 = tx + 35, dX2 = tx + 80, dY = (yB + retY) / 2, loX = tx + 120
+  // The two diode columns stand 60 px apart (was 45) and the chokes move out with them: at 45 the lane
+  // between D1's body and D2's footprint was 16 px, which is narrower than a two-character refdes.
+  const dX1 = tx + 35, dX2 = tx + 95, dY = (yB + retY) / 2, loX = tx + 135
   return [
     indH(lo1, bom, loX, yT), wire(tx + 10, yT, loX - 28, yT), wire(loX + 28, yT, voX, yT), dot(voX, yT),
     indH(lo2, bom, loX, yB), wire(tx + 10, yB, loX - 28, yB), wire(loX + 28, yB, voX, yB),
     // Rlb: series loop-breaker between Lo2's output and the vout node (functional aid that
     // survives to the real deck — a real BOM row, so it is drawn in its electrical position)
     resV('Rlb', bom, voX, ty, 'left'), wire(voX, yT, voX, ty - 20), wire(voX, ty + 20, voX, yB),   // 'left': right of it only ~31 px separate the label from Cout's column, so wider values crossed it
-    diode(d1, bom, dX1, dY, 'up', 'left', false, o.d1dx ?? -34, -8), wire(dX1, dY - 20, dX1, yT), dot(dX1, yT), wire(dX1, dY + 20, dX1, retY),   // clear of the choke lane and the return rail
-    diode(d2, bom, dX2, dY, 'up'), wire(dX2, dY - 20, dX2, yB), dot(dX2, yB), wire(dX2, dY + 20, dX2, retY),
+    // Ref-only labels, on the RIGHT of each diode — the same call secFB makes for its four packed
+    // diodes, and for the same reason: 45 px separate these two columns and the VF string is 64 px, so
+    // it cannot sit beside the part it describes. It used to be pushed 34 px LEFT to make room, which
+    // carried it across the transformer and parked "VF ≤ 600 mV" in the PRIMARY, beside T1's return
+    // riser — a label reads as belonging to whatever it is next to. The rating lives in the BOM row and
+    // the part drawer, where the other packed-diode ratings already live.
+    diode(d1, bom, dX1, dY, 'up', 'right', true), wire(dX1, dY - 20, dX1, yT), dot(dX1, yT), wire(dX1, dY + 20, dX1, retY),   // clear of the choke lane and the return rail
+    diode(d2, bom, dX2, dY, 'up', 'right', true), wire(dX2, dY - 20, dX2, yB), dot(dX2, yB), wire(dX2, dY + 20, dX2, retY),
     wire(dX1, retY, t.retX, retY), dot(dX2, retY),   // secondary return rail → isolated return drawn by outTail
     ...t.els,
   ]
@@ -1073,7 +1084,10 @@ function psfb(bom, variant = 'fullBridge') {
     ...(variant === 'fullBridge' ? [
       // Column at 380: 390 ran through Dr3's ref, and 370 is secFB's own sec_b wrap lane (putting it
       // there T-joined Rbsa onto the wrap). The label is pushed clear of the Dr3/Dr4 diode column.
-      dot(380, 195), wire(380, 195, 380, 290), resV('Rbsa', bom, 380, 310, 'right', 49),
+      // Labelled LEFT: on the right the block had to jump 49 px past Dr3's column to find room, which
+      // put it on the far side of another part's wire from the resistor it names. To the left the lane
+      // between T1's body and secFB's sec_b wrap is clear.
+      dot(380, 195), wire(380, 195, 380, 290), resV('Rbsa', bom, 380, 310, 'left'),
       wire(380, 330, 420, 330),
       dot(534, 240), wire(534, 240, 590, 240, 590, 290), resV('Rbsb', bom, 590, 310, 'left'),   // 'left': on the right the label ran across the riser at x=614
       dot(590, 330),
