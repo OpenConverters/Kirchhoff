@@ -149,7 +149,13 @@ export function renderCiasSchematic(topologyId, tas) {
     parts.push(...layout.synth(bom))
   }).pins
   for (const [ref, pin, x, y] of layout.synthPins) pins.push({ ref, pin, x, y })
-  pins.push(...recorded.filter((r) => r.ref.startsWith('@')))
+  // EVERY recorded terminal, not just the synthesized '@' ones. Keeping only '@' pins silently killed
+  // rule F for this whole rendering path: with no p0/p1 terminals for the passives, a capacitor or
+  // resistor could be wired to the wrong node and nothing complained. Proven by returning flyback's RC
+  // clamp to earth instead of the switch node — the check stayed green until this line changed.
+  // Declared anchors win, so a ref never contributes the same pin twice.
+  const declared = new Set(pins.map((p) => `${p.ref}|${p.pin}`))
+  pins.push(...recorded.filter((r) => !declared.has(`${r.ref}|${r.pin}`)))
 
   const [w, h] = layout.size
   const svgStr = svg(w, h, parts.join(''))
@@ -189,6 +195,12 @@ export function renderCiasSchematicWithPins(topologyId, tas) {
     layout.synth(bom)
   }).pins
   for (const [ref, pin, x, y] of layout.synthPins) pins.push({ ref, pin, x, y })
-  pins.push(...recorded.filter((r) => r.ref.startsWith('@')))
+  // EVERY recorded terminal, not just the synthesized '@' ones. Keeping only '@' pins silently killed
+  // rule F for this whole rendering path: with no p0/p1 terminals for the passives, a capacitor or
+  // resistor could be wired to the wrong node and nothing complained. Proven by returning flyback's RC
+  // clamp to earth instead of the switch node — the check stayed green until this line changed.
+  // Declared anchors win, so a ref never contributes the same pin twice.
+  const declared = new Set(pins.map((p) => `${p.ref}|${p.pin}`))
+  pins.push(...recorded.filter((r) => !declared.has(`${r.ref}|${r.pin}`)))
   return { svg: svgStr, pins }
 }
