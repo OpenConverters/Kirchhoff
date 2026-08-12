@@ -13,6 +13,8 @@
 //   T-WIRE    a text box lying across a wire segment
 //   T-TEXT    two text boxes overlapping
 //   T-SYM     a text box lying across a component footprint that is not its own
+//   OWN-BODY  a part's own ref/value printed across the part's own symbol (every other rule exempts
+//             a part's own labels, so this is the one blind spot they share)
 //   SYM-SYM   two component footprints overlapping
 //   FALSE-DOT a junction dot at a pure CROSSING (neither wire has an endpoint there)
 //   DUP-REF   the same refdes drawn twice
@@ -23,30 +25,16 @@
 import init from '../../build-wasm-ng/kirchhoff.js'
 import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
 import { extractBom } from '../src/bom.js'
-import { collectPins, hasSchematic } from '../src/schematics.js'
+import { hasSchematic } from '../src/schematics.js'
 // Renders through the SAME entry point the app uses: for a topology with a CIAS layout the product
 // draws THAT, not the hand-authored art, so auditing collectPins() directly measured a drawing the
 // user never sees (see renderForAudit in ciasSchematic.js).
 import { renderForAudit } from '../src/ciasSchematic.js'
 import { chromium } from '@playwright/test'
-import fs from 'node:fs'
 
-const TOL = 2
-const FONT = fs.readFileSync('node_modules/@fontsource/ibm-plex-mono/files/ibm-plex-mono-latin-400-normal.woff2').toString('base64')
-const CSS = `
-@font-face{font-family:'IBM Plex Mono';src:url(data:font/woff2;base64,${FONT}) format('woff2');font-weight:400;font-display:block}
-:root{--amber:#ffb347;--amber-hi:#ffce85;--amber-deep:#b87a1e;--ink-dim:#8f7f60;--cyan:#3ce0c8;--mono:'IBM Plex Mono',monospace}
-body{margin:0;background:#0b0906}
-.sch-sym{stroke:var(--amber);stroke-width:1.6;fill:none}.sch-wire{stroke:var(--amber-deep);stroke-width:1.3;fill:none}
-.sch-fill{fill:var(--amber)}.sch-node{fill:var(--amber)}
-.sch-ref{font-family:var(--mono);font-size:11px;fill:var(--amber-hi);letter-spacing:.03em}
-.sch-val{font-family:var(--mono);font-size:10px;fill:var(--ink-dim)}
-.sch-port{font-family:var(--mono);font-size:11px;fill:var(--cyan);letter-spacing:.05em}
-.sch-ctl{stroke:var(--cyan);stroke-width:1.1;fill:none;stroke-dasharray:4 3}
-.sch-sig{font-family:var(--mono);font-size:9.5px;fill:var(--cyan);letter-spacing:.03em}
-.sch-blk{font-family:var(--mono);font-size:10px;fill:var(--ink-dim);letter-spacing:.04em;text-transform:uppercase}
-.sch-hitbox{fill:transparent;stroke:none}
-`
+// The app's OWN stylesheet, sliced out of src/style.css — see harnessCss.mjs. It used to be a hand
+// copy here; a copy of the numbers that decide every glyph box is a copy that will drift.
+import { HARNESS_CSS as CSS } from './harnessCss.mjs'
 
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
@@ -68,8 +56,22 @@ async function measure(page, svg) {
       for (const t of g.querySelectorAll('text')) own.set(t, g.dataset.ref)
     const texts = [...document.querySelectorAll('text')].map((t) => {
       const b = t.getBBox()
-      return { str: t.textContent, ref: own.get(t) ?? null, x: b.x, y: b.y, w: b.width, h: b.height }
+      return { str: t.textContent, ref: own.get(t) ?? null, cls: t.getAttribute('class'),
+               x: b.x, y: b.y, w: b.width, h: b.height }
     })
+    // The INK of each part's own symbol, measured (getBBox resolves curves properly — a winding arc's
+    // control points lie well outside the arc, so deriving this from the path data reports a box half
+    // again too tall). Used by the OWN-BODY rule: a part's own label printed across its own glyph.
+    const drawn = [...document.querySelectorAll('g.sch-hot')].map((g) => {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+      for (const e of g.querySelectorAll('.sch-sym, .sch-fill')) {
+        const b = e.getBBox()
+        if (!b.width && !b.height) continue
+        x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y)
+        x1 = Math.max(x1, b.x + b.width); y1 = Math.max(y1, b.y + b.height)
+      }
+      return { ref: g.dataset.ref, x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+    }).filter((b) => b.w > 0 && b.h > 0)
     const boxes = [...document.querySelectorAll('rect.sch-hitbox')].map((r) => ({
       ref: r.closest('g.sch-hot')?.dataset.ref, x: +r.getAttribute('x'), y: +r.getAttribute('y'),
       w: +r.getAttribute('width'), h: +r.getAttribute('height') }))
@@ -84,7 +86,7 @@ async function measure(page, svg) {
     }
     const dots = [...document.querySelectorAll('circle.sch-node')].map((c) => [+c.getAttribute('cx'), +c.getAttribute('cy')])
     const vb = document.querySelector('svg').getAttribute('viewBox').split(/\s+/).map(Number)
-    return { texts, boxes, glyphs, wires, dots, W: vb[2], H: vb[3] }
+    return { texts, boxes, glyphs, drawn, wires, dots, W: vb[2], H: vb[3] }
   })
 }
 
@@ -104,7 +106,9 @@ if (isMain) for (const t of TOPOLOGIES) {
     const spec = buildSpec({ ...t.preset, variant: opt ?? 'standard' }, t.id)
     if (opt && v) spec.config = { ...(spec.config ?? {}), [v.key]: opt }
     const out = M.design_tas_full(t.id, JSON.stringify(spec))
-    if (out.startsWith('Exception')) continue
+    // A design that throws is not a topology this gate may skip: skipping it silently is how a
+    // sweep reports "clean" over a schematic it never rendered.
+    if (out.startsWith('Exception')) throw new Error(`${t.id}${opt ? '/' + opt : ''}: design failed: ${out.slice(0, 200)}`)
     const { svg, pins } = renderForAudit(t.id, JSON.parse(out).tas, opt ?? 'standard')
     // A gate-drive flag is drawn AT its switch's gate pin, so it necessarily lies on that switch's
     // footprint — that is its own label, not a collision. Over any OTHER part it still counts.

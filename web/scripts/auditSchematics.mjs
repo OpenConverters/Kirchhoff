@@ -15,7 +15,9 @@
 //   3 THROUGH   a wire segment passing straight THROUGH a component footprint (in one side, out the other)
 //   4 T-DOT     a wire endpoint landing in the INTERIOR of another wire (a real T-junction) with no dot
 //   5 DOT       a junction dot that sits on no wire at all
-//   6 BOUNDS    drawn geometry outside the viewBox
+//   6 CROSS-DOT a wire crossing that sits within 15 px of a junction dot on one of the crossing wires,
+//               so the two read as one three-way node (psfb drew its tank shorted to the switch node)
+//   7 BOUNDS    drawn geometry outside the viewBox
 import init from '../../build-wasm-ng/kirchhoff.js'
 import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
 import { extractBom } from '../src/bom.js'
@@ -151,6 +153,27 @@ export function auditDrawing(svg, tasRefs, pins = []) {
     }
     for (const d of D) if (!S.some((s) => onSpan(d, s) || near(d, s[0], 3) || near(d, s[1], 3)))
       problems.push(`DOT at (${d}) sits on no wire`)
+    // CROSS-DOT. A reader resolves a crossing by looking for a dot, so a crossing is only unambiguous
+    // while the nearest dot plainly belongs somewhere else. psfb ran the Lr→T1 tank through the leg-C
+    // column 10 px above midC's junction dot; pshb took the primary return across the NPC stack 10 px
+    // below bridge_a's. Both drew what looks like a single three-way node — the first says the resonant
+    // tank is shorted to the switch node, the second that the neutral is, which is the exact short an
+    // NPC leg's clamp diodes exist to prevent. Every net rule passed: the nets ARE separate, it is the
+    // picture that lies. 15 px is one line of the schematic's own type — nearer than that the dot and
+    // the crossing read as one blob. (Legitimate crossings clear their dots by 20 px+: dab, llc, src.)
+    const isH = (s) => s[0][1] === s[1][1], isV = (s) => s[0][0] === s[1][0]
+    for (const a of S.filter(isH)) for (const b of S.filter(isV)) {
+      const y = a[0][1], x = b[0][0]
+      const [x0, x1] = [Math.min(a[0][0], a[1][0]), Math.max(a[0][0], a[1][0])]
+      const [y0, y1] = [Math.min(b[0][1], b[1][1]), Math.max(b[0][1], b[1][1])]
+      // strictly inside BOTH spans — a corner or a T is a junction, not a crossing, and has its own rule
+      if (!(x > x0 + 1 && x < x1 - 1 && y > y0 + 1 && y < y1 - 1)) continue
+      for (const d of D) {
+        if (!((d[1] === y && d[0] >= x0 && d[0] <= x1) || (d[0] === x && d[1] >= y0 && d[1] <= y1))) continue
+        const gap = Math.hypot(d[0] - x, d[1] - y)
+        if (gap < 15) problems.push(`CROSS-DOT wires cross at (${x},${y}) ${gap.toFixed(0)} px from the junction dot at (${d}) on the same wire — reads as one node`)
+      }
+    }
     for (const s of S) for (const e of s)
       if (e[0] < 0 || e[1] < 0 || e[0] > W || e[1] > H) problems.push(`BOUNDS wire end (${e}) outside ${W}x${H}`)
     for (const b of B)
@@ -166,7 +189,9 @@ if (isMain) for (const t of TOPOLOGIES) {
     const spec = buildSpec({ ...t.preset, variant: opt ?? 'standard' }, t.id)
     if (opt && v) spec.config = { ...(spec.config ?? {}), [v.key]: opt }
     const out = M.design_tas_full(t.id, JSON.stringify(spec))
-    if (out.startsWith('Exception')) continue
+    // A design that throws is not a topology this gate may skip: skipping it silently is how a
+    // sweep reports "clean" over a schematic it never rendered.
+    if (out.startsWith('Exception')) throw new Error(`${t.id}${opt ? '/' + opt : ''}: design failed: ${out.slice(0, 200)}`)
     const tas = JSON.parse(out).tas
     const rows = extractBom(tas)
     const tasRefs = new Set((tas?.topology?.stages ?? []).flatMap((st) => (st.circuit?.components ?? []).map((c) => c.name)))

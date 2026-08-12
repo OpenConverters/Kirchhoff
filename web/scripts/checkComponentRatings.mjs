@@ -41,7 +41,9 @@ for (const t of TOPOLOGIES) {
     const spec = buildSpec({ ...t.preset, variant: opt ?? 'standard' }, t.id)
     if (opt && v) spec.config = { ...(spec.config ?? {}), [v.key]: opt }
     const out = M.design_tas_full(t.id, JSON.stringify(spec))
-    if (out.startsWith('Exception')) continue
+    // A design that throws is not a topology this gate may skip: skipping it silently is how a
+    // sweep reports "clean" over a schematic it never rendered.
+    if (out.startsWith('Exception')) throw new Error(`${t.id}${opt ? '/' + opt : ''}: design failed: ${out.slice(0, 200)}`)
     const tas = JSON.parse(out).tas
     // converter output power (sum of operating-point output powers) sets the sanity bands
     const op = tas.inputs?.operatingPoints?.[0]

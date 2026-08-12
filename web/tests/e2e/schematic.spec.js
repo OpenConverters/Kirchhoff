@@ -24,8 +24,22 @@ async function measureLive(page) {
       for (const t of g.querySelectorAll('text')) own.set(t, g.dataset.ref)
     const texts = [...svg.querySelectorAll('text')].map((t) => {
       const b = t.getBBox()
-      return { str: t.textContent, ref: own.get(t) ?? null, x: b.x, y: b.y, w: b.width, h: b.height }
+      return { str: t.textContent, ref: own.get(t) ?? null, cls: t.getAttribute('class'),
+               x: b.x, y: b.y, w: b.width, h: b.height }
     })
+    // The INK of each part's own symbol, measured (getBBox resolves curves properly — a winding arc's
+    // control points lie well outside the arc, so deriving this from the path data reports a box half
+    // again too tall). Used by the OWN-BODY rule: a part's own label printed across its own glyph.
+    const drawn = [...svg.querySelectorAll('g.sch-hot')].map((g) => {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+      for (const e of g.querySelectorAll('.sch-sym, .sch-fill')) {
+        const b = e.getBBox()
+        if (!b.width && !b.height) continue
+        x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y)
+        x1 = Math.max(x1, b.x + b.width); y1 = Math.max(y1, b.y + b.height)
+      }
+      return { ref: g.dataset.ref, x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+    }).filter((b) => b.w > 0 && b.h > 0)
     const boxes = [...svg.querySelectorAll('rect.sch-hitbox')].map((r) => ({
       ref: r.closest('g.sch-hot')?.dataset.ref, x: +r.getAttribute('x'), y: +r.getAttribute('y'),
       w: +r.getAttribute('width'), h: +r.getAttribute('height') }))
@@ -41,7 +55,7 @@ async function measureLive(page) {
     const vb = svg.getAttribute('viewBox').split(/\s+/).map(Number)
     // The gate-drive flags: a flag drawn AT a switch's gate necessarily sits on that switch.
     const gates = [...svg.querySelectorAll('g.sch-hot')].flatMap((g) => [])
-    return { texts, boxes, glyphs, wires, dots, W: vb[2], H: vb[3], gates }
+    return { texts, boxes, glyphs, drawn, wires, dots, W: vb[2], H: vb[3], gates }
   })
 }
 

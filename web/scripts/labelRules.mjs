@@ -28,7 +28,7 @@ const onSpan = (p, [a, b]) => (a[0] === b[0] && Math.abs(p[0] - a[0]) <= 2 && p[
 
 // One rendered schematic's measured geometry -> string[] problems. Exported so checkSweep.mjs can run
 // the same rules over many design points without duplicating them.
-export function auditLabels({ texts, boxes, glyphs = [], wires, dots, W, H }, gates) {
+export function auditLabels({ texts, boxes, glyphs = [], drawn = [], wires, dots, W, H }, gates) {
   const ownsFlag = (tx, b) => tx.str.length <= 3 && gates.some((q) => q.ref === b.ref &&
     Math.hypot(Math.max(0, Math.max(tx.x - q.x, q.x - (tx.x + tx.w))),
                Math.max(0, Math.max(tx.y - q.y, q.y - (tx.y + tx.h)))) < 25)
@@ -53,6 +53,20 @@ export function auditLabels({ texts, boxes, glyphs = [], wires, dots, W, H }, ga
   // have no hitbox and T-SYM never saw them — pfc printed D1's VF value straight across the VAC source.
   for (const tx of texts) for (const g of glyphs)
     if (tx.str !== g.owner && over(tx, g)) p.push(`T-GLYPH "${tx.str}" over the ${g.owner || 'ground/return'} symbol`)
+  // OWN-BODY: a part's ref/value printed across the part's OWN glyph. Every other rule exempts a part's
+  // own labels — deliberately, since a gate flag belongs on its switch — and that exemption hid DAB's
+  // RbiasC_hi/RbiasC_lo, whose names and values were struck straight through their own resistor
+  // zigzags. Measured against the symbol's real ink (drawn), not the padded hitbox: the label sits
+  // beside the glyph by design, so any real overlap is the label landing on the part it names. Gate
+  // flags (.sch-sig) are drawn AT the gate pin on purpose. A label drawn wholly INSIDE its own symbol
+  // is a caption, not a collision — that is how a control block carries its "PWM"/"CTRL"/"Σ" — so the
+  // rule asks for an overlap that BREAKS OUT of the glyph, which is what a mispositioned label does.
+  const inside = (a, b) => a.x >= b.x && a.y >= b.y && a.x + a.w <= b.x + b.w && a.y + a.h <= b.y + b.h
+  for (const tx of texts) {
+    if (!tx.ref || tx.cls === 'sch-sig') continue
+    const body = drawn.find((b) => b.ref === tx.ref)
+    if (body && over(tx, body) && !inside(tx, body)) p.push(`OWN-BODY "${tx.str}" is printed over ${tx.ref}'s own symbol`)
+  }
   for (const d of dots)
     if (!endpointAt(wires, d) && wires.filter((s) => onSpan(d, s)).length >= 2) p.push(`FALSE-DOT at (${d}) marks a pure crossing`)
   const seen = new Set()
