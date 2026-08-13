@@ -25,7 +25,10 @@ const font = fs.readFileSync(
 // `:root` holds the colour + --mono custom properties every .sch- rule dereferences.
 const root = appCss.match(/:root\s*\{[^}]*\}/)
 // Each top-level rule whose selector mentions .sch- (the schematic block, hover states and all).
-const rules = [...appCss.matchAll(/([^{}]*\.sch-[^{}]*)\{([^}]*)\}/g)].map((m) => `${m[1].trim()}{${m[2]}}`)
+// @media blocks are dropped first: the harness renders for SCREEN, and a print override lifted out of
+// its media query would silently repaint every measurement.
+const screenCss = appCss.replace(/@media[^{]*\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}/g, '')
+const rules = [...screenCss.matchAll(/([^{}]*\.sch-[^{}]*)\{([^}]*)\}/g)].map((m) => `${m[1].trim()}{${m[2]}}`)
 
 // A silently-empty slice would give us back exactly the 16 px-default bug this module exists to kill,
 // so prove the extraction worked instead of trusting the regex.

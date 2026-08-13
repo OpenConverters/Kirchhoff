@@ -13,6 +13,9 @@
 // Reported with the measured ratio either way, because "passes" at 4.6 and "passes" at 13 are not the
 // same drawing, and the first is one palette tweak from failing.
 import { HARNESS_CSS } from './harnessCss.mjs'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const TEXT_MIN = 4.5, GRAPHIC_MIN = 3
 
@@ -65,7 +68,16 @@ const ruleFor = (sel) => {
   return m ? m[2] : null
 }
 
+// The PRINT palette is the other half of the same question. A schematic is the one thing people take
+// out of this app and there is no export, so Ctrl+P is the only route to paper — and the screen palette
+// on white is amber at 1.8:1. src/style.css carries an @media print override; measure it against paper.
+const rawCss = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/style.css'), 'utf8')
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+const printBlock = rawCss.match(/@media\s+print\s*\{((?:[^{}]*\{[^{}]*\})*)[^{}]*\}/)?.[1] ?? ''
+const PAPER = printBlock.match(/\.schematic-frame\s*\{[^}]*background:\s*([^;]+)/)?.[1]?.trim() ?? '#ffffff'
+
 let worst = Infinity, failed = 0
+console.log('SCREEN — against the frame background ' + FRAME_BG)
 for (const [sel, prop, kind, what] of SUBJECTS) {
   const rule = ruleFor(sel)
   if (!rule) { console.log(`${sel.padEnd(11)} NO RULE in src/style.css — the harness and the app disagree`); failed++; continue }
@@ -87,6 +99,21 @@ for (const [sel, prop, kind, what] of SUBJECTS) {
 console.log(failed
   ? `\n${failed} schematic colour(s) below the readable minimum`
   : `\nEvery schematic colour clears its minimum; the tightest sits ${((worst - 1) * 100).toFixed(0)}% above it`)
+console.log('\nPRINT — against paper ' + PAPER)
+for (const [sel, prop, kind, what] of SUBJECTS) {
+  const rule = printBlock.match(new RegExp(`\\.schematic-frame[^{}]*\\${sel}\\b[^{}]*\\{([^}]*)\\}`))?.[1]
+  if (!rule) { console.log(`FAIL ${sel.padEnd(11)} no print override — it would print in the screen colour`); failed++; continue }
+  const decl = rule.match(new RegExp(`(?:^|;)\\s*${prop}\\s*:\\s*([^;]+)`))
+  if (!decl) { console.log(`FAIL ${sel.padEnd(11)} print rule declares no ${prop}`); failed++; continue }
+  const alpha = Number(rule.match(/(?:^|;)\s*opacity\s*:\s*([\d.]+)/)?.[1] ?? 1)
+  const colour = composite(resolve(decl[1]), PAPER, alpha)
+  const r = ratio(colour, PAPER)
+  const min = kind === 'text' ? TEXT_MIN : GRAPHIC_MIN
+  worst = Math.min(worst, r / min)
+  if (r < min) failed++
+  console.log(`${r >= min ? 'ok  ' : 'FAIL'} ${sel.padEnd(11)} ${colour.padEnd(14)} ${r.toFixed(2)}:1  (needs ${min}:1 — ${what})`)
+}
+
 // The other half of "readable": a screen reader gets no purchase on line art at all, so role="img"
 // without an accessible name announces the whole drawing as an unnamed graphic (WCAG 1.1.1 / 4.1.2).
 // Checked here for every topology, since the name is generated per render.

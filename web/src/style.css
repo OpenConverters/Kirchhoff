@@ -724,6 +724,24 @@ details.adv .adv-body { margin-top: 0.75rem; }
 .sch-hot:hover .sch-ref, .sch-hot.selected .sch-ref { fill: #fff; }
 .sch-hot.selected .sch-hitbox { stroke: var(--amber-deep); stroke-dasharray: 4 3; }
 
+/* PRINT. The bench is a dark-phosphor instrument, but a schematic is the one thing people take OUT of
+   it, and there is no export — Ctrl+P is the only route to paper or PDF. Printed as-is the drawing is
+   amber line art on white at 1.8:1 and the values at 3.3:1: faint to invisible. On paper the ink turns
+   dark, the frame turns white, and the control plane keeps a distinguishable (darker) teal.
+   checkSchematicContrast measures THIS palette against white as well. */
+@media print {
+  .schematic-frame { background: #fff; box-shadow: none; border-color: #999; }
+  .schematic-frame .sch-sym { stroke: #111827; }
+  .schematic-frame .sch-wire { stroke: #111827; }
+  .schematic-frame .sch-fill, .schematic-frame .sch-node { fill: #111827; }
+  .schematic-frame .sch-ref { fill: #000000; }
+  .schematic-frame .sch-val { fill: #44403c; }
+  .schematic-frame .sch-blk { fill: #44403c; }
+  .schematic-frame .sch-port, .schematic-frame .sch-sig { fill: #0f5c57; }
+  .schematic-frame .sch-ctl { stroke: #0f5c57; opacity: 1; }
+  .sch-caption { color: #44403c; }
+}
+
 .sch-caption {
   font-family: var(--mono);
   font-size: 0.68rem;
