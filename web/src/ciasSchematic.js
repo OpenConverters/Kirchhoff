@@ -1,21 +1,24 @@
-// CIAS-driven schematic generator. The power-path DRAWING is assembled from the TAS's inline CIAS
-// bricks — the exact same structure the ngspice deck and the falstad visual sim are generated from —
-// so all three views share one source of truth. WHICH components appear (e.g. the QRM resonant cap),
-// their VALUES/labels, and the net TRUTH come from CIAS; only the GEOMETRY (grid coordinates — CIAS
-// carries none) is declared per topology. Every render is verified against the flattened CIAS netlist
-// with the SAME connectivity/isolation checker the hand-authored layouts pass (schematicCheck.js),
-// and THROWS on drift of any ANCHORED net — one carrying a MOSFET drain/source, diode anode/cathode,
-// or a magnetic winding terminal. NOTE: a net whose only members are passives (caps/resistors) + a
-// ground/port glyph has no unambiguous anchor, so the checker (by inherited design — the hand-authored
-// suite shares this blind spot) cannot resolve it; drift confined to such a purely-passive net would
-// not throw. For flyback every return/rail is anchored (Q1|source, D1|cathode, T1 terminals), so this
-// is fully covered here; strengthen rule C in schematicCheck.js before porting resonant/multi-return
-// topologies where purely-passive tank/return nodes are common.
+// CIAS-driven schematic generator — the ONLY schematic generator. The power-path drawing is assembled
+// from the TAS's inline CIAS bricks, the same structure the ngspice deck and the falstad visual sim are
+// generated from, so all three views share one source of truth. WHICH components appear (e.g. the QRM
+// resonant cap), their VALUES/labels and the net TRUTH come from CIAS; only the GEOMETRY (grid
+// coordinates — CIAS carries none) is declared per topology, below.
 //
-// The coordinates below are transcribed from the proven hand-authored flyback layout in schematics.js,
-// so the generated art is identical in quality; the difference is that components/values/wiring are
-// now driven and continuously verified by CIAS rather than hand-listed.
-import { symbols as S, hasSchematic, collectPins, withPinRecording } from './schematics.js'
+// Every render is verified against the flattened CIAS netlist by schematicCheck.js and THROWS on drift,
+// never drawing something unverified. That now includes rule G, which identifies the passive-only nodes
+// (a snubber midpoint, a tank's Cr–Lr join) that no MOSFET/diode/port anchors — the blind spot this file
+// used to warn about.
+//
+// Authoring a layout:
+//   • `place[ref].draw(bom)` positions each CIAS component; the symbol registers its own terminals.
+//   • a wire is `{ from: 'Q1.drain', to: 'T1.p1', via: [[x, y]] }` — ENDS NAME TERMINALS, so a wire
+//     cannot land short of the part it connects to; a bare [x, y] is a rail corner. Diagonals throw.
+//   • `needs: [refs]` gates a wire on the components it belongs to, so an absent part takes its wiring
+//     with it; a whole layout may be a FUNCTION of the present refs when the drawing changes shape.
+//   • junction dots are DERIVED from the finished wiring, never listed.
+//   • `synth(bom, present)` draws the non-CIAS glyphs the TAS assembler implies: source, load, earth,
+//     ports, gate-drive flags and the controller blocks.
+import { symbols as S, withPinRecording } from './schematics.js'
 import { ciasComponents } from './cias.js'
 import { extractBom } from './bom.js'
 import { checkSchematic } from './schematicCheck.js'
@@ -1310,40 +1313,21 @@ const LAYOUTS = {
   },
 }
 
-// A native, fully-generated CIAS layout exists for this topology (flyback so far).
+// Every topology has a native layout (ABT #684), so these are the same question — kept as two names
+// because callers ask it for two reasons: "can the app draw this?" and "is it generated?".
 export function hasNativeCiasLayout(topologyId) { return topologyId in LAYOUTS }
-// Any schematic — native-generated OR hand-authored — is available and will be CIAS-verified at render.
-export function hasCiasSchematic(topologyId) { return topologyId in LAYOUTS || hasSchematic(topologyId) }
+export function hasCiasSchematic(topologyId) { return topologyId in LAYOUTS }
 
-// Render a schematic and VERIFY it against the live CIAS netlist, whichever source it comes from:
-//   • native generator layout (flyback) — components/values/wiring generated from CIAS, then checked;
-//   • hand-authored layout (every other topology) — drawn from the CIAS-derived BOM, then checked with
-//     the SAME connectivity/isolation rules so it can never silently drift from the netlist either.
-// EXACTLY what the app renders, plus the anchor pins the offline checkers need.
-//
-// The app calls renderVerifiedSchematic, which prefers a CIAS layout when one exists and otherwise
-// falls back to the hand-authored art. The offline gates used to call collectPins() directly, i.e. the
-// hand-authored path ALWAYS — so for a topology with a CIAS layout (flyback) every audit measured a
-// drawing the product never shows, and a label fix applied to schematics.js silently never reached the
-// user. Every gate must go through here so the two can never diverge again.
-export function renderForAudit(topologyId, tas, variant, bomRows) {
-  if (topologyId in LAYOUTS) return renderCiasSchematicWithPins(topologyId, tas)
-  if (!hasSchematic(topologyId)) return null
-  const rows = bomRows ?? extractBom(tas)
-  return collectPins(topologyId, rows, variant)
+// EXACTLY what the app renders, plus the anchor pins the offline checkers need. Every gate must render
+// through here: while a second, hand-authored generator existed, the audits measured IT rather than the
+// product, and a label fix applied there never reached the user.
+export function renderForAudit(topologyId, tas) {
+  return renderCiasSchematicWithPins(topologyId, tas)
 }
 
-// Throws on any anchored-net mismatch (see the file header caveat). Returns null if no schematic exists.
-export function renderVerifiedSchematic(topologyId, tas, variant, bomRows) {
-  if (topologyId in LAYOUTS) return renderCiasSchematic(topologyId, tas)
-  if (!hasSchematic(topologyId)) return null
-  // Hand-authored art, but held to the CIAS netlist: collectPins re-renders with terminal recording on,
-  // giving both the SVG and the anchor pins the checker needs.
-  const rows = bomRows ?? extractBom(tas)
-  const { svg, pins } = collectPins(topologyId, rows, variant)
-  const problems = checkSchematic({ svg, pins, tas })
-  if (problems.length) throw new Error(`schematic '${topologyId}' netlist mismatch: ${problems.join(' | ')}`)
-  return svg
+// What the app draws. Throws rather than return an unverified drawing.
+export function renderVerifiedSchematic(topologyId, tas) {
+  return renderCiasSchematic(topologyId, tas)
 }
 
 // Build the drawing ONCE: draw every present part with terminal recording on, resolve each wire against

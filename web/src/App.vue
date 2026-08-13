@@ -4,8 +4,7 @@ import { FAMILIES, FAMILY_SHORT, PLANNED, TOPOLOGIES, buildSpec, topologyById, v
 import { loadEngine, processConverter, topologyWaveforms, extractOperatingPoint, componentWaveforms, realizeTas, generateNetlist, bindMagnetic } from './kh.js'
 import { extractBom } from './bom.js'
 import { falstadExport, hasVisualSim } from './falstad.js'
-import { renderVerifiedSchematic } from './ciasSchematic.js'
-import { hasSchematic } from './schematics.js'
+import { renderVerifiedSchematic, hasCiasSchematic } from './ciasSchematic.js'
 import { si, pct } from './units.js'
 import { trackEvent } from './telemetry.js'
 import PartDrawer from './components/PartDrawer.vue'
@@ -225,7 +224,7 @@ async function solve() {
     }
     bomRows.value = enrichBom(extractBom(res.tas), res.analyticalWaveforms)
     // a topology without a schematic sketch: show the BOM in the left pane instead
-    if (!hasSchematic(topoId.value) && paneA.value === 'schematic') paneA.value = 'bom'
+    if (!hasCiasSchematic(topoId.value) && paneA.value === 'schematic') paneA.value = 'bom'
   } catch (e) {
     runError.value = e.message
     trackEvent('solve_error', { target: topoId.value, engine: form.engine, message: (e.message || '').slice(0, 120) })

@@ -7,11 +7,9 @@
 import init from '../../build-wasm-ng/kirchhoff.js'
 import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
 import { extractBom } from '../src/bom.js'
-import { collectPins, hasSchematic } from '../src/schematics.js'
-// Renders through the SAME entry point the app uses: for a topology with a CIAS layout the product
-// draws THAT, not the hand-authored art, so auditing collectPins() directly measured a drawing the
-// user never sees (see renderForAudit in ciasSchematic.js).
-import { renderForAudit } from '../src/ciasSchematic.js'
+// Renders through the SAME entry point the app uses (renderForAudit). Every topology is generated from
+// CIAS now, but the rule stands: measure what the product draws, never a reconstruction of it.
+import { renderForAudit, hasCiasSchematic } from '../src/ciasSchematic.js'
 import { measure } from './auditSchematicLabels.mjs'
 import { chromium } from '@playwright/test'
 
@@ -21,7 +19,7 @@ const page = await browser.newPage()
 const only = process.argv[2]
 
 for (const t of TOPOLOGIES) {
-  if (!hasSchematic(t.id)) continue
+  if (!hasCiasSchematic(t.id)) continue
   const v = VARIANTS[t.id]
   for (const opt of (v ? v.options.map((o) => o.id) : [null])) {
     const key = opt ? `${t.id}/${opt}` : t.id

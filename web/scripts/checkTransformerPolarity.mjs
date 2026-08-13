@@ -20,7 +20,7 @@
 import init from '../../build-wasm-ng/kirchhoff.js'
 import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
 import { extractBom } from '../src/bom.js'
-import { renderSchematic, hasSchematic } from '../src/schematics.js'
+import { renderForAudit, hasCiasSchematic } from '../src/ciasSchematic.js'
 const M = await init()
 
 const OPPOSITE = new Set(['flyback', 'isolated_buck_boost'])                                   // energy-storage transfer
@@ -48,7 +48,7 @@ function transformers(svg) {
 
 let fail = 0, convention = []
 for (const t of TOPOLOGIES) {
-  if (!hasSchematic(t.id)) continue
+  if (!hasCiasSchematic(t.id)) continue
   const v = VARIANTS[t.id]
   // phasing is variant-independent (it lives in the symbol), so one representative variant suffices
   const opt = v ? v.options[0].id : null
@@ -58,7 +58,7 @@ for (const t of TOPOLOGIES) {
   // A design that throws is not a topology this gate may skip: skipping it silently is how a
     // sweep reports "clean" over a schematic it never rendered.
     if (out.startsWith('Exception')) throw new Error(`${t.id}${opt ? '/' + opt : ''}: design failed: ${out.slice(0, 200)}`)
-  const svg = renderSchematic(t.id, extractBom(JSON.parse(out).tas), opt ?? 'standard')
+  const { svg } = renderForAudit(t.id, JSON.parse(out).tas, opt ?? 'standard')
   const xfmrs = transformers(svg).filter((x) => x.pri && x.sec)
   if (!xfmrs.length) continue   // no transformer (non-isolated topology)
 

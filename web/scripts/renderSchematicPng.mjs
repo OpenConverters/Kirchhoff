@@ -1,10 +1,9 @@
 // Offline schematic renderer for eyeballing: node scripts/renderSchematicPng.mjs <outdir> [topo[/variant] ...]
 import init from '../../build-wasm-ng/kirchhoff.js'
 import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
-import { hasSchematic } from '../src/schematics.js'
 // Draw what the PRODUCT draws: renderForAudit picks the CIAS layout where one exists (flyback), the
 // hand-authored art otherwise — exactly as renderVerifiedSchematic does in the app.
-import { renderForAudit } from '../src/ciasSchematic.js'
+import { renderForAudit, hasCiasSchematic } from '../src/ciasSchematic.js'
 import { chromium } from '@playwright/test'
 import fs from 'node:fs'
 
@@ -21,7 +20,7 @@ const want = process.argv.slice(3)
 fs.mkdirSync(outdir, { recursive: true })
 const b = await chromium.launch()
 for (const t of TOPOLOGIES) {
-  if (!hasSchematic(t.id)) continue
+  if (!hasCiasSchematic(t.id)) continue
   const v = VARIANTS[t.id]
   for (const opt of (v ? v.options.map((o) => o.id) : [null])) {
     const key = opt ? `${t.id}/${opt}` : t.id

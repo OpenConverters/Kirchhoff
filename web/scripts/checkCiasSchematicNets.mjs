@@ -8,13 +8,13 @@
 import init from '../../build-wasm-ng/kirchhoff.js'
 import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
 import { extractBom } from '../src/bom.js'
+import { renderForAudit, hasCiasSchematic } from '../src/ciasSchematic.js'
 import { renderVerifiedSchematic } from '../src/ciasSchematic.js'
-import { hasSchematic } from '../src/schematics.js'
 
 const M = await init()
 let ok = 0, failed = 0
 for (const t of TOPOLOGIES) {
-  if (!hasSchematic(t.id)) continue
+  if (!hasCiasSchematic(t.id)) continue
   const v = VARIANTS[t.id]
   for (const opt of (v ? v.options.map((o) => o.id) : [null])) {
     const spec = buildSpec({ ...t.preset, variant: opt ?? 'standard' }, t.id)

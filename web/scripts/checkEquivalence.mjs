@@ -17,11 +17,9 @@
 // TAS the schematic was drawn from, so a divergence anywhere shows up here.
 import init from '../../build-wasm-ng/kirchhoff.js'
 import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
-import { collectPins, hasSchematic } from '../src/schematics.js'
-// Renders through the SAME entry point the app uses: for a topology with a CIAS layout the product
-// draws THAT, not the hand-authored art, so auditing collectPins() directly measured a drawing the
-// user never sees (see renderForAudit in ciasSchematic.js).
-import { renderForAudit } from '../src/ciasSchematic.js'
+// Renders through the SAME entry point the app uses (renderForAudit). Every topology is generated from
+// CIAS now, but the rule stands: measure what the product draws, never a reconstruction of it.
+import { renderForAudit, hasCiasSchematic } from '../src/ciasSchematic.js'
 import { extractBom } from '../src/bom.js'
 import { falstadExport, hasVisualSim } from '../src/falstad.js'
 import { resolveDim } from '../src/cias.js'
@@ -63,7 +61,7 @@ for (const t of TOPOLOGIES) {
     const problems = [], notes = []
 
     // ── 1/2: the schematic ────────────────────────────────────────────────────────────────────
-    if (hasSchematic(t.id)) {
+    if (hasCiasSchematic(t.id)) {
       const { svg } = renderForAudit(t.id, tas, opt ?? 'standard')
       const drawn = new Set([...svg.matchAll(/data-ref="([^"]+)"/g)].map((m) => m[1]))
       for (const ref of [...cls.power, ...cls.ctrl]) if (!drawn.has(ref)) problems.push(`DRAWN: ${ref} is in the CIAS but not in the schematic`)
