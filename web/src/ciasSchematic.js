@@ -184,8 +184,11 @@ const secCDFrag = (tx, ty, h, o) => {
     place: {
       [o.lo1]: { draw: (b) => indH(o.lo1, b, loX, yT) },
       [o.lo2]: { draw: (b) => indH(o.lo2, b, loX, yB) },
-      // 'left': right of it only ~31 px separate the label from Cout's column, so wider values crossed it
-      Rlb: { draw: (b) => resV('Rlb', b, voX, ty, 'left') },
+      // 'left': right of it only ~31 px separate the label from Cout's column, so wider values crossed
+      // it. Lifted 20 px as well: at the choke spacing this fragment now uses, Lo2's ref sits at the
+      // same height, and a wide value string (Rlb is a milli/micro-ohm loop breaker, so its text grows
+      // and shrinks a lot across design points) reached it at five of the nine sweep points.
+      Rlb: { draw: (b) => resV('Rlb', b, voX, ty, 'left', 0, -20) },
       [o.d1]: { draw: (b) => diode(o.d1, b, dX1, dY, 'up', 'right', true) },
       [o.d2]: { draw: (b) => diode(o.d2, b, dX2, dY, 'up', 'right', true) },
     },
