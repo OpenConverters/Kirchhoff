@@ -20,6 +20,7 @@
 //     ports, gate-drive flags and the controller blocks.
 import { symbols as S, withPinRecording } from './schematics.js'
 import { ciasComponents } from './cias.js'
+import { TOPOLOGIES } from './topologies.js'
 import { extractBom } from './bom.js'
 import { checkSchematic } from './schematicCheck.js'
 
@@ -1376,7 +1377,10 @@ function buildCias(topologyId, tas) {
   for (const [x, y] of deriveDots(parts.join(''), pins.filter(conductor))) parts.push(dot(x, y))
 
   const [w, h] = layout.size
-  const svgStr = svg(w, h, parts.join(''))
+  // The accessible name says what the drawing IS and how much is in it, since a screen reader gets no
+  // other purchase on a schematic: "Phase-shifted full bridge — power-path schematic, 16 components".
+  const name = TOPOLOGIES.find((t) => t.id === topologyId)?.name ?? topologyId
+  const svgStr = svg(w, h, parts.join(''), `${name} — power-path schematic, ${present.size} components`)
 
   // Parity: every present CIAS component must be drawn with a data-ref hotspot (no hidden parts).
   const drawn = new Set([...svgStr.matchAll(/data-ref="([^"]+)"/g)].map((m) => m[1]))

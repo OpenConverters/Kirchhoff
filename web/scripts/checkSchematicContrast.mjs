@@ -87,4 +87,26 @@ for (const [sel, prop, kind, what] of SUBJECTS) {
 console.log(failed
   ? `\n${failed} schematic colour(s) below the readable minimum`
   : `\nEvery schematic colour clears its minimum; the tightest sits ${((worst - 1) * 100).toFixed(0)}% above it`)
-process.exit(failed ? 1 : 0)
+// The other half of "readable": a screen reader gets no purchase on line art at all, so role="img"
+// without an accessible name announces the whole drawing as an unnamed graphic (WCAG 1.1.1 / 4.1.2).
+// Checked here for every topology, since the name is generated per render.
+const { TOPOLOGIES, VARIANTS, buildSpec } = await import('../src/topologies.js')
+const { renderForAudit } = await import('../src/ciasSchematic.js')
+const init = (await import('../../build-wasm-ng/kirchhoff.js')).default
+const M = await init()
+let unnamed = 0
+for (const t of TOPOLOGIES) {
+  const v = VARIANTS[t.id]
+  for (const opt of (v ? v.options.map((o) => o.id) : [null])) {
+    const spec = buildSpec({ ...t.preset, variant: opt ?? 'standard' }, t.id)
+    if (opt && v) spec.config = { ...(spec.config ?? {}), [v.key]: opt }
+    const out = M.design_tas_full(t.id, JSON.stringify(spec))
+    if (out.startsWith('Exception')) throw new Error(`${t.id}: design failed: ${out.slice(0, 200)}`)
+    const { svg } = renderForAudit(t.id, JSON.parse(out).tas, opt ?? 'standard')
+    const name = svg.match(/<svg[^>]*aria-label="([^"]*)"/)?.[1]
+    if (!name?.trim()) { unnamed++; console.log(`FAIL ${t.id}${opt ? '/' + opt : ''} renders role="img" with no accessible name`) }
+  }
+}
+console.log(unnamed ? `${unnamed} schematic(s) with no accessible name` : 'Every schematic carries an accessible name')
+
+process.exit(failed || unnamed ? 1 : 0)

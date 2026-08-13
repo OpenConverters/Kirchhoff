@@ -369,8 +369,12 @@ function port(x, y, label, anchor = 'start') {
   return fp(x - 3, y - 3, 6, 6, label) + `<circle class="sch-sym" cx="${x}" cy="${y}" r="3"/>` + txt(anchor === 'start' ? x + 8 : x - 8, y + 4, label, 'sch-port', anchor)
 }
 
-const svg = (w, h, inner) =>
-  `<svg viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg" role="img">${inner}</svg>`
+// role="img" WITHOUT an accessible name is an unnamed image: a screen reader announces "graphic" and
+// nothing else, so the one piece of content in the pane is opaque to anyone not looking at it
+// (WCAG 1.1.1 / 4.1.2). aria-label rather than <title> deliberately — <title> would also raise a
+// browser tooltip over the whole drawing on hover, which the click-a-component interaction does not want.
+const svg = (w, h, inner, label = 'Power-path schematic') =>
+  `<svg viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="${esc(label)}">${inner}</svg>`
 
 // ── multi-winding transformer symbols ──────────────────────────────────────
 
