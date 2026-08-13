@@ -15,6 +15,7 @@ Run:
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -66,6 +67,7 @@ UI_RESOURCE_MIME = "text/html;profile=mcp-app"
 UI_SCHEMATIC_URI = "ui://kirchhoff/schematic.html"   # CIAS schematic, click-to-select
 UI_CURVES_URI = "ui://kirchhoff/curves.html"         # waveform / sweep chart
 UI_PICKER_URI = "ui://kirchhoff/picker.html"         # ranked candidate parts, click to choose
+UI_BODE_URI = "ui://kirchhoff/bode.html"             # dB against a LOG frequency axis
 
 
 def _ui_meta(uri: str) -> dict:
@@ -77,6 +79,7 @@ def _ui_meta(uri: str) -> dict:
 UI_SCHEMATIC_META = _ui_meta(UI_SCHEMATIC_URI)
 UI_CURVES_META = _ui_meta(UI_CURVES_URI)
 UI_PICKER_META = _ui_meta(UI_PICKER_URI)
+UI_BODE_META = _ui_meta(UI_BODE_URI)
 
 # Every topology with a design + build_tas pair in the engine (BIND_DESIGN in
 # src/bindings.cpp). Kept as data so list_topologies and the argument validation
@@ -326,6 +329,26 @@ def _excitation_series(operating_point: dict, prefix: str = "") -> list[dict]:
 
 
 
+def _bode_result(title, subtitle, series, summary, y_label="dB", x_label="frequency (Hz)",
+                 markers=None, note=None, data=None):
+    """Tool result for the frequency-domain widget.
+
+    Separate from _curves_result because the axes are genuinely different: that one is dual
+    V/A against time and picks its axis from the unit, this one is one quantity against a log
+    frequency axis. Sharing a widget between them would mean labelling one of the two wrongly.
+    """
+    return CallToolResult(
+        content=[TextContent(type="text", text=summary)],
+        structuredContent={
+            **(data or {}),
+            "title": title, "subtitle": subtitle,
+            "x_label": x_label, "y_label": y_label,
+            "series": series, "markers": markers or [], "note": note,
+        },
+    )
+
+
+
 # --- tools: design ----------------------------------------------------------
 
 @mcp.tool(
@@ -515,6 +538,7 @@ def simulate(tas: dict, fidelity: dict | None = None) -> CallToolResult:
         "complex sweep {frequenciesHz, vectors:{name:{re,im}}}."
     ),
 
+    meta=UI_BODE_META,
     structured_output=False,
 )
 def simulate_ac(deck: str) -> CallToolResult:
@@ -524,13 +548,34 @@ def simulate_ac(deck: str) -> CallToolResult:
         raise RuntimeError(f"ngspice .ac run failed: {result.get('error') or 'no detail reported'}")
     freqs = result.get("frequenciesHz") or []
     vectors = result.get("vectors") or {}
-    # The complex sweep is thousands of numbers; the model gets its shape and
-    # the span, the caller gets the arrays in the structured output.
-    return _result(
-        f"AC sweep: {len(freqs)} points"
-        + (f" from {freqs[0]:.4g} to {freqs[-1]:.4g} Hz" if freqs else "")
-        + f", {len(vectors)} vector(s): {', '.join(sorted(vectors))[:200]}",
-        result)
+    # Magnitude in dB is what a sweep is read as. The complex arrays stay in the payload —
+    # phase, real and imaginary parts are all still there for a caller that wants them.
+    series = []
+    for name in sorted(vectors):
+        v = vectors[name] or {}
+        re_, im = v.get("re") or [], v.get("im") or []
+        if len(re_) != len(freqs) or len(im) != len(freqs):
+            continue
+        points = []
+        for f, a, b in zip(freqs, re_, im):
+            mag = (a * a + b * b) ** 0.5
+            if f > 0 and mag > 0:
+                points.append([float(f), 20.0 * math.log10(mag)])
+        if len(points) > 1:
+            series.append({"name": name, "points": _decimate([p[0] for p in points],
+                                                             [p[1] for p in points])})
+    summary = (f"AC sweep: {len(freqs)} points"
+               + (f" from {freqs[0]:.4g} to {freqs[-1]:.4g} Hz" if freqs else "")
+               + f", {len(vectors)} vector(s): {', '.join(sorted(vectors))[:200]}")
+    if not series:
+        # A sweep whose magnitudes are all zero, or whose arrays do not line up with the
+        # frequency axis, has nothing to plot — and saying so beats an empty chart.
+        return _result(summary + ". No vector had a plottable magnitude against frequency.",
+                       result)
+    return _bode_result(
+        "AC sweep", f"{len(series)} vector(s), {len(freqs)} points", series,
+        summary + f"; {len(series)} charted as magnitude.",
+        y_label="magnitude (dB)", data=result)
 
 
 @mcp.tool(
@@ -1029,6 +1074,7 @@ def propose_dmc(spec: dict) -> CallToolResult:
         "frequency, simulated in-process. Reports measured vs theoretical vs required."
     ),
 
+    meta=UI_BODE_META,
     structured_output=False,
 )
 def verify_dmc(spec: dict, inductance: float, capacitance: float = 0.0) -> CallToolResult:
@@ -1045,8 +1091,32 @@ def verify_dmc(spec: dict, inductance: float, capacitance: float = 0.0) -> CallT
         f"measured {r.get('measuredAttenuation') if r.get('measuredAttenuation') is not None else 'n/a'}"
         f" -> {'PASS' if r.get('passed') else 'FAIL'}"
         for r in rows[:15])
-    return _result(f"{passed}/{len(rows)} frequencies meet the requirement:\n{detail}",
-                   {"frequencies": rows, "passed": passed, "total": len(rows)})
+    summary = f"{passed}/{len(rows)} frequencies meet the requirement:\n{detail}"
+    payload = {"frequencies": rows, "passed": passed, "total": len(rows)}
+
+    def curve(key):
+        return [[float(r["frequency"]), float(r[key])] for r in rows
+                if isinstance(r.get("frequency"), (int, float)) and r["frequency"] > 0
+                and isinstance(r.get(key), (int, float))]
+
+    series = []
+    for key, name, kind in (("requiredAttenuation", "required", "required"),
+                            ("measuredAttenuation", "measured (simulated)", "line"),
+                            ("theoreticalAttenuation", "theoretical", "line")):
+        pts = curve(key)
+        if len(pts) > 1:
+            series.append({"name": name, "points": pts, "kind": kind})
+    if not series:
+        return _result(summary, payload)
+    # The verdict belongs ON the curve, at the frequency where it was decided.
+    markers = [{"f_hz": float(r["frequency"]),
+                "value": float(r.get("measuredAttenuation") if isinstance(
+                    r.get("measuredAttenuation"), (int, float)) else r["requiredAttenuation"]),
+                "ok": bool(r.get("passed"))}
+               for r in rows if isinstance(r.get("frequency"), (int, float)) and r["frequency"] > 0]
+    return _bode_result(
+        "DM filter attenuation", f"{passed}/{len(rows)} frequencies meet the requirement",
+        series, summary, y_label="attenuation (dB)", markers=markers, data=payload)
 
 
 @mcp.tool(
@@ -1116,6 +1186,18 @@ def schematic_widget() -> str:
 def curves_widget() -> str:
     """Transient / sweep chart for simulation results."""
     return _widget("curves.html")
+
+
+@mcp.resource(
+    UI_BODE_URI,
+    name="kirchhoff-bode-widget",
+    title="Kirchhoff frequency response",
+    mime_type=UI_RESOURCE_MIME,
+)
+def bode_widget() -> str:
+    """dB against a LOG frequency axis — an AC sweep, or a filter's attenuation against the
+    requirement it is judged by, with the per-frequency verdict drawn on the curve."""
+    return _widget("bode.html")
 
 
 @mcp.resource(

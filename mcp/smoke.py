@@ -62,6 +62,9 @@ def main() -> int:
           {n for n, u in ui.items() if u.endswith("picker.html")}
           == {"select_parts", "select_candidates", "cross_reference", "bind_part"},
           ", ".join(sorted(n for n, u in ui.items() if u.endswith("picker.html"))))
+    check("the frequency-domain tools carry the bode widget",
+          {n for n, u in ui.items() if u.endswith("bode.html")} == {"simulate_ac", "verify_dmc"},
+          ", ".join(sorted(n for n, u in ui.items() if u.endswith("bode.html"))))
     check("the waveform tools carry the curves widget",
           {n for n, u in ui.items() if u.endswith("curves.html")}
           == {"component_waveforms", "operating_point", "topology_waveforms"},
@@ -105,6 +108,38 @@ def main() -> int:
     check("it carries no series, and no widget claims it can draw one",
           "series" not in sc and "simulate" not in
           {t.name for t in tools if (t.meta or {}).get("ui/resourceUri")})
+
+    print("simulate_ac  [bode] — an RC low-pass whose answer is known")
+    deck = ("RC lowpass\nV1 in 0 AC 1\nR1 in out 1k\nC1 out 0 159n\n"
+            ".ac dec 20 10 1meg\n.end\n")
+    r = S.simulate_ac(deck)
+    sc = r.structuredContent
+    out = next((x for x in sc.get("series") or [] if x["name"] == "out"), None)
+    check("the sweep is charted as magnitude against frequency", out is not None,
+          ", ".join(x["name"] for x in sc.get("series") or []))
+    if out:
+        at = lambda f: min(out["points"], key=lambda pt: abs(pt[0] - f))[1]
+        # R=1k, C=159n -> fc ~= 1 kHz. If the dB conversion were wrong this is where it shows.
+        check("the plotted magnitudes are the circuit's, not a scaling of it",
+              abs(at(10)) < 0.1 and abs(at(1000) + 3.01) < 0.3 and abs(at(1e6) + 60) < 1.5,
+              f"{at(10):.2f} dB at 10 Hz, {at(1000):.2f} at the 1 kHz corner, "
+              f"{at(1e6):.2f} at 1 MHz")
+    check("the complex sweep is still returned, not replaced by the chart",
+          bool(sc.get("frequenciesHz")) and bool(sc.get("vectors")))
+
+    print("verify_dmc  [bode]")
+    r = S.verify_dmc({"inputVoltage": 230, "operatingCurrent": 2.0, "lineFrequency": 50,
+                      "switchingFrequency": 100_000, "ambientTemperature": 25,
+                      "minimumInductance": 1e-3}, 1e-3)
+    sc = r.structuredContent
+    names = [x["name"] for x in sc.get("series") or []]
+    check("required, measured and theoretical are all drawn", len(names) >= 2, ", ".join(names))
+    check("the requirement is marked as a limit, not another measurement",
+          any(x.get("kind") == "required" for x in sc.get("series") or []))
+    check("every frequency's verdict is on the curve",
+          len(sc.get("markers") or []) == sc.get("total"),
+          f"{sc.get('passed')}/{sc.get('total')} pass")
+    check("the per-frequency table is still returned", bool(sc.get("frequencies")))
 
     if SKIP_SOURCING:
         print("sourcing: SKIPPED (--skip-sourcing)")

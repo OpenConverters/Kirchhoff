@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Kirchhoff MCP App \u2014 CIAS schematic, waveform and part-picker widgets",
   "scripts": {
-    "build": "rm -rf dist && INPUT=schematic.html vite build && INPUT=curves.html vite build && INPUT=picker.html vite build",
+    "build": "rm -rf dist && INPUT=schematic.html vite build && INPUT=curves.html vite build && INPUT=picker.html vite build && INPUT=bode.html vite build",
     "dev": "vite"
   },
   "license": "ISC",

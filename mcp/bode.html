@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Kirchhoff frequency response</title>
+    <style>
+      :root {
+        --fg: #1c1f24; --muted: #6b7280; --line: #d7dbe0; --grid: rgba(0,0,0,.10);
+        --s0: #1d6fd8; --s1: #b3261e; --s2: #1a7f4b; --s3: #a4680a;
+        --req: #6b7280; --pass: #1a7f4b; --fail: #b3261e;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: #e7e9ee; --muted: #9aa3b0; --line: #333a44; --grid: rgba(255,255,255,.13);
+          --s0: #5aa9ff; --s1: #ff7a70; --s2: #52c98a; --s3: #e0a83a;
+          --req: #9aa3b0; --pass: #52c98a; --fail: #ff7a70;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; background: transparent; color: var(--fg);
+        font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      #app { padding: 10px 12px 12px; }
+      h1 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: -.01em; }
+      .sub { color: var(--muted); font-size: 12px; margin: 3px 0 6px; }
+      .muted { color: var(--muted); }
+      .readout { font-size: 12.5px; padding: 10px 2px; }
+      .err {
+        background: rgba(255,93,85,.12); border-radius: 6px;
+        padding: 6px 9px; font-size: 12.5px; margin-bottom: 8px;
+      }
+      .chart { width: 100%; height: auto; display: block; }
+      .grid { stroke: var(--grid); stroke-width: 1; }
+      .tick { fill: var(--muted); font-size: 10px; }
+      .axis { fill: var(--muted); font-size: 10.5px; }
+      .line { fill: none; stroke-width: 1.9; stroke-linejoin: round; stroke-linecap: round; }
+      .line.s0 { stroke: var(--s0); } .line.s1 { stroke: var(--s1); }
+      .line.s2 { stroke: var(--s2); } .line.s3 { stroke: var(--s3); }
+      /* the requirement is a limit, not a measurement — dashed, and never a colour that
+         competes with the curves being judged against it */
+      .line.required { stroke: var(--req); stroke-dasharray: 6 4; stroke-width: 1.5; }
+      .mk.pass { fill: var(--pass); stroke: none; }
+      .mk.fail { fill: none; stroke: var(--fail); stroke-width: 1.8; }
+      .legend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px; }
+      .key { font-size: 11.5px; padding-left: 14px; position: relative; }
+      .key::before {
+        content: ""; position: absolute; left: 0; top: .55em; width: 10px; height: 2px;
+      }
+      .key.s0::before { background: var(--s0); } .key.s1::before { background: var(--s1); }
+      .key.s2::before { background: var(--s2); } .key.s3::before { background: var(--s3); }
+      .key.required::before { background: var(--req); }
+      .hint { color: var(--muted); font-size: 11.5px; margin-top: 6px; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/bode.js"></script>
+  </body>
+</html>
