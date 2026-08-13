@@ -20,7 +20,11 @@ import sys
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parent.parent
-_SEARCHED = (_REPO / "build", _REPO / "build-latest")
+# Where PyKirchhoff might be. KIRCHHOFF_BUILD first (the name Heaviside already uses for the
+# same question), then the build dirs this repo actually produces — a checkout that builds to
+# build-native could not find its own module and reported it as "not built".
+_SEARCHED = tuple(Path(p) for p in (os.environ.get("KIRCHHOFF_BUILD"),) if p) + (
+    _REPO / "build", _REPO / "build-latest", _REPO / "build-native")
 _FOUND = [p for d in _SEARCHED for p in list(d.glob("PyKirchhoff*.so")) + list(d.glob("PyKirchhoff*.pyd"))]
 for _module in _FOUND:
     sys.path.insert(0, str(_module.parent))
@@ -61,6 +65,7 @@ from mcp.types import CallToolResult, TextContent      # noqa: E402
 UI_RESOURCE_MIME = "text/html;profile=mcp-app"
 UI_SCHEMATIC_URI = "ui://kirchhoff/schematic.html"   # CIAS schematic, click-to-select
 UI_CURVES_URI = "ui://kirchhoff/curves.html"         # waveform / sweep chart
+UI_PICKER_URI = "ui://kirchhoff/picker.html"         # ranked candidate parts, click to choose
 
 
 def _ui_meta(uri: str) -> dict:
@@ -71,6 +76,7 @@ def _ui_meta(uri: str) -> dict:
 
 UI_SCHEMATIC_META = _ui_meta(UI_SCHEMATIC_URI)
 UI_CURVES_META = _ui_meta(UI_CURVES_URI)
+UI_PICKER_META = _ui_meta(UI_PICKER_URI)
 
 # Every topology with a design + build_tas pair in the engine (BIND_DESIGN in
 # src/bindings.cpp). Kept as data so list_topologies and the argument validation
@@ -191,15 +197,21 @@ def _result(summary: str, payload: dict) -> CallToolResult:
     )
 
 
-def _curves_result(title, subtitle, x_label, y_label, series, summary, note=None):
+def _curves_result(title, subtitle, x_label, y_label, series, summary, note=None, data=None):
     """Tool result for the curves widget.
 
     Two channels, as in the Hertz server: `content` is the digest the model
     reads, `structuredContent` is the payload only the widget reads.
+
+    `data` carries the tool's OWN result alongside the chart. A tool that returns an
+    operating point and happens to draw it must still return the operating point — charting
+    a result is not a reason to stop returning it, and a caller that wants to feed it onward
+    would otherwise have to call twice.
     """
     return CallToolResult(
         content=[TextContent(type="text", text=summary)],
         structuredContent={
+            **(data or {}),
             "title": title, "subtitle": subtitle,
             "x_label": x_label, "y_label": y_label,
             "series": series, "note": note,
@@ -289,6 +301,29 @@ def _kelvin_data_dir(data_dir: str | None) -> str:
     if not Path(resolved).is_dir():
         raise ValueError(f"Kelvin data_dir {resolved!r} is not a directory")
     return resolved
+
+
+def _excitation_series(operating_point: dict, prefix: str = "") -> list[dict]:
+    """MAS excitationsPerWinding -> the curves widget's V/A series.
+
+    An excitation carries the winding's voltage and current as {waveform:{time,data}}. Only
+    a pair with matching, non-empty arrays becomes a trace: a signal the engine described by
+    processed STATS alone (peak/rms, no samples) has no curve, and inventing one from the
+    stats would draw a shape the engine never computed.
+    """
+    series = []
+    for i, exc in enumerate(operating_point.get("excitationsPerWinding") or []):
+        name = exc.get("name") or f"winding {i + 1}"
+        for quantity, unit in (("voltage", "V"), ("current", "A")):
+            waveform = ((exc.get(quantity) or {}).get("waveform")) or {}
+            time, data = waveform.get("time"), waveform.get("data")
+            if not (isinstance(time, list) and isinstance(data, list)
+                    and len(time) == len(data) and len(time) > 1):
+                continue
+            series.append({"name": f"{prefix}{name} {quantity}", "unit": unit,
+                           "points": _decimate(time, data)})
+    return series
+
 
 
 # --- tools: design ----------------------------------------------------------
@@ -618,6 +653,7 @@ def magnetic_inputs(tas: dict, magnetic: str = "", enrich: bool = True) -> CallT
         "samples, not just processed stats) — what a 'custom'-shaped excitation "
         "(QRM valley switching, resonant legs) needs before advising."
     ),
+    meta=UI_CURVES_META,
     structured_output=False,
 )
 def topology_waveforms(tas: dict) -> CallToolResult:
@@ -625,10 +661,25 @@ def topology_waveforms(tas: dict) -> CallToolResult:
     magnetics = kh.topology_waveforms(tas)
     names = [m.get("name") for m in magnetics]
     main = next((m.get("name") for m in magnetics if m.get("isMain")), None)
-    return _result(
-        f"{len(magnetics)} magnetic(s) with full waveforms: {', '.join(str(n) for n in names)}"
-        + (f" (main: {main})" if main else ""),
-        {"magnetics": magnetics, "count": len(magnetics), "names": names})
+    # Every magnetic's first operating point, charted together and labelled by magnetic:
+    # the point of asking for ALL of them is to compare them.
+    series = []
+    for m in magnetics:
+        ops = ((m.get("inputs") or {}).get("operatingPoints")) or []
+        if ops:
+            series += _excitation_series(ops[0], prefix=f"{m.get('name') or '?'} ")
+    summary = (f"{len(magnetics)} magnetic(s) with full waveforms: "
+               f"{', '.join(str(n) for n in names)}" + (f" (main: {main})" if main else ""))
+    if not series:
+        return _result(
+            summary + ". No time-domain samples reached the excitations, so there is nothing "
+            "to chart — which is itself the answer if you were about to advise on them.",
+            {"magnetics": magnetics, "count": len(magnetics), "names": names})
+    return _curves_result(
+        "Magnetic excitations", f"{len(magnetics)} magnetic(s), {len(series)} waveform(s)",
+        "time (s)", "V / A", series,
+        summary + f", {len(series)} charted waveform(s).",
+        data={"magnetics": magnetics, "count": len(magnetics), "names": names})
 
 
 @mcp.tool(
@@ -638,6 +689,7 @@ def topology_waveforms(tas: dict) -> CallToolResult:
         "ngspice run of the real circuit."
     ),
 
+    meta=UI_CURVES_META,
     structured_output=False,
 )
 def operating_point(tas: dict, engine: str = "analytical", magnetic: str = "",
@@ -652,10 +704,24 @@ def operating_point(tas: dict, engine: str = "analytical", magnetic: str = "",
         raise ValueError(f"engine must be 'analytical' or 'ngspice' -- got {engine!r}")
     op = kh.extract_operating_point(tas, engine, magnetic, _fidelity(fidelity))
     windings = len(op.get("excitationsPerWinding") or [])
-    return _result(
-        f"Operating point for {magnetic or 'the main magnetic'} ({engine}): "
-        f"{windings} winding excitation(s).",
-        {"operating_point": op})
+    series = _excitation_series(op)
+    who = magnetic or "the main magnetic"
+    if not series:
+        # An excitation the engine described by processed statistics alone has no curve.
+        # Saying so beats an empty chart, and beats drawing a shape from the stats that the
+        # engine never computed.
+        return _result(
+            f"Operating point for {who} ({engine}): {windings} winding excitation(s). The "
+            f"engine described them by processed statistics only, so there are no "
+            f"time-domain samples to chart.",
+            {"operating_point": op})
+    return _curves_result(
+        f"{magnetic or 'Main magnetic'} — operating point ({engine})",
+        f"{windings} winding excitation(s), {len(series)} waveform(s)",
+        "time (s)", "V / A", series,
+        f"Operating point for {who} ({engine}): {windings} winding excitation(s), "
+        f"{len(series)} charted waveform(s).",
+        data={"operating_point": op})
 
 
 # --- tools: parts sourcing --------------------------------------------------
@@ -667,6 +733,7 @@ def operating_point(tas: dict, engine: str = "analytical", magnetic: str = "",
         "sourcing over the TAS parts DB). Returns candidates with MPN, manufacturer "
         "and the margins that ranked them."
     ),
+    meta=UI_PICKER_META,
     structured_output=False,
 )
 def select_parts(tas: dict, data_dir: str | None = None, options: dict | None = None) -> CallToolResult:
@@ -687,12 +754,25 @@ def select_parts(tas: dict, data_dir: str | None = None, options: dict | None = 
         n = len((c.get("selection") or {}).get("candidates") or [])
         if c.get("filled"):
             lines.append(f"  {c['ref']} ({c.get('family')}): {c.get('mpn')} — {n} candidate(s)")
+        elif c.get("deferred"):
+            # NOBODY LOOKED. A controller is deferred until the topology and operating point
+            # are known; reporting that as "no candidate met the requirements" would send an
+            # engineer hunting for a part that was never searched for.
+            lines.append(f"  {c['ref']} ({c.get('family')}): not sourced — deferred"
+                         + (f" ({c['deferred']})" if isinstance(c.get("deferred"), str) else ""))
         else:
             why = c.get("error") or "no candidate met the requirements"
-            lines.append(f"  {c['ref']} ({c.get('family')}): UNFILLED — {why}")
+            gates = c.get("rejections") or {}
+            lines.append(
+                f"  {c['ref']} ({c.get('family')}): UNFILLED — {why}"
+                + (" · rejections: "
+                   + ", ".join(f"{k}={v}" for k, v in
+                               sorted(gates.items(), key=lambda kv: -kv[1])[:4]) if gates else ""))
+    deferred = sum(1 for c in components if not c.get("filled") and c.get("deferred"))
     return _result(
-        f"{filled}/{len(components)} components sourced from the catalogue:\n"
-        + "\n".join(lines),
+        f"{filled}/{len(components)} components sourced from the catalogue"
+        + (f" ({deferred} deferred — not searched for, rather than not found)" if deferred else "")
+        + ":\n" + "\n".join(lines),
         {
             "components": components,
             "filled": filled,
@@ -708,6 +788,7 @@ def select_parts(tas: dict, data_dir: str | None = None, options: dict | None = 
         "manufacturer-diversity cap. The per-component entry point; select_parts walks "
         "a whole design instead."
     ),
+    meta=UI_PICKER_META,
     structured_output=False,
 )
 def select_candidates(kind: str, requirements: dict, context: dict | None = None,
@@ -812,6 +893,7 @@ def run_deck(deck: str, timeout_s: float = 600.0) -> CallToolResult:
         "the updated TAS at DATASHEET fidelity."
     ),
 
+    meta=UI_PICKER_META,
     structured_output=False,
 )
 def bind_part(tas: dict, ref: str, envelope: dict) -> CallToolResult:
@@ -836,6 +918,7 @@ def bind_part(tas: dict, ref: str, envelope: dict) -> CallToolResult:
         "judgement. Returns candidates scored best-first with the penalty that ranked them."
     ),
 
+    meta=UI_PICKER_META,
     structured_output=False,
 )
 def cross_reference(category: str, original: dict, candidates: list[dict],
@@ -1033,6 +1116,19 @@ def schematic_widget() -> str:
 def curves_widget() -> str:
     """Transient / sweep chart for simulation results."""
     return _widget("curves.html")
+
+
+@mcp.resource(
+    UI_PICKER_URI,
+    name="kirchhoff-picker-widget",
+    title="Kirchhoff part picker",
+    mime_type=UI_RESOURCE_MIME,
+)
+def picker_widget() -> str:
+    """Ranked candidate parts with their specs, verdicts and margins — click one and the
+    choice goes back to the model. Every sourcing tool ends in the same decision, so they
+    share it."""
+    return _widget("picker.html")
 
 
 def build_app():
