@@ -13,11 +13,12 @@
     "check:drawing": "node scripts/auditSchematics.mjs && node scripts/auditSchematicLabels.mjs",
     "check:equivalence": "node scripts/checkEquivalence.mjs",
     "check:sweep": "node scripts/checkSweep.mjs   # slow: 9 design points x every topology/variant",
-    "check": "npm run check:nets && npm run check:drawing && npm run check:anchoring && npm run check:equivalence",
+    "check": "npm run check:nets && npm run check:drawing && npm run check:anchoring && npm run check:contrast && npm run check:equivalence",
     "test:e2e": "playwright test",
     "test:e2e:smoke": "playwright test smoke",
     "test": "npm run check && npm run test:unit && npm run test:e2e",
-    "check:anchoring": "node scripts/checkLabelAnchoring.mjs"
+    "check:anchoring": "node scripts/checkLabelAnchoring.mjs",
+    "check:contrast": "node scripts/checkSchematicContrast.mjs"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.3.0",
