@@ -1313,9 +1313,8 @@ const LAYOUTS = {
   },
 }
 
-// Every topology has a native layout (ABT #684), so these are the same question — kept as two names
-// because callers ask it for two reasons: "can the app draw this?" and "is it generated?".
-export function hasNativeCiasLayout(topologyId) { return topologyId in LAYOUTS }
+// Can this topology be drawn? Every one can (ABT #684) — the test remains so that adding a topology
+// without a layout fails loudly at the call sites rather than rendering nothing.
 export function hasCiasSchematic(topologyId) { return topologyId in LAYOUTS }
 
 // EXACTLY what the app renders, plus the anchor pins the offline checkers need. Every gate must render
