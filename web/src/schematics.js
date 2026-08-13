@@ -1356,7 +1356,7 @@ export function hasSchematic(topologyId) {
 // regPin side effects are inert unless a collectPins recording is active).
 export const symbols = {
   svg, wire, dot, mosfetV, mosfetH, diode, indH, indV, capV, capH, resV, resH,
-  xfmr, xfmr3, xfmr4, srcDC, srcAC, gnd, isoGnd, loadR, port, sig, ctrlIC,
+  xfmr, xfmr3, xfmr4, srcDC, srcAC, gnd, isoGnd, loadR, port, sig, ctrlIC, icBox, txt,
 }
 
 export function renderSchematic(topologyId, bomRows, variant) {
