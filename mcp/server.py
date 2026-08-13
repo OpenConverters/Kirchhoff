@@ -62,6 +62,8 @@ from mcp.server.transport_security import (            # noqa: E402
 )
 from mcp.types import CallToolResult, TextContent      # noqa: E402
 
+from artifacts import resolved                          # noqa: E402
+
 # --- MCP Apps wire constants (from @modelcontextprotocol/ext-apps 1.7.5) -----
 UI_RESOURCE_MIME = "text/html;profile=mcp-app"
 UI_SCHEMATIC_URI = "ui://kirchhoff/schematic.html"   # CIAS schematic, click-to-select
@@ -349,6 +351,21 @@ def _bode_result(title, subtitle, series, summary, y_label="dB", x_label="freque
 
 
 
+def _deck_text(deck: str | None, deck_ref: str | None) -> str:
+    """A SPICE deck, given inline or by reference. Exactly one."""
+    if deck and deck_ref:
+        raise ValueError("pass deck OR deck_ref, not both — which one is the circuit is not "
+                         "something this server should guess")
+    if deck_ref:
+        with resolved(deck_ref, "KIRCHHOFF", "deck") as path:
+            return path.read_text(encoding="utf-8", errors="replace")
+    if not deck:
+        raise ValueError("no deck given: pass deck (the netlist itself) or deck_ref (a path, "
+                         "artifact://<id> or URL)")
+    return deck
+
+
+
 # --- tools: design ----------------------------------------------------------
 
 @mcp.tool(
@@ -541,8 +558,14 @@ def simulate(tas: dict, fidelity: dict | None = None) -> CallToolResult:
     meta=UI_BODE_META,
     structured_output=False,
 )
-def simulate_ac(deck: str) -> CallToolResult:
-    """Complex AC sweep of a hand-written or exported .ac deck."""
+def simulate_ac(deck: str | None = None, deck_ref: str | None = None) -> CallToolResult:
+    """Complex AC sweep of a hand-written or exported .ac deck.
+
+    Args:
+        deck: the deck itself.
+        deck_ref: the deck by reference — see run_deck.
+    """
+    deck = _deck_text(deck, deck_ref)
     result = kh.run_ngspice_ac(deck)
     if not result.get("success"):
         raise RuntimeError(f"ngspice .ac run failed: {result.get('error') or 'no detail reported'}")
@@ -921,8 +944,18 @@ def pfc_mode(spec: dict, inductance: float) -> CallToolResult:
     ),
     structured_output=False,
 )
-def run_deck(deck: str, timeout_s: float = 600.0) -> CallToolResult:
-    """Console output of a raw deck run in-process."""
+def run_deck(deck: str | None = None, timeout_s: float = 600.0,
+             deck_ref: str | None = None) -> CallToolResult:
+    """Console output of a raw deck run in-process.
+
+    Args:
+        deck: the deck itself.
+        deck_ref: the deck by reference instead — a local path, file://, artifact://<id>
+            (resolved against KIRCHHOFF_ARTIFACT_BASE) or an https:// URL. The shared
+            convention across the OpenConverters servers (artifacts.py, ABT #661/#656), so a
+            long deck never travels through the tool arguments.
+    """
+    deck = _deck_text(deck, deck_ref)
     output = kh.run_ngspice_console(deck, timeout_s)
     lines = output.splitlines()
     measured = [l for l in lines if "=" in l and not l.strip().startswith("*")]
@@ -1213,6 +1246,48 @@ def picker_widget() -> str:
     return _widget("picker.html")
 
 
+
+def _auth_middleware(app, prefix: str):
+    """Optional bearer-token auth in front of the transport.
+
+    OFF unless {PREFIX}_AUTH_TOKEN is set, because the default deployment is loopback and a
+    token nobody configured would be security theatre with a support cost. Set it and every
+    request must carry `Authorization: Bearer <token>`; the MCP endpoints are all that is
+    protected, and the failure is a plain 401 rather than a redirect, so a client sees what
+    happened instead of guessing at OAuth (ABT #656).
+
+    This is a gate, not an identity: one shared token says the caller is allowed in, not who
+    they are. Anything needing per-user identity wants a real IdP in front, and this is not a
+    substitute for one.
+    """
+    import os as _os
+
+    token = _os.environ.get(f"{prefix}_AUTH_TOKEN", "").strip()
+    if not token:
+        return app
+
+    from starlette.responses import PlainTextResponse
+
+    class _BearerGate:
+        def __init__(self, inner):
+            self.inner = inner
+
+        async def __call__(self, scope, receive, send):
+            if scope.get("type") != "http":
+                await self.inner(scope, receive, send)
+                return
+            headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers") or []}
+            if headers.get("authorization", "") != f"Bearer {token}":
+                response = PlainTextResponse(
+                    f"401 Unauthorized: this server requires a bearer token "
+                    f"({prefix}_AUTH_TOKEN).", status_code=401)
+                await response(scope, receive, send)
+                return
+            await self.inner(scope, receive, send)
+
+    return _BearerGate(app)
+
+
 def build_app():
     """Starlette app with CORS.
 
@@ -1231,7 +1306,7 @@ def build_app():
         allow_headers=["*"],
         expose_headers=["Mcp-Session-Id"],
     )
-    return app
+    return _auth_middleware(app, "KIRCHHOFF")
 
 
 if __name__ == "__main__":
