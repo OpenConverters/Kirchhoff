@@ -171,6 +171,16 @@ export function auditDrawing(svg, tasRefs, pins = []) {
     }
     for (const d of D) if (!S.some((s) => onSpan(d, s) || near(d, s[0], 3) || near(d, s[1], 3)))
       problems.push(`DOT at (${d}) sits on no wire`)
+    // ORPHAN-FLAG. Gate drive and sense are drawn as net LABELS, not wires: two flags carrying the same
+    // name are the same net (standard practice, and the only way to avoid dashed spaghetti across the
+    // power path). A name that appears exactly once therefore connects to nothing — a switch nobody
+    // drives, or a controller pin driving nobody — and every rule here is blind to it, because a flag
+    // is a text and a stub rather than a wire.
+    const flagCount = new Map()
+    for (const m of svg.matchAll(/<text class="sch-sig"[^>]*>([^<]*)<\/text>/g))
+      flagCount.set(m[1], (flagCount.get(m[1]) ?? 0) + 1)
+    for (const [name, n] of flagCount)
+      if (n < 2) problems.push(`ORPHAN-FLAG signal '${name}' is labelled once — it names a net with one end`)
     // CROSS-DOT. A reader resolves a crossing by looking for a dot, so a crossing is only unambiguous
     // while the nearest dot plainly belongs somewhere else. psfb ran the Lr→T1 tank through the leg-C
     // column 10 px above midC's junction dot; pshb took the primary return across the NPC stack 10 px
