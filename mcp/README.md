@@ -142,4 +142,26 @@ tunnel or reverse proxy, name the public host in `KIRCHHOFF_PUBLIC_HOST` (or set
 
 Spike. Not yet done: magnetics handoff to the OpenMagnetics adviser (the web app
 does this with a cross-origin postMessage round-trip that has no server-side
-equivalent yet), file upload, auth.
+equivalent yet). File references and auth are done — see below.
+
+## Files and auth
+
+Anything this server reads from disk takes ONE reference argument, the shared convention across
+the OpenConverters MCP servers (`mcp/artifacts.py`, identical in Faraday, Hertz and Kirchhoff):
+
+```
+/path/to/file            a path on the machine running the server
+file:///path/to/file     the same, as a URI
+artifact://<id>          resolved against KIRCHHOFF_ARTIFACT_BASE, with KIRCHHOFF_ARTIFACT_TOKEN as a bearer token
+https://host/path        fetched as-is
+```
+
+One argument rather than a path field and a URI field, so the orchestrator implements the
+reference once. Large inputs therefore never travel through the tool arguments — which is to
+say, never through the model context.
+
+Auth is **off unless `KIRCHHOFF_AUTH_TOKEN` is set**. Set it and every request must carry
+`Authorization: Bearer <token>`, and one that does not gets a plain 401 rather than a redirect.
+It is a gate, not an identity: one shared token says the caller is allowed in, not who they
+are. Anything needing per-user identity, audit or revocation wants a real IdP in front, and
+TLS belongs on the proxy.
