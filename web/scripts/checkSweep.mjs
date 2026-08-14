@@ -51,6 +51,7 @@ const only = process.argv[2]
 const onlyPoint = process.env.KH_POINT   // run a single design point (line-frequency topologies are slow)
 
 let combos = 0, skipped = 0, flagged = 0, total = 0
+const skips = []   // every unsolvable point WITH the engine's reason — see the note at the end
 for (const t of TOPOLOGIES) {
   if (!hasCiasSchematic(t.id)) continue
   if (only && t.id !== only) continue
@@ -73,7 +74,7 @@ for (const t of TOPOLOGIES) {
       if (opt && v) spec.config = { ...(spec.config ?? {}), [v.key]: opt }
       const out = M.design_tas_full(t.id, JSON.stringify(spec))
       const name = `${t.id}${opt ? '/' + opt : ''} @ ${pt}`
-      if (out.startsWith('Exception')) { skipped++; continue }
+      if (out.startsWith('Exception')) { skipped++; skips.push(`${t.id}${opt ? '/' + opt : ''} @${pt}: ${out.slice(10, 120).trim()}`); continue }
       const tas = JSON.parse(out).tas
       const { svg, pins } = renderForAudit(t.id, tas, opt ?? 'standard')
       const tasRefs = new Set((tas?.topology?.stages ?? []).flatMap((st) => (st.circuit?.components ?? []).map((c) => c.name)))
@@ -89,5 +90,12 @@ for (const t of TOPOLOGIES) {
   }
 }
 await browser.close()
+// A skip count on its own is a shrug: it cannot be told apart from a harness that built an impossible
+// spec (which is exactly what this sweep did for eight flyback points until the input range was scaled
+// as a whole). Name every one, with the engine's own reason.
+if (skips.length) {
+  console.log(`\nnot solvable at these points — the engine's reason, verbatim:`)
+  for (const s of skips) console.log('   ' + s)
+}
 console.log(`\n${combos} design points checked (${skipped} not solvable, skipped) — ${total} problem(s) in ${flagged}`)
 process.exit(flagged ? 1 : 0)
