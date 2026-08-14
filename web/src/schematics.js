@@ -270,7 +270,11 @@ function icBox(ref, bom, x, y, w, h, pinsL = [], pinsR = [], title = '') {
     })
   place(pinsL, 'left')
   place(pinsR, 'right')
-  if (title) els.push(txt(x, y + 4, title, 'sch-val'))
+  // .sch-blk, not .sch-val: this is the block's CAPTION (PWM, ∫, Σ) — what the box DOES — not a
+  // component value, and the stylesheet has carried a control-block-caption class all along. Wearing
+  // the value class made every tool that reads values read a caption instead: the BOM/drawing agreement
+  // check compared U1's "PWM" against the BOM's "pwmController" and called it a mismatch.
+  if (title) els.push(txt(x, y + 4, title, 'sch-blk'))
   // noVal: the value (e.g. a controller category string) would land on the box border — the
   // in-box title carries the function; the full value lives in the BOM row / part drawer.
   return hot(ref, bom, [x - w / 2, y - h / 2, w, h], els.join(''), [x, y - h / 2 - 8, 'middle', true])

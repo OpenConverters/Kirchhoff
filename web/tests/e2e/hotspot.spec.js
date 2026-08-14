@@ -202,3 +202,49 @@ test('every character the schematic prints comes from a font the app ships', asy
   }, [...seen])
   expect(bad, `characters drawn from a font the app does not ship:\n${bad.join('\n')}`).toEqual([])
 })
+
+// DOES THE DRAWING FOLLOW THE DESIGN? Everything else in this suite inspects ONE render of a freshly
+// solved design. The schematic is a Vue computed over the solved TAS and the BOM, injected as raw HTML —
+// so the failure worth fearing is not a wrong line, it is a RIGHT line carrying yesterday's numbers:
+// re-solve at another frequency and, if anything in that chain fails to invalidate, the pane keeps
+// showing the previous design's values while the BOM beside it shows the new ones. Nothing has ever
+// asked the two to agree, or asked the drawing to change when the design does.
+test('the drawing shows the design that is loaded, not the one before it', async ({ page }) => {
+  const drawn = () => page.evaluate(() => Object.fromEntries([...document.querySelectorAll('.schematic-frame g.sch-hot')]
+    .map((g) => [g.dataset.ref, g.querySelector('text.sch-val')?.textContent ?? null])
+    .filter(([, v]) => v)))
+  const listed = async () => {
+    await page.locator('.pane-select').last().selectOption('bom')
+    const rows = await page.evaluate(() => Object.fromEntries([...document.querySelectorAll('table.data-table tbody tr')]
+      .map((r) => [...r.querySelectorAll('td')].map((td) => td.textContent.trim()))
+      .map(([ref, , , value]) => [ref, value])))
+    await page.locator('.pane-select').last().selectOption('schematic')
+    return rows
+  }
+
+  await boot(page)
+  await selectTopology(page, 'buck')
+  expect(await solve(page, 'analytical'), 'solve error').toBeNull()
+  await expect(page.locator('.schematic-frame svg').first()).toBeVisible({ timeout: 30000 })
+
+  const first = await drawn()
+  expect(Object.keys(first).length, 'components drawn with a value').toBeGreaterThan(2)
+  // The drawing and the BOM are two views of one design; a reader compares them constantly.
+  const bom1 = await listed()
+  for (const [ref, value] of Object.entries(first))
+    expect(bom1[ref], `${ref}: the drawing says ${value}, the BOM says ${bom1[ref]}`).toBe(value)
+
+  // Re-solve the same topology at 4x the switching frequency. Every reactive component must shrink;
+  // if the pane still shows the old numbers, the drawing is stale.
+  const fs = await page.evaluate(() => window.__bench.form.fs)
+  await page.evaluate((f) => { window.__bench.form.fs = f * 4 }, fs)
+  expect(await solve(page, 'analytical'), 'solve error at 4x fsw').toBeNull()
+  await expect(page.locator('.schematic-frame svg').first()).toBeVisible({ timeout: 30000 })
+
+  const second = await drawn()
+  const moved = Object.keys(second).filter((ref) => second[ref] !== first[ref])
+  expect(moved.length, `4x the switching frequency and every drawn value is unchanged: ${JSON.stringify(first)}`).toBeGreaterThan(0)
+  const bom2 = await listed()
+  for (const [ref, value] of Object.entries(second))
+    expect(bom2[ref], `after re-solving, ${ref}: the drawing says ${value}, the BOM says ${bom2[ref]}`).toBe(value)
+})
