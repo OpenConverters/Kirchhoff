@@ -105,6 +105,15 @@ PfcDesign design_pfc(const json& tasInputs) {
     // an INTERLEAVED PFC each of the N phases carries 1/N of the line current, so the per-phase inductor is
     // sized to the per-phase power/current (MKF per_phase_power :163); N = 1 for boost/totem-pole.
     // Duty at the line peak: boost-class D = 1 − Vpk/Vout; buck-boost-class (SEPIC/Ćuk) D = Vout/(Vout+Vpk).
+    // A boost-class PFC can only pump the rail UP: at the line peak the duty is 1 − Vpk/Vout, which goes
+    // to zero and then negative as Vout approaches and falls below the peak — and every inductance formula
+    // below then produces a zero or negative L, so the failure surfaced downstream as the useless
+    // "analytical_pfc: boostInductance must be > 0". Say which requirement is impossible instead.
+    if (!buckBoost && d.outputVoltage <= vpeak)
+        throw std::invalid_argument(
+            "pfc design: a boost-class PFC needs an output above the line PEAK — asked for "
+            + std::to_string(d.outputVoltage) + " V out against a peak line voltage of "
+            + std::to_string(vpeak) + " V");
     const double dutyPeak   = buckBoost ? d.outputVoltage / (d.outputVoltage + vpeak)
                                         : 1.0 - vpeak / d.outputVoltage;
     const double pinPhase   = pin   / d.numberOfPhases;        // per-phase input power
