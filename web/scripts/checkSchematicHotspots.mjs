@@ -119,6 +119,15 @@ for (const t of TOPOLOGIES) {
     const { svg } = renderForAudit(t.id, tas, opt ?? 'standard')
     const { parts, annotations } = await probe(svg)
     const bad = []
+    // WELL-FORMEDNESS. setContent parses the drawing as HTML, which forgives nearly everything; an SVG
+    // that is going anywhere else (a file export, a PDF, any XML consumer) has to be a real document. A
+    // stray & or < from a component name or a value string would go unnoticed in the app and break the
+    // moment the drawing leaves it — so parse it strictly, once per combo, and report what the parser says.
+    const xmlError = await page.evaluate((src) => {
+      const doc = new DOMParser().parseFromString(src, 'image/svg+xml')
+      return doc.querySelector('parsererror')?.textContent?.replace(/\s+/g, ' ').trim().slice(0, 200) ?? null
+    }, svg)
+    if (xmlError) bad.push(`MALFORMED the drawing is not well-formed XML: ${xmlError}`)
     const allowed = annotatable(tas)
     for (const ref of annotations)
       if (!allowed.has(ref))

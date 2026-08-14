@@ -114,6 +114,18 @@ for (const [sel, prop, kind, what] of SUBJECTS) {
   console.log(`${r >= min ? 'ok  ' : 'FAIL'} ${sel.padEnd(11)} ${colour.padEnd(14)} ${r.toFixed(2)}:1  (needs ${min}:1 — ${what})`)
 }
 
+// USE OF COLOUR (WCAG 1.4.1). The drawing separates two planes: power (amber) and control (cyan). If that
+// separation were carried by hue alone, it would vanish for a reader with a colour-vision deficiency and
+// on any monochrome print. It is not — the control stubs are DASHED and the power wires solid — but that
+// is exactly the kind of non-colour cue a palette refactor deletes without noticing, so it is pinned:
+// the control-plane stroke must declare a dash pattern, and the power wire must not.
+const dashOf = (sel) => ruleFor(sel)?.match(/stroke-dasharray\s*:\s*([^;]+)/)?.[1]?.trim() ?? null
+if (!dashOf('.sch-ctl'))
+  { console.log('FAIL .sch-ctl has no stroke-dasharray — the control plane would be told apart by colour alone'); failed++ }
+if (dashOf('.sch-wire'))
+  { console.log('FAIL .sch-wire is dashed too — the dash no longer distinguishes the control plane'); failed++ }
+if (!failed) console.log('\nControl and power planes differ by more than colour (control stubs dashed, power wires solid)')
+
 // The other half of "readable": a screen reader gets no purchase on line art at all. Two things have to
 // hold, and they are checked here because both are generated per render:
 //   • the drawing carries an accessible NAME (WCAG 1.1.1 / 4.1.2) — without it the one piece of content
