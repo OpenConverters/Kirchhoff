@@ -103,3 +103,48 @@ for (const [id, opt] of CASES) {
     await page.keyboard.press('Escape')
   })
 }
+
+// TARGET SIZE (WCAG 2.5.8 AA). Measured in the running app, a component's click target is 6.5–28 CSS px
+// — a resistor is 7 px wide — because the drawing is scaled to fit the pane. The spacing exception does
+// not rescue it either: llc's closest target centres are 20 px apart, inside the 24 px circle the
+// exception requires to stay clear. Enlarging the hitboxes is not the fix; they would start covering
+// each other's symbols, which is exactly the misroute defect checkSchematicHotspots.mjs exists to catch.
+//
+// What makes this conform is the EQUIVALENT CONTROL exception: the same drawer opens from the BOM view's
+// rows, on the same page, at 838 × 31.6 px. That argument is invisible in the code and one refactor from
+// being false, so it is pinned here: every component that is clickable on the drawing must also be
+// reachable from a row that meets the criterion and opens the same part.
+for (const [id, opt] of [['flyback', null], ['llc', 'fullBridge']]) {
+  test(`${id}: every component is also reachable through a target that meets WCAG 2.5.8`, async ({ page }) => {
+    await boot(page)
+    await selectTopology(page, id)
+    if (opt) await page.evaluate((x) => { window.__bench.form.variant = x }, opt)
+    expect(await solve(page, 'analytical'), 'solve error').toBeNull()
+    await expect(page.locator('.schematic-frame svg').first()).toBeVisible({ timeout: 30000 })
+
+    const refs = await page.evaluate(() => [...document.querySelectorAll('.schematic-frame g.sch-hot:not(.sch-ann)')]
+      .map((g) => g.dataset.ref))
+    expect(refs.length, 'clickable components on the drawing').toBeGreaterThan(4)
+    // For the record, and so a future change that shrinks the drawing further is visible in the log.
+    const smallest = await page.evaluate(() => Math.min(...[...document.querySelectorAll('.schematic-frame rect.sch-hitbox')]
+      .flatMap((r) => { const b = r.getBoundingClientRect(); return [b.width, b.height] })))
+    console.log(`${id}: smallest schematic target ${smallest.toFixed(1)} px (conformance rests on the BOM rows below)`)
+
+    await page.locator('.pane-select').last().selectOption('bom')
+    const table = page.locator('table.data-table')
+    await expect(table).toBeVisible()
+    const bad = []
+    for (const ref of refs) {
+      const row = table.locator('tbody tr').filter({ has: page.locator(`td:text-is("${ref}")`) }).first()
+      if (!(await row.count())) { bad.push(`${ref}: clickable on the drawing but absent from the BOM`); continue }
+      const box = await row.boundingBox()
+      if (!box || box.width < 24 || box.height < 24)
+        bad.push(`${ref}: its BOM row is ${box ? `${box.width.toFixed(0)}x${box.height.toFixed(0)}` : 'not laid out'} — under the 24x24 minimum`)
+      await row.click()
+      const got = (await page.locator('aside.drawer h3').first().textContent())?.trim()
+      if (got !== ref) bad.push(`${ref}: its BOM row opened ${got ?? 'no drawer'} — not the same function as the symbol`)
+      await page.keyboard.press('Escape')
+    }
+    expect(bad, `components with no conforming way to reach them:\n${bad.join('\n')}`).toEqual([])
+  })
+}
