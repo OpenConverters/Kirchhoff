@@ -22,10 +22,14 @@ const M = await init()
 // "12.4 mΩ" / "0 F" / "1.37 mH · n=6.51" → the numbers with their SI prefixes resolved.
 const PREFIX = { y: 1e-24, z: 1e-21, a: 1e-18, f: 1e-15, p: 1e-12, n: 1e-9, µ: 1e-6, u: 1e-6, m: 1e-3,
                  k: 1e3, M: 1e6, G: 1e9, T: 1e12 }
-const UNIT = /^(F|H|Ω|V|A|W|Hz|s)$/
+const UNIT = /^(Hz|F|H|Ω|V|A|W|s)$/
 function quantities(text) {
   const out = []
-  for (const m of text.matchAll(/(-?\d+(?:\.\d+)?)\s*([yzafpnµumkMGT])?(F|H|Ω|V|A|W|Hz|s)\b/g)) {
+  // The terminator is a lookahead, NOT \b. \b is defined against [A-Za-z0-9_], and Ω is none of those —
+  // so "100 Ω" has no word boundary after the unit and the original pattern matched NOTHING for ohms.
+  // Every resistor value and every "RDS(on) ≤ 80 mΩ" walked past this gate while it reported a count that
+  // made it look thorough. Hz is listed before H so the alternation cannot take the H and strand the z.
+  for (const m of text.matchAll(/(-?\d+(?:\.\d+)?)\s*([yzafpnµumkMGT])?(Hz|F|H|Ω|V|A|W|s)(?![A-Za-z0-9])/g)) {
     const [, num, prefix, unit] = m
     if (!UNIT.test(unit)) continue
     out.push({ value: Number(num) * (prefix ? PREFIX[prefix] ?? 1 : 1), unit, text: m[0] })
