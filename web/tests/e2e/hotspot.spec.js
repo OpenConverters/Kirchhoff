@@ -148,3 +148,57 @@ for (const [id, opt] of [['flyback', null], ['llc', 'fullBridge']]) {
     expect(bad, `components with no conforming way to reach them:\n${bad.join('\n')}`).toEqual([])
   })
 }
+
+// FONT COVERAGE. Every character the schematic prints must come from a font the app SHIPS. Ω and ≤ are in
+// no IBM Plex Mono subset fontsource publishes, so both silently fell through to a system font: measured
+// here, Ω rendered at 0.743 em against the 0.6 em mono advance — a proportional glyph among monospaced
+// digits, on every resistor label, and a tofu box on any host without U+03A9. `document.fonts.check()`
+// returns true for them either way, which is exactly why it went unnoticed for so long.
+//
+// The test is the advance width: in a monospaced face every glyph has the SAME advance, so a character
+// that measures differently is not being drawn from that face. src/style.css now ships the missing glyphs
+// (DejaVu Sans Mono subset, 0.602 em — within 0.3% of Plex), and this keeps it that way for whatever
+// character a future value string introduces.
+test('every character the schematic prints comes from a font the app ships', async ({ page }) => {
+  await boot(page)
+  const seen = new Set()
+  for (const [id, opt] of CASES) {
+    await selectTopology(page, id)
+    if (opt) await page.evaluate((x) => { window.__bench.form.variant = x }, opt)
+    expect(await solve(page, 'analytical'), `${id}: solve error`).toBeNull()
+    await expect(page.locator('.schematic-frame svg').first()).toBeVisible({ timeout: 30000 })
+    await page.evaluate(() => document.fonts.ready)
+    for (const c of await page.evaluate(() => [...new Set([...document.querySelectorAll('.schematic-frame text')]
+      .flatMap((t) => [...t.textContent]))])) seen.add(c)
+  }
+  expect(seen.size, 'characters drawn on the schematics').toBeGreaterThan(20)
+
+  // Ask the document which of the app's OWN faces claims each character. Width-based font detection is
+  // useless here: this host resolves serif, cursive and the bare default to the same font, so every
+  // sentinel trick measures identical numbers whether or not a fallback is in play. document.fonts holds
+  // exactly the @font-faces the app loads (system fonts never appear there), and each carries the
+  // unicode-range it covers — so "is there a shipped face that claims this codepoint?" is answerable
+  // exactly, on any machine. Ω was claimed by none of them, which is the bug this pins.
+  const bad = await page.evaluate((chars) => {
+    const faces = [...document.fonts].filter((f) => f.status === 'loaded')
+    const claims = (range, cp) => (range || 'U+0-10FFFF').split(',').some((part) => {
+      const m = part.trim().replace(/^U\+/i, '')
+      if (m.includes('?')) { const lo = parseInt(m.replace(/\?/g, '0'), 16), hi = parseInt(m.replace(/\?/g, 'F'), 16); return cp >= lo && cp <= hi }
+      const [a, b] = m.split('-')
+      const lo = parseInt(a, 16), hi = b === undefined ? lo : parseInt(b, 16)
+      return cp >= lo && cp <= hi
+    })
+    const out = []
+    for (const c of chars) {
+      if (c === ' ') continue
+      const cp = c.codePointAt(0)
+      const by = faces.filter((f) => claims(f.unicodeRange, cp)).map((f) => f.family)
+      if (!by.length)
+        out.push(`U+${cp.toString(16).toUpperCase().padStart(4, '0')} '${c}' is covered by NONE of the ` +
+                 `${faces.length} faces the app loads — it is drawn by whatever the host happens to have, ` +
+                 `or not at all`)
+    }
+    return out
+  }, [...seen])
+  expect(bad, `characters drawn from a font the app does not ship:\n${bad.join('\n')}`).toEqual([])
+})

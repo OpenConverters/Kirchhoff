@@ -1,3 +1,22 @@
+/* Ω and ≤ are NOT in any IBM Plex Mono subset fontsource ships (latin stops at U+00FF plus a handful of
+   arrows and U+2212/U+2215; there is no greek subset for the mono family at all). Measured in the running
+   app, both fell through to a system font — the Ω on every resistor label rendered at 0.743 em against the
+   0.6 em mono advance, i.e. a PROPORTIONAL glyph sitting in the middle of monospaced digits, and on a host
+   with no font covering U+03A9 it would be a tofu box. document.fonts.check() answers `true` throughout,
+   which is why it went unseen.
+   So we ship the glyphs: a 3.8 kB subset of DejaVu Sans Mono (advance 0.602 em — within 0.3% of Plex's
+   0.6 em, so it lands on the same grid), renamed as the Bitstream Vera licence requires of a derivative.
+   Copyright (c) 2003 by Bitstream, Inc. Bitstream Vera Fonts Copyright / DejaVu changes are in public
+   domain. The unicode-range keeps it to the characters Plex lacks — nothing else can be drawn from it. */
+@font-face {
+  font-family: 'KH Mono Symbols';
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url('./assets/kh-mono-symbols.woff2') format('woff2');
+  unicode-range: U+00B1, U+0394, U+0398, U+039B, U+03A3, U+03A6, U+03A9, U+03B1-03B5, U+03B7-03B8, U+03BB-03BC, U+03C0-03C1, U+03C3-03C4, U+03C6, U+03C9, U+2126, U+2202, U+2206, U+2211, U+221A, U+221E, U+222B, U+2248, U+2260, U+2264-2265;
+}
+
 /* ──────────────────────────────────────────────────────────────────────────
    Kirchhoff — design system
    Sibling of the Heaviside bench-instrument UI, but a different instrument:
@@ -25,7 +44,7 @@
   --grat:        rgba(255, 179, 71, 0.045);
   --grat-strong: rgba(255, 179, 71, 0.11);
 
-  --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --mono: 'IBM Plex Mono', 'KH Mono Symbols', ui-monospace, SFMono-Regular, Menlo, monospace;
   --disp: 'Share Tech Mono', 'IBM Plex Mono', monospace;
   --body: 'IBM Plex Sans', system-ui, sans-serif;
 }

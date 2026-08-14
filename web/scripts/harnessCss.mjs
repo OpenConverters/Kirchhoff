@@ -21,6 +21,11 @@ const appCss = fs.readFileSync(path.join(here, '../src/style.css'), 'utf8').repl
 const font = fs.readFileSync(
   path.join(here, '../node_modules/@fontsource/ibm-plex-mono/files/ibm-plex-mono-latin-400-normal.woff2'),
 ).toString('base64')
+// ...and the glyphs Plex Mono does not have. Ω and ≤ appear in most resistor and semiconductor value
+// strings, and the app ships them itself (see the @font-face at the top of src/style.css); if the harness
+// embedded only Plex, every measured box containing an ohm would be measured against whatever font the
+// test machine happens to fall back to, which is not what the product renders.
+const symbols = fs.readFileSync(path.join(here, '../src/assets/kh-mono-symbols.woff2')).toString('base64')
 
 // `:root` holds the colour + --mono custom properties every .sch- rule dereferences.
 const root = appCss.match(/:root\s*\{[^}]*\}/)
@@ -42,6 +47,8 @@ for (const sel of need) {
 
 export const HARNESS_CSS = [
   `@font-face{font-family:'IBM Plex Mono';src:url(data:font/woff2;base64,${font}) format('woff2');font-weight:400;font-display:block}`,
+  `@font-face{font-family:'KH Mono Symbols';src:url(data:font/woff2;base64,${symbols}) format('woff2');font-weight:400;font-display:block;` +
+    `unicode-range:U+00B1,U+0394,U+0398,U+039B,U+03A3,U+03A6,U+03A9,U+03B1-03B5,U+03B7-03B8,U+03BB-03BC,U+03C0-03C1,U+03C3-03C4,U+03C6,U+03C9,U+2126,U+2202,U+2206,U+2211,U+221A,U+221E,U+222B,U+2248,U+2260,U+2264-2265}`,
   root[0],
   'body{margin:0;background:#0b0906}',
   'svg{display:block}',
