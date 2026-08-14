@@ -59,7 +59,13 @@ for (const t of TOPOLOGIES) {
     for (const [pt, kVin, kVout, kP, fsw] of POINTS) {
       if (onlyPoint && pt !== onlyPoint) continue
       const preset = { ...t.preset, variant: opt ?? 'standard' }
-      if (typeof preset.vinNom === 'number') preset.vinNom = preset.vinNom * kVin
+      // Scale the WHOLE input range, not just the nominal. Scaling vinNom alone left the preset's own
+      // vinMin/vinMax behind and built contradictory specs — flyback at the lowline point asked for a
+      // 24 V nominal inside a 36–60 V range, and at the highline point a 96 V nominal in the same range.
+      // The engine refuses those now (ABT #747), so the harness was quietly throwing away 8 of its 351
+      // points and reporting them as "not solvable" — a harness bug wearing an engine's clothes.
+      for (const k of ['vinMin', 'vinNom', 'vinMax'])
+        if (typeof preset[k] === 'number') preset[k] = preset[k] * kVin
       preset.outputs = (preset.outputs ?? [{ name: 'out', voltage: 12, power: 60 }])
         .map((o) => ({ ...o, voltage: o.voltage * kVout, power: o.power * kP }))
       if (fsw) preset.fs = fsw          // buildSpec reads form.fs, not .fsw
