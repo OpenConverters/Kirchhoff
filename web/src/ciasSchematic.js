@@ -1280,7 +1280,13 @@ const LAYOUTS = {
     place: {
       Cin:   { draw: (b) => capV('Cin', b, 150, 165, 'left') },
       Cclmp: { draw: (b) => capV('Cclmp', b, 205, 90, 'left') },
-      Rclmp: { draw: (b) => resV('Rclmp', b, 205, 130, 'left') },
+      // 145, not 130: at 130 the resistor's top lead tip landed exactly on the clamp cap's bottom lead
+      // tip, so the two click targets shared that edge and the later-painted one (Rclmp) took every
+      // click there — pointing at Cclmp's own plate opened Rclmp. Series parts get a wire between them.
+      // ...and -14 on the label: dropping the resistor 15 px carried its value string down onto Cin's
+      // footprint. Only the LIVE gate saw that (glyph advances quantise differently at the app's
+      // scale), which is the whole reason that gate renders in the running app.
+      Rclmp: { draw: (b) => resV('Rclmp', b, 205, 145, 'left', 0, -14) },
       Cres:  { draw: (b) => capV('Cres', b, 205, 215, 'left') },     // QRM only — absent in CCM/DCM/BCM
       T1:    { draw: (b) => xfmr('T1', b, 260, 140, { opp: true, labelDy: -30 }) },
       // +14: the secondary return runs down x=270, straight through "Q1" and its RDS(on) value.
@@ -1297,6 +1303,7 @@ const LAYOUTS = {
       { from: 'Cin.p0', to: [150, 70], via: [], needs: ['Cin'] },                      // Cin top → Vin rail
       { from: 'Cin.p1', to: [150, 260], needs: ['Cin'] },                              // Cin bottom → return rail
       { from: 'T1.p1', to: 'Q1.drain', needs: ['T1', 'Q1'] },                          // primary_end → drain (sw)
+      { from: 'Cclmp.p1', to: 'Rclmp.p0', needs: ['Cclmp', 'Rclmp'] },                 // clamp cap → clamp resistor
       { from: 'Rclmp.p1', to: [250, 195], via: [[205, 195]], needs: ['Rclmp'] },       // RC clamp → sw node
       { from: 'Cres.p1', to: [205, 260], needs: ['Cres'] },                            // Cres bottom → return rail
       { from: 'T1.s0', to: 'D1.anode', via: [[270, 90]], needs: ['T1', 'D1'] },        // secondary_end → D1 anode

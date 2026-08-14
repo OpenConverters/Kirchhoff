@@ -717,12 +717,24 @@ details.adv .adv-body { margin-top: 0.75rem; }
 .sch-sig { font-family: var(--mono); font-size: 9.5px; fill: var(--cyan); letter-spacing: 0.03em; }
 .sch-blk { font-family: var(--mono); font-size: 10px; fill: var(--ink-dim); letter-spacing: 0.04em; text-transform: uppercase; }
 
-.sch-hot { cursor: pointer; }
+/* A hotspot PROMISES a drawer: pointer cursor, hover glow, white refdes. Anything drawn that has no BOM
+   row cannot keep that promise — a FET's intrinsic body diode is a real TAS component but not an
+   orderable part, so App.openPart() finds nothing and the click silently does nothing. It carries
+   .sch-ann and is inert: no cursor, no hover, no selection ring. */
+.sch-hot:not(.sch-ann) { cursor: pointer; }
 .sch-hot .sch-hitbox { fill: transparent; stroke: none; }
-.sch-hot:hover .sch-sym, .sch-hot.selected .sch-sym { stroke: var(--amber-hi); filter: drop-shadow(0 0 5px rgba(255, 179, 71, 0.9)); }
-.sch-hot:hover .sch-fill, .sch-hot.selected .sch-fill { fill: var(--amber-hi); filter: drop-shadow(0 0 5px rgba(255, 179, 71, 0.9)); }
-.sch-hot:hover .sch-ref, .sch-hot.selected .sch-ref { fill: #fff; }
+.sch-hot:not(.sch-ann):hover .sch-sym, .sch-hot.selected .sch-sym { stroke: var(--amber-hi); filter: drop-shadow(0 0 5px rgba(255, 179, 71, 0.9)); }
+.sch-hot:not(.sch-ann):hover .sch-fill, .sch-hot.selected .sch-fill { fill: var(--amber-hi); filter: drop-shadow(0 0 5px rgba(255, 179, 71, 0.9)); }
+.sch-hot:not(.sch-ann):hover .sch-ref, .sch-hot.selected .sch-ref { fill: #fff; }
 .sch-hot.selected .sch-hitbox { stroke: var(--amber-deep); stroke-dasharray: 4 3; }
+/* KEYBOARD FOCUS (ABT #693). Each part is a real tab stop now, so it needs a focus indicator that is
+   visible against the dark frame and distinct from both hover (glow) and selection (dashed ring): a
+   solid amber box around the hitbox, at 2 px so it survives the pane's fit-scaling. WCAG 2.4.7. */
+.sch-hot:focus { outline: none; }
+.sch-hot:focus-visible .sch-hitbox { stroke: var(--amber-hi); stroke-width: 2; stroke-dasharray: none; }
+.sch-hot:focus-visible .sch-sym { stroke: var(--amber-hi); }
+.sch-hot:focus-visible .sch-fill { fill: var(--amber-hi); }
+.sch-hot:focus-visible .sch-ref { fill: #fff; }
 
 /* PRINT. The bench is a dark-phosphor instrument, but a schematic is the one thing people take OUT of
    it, and there is no export — Ctrl+P is the only route to paper or PDF. Printed as-is the drawing is

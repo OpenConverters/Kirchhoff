@@ -71,7 +71,20 @@ function hot(ref, bom, box, body, labelPos) {
   const row = bom?.get(ref)
   const [lx, ly, anchor = 'middle', noVal] = labelPos
   const val = !noVal && row?.value && row.value !== '—' ? row.value : ''
-  return `<g class="sch-hot" data-ref="${esc(ref)}">
+  // A part with no BOM row is drawn but NOT a part the drawer can open (App.openPart looks the ref up in
+  // bomRows): a FET's intrinsic body diode is a real TAS component and deliberately not an orderable
+  // one. Marked .sch-ann so the stylesheet withholds the cursor/hover that promise a drawer and the
+  // click handler ignores it — clicking Q2's body diode used to highlight it and then do nothing.
+  // Which refs may be annotations is not left to chance: checkSchematicHotspots.mjs pins the set to the
+  // TAS components the BOM excludes on purpose, so a genuinely missing part cannot hide here.
+  // KEYBOARD + SCREEN READER (ABT #693). A part that opens a drawer is a button, and it was reachable
+  // only with a mouse: no tab stop, no key handler, nothing announced. tabindex makes it focusable in
+  // document order (which is the order the layout places parts — the power path), role="button" says
+  // what it does, and the name carries what a sighted reader gets from the two label lines: the refdes,
+  // the kind and the value. Annotations get none of it — they do nothing when activated.
+  const name = row ? `Component ${ref}${row.kind ? ', ' + row.kind : ''}${val ? ', ' + val : ''}` : null
+  return `<g class="sch-hot${row ? '' : ' sch-ann'}" data-ref="${esc(ref)}"` +
+    (name ? ` tabindex="0" role="button" aria-label="${esc(name)}"` : '') + `>
     <rect class="sch-hitbox" x="${bx}" y="${by}" width="${bw}" height="${bh}"/>
     ${body}
     ${txt(lx, ly, ref, 'sch-ref', anchor)}
@@ -369,12 +382,16 @@ function port(x, y, label, anchor = 'start') {
   return fp(x - 3, y - 3, 6, 6, label) + `<circle class="sch-sym" cx="${x}" cy="${y}" r="3"/>` + txt(anchor === 'start' ? x + 8 : x - 8, y + 4, label, 'sch-port', anchor)
 }
 
-// role="img" WITHOUT an accessible name is an unnamed image: a screen reader announces "graphic" and
-// nothing else, so the one piece of content in the pane is opaque to anyone not looking at it
-// (WCAG 1.1.1 / 4.1.2). aria-label rather than <title> deliberately — <title> would also raise a
-// browser tooltip over the whole drawing on hover, which the click-a-component interaction does not want.
+// A drawing WITHOUT an accessible name announces as "graphic" and nothing else, so the one piece of
+// content in the pane is opaque to anyone not looking at it (WCAG 1.1.1 / 4.1.2). aria-label rather than
+// <title> deliberately — <title> would also raise a browser tooltip over the whole drawing on hover,
+// which the click-a-component interaction does not want.
+//
+// role="group", NOT role="img": every component in here is a button (see hot()), and the children of a
+// role="img" are presentational — declaring the drawing an image would hide every one of those buttons
+// from the assistive tech that needs them most. A group keeps the name and exposes what is inside it.
 const svg = (w, h, inner, label = 'Power-path schematic') =>
-  `<svg viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="${esc(label)}">${inner}</svg>`
+  `<svg viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg" role="group" aria-label="${esc(label)}">${inner}</svg>`
 
 // ── multi-winding transformer symbols ──────────────────────────────────────
 

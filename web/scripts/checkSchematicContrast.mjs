@@ -114,14 +114,18 @@ for (const [sel, prop, kind, what] of SUBJECTS) {
   console.log(`${r >= min ? 'ok  ' : 'FAIL'} ${sel.padEnd(11)} ${colour.padEnd(14)} ${r.toFixed(2)}:1  (needs ${min}:1 — ${what})`)
 }
 
-// The other half of "readable": a screen reader gets no purchase on line art at all, so role="img"
-// without an accessible name announces the whole drawing as an unnamed graphic (WCAG 1.1.1 / 4.1.2).
-// Checked here for every topology, since the name is generated per render.
+// The other half of "readable": a screen reader gets no purchase on line art at all. Two things have to
+// hold, and they are checked here because both are generated per render:
+//   • the drawing carries an accessible NAME (WCAG 1.1.1 / 4.1.2) — without it the one piece of content
+//     in the pane announces as "graphic" and nothing else;
+//   • every component that opens a drawer is exposed as a NAMED, FOCUSABLE button (WCAG 2.1.1 / 4.1.2).
+//     The root is role="group" for exactly this reason: children of a role="img" are presentational, so
+//     declaring the drawing an image would hide every one of those buttons.
 const { TOPOLOGIES, VARIANTS, buildSpec } = await import('../src/topologies.js')
 const { renderForAudit } = await import('../src/ciasSchematic.js')
 const init = (await import('../../build-wasm-ng/kirchhoff.js')).default
 const M = await init()
-let unnamed = 0
+let unnamed = 0, probed = 0
 for (const t of TOPOLOGIES) {
   const v = VARIANTS[t.id]
   for (const opt of (v ? v.options.map((o) => o.id) : [null])) {
@@ -129,11 +133,24 @@ for (const t of TOPOLOGIES) {
     if (opt && v) spec.config = { ...(spec.config ?? {}), [v.key]: opt }
     const out = M.design_tas_full(t.id, JSON.stringify(spec))
     if (out.startsWith('Exception')) throw new Error(`${t.id}: design failed: ${out.slice(0, 200)}`)
+    const key = `${t.id}${opt ? '/' + opt : ''}`
     const { svg } = renderForAudit(t.id, JSON.parse(out).tas, opt ?? 'standard')
-    const name = svg.match(/<svg[^>]*aria-label="([^"]*)"/)?.[1]
-    if (!name?.trim()) { unnamed++; console.log(`FAIL ${t.id}${opt ? '/' + opt : ''} renders role="img" with no accessible name`) }
+    const root = svg.match(/<svg[^>]*>/)[0]
+    const name = root.match(/aria-label="([^"]*)"/)?.[1]
+    if (!name?.trim()) { unnamed++; console.log(`FAIL ${key} renders the drawing with no accessible name`) }
+    if (/role="img"/.test(root)) { unnamed++; console.log(`FAIL ${key} root is role="img" — its component buttons are presentational and unreachable`) }
+    for (const m of svg.matchAll(/<g class="sch-hot(?! sch-ann)[^"]*"[^>]*>/g)) {
+      probed++
+      const g = m[0]
+      const ref = g.match(/data-ref="([^"]*)"/)?.[1]
+      if (!/tabindex="0"/.test(g)) { unnamed++; console.log(`FAIL ${key}/${ref} is clickable but not focusable (no tab stop)`) }
+      if (!/role="button"/.test(g)) { unnamed++; console.log(`FAIL ${key}/${ref} opens a drawer but is not exposed as a button`) }
+      if (!/aria-label="[^"]+"/.test(g)) { unnamed++; console.log(`FAIL ${key}/${ref} is a button with no accessible name`) }
+    }
   }
 }
-console.log(unnamed ? `${unnamed} schematic(s) with no accessible name` : 'Every schematic carries an accessible name')
+// A sweep that examined no component would report "all named" having looked at nothing.
+if (!probed) throw new Error('checkSchematicContrast found no clickable components to check')
+console.log(unnamed ? `${unnamed} accessibility problem(s) across ${probed} components` : `Every schematic is named and all ${probed} component buttons are focusable and named`)
 
 process.exit(failed || unnamed ? 1 : 0)

@@ -367,7 +367,19 @@ selectTopology(topoId.value)
 
 function schematicClick(ev) {
   const g = ev.target.closest('[data-ref]')
-  if (!g) return
+  // .sch-ann marks something drawn that is not an orderable part (a FET's intrinsic body diode): it has
+  // no BOM row, so there is no drawer to open and the stylesheet gives it no cursor or hover either.
+  if (!g || g.classList.contains('sch-ann')) return
+  openPart(g.dataset.ref)
+}
+// The same activation from the keyboard (ABT #693): every component is a role="button" tab stop, and a
+// button that answers the mouse but not Enter/Space is not operable (WCAG 2.1.1). Space is prevented
+// because its default is to scroll the page out from under the drawing.
+function schematicKey(ev) {
+  if (ev.key !== 'Enter' && ev.key !== ' ') return
+  const g = ev.target.closest?.('[data-ref]')
+  if (!g || g.classList.contains('sch-ann')) return
+  ev.preventDefault()
   openPart(g.dataset.ref)
 }
 function openPart(ref_) {
@@ -639,7 +651,7 @@ function downloadMagneticInputs() {
 
 // Everything the two OutputPanes render is shared through this context (they are pure views).
 provide('kh', {
-  result, topo, diag, bomRows, selectedPart, schematicSvg, schematicError, schematicClick, openPart,
+  result, topo, diag, bomRows, selectedPart, schematicSvg, schematicError, schematicClick, schematicKey, openPart,
   waveTarget, waveMagnetics, deviceGroups, targetIsMagnetic, waveOps, waveOpIdx, waveSource,
   waveExcitations, waveMag, ngspiceOps, ngspiceBusy, simulateMagnetic, downloadMagneticInputs,
   deviceExcitation, deviceComp, componentBusy, fetchComponentWaves,

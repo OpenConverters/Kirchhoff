@@ -2,7 +2,7 @@
 // One selectable output pane. The workbench shows two of these side by side (default Schematic +
 // Waveforms). All design state + methods come from the injected `kh` context App provides, so the pane
 // is a pure view: pick a view type from its header dropdown, render it.
-import { computed, inject, ref, watch } from 'vue'
+import { computed, inject, nextTick, ref, watch } from 'vue'
 import { trackEvent } from '../telemetry.js'
 import WavePane from './WavePane.vue'
 
@@ -23,7 +23,7 @@ const VIEWS = [
 
 const kh = inject('kh')
 const {
-  result, topo, diag, bomRows, selectedPart, schematicSvg, schematicError, schematicClick, openPart,
+  result, topo, diag, bomRows, selectedPart, schematicSvg, schematicError, schematicClick, schematicKey, openPart,
   waveTarget, waveMagnetics, deviceGroups, targetIsMagnetic, waveOps, waveOpIdx, waveSource,
   waveExcitations, waveMag, ngspiceOps, ngspiceBusy, simulateMagnetic, downloadMagneticInputs,
   deviceExcitation, deviceComp, componentBusy, fetchComponentWaves,
@@ -31,6 +31,21 @@ const {
   deck, deckFlavor, deckFidelity, simStop, simStep, deckBusy, designStop, designStep, periodsShown,
   makeDeck, copyDeck, downloadDeck, si, pct,
 } = kh
+
+// Which component is open, ON THE DRAWING. The stylesheet has always carried `.sch-hot.selected`
+// (amber glow, white refdes, dashed ring round the hitbox) and nothing ever applied it: opening a part —
+// by clicking its symbol or its BOM row — highlighted the BOM row and left the schematic unmarked, so on
+// a 20-part resonant converter the reader had to hunt for the part whose drawer they were reading. The
+// SVG is injected with v-html, so the class is toggled on the live nodes rather than re-rendering the
+// whole drawing (a re-render on every selection would also throw away scroll/hover state).
+const schFrame = ref(null)
+watch([() => selectedPart.value?.ref, schematicSvg], async ([ref_]) => {
+  await nextTick()
+  const frame = schFrame.value
+  if (!frame) return
+  for (const g of frame.querySelectorAll('g.sch-hot.selected')) g.classList.remove('selected')
+  if (ref_) frame.querySelector(`g.sch-hot[data-ref="${CSS.escape(ref_)}"]:not(.sch-ann)`)?.classList.add('selected')
+}, { flush: 'post' })
 
 // Visual-sim panel height + a real drag handle. The iframe swallows pointer events over its area
 // (and setPointerCapture does NOT redirect them away from a cross-document iframe), so dragging the
@@ -91,8 +106,8 @@ const winding = computed(() => waveExcitations.value[windingIdx.value] ?? null)
           Schematic ≠ netlist for <code>{{ topo.name }}</code>: {{ schematicError }}
         </div>
         <template v-else-if="schematicSvg">
-          <div class="schematic-frame fit" v-html="schematicSvg" @click="schematicClick"></div>
-          <div class="sch-caption">Power-path sketch, checked against the CIAS netlist — click any component for its details.</div>
+          <div ref="schFrame" class="schematic-frame fit" v-html="schematicSvg" @click="schematicClick" @keydown="schematicKey"></div>
+          <div class="sch-caption">Power-path sketch, checked against the CIAS netlist — click or tab to any component for its details.</div>
         </template>
         <div v-else class="wave-empty">
           No schematic sketch for <code>{{ topo.name }}</code> yet — see the BOM view for every component.

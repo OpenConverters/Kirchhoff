@@ -36,6 +36,9 @@ export default defineConfig({
     // +14% in user units at 800 px). A layout tuned at one width is therefore not proven at another.
     { name: 'schematic-narrow', testMatch: /schematic\.spec\.js/,
       use: { ...devices['Desktop Chrome'], viewport: { width: 900, height: 900 } } },
+    // The schematic is also the app's navigation surface: a REAL pointer click on a part must open that
+    // part's drawer. Every other schematic gate measures the picture, never the click.
+    { name: 'hotspot', testMatch: /hotspot\.spec\.js/, use: { ...devices['Desktop Chrome'] } },
   ],
   webServer: {
     command: 'npm run build && npm run preview -- --port 4173',
