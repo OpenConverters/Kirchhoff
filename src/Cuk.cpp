@@ -26,6 +26,13 @@ CukDesign design_cuk(const json& tasInputs) {
     d.config = cfg::object_of(tasInputs);
     // Output voltage is stored as a magnitude (MKF treats Cuk Vout as |Vo|); take abs to be robust to
     // a negative setpoint in the TAS.
+    // ONE output, and say so. This cell has a single output rail; asking for more used to design
+    // outputs[0] and DISCARD the rest without a word — the caller got a one-output converter back
+    // and the schematic drew it as the answer (ABT #752). flyback and llc already refuse; so does this.
+    if (dr.at("outputs").size() > 1)
+        throw std::invalid_argument("cuk design: this topology has a single output rail, but "
+                                    + std::to_string(dr.at("outputs").size())
+                                    + " outputs were requested");
     d.outputVoltageMag = std::fabs(nominal(dr.at("outputs").at(0).at("voltage")));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 0.9);

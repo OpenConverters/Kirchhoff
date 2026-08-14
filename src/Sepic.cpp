@@ -25,6 +25,13 @@ SepicDesign design_sepic(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     SepicDesign d{};
     d.config = cfg::object_of(tasInputs);
+    // ONE output, and say so. This cell has a single output rail; asking for more used to design
+    // outputs[0] and DISCARD the rest without a word — the caller got a one-output converter back
+    // and the schematic drew it as the answer (ABT #752). flyback and llc already refuse; so does this.
+    if (dr.at("outputs").size() > 1)
+        throw std::invalid_argument("sepic design: this topology has a single output rail, but "
+                                    + std::to_string(dr.at("outputs").size())
+                                    + " outputs were requested");
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 0.9);

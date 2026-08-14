@@ -6,6 +6,7 @@
 #include "ComponentWaveforms.hpp" // component_waveforms — per-component V/I from one ngspice run
 #include "DatasheetModels.hpp"    // derive_datasheet_models — realize real-conduction semiconductors
 #include "FidelityJson.hpp"       // PEAS::fidelity_from_json
+#include "DimensionJson.hpp"      // PEAS::resolve_dimensional_values on raw json (spec validation)
 #include "Clllc.hpp"              // topologies not in the Kirchhoff.hpp umbrella
 #include "Pfc.hpp"
 #include "Vienna.hpp"
@@ -96,7 +97,84 @@ void apply_ambient(json& tas, double ambientC) {
     }
 }
 
+// Requirements that describe no converter must be REFUSED, not designed around. The engine validated in
+// places and not in others: fs=0, Vout=0 and Vout>Vin were already rejected with specific exceptions,
+// while efficiency=1.5, Vin,min>Vin,nom, Pout=0 and Vin,min=0 sailed through and produced designs whose
+// parts were then drawn as fact — a 0 F output capacitor on a Pout=0 buck, a 0 H transformer with a turns
+// ratio of zero on a Vin,min=0 forward (ABT #747). Silently designing for a requirement nobody can build
+// is exactly what the no-fallbacks rule forbids, so the check lives at the one choke point every caller
+// passes through (WASM, pybind, the MCP servers) rather than in 24 builders.
+void validate_requirements(const json& spec) {
+    if (!spec.contains("designRequirements") || !spec.at("designRequirements").is_object())
+        throw std::invalid_argument("spec: designRequirements missing");
+    const json& dr = spec.at("designRequirements");
+
+    if (dr.contains("efficiency") && dr.at("efficiency").is_number()) {
+        const double eta = dr.at("efficiency").get<double>();
+        if (!(eta > 0.0) || eta > 1.0)
+            throw std::invalid_argument("designRequirements.efficiency must be in (0, 1]; got "
+                                        + std::to_string(eta));
+    }
+    if (dr.contains("switchingFrequency")) {
+        const double fs = PEAS::resolve_dimensional_values(dr.at("switchingFrequency"));
+        if (!(fs > 0.0))
+            throw std::invalid_argument("designRequirements.switchingFrequency must be > 0; got "
+                                        + std::to_string(fs));
+    }
+    if (dr.contains("inputVoltage")) {
+        const json& iv = dr.at("inputVoltage");
+        const double nom = PEAS::resolve_dimensional_values(iv);
+        if (!(nom > 0.0))
+            throw std::invalid_argument("designRequirements.inputVoltage nominal must be > 0; got "
+                                        + std::to_string(nom));
+        // A bound is only a bound if it bounds: an input range that excludes its own nominal, or starts at
+        // zero volts, describes no supply. (0 is not "unspecified" — an absent bound is.)
+        if (iv.is_object() && iv.contains("minimum") && iv.at("minimum").is_number()) {
+            const double lo = iv.at("minimum").get<double>();
+            if (!(lo > 0.0))
+                throw std::invalid_argument("designRequirements.inputVoltage.minimum must be > 0 when given; got "
+                                            + std::to_string(lo));
+            if (lo > nom)
+                throw std::invalid_argument("designRequirements.inputVoltage.minimum (" + std::to_string(lo)
+                                            + ") is above the nominal (" + std::to_string(nom) + ")");
+        }
+        if (iv.is_object() && iv.contains("maximum") && iv.at("maximum").is_number()) {
+            const double hi = iv.at("maximum").get<double>();
+            if (hi < nom)
+                throw std::invalid_argument("designRequirements.inputVoltage.maximum (" + std::to_string(hi)
+                                            + ") is below the nominal (" + std::to_string(nom) + ")");
+        }
+    }
+    if (dr.contains("outputs") && dr.at("outputs").is_array()) {
+        size_t i = 0;
+        for (const json& o : dr.at("outputs")) {
+            const std::string name = o.value("name", "outputs[" + std::to_string(i) + "]");
+            if (o.contains("voltage")) {
+                const double v = PEAS::resolve_dimensional_values(o.at("voltage"));
+                // Inverting topologies legitimately ask for a negative rail; zero is not a rail.
+                if (v == 0.0)
+                    throw std::invalid_argument("output '" + name + "': voltage must be non-zero");
+            }
+            ++i;
+        }
+    }
+    if (spec.contains("operatingPoints") && spec.at("operatingPoints").is_array()) {
+        for (const json& op : spec.at("operatingPoints")) {
+            if (!op.contains("outputs") || !op.at("outputs").is_array()) continue;
+            for (const json& o : op.at("outputs")) {
+                if (!o.contains("power") || !o.at("power").is_number()) continue;
+                const double p = o.at("power").get<double>();
+                if (!(p > 0.0))
+                    throw std::invalid_argument("operating point '" + op.value("name", std::string("?"))
+                                                + "', output '" + o.value("name", std::string("?"))
+                                                + "': power must be > 0; got " + std::to_string(p));
+            }
+        }
+    }
+}
+
 json build_tas_for(const std::string& topology, const json& spec) {
+    validate_requirements(spec);
     auto it = tas_builders().find(topology);
     if (it == tas_builders().end())
         throw std::runtime_error("Kirchhoff::api: unknown topology '" + topology + "'");

@@ -305,6 +305,13 @@ target_link_libraries(test_diagnostics PRIVATE kirchhoff Catch2::Catch2WithMain)
 
 add_executable(test_settings tests/test_settings.cpp)
 target_link_libraries(test_settings PRIVATE kirchhoff Catch2::Catch2WithMain)
+
+# Spec validation at the api choke point: impossible requirements refused, multi-output requests on a
+# single-output cell refused rather than silently reduced (ABT #747, #752).
+# KirchhoffApi.cpp is not part of libkirchhoff (it is compiled into the wasm/pybind targets), so the
+# test compiles it in directly — the point is to exercise the api choke point every caller passes through.
+add_executable(test_spec_validation tests/test_spec_validation.cpp src/KirchhoffApi.cpp)
+target_link_libraries(test_spec_validation PRIVATE kirchhoff Catch2::Catch2WithMain)
 # Lets the test locate the independent Python averaged-model oracle (tests/averaged_model.py).
 target_compile_definitions(test_pfc PRIVATE KIRCHHOFF_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests")
 
