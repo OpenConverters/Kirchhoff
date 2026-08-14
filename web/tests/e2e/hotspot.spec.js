@@ -377,3 +377,45 @@ test('a schematic that cannot be drawn says so, out loud and in the palette', as
   })
   expect(ratio, `the banner sits at ${ratio.toFixed(2)}:1 against the pane`).toBeGreaterThan(4.5)
 })
+
+// HOVER, AND TWO PANES AT ONCE. The hover glow is the affordance that tells a reader a symbol is live;
+// the selection ring tells them which part the drawer belongs to. Both are pure CSS state that no test
+// has ever exercised — and the workbench can show the schematic in BOTH panes, where a selection that
+// marked only one of them would read as two different drawings of the same design.
+test('hover marks the part under the pointer, and only a real part', async ({ page }) => {
+  await boot(page)
+  await selectTopology(page, 'buck')
+  await page.evaluate(() => { window.__bench.form.variant = 'synchronous' })
+  expect(await solve(page, 'analytical'), 'solve error').toBeNull()
+  await expect(page.locator('.schematic-frame svg').first()).toBeVisible({ timeout: 30000 })
+
+  const q1 = page.locator('.schematic-frame g.sch-hot[data-ref="Q1"]').first()
+  const before = await q1.locator('.sch-sym').first().evaluate((el) => getComputedStyle(el).stroke)
+  await q1.hover()
+  const hovered = await q1.locator('.sch-sym').first().evaluate((el) => getComputedStyle(el).stroke)
+  expect(hovered, 'hovering a component changes nothing about it').not.toBe(before)
+
+  // A body diode is drawn but is not a part: it must not offer the affordance (no pointer, no glow).
+  const ann = page.locator('.schematic-frame g.sch-hot.sch-ann').first()
+  if (await ann.count()) {
+    const annBefore = await ann.locator('.sch-sym').first().evaluate((el) => getComputedStyle(el).stroke)
+    await ann.hover()
+    const annAfter = await ann.locator('.sch-sym').first().evaluate((el) => getComputedStyle(el).stroke)
+    expect(annAfter, 'an annotation lights up as though it were a part').toBe(annBefore)
+    expect(await ann.evaluate((el) => getComputedStyle(el).cursor), 'an annotation offers a pointer cursor').not.toBe('pointer')
+  }
+})
+
+test('with the schematic in both panes, the open part is marked in both', async ({ page }) => {
+  await boot(page)
+  await selectTopology(page, 'buck')
+  expect(await solve(page, 'analytical'), 'solve error').toBeNull()
+  await page.locator('.pane-select').last().selectOption('schematic')
+  await expect(page.locator('.schematic-frame svg')).toHaveCount(2)
+
+  await page.evaluate(() => window.__bench.openPart('L1'))
+  await expect(page.locator('aside.drawer')).toBeVisible()
+  const marked = await page.evaluate(() => [...document.querySelectorAll('.schematic-frame g.sch-hot.selected')]
+    .map((g) => g.dataset.ref))
+  expect(marked, 'both drawings of the same design must mark the open part').toEqual(['L1', 'L1'])
+})
