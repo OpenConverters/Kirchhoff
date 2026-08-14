@@ -771,6 +771,23 @@ details.adv .adv-body { margin-top: 0.75rem; }
   .schematic-frame .sch-port, .schematic-frame .sch-sig { fill: #0f5c57; }
   .schematic-frame .sch-ctl { stroke: #0f5c57; opacity: 1; }
   .sch-caption { color: #44403c; }
+
+  /* INTERACTION STATE IS NOT PART OF THE DRAWING. Printing happens after the reader has been using the
+     app — clicking the part they care about and then hitting Ctrl+P is the ordinary path — and that left
+     the page with the part drawer over 63% of the frame, a 55%-black mask across the whole sheet, and
+     the selected component drawn in amber (#ffce85 on white is 1.4:1) with a glow round it. The base
+     print palette above fixed the ink and said nothing about state; making the selection ring actually
+     work is what brought it to paper. */
+  .drawer, .drawer-mask { display: none !important; }
+  .schematic-frame .sch-hot.selected .sch-sym,
+  .schematic-frame .sch-hot:focus-visible .sch-sym { stroke: #111827; filter: none; }
+  .schematic-frame .sch-hot.selected .sch-fill,
+  .schematic-frame .sch-hot:focus-visible .sch-fill { fill: #111827; filter: none; }
+  .schematic-frame .sch-hot.selected .sch-ref,
+  .schematic-frame .sch-hot:focus-visible .sch-ref { fill: #000000; }
+  /* the selected part keeps a mark on paper, but as a thin grey outline rather than an amber ring */
+  .schematic-frame .sch-hot.selected .sch-hitbox { stroke: #9ca3af; stroke-dasharray: 3 2; }
+  .schematic-frame .sch-hot:focus-visible .sch-hitbox { stroke: none; }
 }
 
 .sch-caption {

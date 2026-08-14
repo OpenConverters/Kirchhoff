@@ -248,3 +248,50 @@ test('the drawing shows the design that is loaded, not the one before it', async
   for (const [ref, value] of Object.entries(second))
     expect(bom2[ref], `after re-solving, ${ref}: the drawing says ${value}, the BOM says ${bom2[ref]}`).toBe(value)
 })
+
+// PRINTING AFTER USING THE APP. There is no schematic export, so Ctrl+P is the only way to get the
+// drawing onto paper, and the realistic moment to press it is AFTER clicking the part you care about.
+// That state used to print: the part drawer covering 63% of the frame, a 55%-black mask across the whole
+// sheet, and the selected component drawn in amber (#ffce85 on white is 1.4:1) inside a glow. The base
+// print palette had only ever been checked on a freshly rendered, untouched page — and making the
+// selection ring work (it was dead CSS) is what put it on paper in the first place.
+test('printing while a part is open prints the drawing, not the app', async ({ page }) => {
+  await boot(page)
+  await selectTopology(page, 'buck')
+  expect(await solve(page, 'analytical'), 'solve error').toBeNull()
+  await expect(page.locator('.schematic-frame svg').first()).toBeVisible({ timeout: 30000 })
+  await page.evaluate(() => window.__bench.openPart('L1'))
+  await expect(page.locator('aside.drawer')).toBeVisible()
+
+  await page.emulateMedia({ media: 'print' })
+  const printed = await page.evaluate(() => {
+    const sel = document.querySelector('.schematic-frame g.sch-hot.selected')
+    const cs = (el) => (el ? getComputedStyle(el) : null)
+    const frame = document.querySelector('.schematic-frame')?.getBoundingClientRect()
+    const cover = (el) => {
+      const b = el?.getBoundingClientRect()
+      if (!b || !frame || cs(el)?.display === 'none') return 0
+      return Math.max(0, Math.min(frame.right, b.right) - Math.max(frame.left, b.left)) *
+             Math.max(0, Math.min(frame.bottom, b.bottom) - Math.max(frame.top, b.top))
+    }
+    return {
+      ref: sel?.dataset.ref ?? null,
+      symStroke: cs(sel?.querySelector('.sch-sym'))?.stroke,
+      symFilter: cs(sel?.querySelector('.sch-sym'))?.filter,
+      drawerCover: Math.round(cover(document.querySelector('aside.drawer'))),
+      maskCover: Math.round(cover(document.querySelector('.drawer-mask'))),
+    }
+  })
+  await page.emulateMedia({ media: 'screen' })
+
+  expect(printed.ref, 'a part is selected while printing').toBe('L1')
+  expect(printed.drawerCover, 'the part drawer covers the drawing on paper').toBe(0)
+  expect(printed.maskCover, 'the modal mask washes over the drawing on paper').toBe(0)
+  expect(printed.symFilter, 'the selected part keeps its screen glow on paper').toBe('none')
+  // Whatever the selected part is drawn in must be the print ink, not the amber the screen uses.
+  const [r, g, b] = printed.symStroke.match(/\d+/g).map(Number)
+  const lum = (c) => { const s = c / 255; return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4 }
+  const L = 0.2126 * lum(r) + 0.7152 * lum(g) + 0.0722 * lum(b)
+  const contrast = 1.05 / (L + 0.05)
+  expect(contrast, `the selected part prints as ${printed.symStroke} — ${contrast.toFixed(2)}:1 on paper`).toBeGreaterThan(3)
+})
