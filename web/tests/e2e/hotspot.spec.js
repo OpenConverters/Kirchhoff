@@ -295,3 +295,48 @@ test('printing while a part is open prints the drawing, not the app', async ({ p
   const contrast = 1.05 / (L + 0.05)
   expect(contrast, `the selected part prints as ${printed.symStroke} — ${contrast.toFixed(2)}:1 on paper`).toBeGreaterThan(3)
 })
+
+// BINDING A REAL PART IS THE OTHER WAY THE DESIGN CHANGES. Solving is not the only path: Kelvin binds a
+// catalogue MPN into the TAS, which replaces the design under the drawing without any re-solve. The
+// schematic is re-generated from that TAS and RE-VERIFIED against its CIAS on every render, so a bind
+// that perturbs the netlist would turn the pane into the "Schematic ≠ netlist" banner — and the Kelvin
+// e2e sources candidates but has never bound one, so nothing has ever watched the drawing survive it.
+test('binding a real part leaves the schematic drawn, verified and agreeing with the BOM', async ({ page }) => {
+  await boot(page)
+  await selectTopology(page, 'flyback')
+  expect(await solve(page, 'analytical'), 'solve error').toBeNull()
+  await expect(page.locator('.schematic-frame svg').first()).toBeVisible({ timeout: 30000 })
+
+  const shot = () => page.evaluate(() => Object.fromEntries([...document.querySelectorAll('.schematic-frame g.sch-hot')]
+    .map((g) => [g.dataset.ref, g.querySelector('text.sch-val')?.textContent ?? ''])))
+  const before = await shot()
+  expect(Object.keys(before).length, 'components drawn before the bind').toBeGreaterThan(3)
+
+  await page.evaluate(() => window.__bench.openPart('Q1'))
+  await expect(page.getByTestId('kelvin-section')).toBeVisible()
+  await page.getByTestId('find-parts').click()
+  const table = page.getByTestId('kelvin-candidates')
+  const empty = page.getByTestId('kelvin-empty')
+  const err = page.getByTestId('kelvin-error')
+  await expect(table.or(empty).or(err), 'the drawer settled').toBeVisible({ timeout: 120_000 })
+  test.skip(!(await table.isVisible()), 'no catalogue candidates available in this environment')
+
+  const mpn = (await page.getByTestId('kelvin-candidate').first().locator('.mpn').innerText()).trim()
+  expect(mpn.length, 'the candidate about to be bound has an MPN').toBeGreaterThan(0)
+  await page.getByTestId('use-part').first().click()
+  await expect(page.getByTestId('bound-tag').first()).toBeVisible({ timeout: 60_000 })
+  await page.keyboard.press('Escape')
+
+  // The drawing must still BE a drawing — a bind that perturbed the netlist would show the banner.
+  await expect(page.locator('.sch-error'), 'the schematic fell back to its netlist-drift banner').toHaveCount(0)
+  await expect(page.locator('.schematic-frame svg').first()).toBeVisible()
+  const after = await shot()
+  expect(Object.keys(after).sort(), 'the bound design draws the same components').toEqual(Object.keys(before).sort())
+
+  // ...and still agrees with the BOM, which the bind rewrote underneath it.
+  await page.locator('.pane-select').last().selectOption('bom')
+  const bom = await page.evaluate(() => Object.fromEntries([...document.querySelectorAll('table.data-table tbody tr')]
+    .map((r) => [...r.querySelectorAll('td')].map((td) => td.textContent.trim())).map(([ref, , , value]) => [ref, value])))
+  for (const [ref, value] of Object.entries(after))
+    if (value) expect(bom[ref], `${ref}: the drawing says ${value}, the BOM says ${bom[ref]}`).toBe(value)
+})
