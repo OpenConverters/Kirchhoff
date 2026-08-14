@@ -30,4 +30,6 @@ for (const t of TOPOLOGIES) {
   }
 }
 if (failed) { console.error(`\n${failed} CIAS schematic(s) failed`); process.exit(1) }
+// Success over an empty sweep is a clean bill of health for nothing.
+if (!ok) throw new Error('checkCiasSchematicNets verified 0 schematics — every topology was skipped')
 console.log(`\nAll ${ok} CIAS-verified schematics consistent with the flattened netlist`)

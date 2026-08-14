@@ -40,4 +40,6 @@ for (const t of TOPOLOGIES) {
   }
 }
 if (failed) { console.error(`\n${failed} visual-sim export(s) failed`); process.exit(1) }
+// Success over an empty sweep is a clean bill of health for nothing.
+if (!checked) throw new Error('checkFalstadNets exported 0 visual sims — every topology was skipped')
 console.log(`\nAll ${checked} visual-sim exports consistent with the flattened CIAS netlist${skipped ? ` (${skipped} variant(s) not laid out yet)` : ''}`)

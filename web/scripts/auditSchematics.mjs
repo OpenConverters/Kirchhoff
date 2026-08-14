@@ -209,7 +209,7 @@ export function auditDrawing(svg, tasRefs, pins = []) {
     return [...new Set(problems)]
 }
 
-let flagged = 0
+let flagged = 0, audited = 0
 if (isMain) for (const t of TOPOLOGIES) {
   if (!hasCiasSchematic(t.id)) continue
   const v = VARIANTS[t.id]
@@ -227,12 +227,16 @@ if (isMain) for (const t of TOPOLOGIES) {
     // ONE implementation of the rules — the CLI used to re-inline all six, which is how a rule fix
     // silently reaches checkSweep but not this sweep (or the reverse).
     const problems = auditDrawing(svg, tasRefs, pins)
+    audited++
 
     const uniq = [...new Set(problems)]
     if (uniq.length) { flagged++; console.log(`\n== ${t.id}${opt ? '/' + opt : ''}`); for (const p of uniq) console.log('   ' + p) }
   }
 }
 if (isMain) {
-  console.log(flagged ? `\n${flagged} combo(s) flagged` : '\nclean')
+  // Say what was covered, and refuse to report success over nothing: this sweep skips a topology with no
+  // CIAS layout, and "clean" over an empty sweep is a clean bill of health for zero drawings.
+  if (!audited) throw new Error('auditSchematics drew 0 schematics — every topology was skipped')
+  console.log(flagged ? `\n${flagged} of ${audited} combo(s) flagged` : `\nclean — ${audited} drawings audited`)
   process.exit(flagged ? 1 : 0)   // a gate that cannot fail is not a gate
 }

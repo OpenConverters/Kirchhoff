@@ -46,7 +46,7 @@ function transformers(svg) {
   })
 }
 
-let fail = 0, convention = []
+let fail = 0, checked = 0, convention = []
 for (const t of TOPOLOGIES) {
   if (!hasCiasSchematic(t.id)) continue
   const v = VARIANTS[t.id]
@@ -59,6 +59,7 @@ for (const t of TOPOLOGIES) {
     // sweep reports "clean" over a schematic it never rendered.
     if (out.startsWith('Exception')) throw new Error(`${t.id}${opt ? '/' + opt : ''}: design failed: ${out.slice(0, 200)}`)
   const { svg } = renderForAudit(t.id, JSON.parse(out).tas, opt ?? 'standard')
+  checked++
   const xfmrs = transformers(svg).filter((x) => x.pri && x.sec)
   if (!xfmrs.length) continue   // no transformer (non-isolated topology)
 
@@ -75,5 +76,8 @@ for (const t of TOPOLOGIES) {
 }
 console.log('\n— phasing is a design choice for these; dots verified present, sign needs human sign-off —')
 for (const c of convention) console.log('  ' + c)
-console.log(fail ? `\n${fail} HARD-RULE polarity violation(s)` : '\nAll hard-rule (flyback/forward) transformer phasings correct; dots present on every isolated transformer')
+if (!checked) throw new Error('checkTransformerPolarity inspected 0 schematics')
+console.log(fail
+  ? `\n${fail} HARD-RULE polarity violation(s)`
+  : `\nAll hard-rule (flyback/forward) transformer phasings correct across ${checked} topologies; dots present on every isolated transformer`)
 process.exit(fail ? 1 : 0)   // a gate that cannot fail is not a gate

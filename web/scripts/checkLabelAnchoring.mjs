@@ -27,7 +27,7 @@ const gap = (a, b) => Math.hypot(
   Math.max(0, Math.max(a.x - (b.x + b.w), b.x - (a.x + a.w))),
   Math.max(0, Math.max(a.y - (b.y + b.h), b.y - (a.y + a.h))))
 
-let flagged = 0, worst = []
+let flagged = 0, checked = 0, worst = []
 for (const t of TOPOLOGIES) {
   if (!hasCiasSchematic(t.id)) continue
   const v = VARIANTS[t.id]
@@ -43,6 +43,7 @@ for (const t of TOPOLOGIES) {
     const tas = JSON.parse(out).tas
     const { svg } = renderForAudit(t.id, tas, opt ?? 'standard')
     const { texts, boxes } = await measure(page, svg)
+    checked++
     const bad = []
     for (const tx of texts) {
       if (!tx.ref) continue                                  // only labels that belong to a part
@@ -70,6 +71,9 @@ for (const t of TOPOLOGIES) {
 }
 worst.sort((a, b) => b.d - a.d)
 console.log(`\nwidest gaps: ${worst.slice(0, 5).map((w) => `${w.key}/${w.ref} ${w.d.toFixed(0)}px`).join(', ')}`)
-console.log(flagged ? `\n${flagged} combo(s) where a label sits nearer another part than its own` : '\nevery label is nearer its own part than any other')
+if (!checked) throw new Error('checkLabelAnchoring measured 0 schematics')
+console.log(flagged
+  ? `\n${flagged} combo(s) where a label sits nearer another part than its own`
+  : `\nevery label in ${checked} drawings is nearer its own part than any other`)
 await browser.close()
 process.exit(flagged ? 1 : 0)

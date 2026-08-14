@@ -34,7 +34,7 @@ function leaves(obj, path = '') {
 }
 
 
-let flagged = 0
+let flagged = 0, checked = 0
 for (const t of TOPOLOGIES) {
   const v = VARIANTS[t.id]
   for (const opt of (v ? v.options.map((o) => o.id) : [null])) {
@@ -45,6 +45,7 @@ for (const t of TOPOLOGIES) {
     // sweep reports "clean" over a schematic it never rendered.
     if (out.startsWith('Exception')) throw new Error(`${t.id}${opt ? '/' + opt : ''}: design failed: ${out.slice(0, 200)}`)
     const tas = JSON.parse(out).tas
+    checked++
     // converter output power (sum of operating-point output powers) sets the sanity bands
     const op = tas.inputs?.operatingPoints?.[0]
     const outPower = (op?.outputs ?? []).reduce((s, o) => s + (o.power ?? 0), 0) || 1
@@ -99,5 +100,8 @@ for (const t of TOPOLOGIES) {
     if (problems.length) { flagged++; console.log((t.id + (opt ? '/' + opt : '')).padEnd(26), problems.join('  |  ')) }
   }
 }
-console.log(flagged ? `\n${flagged} topology/variant combos with rating problems` : '\nAll component ratings sane (no negatives, no absurd current/power, every semiconductor typed)')
+if (!checked) throw new Error('checkComponentRatings inspected 0 designs')
+console.log(flagged
+  ? `\n${flagged} topology/variant combos with rating problems`
+  : `\nAll ${checked} designs: component ratings sane (no negatives, no absurd current/power, every semiconductor typed)`)
 process.exit(flagged ? 1 : 0)   // a gate that cannot fail is not a gate
