@@ -102,7 +102,10 @@ const winding = computed(() => waveExcitations.value[windingIdx.value] ?? null)
     <div class="pane-body">
       <!-- schematic (scaled to fit the pane, no crop) -->
       <div v-if="view === 'schematic'" class="view-fill">
-        <div v-if="schematicError" class="wave-empty sch-error">
+        <!-- role=alert: when the generator refuses to draw (a netlist drift, or a design whose components
+             no layout can place) this banner REPLACES the drawing, and without a live region a screen
+             reader is told nothing at all — the pane simply stops having a schematic in it. -->
+        <div v-if="schematicError" class="wave-empty sch-error" role="alert">
           Schematic ≠ netlist for <code>{{ topo.name }}</code>: {{ schematicError }}
         </div>
         <template v-else-if="schematicSvg">
@@ -386,6 +389,8 @@ const winding = computed(() => waveExcitations.value[windingIdx.value] ?? null)
 }
 .falstad-grip:hover, .falstad-grip.dragging { color: var(--amber); background: rgba(255, 179, 71, 0.12); }
 .grip-dots { font-size: 9px; letter-spacing: 2px; line-height: 1; }
-.sch-error { color: var(--err, #ff6b6b); white-space: pre-wrap; }
+/* --err is defined nowhere in the app: this was the only rule reaching for it, so the banner has always
+   painted itself with the hard-coded fallback instead of the palette's fault colour. */
+.sch-error { color: var(--fault); white-space: pre-wrap; }
 .wave-name { font-size: 0.72rem; color: var(--amber-hi); margin-bottom: 0.3rem; }
 </style>

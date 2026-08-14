@@ -73,7 +73,11 @@ const layout = computed(() => {
 </script>
 
 <template>
-  <div v-if="layout" class="schematic-frame">
+  <!-- .plot-frame, not .schematic-frame: the chart borrows the instrument frame's LOOK, but wearing the
+       schematic's class made every live schematic gate's `document.querySelector('.schematic-frame …')`
+       able to land on a waveform chart instead of the drawing — it only ever found the right one because
+       the schematic happens to sit in the left pane by default. -->
+  <div v-if="layout" class="plot-frame">
     <svg :viewBox="`0 0 ${W} ${layout.h}`" xmlns="http://www.w3.org/2000/svg" role="img">
       <line
         v-for="(y, i) in layout.gridY" :key="'g' + i"

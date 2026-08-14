@@ -706,7 +706,7 @@ details.adv .adv-body { margin-top: 0.75rem; }
 
 /* ── schematic sheet ────────────────────────────────────────────────────── */
 
-.schematic-frame {
+.schematic-frame, .plot-frame {
   position: relative;
   border: 1px solid var(--line);
   border-radius: 4px;
@@ -717,7 +717,7 @@ details.adv .adv-body { margin-top: 0.75rem; }
   box-shadow: inset 0 0 60px rgba(0, 0, 0, 0.6);
   overflow: hidden;
 }
-.schematic-frame svg { display: block; width: 100%; height: auto; }
+.schematic-frame svg, .plot-frame svg { display: block; width: 100%; height: auto; }
 
 .sch-sym { stroke: var(--amber); stroke-width: 1.6; fill: none; stroke-linecap: round; }
 .sch-wire { stroke: var(--amber-deep); stroke-width: 1.3; fill: none; }

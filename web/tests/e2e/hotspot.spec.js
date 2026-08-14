@@ -340,3 +340,40 @@ test('binding a real part leaves the schematic drawn, verified and agreeing with
   for (const [ref, value] of Object.entries(after))
     if (value) expect(bom[ref], `${ref}: the drawing says ${value}, the BOM says ${bom[ref]}`).toBe(value)
 })
+
+// WHEN THE DRAWING REFUSES TO BE DRAWN. The generator verifies every render against the CIAS and throws
+// rather than draw something unverified, which is the right call — but the resulting banner is the ONLY
+// signal the schematic is unavailable, and nothing had ever looked at it. It is reachable without any
+// contrivance: forward's engine designs a second output (ABT #752) that no layout can place.
+test('a schematic that cannot be drawn says so, out loud and in the palette', async ({ page }) => {
+  await boot(page)
+  await selectTopology(page, 'forward')
+  expect(await solve(page, 'analytical'), 'the one-output design solves').toBeNull()
+  await expect(page.locator('.schematic-frame svg').first()).toBeVisible({ timeout: 30000 })
+
+  await page.getByRole('button', { name: '+ output' }).click()
+  expect(await page.evaluate(() => window.__bench.form.outputs.length), 'the form took a second output').toBe(2)
+  expect(await solve(page, 'analytical'), 'the two-output forward designs').toBeNull()
+
+  const banner = page.locator('.sch-error')
+  await expect(banner, 'the pane says why there is no drawing').toBeVisible({ timeout: 30000 })
+  // No stale drawing left behind next to the banner.
+  expect(await page.locator('.schematic-frame svg').count(), 'a drawing survived alongside the error').toBe(0)
+  // Announced: replacing the pane's content without a live region tells a screen reader nothing.
+  expect(await banner.getAttribute('role'), 'the banner is a live region').toBe('alert')
+  const text = (await banner.textContent()) ?? ''
+  expect(text, 'the banner names the topology').toMatch(/Forward/i)
+  expect(text, 'the banner says what could not be drawn').toMatch(/placement|netlist|component/i)
+
+  // ...and it is readable: the palette's fault colour against the pane, not a hard-coded stand-in.
+  const ratio = await banner.evaluate((el) => {
+    const px = (c) => c.match(/[\d.]+/g).slice(0, 3).map(Number)
+    const lum = ([r, g, b]) => { const f = (v) => { const s = v / 255; return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4 }
+      return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b) }
+    let bg = el, bgc = 'rgba(0, 0, 0, 0)'
+    while (bg && (bgc === 'rgba(0, 0, 0, 0)' || bgc === 'transparent')) { bgc = getComputedStyle(bg).backgroundColor; bg = bg.parentElement }
+    const [l1, l2] = [lum(px(getComputedStyle(el).color)), lum(px(bgc))].sort((a, b) => b - a)
+    return (l1 + 0.05) / (l2 + 0.05)
+  })
+  expect(ratio, `the banner sits at ${ratio.toFixed(2)}:1 against the pane`).toBeGreaterThan(4.5)
+})
