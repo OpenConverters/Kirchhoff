@@ -190,6 +190,36 @@ function passiveOnlyNets({ g, pins, pinNet, magRefs, refRoots, twoTerm }) {
 export function checkSchematic({ svg, pins, tas }) {
   const g = wireGraph(svg)
   const pinNet = flattenNets(tas)
+  // FLOOR — the checker must refuse to certify what it cannot see. Every rule below is of the form "for
+  // each drawn anchor, check X", so an EMPTY drawing satisfies all of them: fed a blank <svg> and an
+  // empty pin list, this function returned [] for buck — a clean bill of health for a blank page. That
+  // matters beyond the offline gate, because buildCias runs this at RENDER time to decide whether the
+  // app may draw at all. So first establish that the drawing actually contains the netlist: every
+  // component the netlist connects must have registered terminals, and there must be wires.
+  const floor = []
+  // Sourced from the DRAWING, not the netlist: the netlist also carries things the drawing deliberately
+  // does not anchor — a FET's body diode is drawn as an annotation, and the ngspice convergence aids are
+  // not drawn at all — so requiring terminals for every connected component flags six healthy fsbb parts.
+  // What must hold is that everything the drawing CLAIMS to show is anchored, and that there is a drawing.
+  const wires = svg.match(/<path class="sch-wire"/g)?.length ?? 0
+  const wired = new Set(pins.map((p) => p.ref))
+  if (!wires) floor.push('the drawing contains no wires at all')
+  // Each hot group with its body, so a part can be judged by HOW it is connected. A control block —
+  // the controller IC, and pfc/vienna's analog blocks (integrators, multipliers, comparators) — reaches
+  // the design through dashed .sch-ctl stubs and net-label flags rather than wires, which is exactly why
+  // the net rules exclude gate nets. Those anchor nothing by design; every other drawn part must anchor.
+  // Split on the group openers rather than matching to </g>: several symbols nest a <g transform> of
+  // their own (a flipped FET), and the opener carries tabindex/role/aria-label after data-ref.
+  const groups = svg.split('<g class="sch-hot').slice(1).map((chunk) => ({
+    ann: /^[^">]*\bsch-ann\b/.test(chunk),
+    ref: chunk.match(/data-ref="([^"]+)"/)?.[1] ?? null,
+    body: chunk,
+  })).filter((x) => x.ref)
+  if (!groups.length) floor.push('the drawing contains no components at all')
+  for (const { ann, ref, body } of groups)
+    if (!ann && !wired.has(ref) && !/class="sch-ctl"/.test(body))
+      floor.push(`${ref} is drawn but registered no terminals — nothing about its connections can be verified`)
+  if (floor.length) return floor
   const magRefs = new Set()
   for (const st of tas.topology?.stages ?? []) for (const c of st.circuit?.components ?? []) if (c.data?.magnetic !== undefined) magRefs.add(c.name)
 

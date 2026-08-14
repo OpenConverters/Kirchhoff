@@ -32,7 +32,7 @@ const M = await init()
 
 // wireGraph + the connectivity/isolation checks now live in ../src/schematicCheck.js (shared with
 // the runtime CIAS generator) so both validate against identical rules.
-let flagged = 0
+let flagged = 0, checked = 0
 for (const t of TOPOLOGIES) {
   if (!hasCiasSchematic(t.id)) continue
   const v = VARIANTS[t.id]
@@ -46,9 +46,15 @@ for (const t of TOPOLOGIES) {
     const tas = JSON.parse(out).tas
     const { svg, pins } = renderForAudit(t.id, tas, opt ?? 'standard')
     const problems = checkSchematic({ svg, pins, tas })
+    checked++
     if (problems.length) { flagged++; console.log((t.id + (opt ? '/' + opt : '')).padEnd(26), problems.join('  |  ')) }
   }
 }
 
-console.log(flagged ? `\n${flagged} topology/variant combos flagged` : '\nAll nets + magnetic windings consistent with the flattened netlist')
+// Report the COUNT, and refuse to report success over nothing: this gate skips a topology with no CIAS
+// layout, so "all consistent" over an empty sweep would be a clean bill of health for zero drawings.
+if (!checked) throw new Error('checkSchematicNets verified 0 schematics — every topology was skipped')
+console.log(flagged
+  ? `\n${flagged} topology/variant combos flagged`
+  : `\nAll ${checked} schematics: nets + magnetic windings consistent with the flattened netlist`)
 process.exit(flagged ? 1 : 0)   // a gate that cannot fail is not a gate
