@@ -76,10 +76,21 @@ for (const t of TOPOLOGIES) {
       expect(live, 'the app rendered a schematic').not.toBeNull()
       // Gate flags are matched by proximity inside auditLabels; the live DOM has no separate pin list,
       // so pass none — that only makes the check STRICTER, never laxer.
-      const problems = auditLabels(live, [])
-        // A gate-drive flag sits on its own switch by construction; without the pin list those read as
-        // T-SYM. Drop exactly that case (a <=3-char cyan sig label over a footprint) and nothing else.
-        .filter((p) => !/^T-SYM "(g|s)[A-Za-z0-9]?[0-9]?" /.test(p))
+      const all = auditLabels(live, [])
+      // A gate-drive flag sits on its own switch by construction; without the pin list those read as
+      // T-SYM. The old filter dropped ANY short g*/s* label over ANY part, which would have swallowed a
+      // flag sitting on the wrong component just as quietly. Measured against the offline gate (which
+      // HAS the pin list and resolves each flag to its own switch), exactly ten such pairs exist, so they
+      // are named: anything else that looks like a flag collision is a finding, not house convention.
+      const EXPECTED_FLAG_ON_OWN_SWITCH = new Set([
+        'boost/diode g1 Q1', 'boost/synchronous g1 Q1', 'cuk g1 Q1',
+        'flyback/ccm g1 Q1', 'flyback/dcm g1 Q1', 'flyback/bcm g1 Q1', 'flyback/qrm g1 Q1',
+        'isolated_buck g1 QS1', 'isolated_buck g2 QS2', 'two_switch_forward g1 Q1',
+      ])
+      const problems = all.filter((p) => {
+        const m = p.match(/^T-SYM "([gs][A-Za-z0-9]?[0-9]?)" .* over ([A-Za-z0-9_]+)'s footprint/)
+        return !(m && EXPECTED_FLAG_ON_OWN_SWITCH.has(`${name} ${m[1]} ${m[2]}`))
+      })
       expect(problems, `live schematic problems:\n${problems.join('\n')}`).toEqual([])
     })
   }

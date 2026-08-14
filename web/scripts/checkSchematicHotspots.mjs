@@ -133,6 +133,12 @@ for (const t of TOPOLOGIES) {
       if (!allowed.has(ref))
         bad.push(`INERT ${ref}: drawn without a working click target, but it is not a body diode or a ` +
                  `numerical aid — it is a part the user cannot open`)
+    // A part that contributed NO probe points was never tested: its symbol may be drawn with elements the
+    // sampler cannot walk (getTotalLength is an SVGGeometryElement method — a <g> wrapper or an <image>
+    // has none), and it would sail through this gate invisibly, which is the failure mode this whole file
+    // exists to prevent in the drawing.
+    for (const { ref, hits } of parts)
+      if (!hits.length) bad.push(`UNPROBED ${ref}: no walkable geometry — this gate never tested it`)
     for (const { ref, hits } of parts) {
       // symbol ink and each label are judged on their OWN denominator: a 5-glyph refdes swamped by 200
       // points of transformer winding would never clear any share threshold.
