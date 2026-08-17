@@ -11,6 +11,7 @@ server-side complains — that is ABT #651's failure mode, and this is what catc
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -92,6 +93,34 @@ def main() -> int:
           all(c.get("subject") and c.get("schema", {}).get("name")
               for c in (sc.get("companions") or {}).values()),
           ", ".join(sc.get("companions") or {}))
+
+    # THE HANDLE. A designed converter is ~26 kB and nine tools take it; on a backend where
+    # the model holds the conversation it retypes the document every call, and two select_parts
+    # calls in one deployed turn died with "input could not be parsed as JSON" on a truncated
+    # copy. The handle is the same design in 22 characters.
+    print("tas_ref — the design by handle")
+    handle = sc.get("artifact") if sc.get("mode") == "document" else None
+    r0 = S.design_converter("flyback", SPEC)
+    handle = r0.structuredContent["artifact"]
+    check("design_converter hands back a handle", bool(handle) and handle.startswith("tas://"),
+          f"{handle} for {len(json.dumps(r0.structuredContent['document'])):,} bytes")
+    check("and every consumer accepts it",
+          all(fn().structuredContent.get("mode") for fn in (
+              lambda: S.converter_diagnostics(tas_ref=handle),
+              lambda: S.export_netlist(tas_ref=handle),
+              lambda: S.magnetic_inputs(tas_ref=handle))))
+    check("the handle is content-addressed, so an unchanged design reuses it",
+          S.design_converter("flyback", SPEC).structuredContent["artifact"] == handle)
+    for label, fn in (("both tas and tas_ref", lambda: S.simulate(tas=tas, tas_ref=handle)),
+                      ("neither", lambda: S.simulate()),
+                      ("an unknown handle", lambda: S.simulate(tas_ref="tas://" + "0" * 16)),
+                      ("a path in place of a handle",
+                       lambda: S.simulate(tas_ref="tas://../../etc/passwd"))):
+        try:
+            fn()
+            check(f"refuses {label}", False)
+        except ValueError:
+            check(f"refuses {label}", True)
 
     print("operating_point  [document]")
     r = S.operating_point(tas)
@@ -209,6 +238,24 @@ def main() -> int:
         check("each candidate carries something the picker can rank on",
               all(any(l["candidates"][0].get(k) for k in ("margins", "sortKey", "specs"))
                   for l in filled))
+        # LEAN BY DEFAULT. The full answer is 215 kB, 70 % of it datasheet envelopes, and on
+        # the Claude Code backend the payload goes into the MODEL's context as text — where it
+        # was truncated, which both flooded the turn and left the widget with unparseable JSON
+        # and nothing to draw.
+        payload_size = len(json.dumps(sc))
+        check("the payload is small enough for a chat turn", payload_size < 40_000,
+              f"{payload_size:,} bytes — over ~40 kB it truncates and the widget draws nothing")
+        check("no datasheet envelopes ride along by default",
+              not any("_envelope" in c for l in lines for c in l.get("candidates", [])))
+        check("and the payload SAYS what it left out",
+              "envelopes omitted" in (sc.get("caveat") or "")
+              and "ranked candidates" in (sc.get("caveat") or ""),
+              sc.get("caveat", "")[:90])
+        # The picker asks for the heavy version itself; its calls do not touch the model.
+        heavy = S.select_parts(tas, max_candidates=12, include_envelopes=True).structuredContent
+        envelopes = [c for l in heavy["lines"] for c in l.get("candidates", []) if c.get("_envelope")]
+        check("the picker can still get envelopes when it needs to bind", bool(envelopes),
+              f"{len(envelopes)} candidates carry one")
         # "nobody looked" and "nothing fit" are different answers and must not read alike: a
         # controller is DEFERRED until the topology is known, not rejected by a gate.
         unsourced = [l for l in lines if l["status"] != "recommended"]

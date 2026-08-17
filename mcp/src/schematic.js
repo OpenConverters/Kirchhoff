@@ -122,9 +122,14 @@ async function loadCandidates(ref) {
   state.busy = true;
   state.candidates = null;
   try {
+    // WITH envelopes, and more rows than the model's copy carries. A widget's own tool call
+    // does not pass through the model's context, so the payload that is too heavy for a chat
+    // turn is exactly right here — and bind_part needs the chosen candidate's envelope, which
+    // select_parts omits by default precisely because the model never reads it.
     const res = await app.callServerTool({
       name: "select_parts",
-      arguments: plain({ tas: state.tas, options: { topology: state.topology } }),
+      arguments: plain({ tas: state.tas, options: { topology: state.topology },
+                        max_candidates: 12, include_envelopes: true }),
     });
     // select_parts answers as a BOM: one line per position, its candidates on the line.
     const sc = res.structuredContent || {};

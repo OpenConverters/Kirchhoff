@@ -15,6 +15,8 @@ Run:
 from __future__ import annotations
 
 import json
+import tempfile
+import hashlib
 import math
 import os
 import sys
@@ -221,7 +223,8 @@ def _document_result(summary: str, *, schema: str, operation: str, document: dic
                      subject: str | None = None, version: str | None = None,
                      companions: dict | None = None, diagnostics: list | None = None,
                      changed: list | None = None, derived_from: str | None = None,
-                     view: str | None = None, caveat: str | None = None) -> CallToolResult:
+                     view: str | None = None, caveat: str | None = None,
+                     artifact: str | None = None) -> CallToolResult:
     """A `document` result — the artifact, and WHICH schema governs it.
 
     `schema` is not decoration: a consumer holding 40 kB of JSON that does not say what it is
@@ -237,7 +240,8 @@ def _document_result(summary: str, *, schema: str, operation: str, document: dic
     }
     for key, value in (("subject", subject), ("companions", companions),
                        ("diagnostics", diagnostics), ("changed", changed),
-                       ("derivedFrom", derived_from), ("view", view), ("caveat", caveat)):
+                       ("derivedFrom", derived_from), ("view", view), ("caveat", caveat),
+                       ("artifact", artifact)):
         if value:
             payload[key] = value
     return _result(summary, payload)
@@ -331,15 +335,83 @@ CANDIDATE_FIELDS = ("mpn", "manufacturer", "specs", "status", "grade", "penalty"
                     "record")
 
 
-def _candidate(cand: dict) -> dict:
-    """One engine candidate as the contract's `candidate`."""
+def _candidate(cand: dict, envelope: bool = True) -> dict:
+    """One engine candidate as the contract's `candidate`.
+
+    `envelope=False` drops the datasheet blob. It is 70 % of a sourcing payload and
+    nothing reads it except bind_part, which needs exactly one — the chosen line's.
+    """
     out = {k: v for k, v in cand.items() if k in CANDIDATE_FIELDS}
     out.setdefault("mpn", cand.get("mpn") or "(unnamed)")
     for key, value in cand.items():
-        if key in CANDIDATE_FIELDS:
+        if key in CANDIDATE_FIELDS or (key == "envelope" and not envelope):
             continue
         out[key if key.startswith("_") else f"_{key}"] = value
     return out
+
+
+# --- the TAS by reference ---------------------------------------------------
+# A designed converter is ~46 kB of JSON, and nine tools take it as an argument.
+# On a backend where the model holds the conversation (Claude Code), that means
+# the model RETYPES the whole document on every call — and it does not always
+# survive: two select_parts calls in one deployed turn came back as
+# "InputValidationError: input could not be parsed as JSON", 4.3 kB and 5.7 kB of
+# truncated document, before a third attempt landed. The tool worked; the
+# argument never arrived.
+#
+# artifacts.py already states the rule this breaks — "a real scan, a Gerber set
+# or a 150k-point deck must not travel through the tool arguments, because tool
+# arguments travel through the model context" — and applies it to files. A TAS is
+# the same problem with a different shape, so it gets the same treatment: the
+# engine hands back a HANDLE, and every tool that takes a document takes the
+# handle instead.
+#
+# Handles live under a work directory and are content-addressed, so re-registering
+# an unchanged document is free and two callers designing the same converter share
+# one entry. Nothing expires them: a demo host restarts more often than it fills
+# up, and silently forgetting a document a caller still holds is worse than a file.
+TAS_STORE = Path(os.environ.get("KIRCHHOFF_WORK_DIR")
+                 or Path(tempfile.gettempdir()) / "kirchhoff-tas")
+
+
+def _register_tas(tas: dict) -> str:
+    """Persist a TAS and return the handle that stands in for it."""
+    blob = json.dumps(tas, sort_keys=True).encode()
+    handle = hashlib.sha256(blob).hexdigest()[:16]
+    TAS_STORE.mkdir(parents=True, exist_ok=True)
+    path = TAS_STORE / f"{handle}.json"
+    if not path.exists():
+        path.write_bytes(blob)
+    return f"tas://{handle}"
+
+
+def _resolve_tas(tas: dict | None = None, tas_ref: str | None = None) -> dict:
+    """The document, from whichever way the caller supplied it. Exactly one.
+
+    Both is refused rather than reconciled: which one is the design is not
+    something this server should guess, and a caller passing both has a bug that
+    a silent preference would hide.
+    """
+    if tas and tas_ref:
+        raise ValueError("pass tas OR tas_ref, not both — which one is the design is not "
+                         "something this server should guess")
+    if tas:
+        return tas
+    if not tas_ref:
+        raise ValueError("no design given: pass tas (the document) or tas_ref (a handle from "
+                         "design_converter, realize_tas or bind_part)")
+    handle = tas_ref.split("tas://", 1)[-1].strip()
+    if not handle or "/" in handle or not all(c in "0123456789abcdef" for c in handle):
+        raise ValueError(f"{tas_ref!r} is not a TAS handle — expected tas://<hex id> as "
+                         f"returned in a document result's `artifact`")
+    path = TAS_STORE / f"{handle}.json"
+    if not path.exists():
+        # A restart empties the store, and "unknown handle" must not read like
+        # "bad design": say which it is and what to do.
+        raise ValueError(
+            f"no TAS at {tas_ref} — it was never registered here, or this server restarted "
+            f"since (handles live under {TAS_STORE}). Re-run design_converter; it is one call.")
+    return json.loads(path.read_text())
 
 
 def _components_of(tas: dict) -> dict:
@@ -594,7 +666,9 @@ def list_topologies() -> CallToolResult:
     description=(
         "Design a power converter from a high-level spec and return its full TAS "
         "topology document, the engine's component sizing, and a clickable schematic. "
-        "Pass the returned `tas` to the simulate / netlist / sourcing tools."
+        "Pass the returned `artifact` handle as `tas_ref` to the simulate / netlist / "
+        "sourcing tools — it is the same design in 22 characters instead of ~26 kB, and "
+        "retyping the document is how those calls fail."
     ),
     meta=UI_SCHEMATIC_META,
     structured_output=False,
@@ -631,8 +705,13 @@ def design_converter(topology: str, spec: dict, engine: str = "analytical") -> C
                           if m.get("isMain")), None) or "main magnetic")
         companions[magnetic] = {"schema": {"name": "MAS"}, "subject": magnetic,
                                 "document": operating_point}
+    handle = _register_tas(tas)
     return _document_result(
-        summary, schema="TAS", operation="produced", document=tas, subject=topology_id,
+        summary + f"\nPass tas_ref=\"{handle}\" to the simulate / netlist / sourcing tools "
+        f"instead of the document itself — it is the same design, 16 characters instead of "
+        f"{len(json.dumps(tas)) // 1000} kB.",
+        schema="TAS", operation="produced", document=tas, subject=topology_id,
+        artifact=handle,
         companions=companions or None,
         # The engine's sizing travels as diagnostics: it describes how this document was
         # arrived at, and a consumer that wants the numbers on their own calls
@@ -647,8 +726,9 @@ def design_converter(topology: str, spec: dict, engine: str = "analytical") -> C
 
     structured_output=False,
 )
-def converter_diagnostics(tas: dict) -> CallToolResult:
+def converter_diagnostics(tas: dict | None = None, tas_ref: str | None = None) -> CallToolResult:
     """Sized components and design diagnostics for a TAS from design_converter."""
+    tas = _resolve_tas(tas, tas_ref)
     diag = kh.diagnostics(tas)
     quantities = _sized_quantities(diag)
     if not quantities:
@@ -672,13 +752,15 @@ def converter_diagnostics(tas: dict) -> CallToolResult:
     ),
     structured_output=False,
 )
-def realize_tas(tas: dict) -> CallToolResult:
+def realize_tas(tas: dict | None = None, tas_ref: str | None = None) -> CallToolResult:
     """Returns the realized TAS; feed it to export_netlist/simulate with DATASHEET fidelity."""
+    tas = _resolve_tas(tas, tas_ref)
     realized = kh.realize_tas(tas)
     return _document_result(
         "Datasheet device models added. Pass this TAS to export_netlist or simulate "
         'with fidelity {"origin": "DATASHEET"} to see real conduction losses.',
         schema="TAS", operation="transformed", document=realized,
+        artifact=_register_tas(realized),
         # `changed` is required on a transform, and this is why: without it a consumer has to
         # diff two 40 kB documents to find out which semiconductors grew a model.
         changed=_realized_refs(tas, realized) or ["every semiconductor in the design"])
@@ -696,14 +778,17 @@ def realize_tas(tas: dict) -> CallToolResult:
 
     structured_output=False,
 )
-def export_netlist(tas: dict, flavor: str = "ngspice", fidelity: dict | None = None) -> CallToolResult:
+def export_netlist(tas: dict | None = None, flavor: str = "ngspice", fidelity: dict | None = None, tas_ref: str | None = None) -> CallToolResult:
     """Netlist text for a designed converter.
 
     Args:
-        tas: a TAS document from design_converter.
+        tas: a TAS document from design_converter. Prefer `tas_ref`.
+        tas_ref: the handle design_converter returned as `artifact`
+            (tas://<id>) — the same design, without retyping 26 kB of JSON.
         flavor: 'ngspice' or 'ltspice'.
         fidelity: model selection, e.g. {"origin": "REQUIREMENTS"|"DATASHEET"|"MKF_MODEL"}.
     """
+    tas = _resolve_tas(tas, tas_ref)
     if flavor not in ("ngspice", "ltspice"):
         raise ValueError(f"flavor must be 'ngspice' or 'ltspice' -- got {flavor!r}")
     emit = kh.tas_to_ngspice if flavor == "ngspice" else kh.tas_to_ltspice
@@ -730,7 +815,7 @@ def export_netlist(tas: dict, flavor: str = "ngspice", fidelity: dict | None = N
     ),
     structured_output=False,
 )
-def simulate(tas: dict, fidelity: dict | None = None) -> CallToolResult:
+def simulate(tas: dict | None = None, fidelity: dict | None = None, tas_ref: str | None = None) -> CallToolResult:
     """Transient simulation of an assembled TAS.
 
     The engine returns per-vector STATISTICS rather than the raw samples — the
@@ -738,9 +823,12 @@ def simulate(tas: dict, fidelity: dict | None = None) -> CallToolResult:
     wire. `component_waveforms` is the sampled-waveform tool.
 
     Args:
-        tas: a TAS document from design_converter.
+        tas: a TAS document from design_converter. Prefer `tas_ref`.
+        tas_ref: the handle design_converter returned as `artifact`
+            (tas://<id>) — the same design, without retyping 26 kB of JSON.
         fidelity: {"origin": "REQUIREMENTS"|"DATASHEET"|"MKF_MODEL"}.
     """
+    tas = _resolve_tas(tas, tas_ref)
     result = kh.simulate_ngspice(tas, _fidelity(fidelity))
     if not result.get("success"):
         raise RuntimeError(f"ngspice run failed: {result.get('error') or 'no detail reported'}")
@@ -872,15 +960,18 @@ def simulate_ac(deck: str | None = None, deck_ref: str | None = None) -> CallToo
     meta=UI_CURVES_META,
     structured_output=False,
 )
-def component_waveforms(tas: dict, fidelity: dict | None = None,
-                        component: str | None = None) -> CallToolResult:
+def component_waveforms(tas: dict | None = None, fidelity: dict | None = None,
+                        component: str | None = None, tas_ref: str | None = None) -> CallToolResult:
     """V/I per power component.
 
     Args:
-        tas: a TAS document from design_converter.
+        tas: a TAS document from design_converter. Prefer `tas_ref`.
+        tas_ref: the handle design_converter returned as `artifact`
+            (tas://<id>) — the same design, without retyping 26 kB of JSON.
         fidelity: {"origin": ...}.
         component: chart only this ref (e.g. 'Q1'); default charts every one.
     """
+    tas = _resolve_tas(tas, tas_ref)
     result = kh.component_waveforms(tas, _fidelity(fidelity))
     components = result.get("components") or []
     if not components:
@@ -932,17 +1023,20 @@ def component_waveforms(tas: dict, fidelity: dict | None = None,
     ),
     structured_output=False,
 )
-def magnetic_inputs(tas: dict, magnetic: str = "", enrich: bool = True) -> CallToolResult:
+def magnetic_inputs(tas: dict | None = None, magnetic: str = "", enrich: bool = True, tas_ref: str | None = None) -> CallToolResult:
     """MAS Inputs for one magnetic.
 
     Args:
-        tas: a TAS document from design_converter.
+        tas: a TAS document from design_converter. Prefer `tas_ref`.
+        tas_ref: the handle design_converter returned as `artifact`
+            (tas://<id>) — the same design, without retyping 26 kB of JSON.
         magnetic: component name / BOM ref; '' picks the main magnetic (most windings).
         enrich: take the FULL-waveform inputs (real time-domain samples) instead of
             the processed-stats-only form. A 'custom'-shaped excitation (QRM valley
             switching, resonant bridge legs) cannot be reconstructed from stats, and
             the adviser refuses it with "Waveform must have at least 2 data points".
     """
+    tas = _resolve_tas(tas, tas_ref)
     if enrich:
         # The engine already emits full-waveform inputs per magnetic; use them
         # rather than splicing waveforms into the stats form by hand (which is
@@ -994,7 +1088,7 @@ def magnetic_inputs(tas: dict, magnetic: str = "", enrich: bool = True) -> CallT
     ),
     structured_output=False,
 )
-def topology_waveforms(tas: dict) -> CallToolResult:
+def topology_waveforms(tas: dict | None = None, tas_ref: str | None = None) -> CallToolResult:
     """MAS Inputs for every magnetic in the design, the main one first.
 
     NO CHART. This tool used to draw every magnetic's excitations, which made its payload two
@@ -1003,6 +1097,7 @@ def topology_waveforms(tas: dict) -> CallToolResult:
     consumes), so they are what it returns; component_waveforms is the charting tool, and it
     charts the transformer's real V/I from the same run.
     """
+    tas = _resolve_tas(tas, tas_ref)
     magnetics = kh.topology_waveforms(tas)
     if not magnetics:
         raise RuntimeError("this design carries no magnetics")
@@ -1045,14 +1140,15 @@ def topology_waveforms(tas: dict) -> CallToolResult:
 
     structured_output=False,
 )
-def operating_point(tas: dict, engine: str = "analytical", magnetic: str = "",
-                    fidelity: dict | None = None) -> CallToolResult:
+def operating_point(tas: dict | None = None, engine: str = "analytical", magnetic: str = "",
+                    fidelity: dict | None = None, tas_ref: str | None = None) -> CallToolResult:
     """Excitations per winding for one magnetic.
 
     Args:
         engine: 'analytical' (closed form) or 'ngspice' (from a simulation).
         magnetic: component name; '' picks the main magnetic.
     """
+    tas = _resolve_tas(tas, tas_ref)
     if engine not in ("analytical", "ngspice"):
         raise ValueError(f"engine must be 'analytical' or 'ngspice' -- got {engine!r}")
     op = kh.extract_operating_point(tas, engine, magnetic, _fidelity(fidelity))
@@ -1085,14 +1181,37 @@ def operating_point(tas: dict, engine: str = "analytical", magnetic: str = "",
     meta=UI_PICKER_META,
     structured_output=False,
 )
-def select_parts(tas: dict, data_dir: str | None = None, options: dict | None = None) -> CallToolResult:
+def select_parts(tas: dict | None = None, data_dir: str | None = None, options: dict | None = None,
+                 max_candidates: int = 6, include_envelopes: bool = False, tas_ref: str | None = None) -> CallToolResult:
     """Candidate parts per component.
 
     Args:
-        tas: a TAS document from design_converter.
+        tas: a TAS document from design_converter. Prefer `tas_ref`.
+        tas_ref: the handle design_converter returned as `artifact`
+            (tas://<id>) — the same design, without retyping 26 kB of JSON.
         data_dir: TAS catalogue directory; defaults to $KELVIN_TAS_DATA_DIR.
-        options: selector options, e.g. {"topology": "flyback", "maxCandidates": 12}.
+        options: selector options, e.g. {"topology": "flyback"}.
+        max_candidates: ranked alternatives kept PER LINE. The engine's own default
+            returned 25, which is 150 rows on an eight-line design.
+        include_envelopes: attach each candidate's full datasheet envelope. Off by
+            default and only the picker should turn it on — see below.
+
+    WHY THIS TOOL IS DELIBERATELY LEAN. The full answer is 215 kB for a flyback,
+    70 % of it datasheet envelopes, and on the Claude Code backend the payload is
+    injected into the MODEL's context as text rather than handed to the widget
+    out of band. Two things went wrong at once because of it: the model said the
+    result was too big to read and worked around itself, and the widget rendered
+    EMPTY, because a truncated payload is not parseable JSON and the bridge
+    recovers the widget's data by parsing that text.
+
+    So the model gets a BOM it can read, and the picker — whose own tool calls do
+    not pass through the model at all — asks for envelopes when a bind needs one.
     """
+    tas = _resolve_tas(tas, tas_ref)
+    if max_candidates < 1:
+        raise ValueError(f"max_candidates must be at least 1 -- got {max_candidates}")
+    options = dict(options or {})
+    options.setdefault("maxCandidates", max_candidates)
     result = kh.select_components(tas, _kelvin_data_dir(data_dir), "", options or {})
     components = result.get("components") or []
     filled = sum(1 for c in components if c.get("filled"))
@@ -1139,7 +1258,8 @@ def select_parts(tas: dict, data_dir: str | None = None, options: dict | None = 
                 "manufacturer": (c.get("manufacturer")
                                  or (candidates[0].get("manufacturer") if candidates else None)),
                 "kind": c.get("family") or c.get("kind") or "",
-                "candidates": [_candidate(cand) for cand in candidates]}
+                "candidates": [_candidate(cand, envelope=include_envelopes)
+                               for cand in candidates[:max_candidates]]}
         notes = c.get("error") or (c.get("deferred") if isinstance(c.get("deferred"), str) else "")
         if notes:
             line["notes"] = str(notes)
@@ -1149,6 +1269,18 @@ def select_parts(tas: dict, data_dir: str | None = None, options: dict | None = 
                    for c in components
                    if not c.get("filled") and (c.get("error") or c.get("deferred"))]
     payload = {"mode": "bom", "lines": bom_lines, "total": len(components), "sourced": filled}
+    # What was left out, in a field rather than in silence. A capped list that does not say it
+    # is capped reads as "these are all the parts that fit".
+    ranked = sum(len((c.get("selection") or {}).get("candidates") or []) for c in components)
+    shown = sum(len(l.get("candidates") or []) for l in bom_lines)
+    notes = []
+    if ranked > shown:
+        notes.append(f"each line lists its top {max_candidates} of {ranked} ranked candidates")
+    if not include_envelopes:
+        notes.append("datasheet envelopes omitted — call again with include_envelopes=true "
+                     "for the line you intend to bind")
+    if notes:
+        payload["caveat"] = "; ".join(notes)
     topology = (tas.get("topology") or {}).get("name")
     if topology:
         payload["topology"] = str(topology)
@@ -1332,19 +1464,22 @@ def run_deck(deck: str | None = None, timeout_s: float = 600.0,
     meta=UI_PICKER_META,
     structured_output=False,
 )
-def bind_part(tas: dict, ref: str, envelope: dict) -> CallToolResult:
+def bind_part(ref: str, envelope: dict, tas: dict | None = None,
+              tas_ref: str | None = None) -> CallToolResult:
     """Bind a real part.
 
     Args:
         ref: the component reference in the design, e.g. 'Q1'.
         envelope: the candidate's full datasheet envelope (from select_parts).
     """
+    tas = _resolve_tas(tas, tas_ref)
     bound = kh.bind_part(tas, ref, envelope)
     mpn = envelope.get("mpn") or (envelope.get("manufacturerInfo") or {}).get("reference")
     return _document_result(
         f"Bound {mpn or 'the chosen part'} into {ref}; the returned TAS is at DATASHEET "
         f"fidelity for that component.",
         schema="TAS", operation="transformed", document=bound,
+        artifact=_register_tas(bound),
         # The ref is an ARGUMENT to this call, so the delta is known before the engine runs —
         # which is why the contract can require `changed` rather than hope for it.
         changed=[{"ref": ref, "change": "bound to a catalogue part",
