@@ -16,10 +16,16 @@ const app = new App({ name: "Kirchhoff Waveforms", version: "0.1.0" });
 const state = reactive({ title: "", subtitle: "", note: "", traces: [] });
 
 /**
- * Server series are [[t, v], ...] point pairs; WaveformChart wants parallel
- * time/data arrays plus the unit that selects its axis.
+ * Server series are [[t, v], ...] point pairs; WaveformChart wants parallel time/data arrays
+ * plus the unit that selects its axis.
+ *
+ * WHICH AXIS A TRACE BELONGS TO IS NOW SAID, NOT GUESSED. The payload is a `curves` result
+ * under the pipeline contract: it declares `axes.y` and `axes.y2`, and every series names the
+ * one it is measured against. This widget used to read a per-series `unit` string and treat
+ * "A" as "the right-hand axis" — a convention that silently put the first unit nobody thought
+ * of on the wrong scale.
  */
-function toTrace(s) {
+function toTrace(s, axes) {
   const time = [];
   const data = [];
   for (const [t, v] of s.points || []) {
@@ -27,7 +33,8 @@ function toTrace(s) {
     time.push(t);
     data.push(v);
   }
-  return { label: s.name, unit: s.unit === "A" ? "A" : "V", time, data };
+  const axis = s.axis === "y2" ? axes?.y2 : axes?.y;
+  return { label: s.name, unit: axis?.unit || "V", time, data };
 }
 
 const Root = {
@@ -48,14 +55,14 @@ createApp(Root).mount("#app");
 
 app.ontoolresult = (result) => {
   const sc = result.structuredContent;
-  if (!sc || !Array.isArray(sc.series)) {
+  if (sc?.mode !== "curves" || !Array.isArray(sc.series)) {
     state.title = "No waveform data in tool result.";
     return;
   }
   state.title = sc.title || "Waveforms";
   state.subtitle = sc.subtitle || "";
-  state.note = sc.note || "";
-  state.traces = sc.series.map(toTrace).filter((t) => t.data.length > 1);
+  state.note = sc.caveat || "";
+  state.traces = sc.series.map((s) => toTrace(s, sc.axes)).filter((t) => t.data.length > 1);
 };
 
 await app.connect();

@@ -43,10 +43,18 @@ def text(result) -> str:
     return "\n".join(c.text for c in result.content)
 
 
-def drawable(series: list) -> bool:
-    """A series the curves widget can actually draw: >1 finite point, a V or A unit."""
+def drawable(sc: dict) -> bool:
+    """A `curves` payload the widget can actually draw.
+
+    Every series must name an ordinate that the payload DECLARES. The old form of this check
+    read a per-series unit string and accepted "V" or "A", which is the convention the
+    contract's axes replaced: a trace whose axis is undeclared has no scale to be drawn on.
+    """
+    series = sc.get("series") or []
+    axes = sc.get("axes") or {}
     return bool(series) and all(
-        s.get("unit") in ("V", "A") and len(s.get("points") or []) > 1 for s in series)
+        axes.get("y2" if s.get("axis") == "y2" else "y", {}).get("unit")
+        and len(s.get("points") or []) > 1 for s in series)
 
 
 def main() -> int:
@@ -65,46 +73,64 @@ def main() -> int:
     check("the frequency-domain tools carry the bode widget",
           {n for n, u in ui.items() if u.endswith("bode.html")} == {"simulate_ac", "verify_dmc"},
           ", ".join(sorted(n for n, u in ui.items() if u.endswith("bode.html"))))
+    # component_waveforms is the ONLY charting tool now. operating_point and
+    # topology_waveforms return the MAS documents they are for — a payload cannot be a
+    # document and a chart at once, and the documents are what an adviser consumes.
     check("the waveform tools carry the curves widget",
-          {n for n, u in ui.items() if u.endswith("curves.html")}
-          == {"component_waveforms", "operating_point", "topology_waveforms"},
+          {n for n, u in ui.items() if u.endswith("curves.html")} == {"component_waveforms"},
           ", ".join(sorted(n for n, u in ui.items() if u.endswith("curves.html"))))
 
     print("design_converter(flyback)")
     r = S.design_converter("flyback", SPEC)
-    tas = r.structuredContent["tas"]
+    sc = r.structuredContent
+    tas = sc["document"]
     check("a TAS came back", bool(tas.get("topology")), "flyback")
+    check("the document says which schema governs it and what it is of",
+          sc["schema"]["name"] == "TAS" and sc["subject"] == "flyback"
+          and sc["operation"] == "produced")
+    check("the magnetic's operating point rides as a companion, keyed by the magnetic",
+          all(c.get("subject") and c.get("schema", {}).get("name")
+              for c in (sc.get("companions") or {}).values()),
+          ", ".join(sc.get("companions") or {}))
 
-    print("operating_point  [curves]")
+    print("operating_point  [document]")
     r = S.operating_point(tas)
     sc = r.structuredContent
-    check("the operating point is still returned, not replaced by a chart",
-          bool(sc.get("operating_point", {}).get("excitationsPerWinding")))
-    check("its excitations are drawable by the curves widget", drawable(sc.get("series") or []),
-          f"{len(sc.get('series') or [])} traces, "
-          f"{(sc.get('series') or [{}])[0].get('name')}")
-    check("the digest says how many were charted", "charted waveform" in text(r))
+    check("the operating point is the answer, not a chart of it",
+          sc["mode"] == "document"
+          and bool(sc["document"].get("excitationsPerWinding")))
+    check("it names the MAS schema and the magnetic it came from",
+          sc["schema"]["name"] == "MAS" and bool(sc.get("derivedFrom")))
 
-    print("topology_waveforms  [curves]")
+    print("topology_waveforms  [document + companions]")
     r = S.topology_waveforms(tas)
     sc = r.structuredContent
-    check("every magnetic is still returned", sc.get("count", 0) >= 1,
-          ", ".join(str(n) for n in sc.get("names") or []))
-    check("its excitations are drawable", drawable(sc.get("series") or []),
-          f"{len(sc.get('series') or [])} traces")
-    check("traces are labelled by magnetic, so they can be told apart",
-          all(any(str(n) in s["name"] for n in sc["names"]) for s in sc["series"]))
+    check("the main magnetic is the document", bool(sc["document"].get("operatingPoints")))
+    check("every other magnetic is a companion named after itself",
+          all(name == c["subject"] for name, c in (sc.get("companions") or {}).items()),
+          ", ".join(sc.get("companions") or {}) or "one magnetic in this design")
 
-    print("component_waveforms  [curves, pre-existing]")
+    print("component_waveforms  [curves]")
     r = S.component_waveforms(tas)
-    check("component traces are drawable", drawable(r.structuredContent.get("series") or []),
-          f"{len(r.structuredContent.get('series') or [])} traces")
+    sc = r.structuredContent
+    check("component traces are drawable", drawable(sc), f"{len(sc.get('series') or [])} traces")
+    # Volts and amps on one plot: the second ordinate is what keeps the currents off the
+    # voltage scale, and every trace says which one it belongs to.
+    check("volts and amps are on their own declared axes",
+          sc["axes"]["y"]["unit"] == "V" and sc["axes"]["y2"]["unit"] == "A"
+          and {s.get("axis") for s in sc["series"]} <= {"y", "y2"},
+          f"{sum(1 for s in sc['series'] if s.get('axis') == 'y2')} of {len(sc['series'])} "
+          f"traces on the current axis")
 
     print("simulate — deliberately NOT charted")
     r = S.simulate(tas)
     sc = r.structuredContent
-    check("it returns per-vector statistics", bool(sc.get("measurements")),
-          f"{len(sc.get('measurements') or [])} vectors")
+    check("it returns per-vector statistics", bool(sc.get("statistics")),
+          f"{len(sc.get('statistics') or {})} vectors")
+    check("every statistic says what it is in and over what window",
+          all(v.get("unit") and v.get("over", {}).get("axis") == "time"
+              for v in sc["statistics"].values()))
+    check("it says which model measured them", "libngspice" in sc["model"], sc["model"])
     check("it carries no series, and no widget claims it can draw one",
           "series" not in sc and "simulate" not in
           {t.name for t in tools if (t.meta or {}).get("ui/resourceUri")})
@@ -124,8 +150,21 @@ def main() -> int:
               abs(at(10)) < 0.1 and abs(at(1000) + 3.01) < 0.3 and abs(at(1e6) + 60) < 1.5,
               f"{at(10):.2f} dB at 10 Hz, {at(1000):.2f} at the 1 kHz corner, "
               f"{at(1e6):.2f} at 1 MHz")
-    check("the complex sweep is still returned, not replaced by the chart",
-          bool(sc.get("frequenciesHz")) and bool(sc.get("vectors")))
+    # Phase is the other half of a Bode answer — a magnitude-only payload cannot say what the
+    # phase margin is, and degrees on a decibel axis would mislabel every point of it.
+    phase = [x for x in sc.get("series") or [] if x.get("axis") == "y2"]
+    check("phase is carried too, on its own ordinate",
+          bool(phase) and sc["axes"]["y2"]["unit"] == "deg",
+          f"{len(phase)} phase trace(s)")
+    # The OUTPUT node's phase, not whichever trace came first — `in` is the source and is
+    # flat at 0 degrees by definition, so checking it would pass against any phase code at all.
+    out_phase = next((x for x in phase if x["name"].startswith("out")), None)
+    if out_phase and out:
+        at_phase = lambda f: min(out_phase["points"], key=lambda pt: abs(pt[0] - f))[1]
+        # An RC low-pass is -45 deg at its corner and approaches -90 well above it.
+        check("the plotted phase is the circuit's",
+              abs(at_phase(1000) + 45) < 5 and abs(at_phase(1e6) + 90) < 2,
+              f"{at_phase(1000):.1f} deg at the corner, {at_phase(1e6):.1f} deg at 1 MHz")
 
     print("verify_dmc  [bode]")
     r = S.verify_dmc({"inputVoltage": 230, "operatingCurrent": 2.0, "lineFrequency": 50,
@@ -135,11 +174,21 @@ def main() -> int:
     names = [x["name"] for x in sc.get("series") or []]
     check("required, measured and theoretical are all drawn", len(names) >= 2, ", ".join(names))
     check("the requirement is marked as a limit, not another measurement",
-          any(x.get("kind") == "required" for x in sc.get("series") or []))
-    check("every frequency's verdict is on the curve",
-          len(sc.get("markers") or []) == sc.get("total"),
-          f"{sc.get('passed')}/{sc.get('total')} pass")
-    check("the per-frequency table is still returned", bool(sc.get("frequencies")))
+          any(x.get("kind") == "limit" for x in sc.get("series") or []))
+    check("it is a verdict against a named criterion, and says it is provisional",
+          sc["mode"] == "verdict" and sc["verdict"] in ("pass", "warn", "fail", "unverified")
+          and sc["criterion"] and sc["provisional"] is True,
+          f"{sc['verdict']} — {sc['criterion']}")
+    check("the tally reconciles with the breaches",
+          sc["measurements"]["frequenciesPassed"]["value"]
+          + len(sc.get("exceedances") or [])
+          + sc["measurements"]["frequenciesUnmeasured"]["value"]
+          == sc["measurements"]["frequenciesTested"]["value"],
+          f"{sc['measurements']['frequenciesPassed']['value']}"
+          f"/{sc['measurements']['frequenciesTested']['value']} pass, "
+          f"{len(sc.get('exceedances') or [])} breach")
+    check("every breach says how far it missed by",
+          all("margin" in e and "limit" in e for e in sc.get("exceedances") or []))
 
     if SKIP_SOURCING:
         print("sourcing: SKIPPED (--skip-sourcing)")
@@ -147,26 +196,30 @@ def main() -> int:
         print("select_parts  [picker]")
         r = S.select_parts(tas)
         sc = r.structuredContent
-        components = sc["components"]
-        check("the design was sourced", sc["filled"] > 0, f"{sc['filled']}/{sc['total']} filled")
-        filled = [c for c in components if c.get("filled")]
-        check("every filled component offers a ranked list to choose from",
-              all((c.get("selection") or {}).get("candidates") for c in filled),
-              f"{sum(len(c['selection']['candidates']) for c in filled)} candidates over "
-              f"{len(filled)} components")
+        lines = sc["lines"]
+        check("the design was sourced as a BOM", sc["mode"] == "bom" and sc["sourced"] > 0,
+              f"{sc['sourced']}/{sc['total']} lines sourced")
+        check("every line keeps its own reference designator",
+              all(l.get("ref") for l in lines), ", ".join(l["ref"] for l in lines))
+        filled = [l for l in lines if l["status"] == "recommended"]
+        check("every sourced line offers the ranked list it was chosen from",
+              all(l.get("candidates") for l in filled),
+              f"{sum(len(l['candidates']) for l in filled)} candidates over "
+              f"{len(filled)} lines")
         check("each candidate carries something the picker can rank on",
-              all(any(c["selection"]["candidates"][0].get(k)
-                      for k in ("margins", "sortKey", "deviation")) for c in filled))
-        # "nobody looked" and "nothing fit" are different answers and must not print alike:
-        # a controller is DEFERRED until the topology is known, not rejected by a gate.
-        unfilled = [c for c in components if not c.get("filled")]
-        check("every unfilled component says which kind of unfilled it is",
-              all(c.get("deferred") or c.get("error") for c in unfilled),
-              ", ".join(f"{c['ref']}={'deferred' if c.get('deferred') else 'rejected'}"
-                        for c in unfilled))
-        check("a deferred component is not reported as 'no candidate met the requirements'",
-              not any(c.get("deferred") for c in unfilled)
-              or "deferred" in text(r))
+              all(any(l["candidates"][0].get(k) for k in ("margins", "sortKey", "specs"))
+                  for l in filled))
+        # "nobody looked" and "nothing fit" are different answers and must not read alike: a
+        # controller is DEFERRED until the topology is known, not rejected by a gate.
+        unsourced = [l for l in lines if l["status"] != "recommended"]
+        check("every unsourced line says WHICH kind of unsourced it is",
+              all(l["status"] in ("unsourced", "no_substitute") for l in unsourced),
+              ", ".join(f"{l['ref']}={l['status']}" for l in unsourced))
+        check("a deferred line is not reported as 'no candidate met the requirements'",
+              not any(l["status"] == "unsourced" for l in unsourced) or "deferred" in text(r))
+        check("what could not be done is said in the payload, not only the digest",
+              not unsourced or bool(sc.get("diagnostics")),
+              "; ".join(sc.get("diagnostics") or [])[:80])
 
     print()
     if FAILURES:

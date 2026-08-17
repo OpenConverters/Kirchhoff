@@ -83,22 +83,44 @@ on `wasm-unsafe-eval` is irrelevant to these widgets.
 
 ## Tools
 
-Nineteen, curated to follow the flow the web app already has rather than
+Twenty-three, curated to follow the flow the web app already has rather than
 mirroring all ~47 engine entry points one-to-one (past ~25 tools, hosts start
 picking the wrong one). All 24 topologies sit behind one `design_converter`.
 
-| Group | Tools |
-|---|---|
-| Design | `list_topologies`, `design_converter`, `converter_diagnostics`, `realize_tas` |
-| Simulate | `export_netlist`, `simulate`, `simulate_ac`, `component_waveforms` |
-| Magnetics | `magnetic_inputs`, `topology_waveforms`, `operating_point` |
-| Sourcing | `select_parts`, `bind_part`, `cross_reference` |
-| EMI components | `design_cmc`, `design_dmc`, `propose_dmc`, `verify_dmc`, `design_current_transformer` |
+| Group | Tools | Result |
+|---|---|---|
+| Design | `list_topologies` | catalogue |
+| | `design_converter`, `realize_tas`, `magnetic_inputs`, `topology_waveforms`, `operating_point`, `design_magnetic_inputs`, `design_current_transformer`, `design_cmc`, `design_dmc`, `export_netlist`, `bind_part`, `run_deck` | document |
+| Compute | `converter_diagnostics`, `simulate`, `pfc_mode`, `propose_dmc` | quantity |
+| Chart | `component_waveforms`, `simulate_ac` | curves |
+| Judge | `verify_dmc` | verdict |
+| Sourcing | `select_parts` | bom |
+| | `select_candidates`, `cross_reference` | search / crossref |
 
-`simulate` returns per-vector **statistics** (min/max/average/final), because
-that is what the engine measures as the deck runs — a 150k-point transient never
-crosses the wire. `component_waveforms` is the sampled-waveform tool, and the one
-that charts.
+Every payload is a result under the **Moebius pipeline contract**
+(`contracts/pipeline_result.json`), which is what lets an orchestrator, a widget
+and the next server read this engine without learning its private shapes. Check
+it from this repo:
+
+```bash
+python3 ~/wuerth/moebius-orchestrator/scripts/conformance.py \
+    http://127.0.0.1:8401/mcp --calls ~/wuerth/moebius-orchestrator/contracts/calls/kirchhoff.json
+```
+
+Three consequences worth knowing before calling these tools:
+
+- **`select_parts` answers as a BOM** — one line per position, carrying the
+  candidates ranked *for that line*. "Which part for Q1" is the question, and a
+  single pooled list forgets which position each part was ranked for.
+- **`simulate` returns per-vector statistics** (min/max/average/final) with the
+  time window they were reduced over, because that is what the engine measures
+  as the deck runs — a 150k-point transient never crosses the wire. Min/max over
+  the first two switching cycles is a different claim from min/max in steady
+  state, and the window is what tells them apart.
+- **`operating_point` and `topology_waveforms` no longer chart.** They return
+  the MAS documents they exist to produce; a payload is one answer, not a
+  document and a plot at once. `component_waveforms` is the charting tool, with
+  volts and amps on their own declared axes.
 
 Every SPICE run goes through Kirchhoff's **in-process libngspice**; the installed
 `ngspice` binary is never invoked and is not a runtime dependency.
@@ -140,9 +162,15 @@ tunnel or reverse proxy, name the public host in `KIRCHHOFF_PUBLIC_HOST` (or set
 
 ## Status
 
-Spike. Not yet done: magnetics handoff to the OpenMagnetics adviser (the web app
-does this with a cross-origin postMessage round-trip that has no server-side
-equivalent yet). File references and auth are done — see below.
+In the Moebius pool since 2026-08-17, conformant on all 23 tools. File
+references and auth are done — see below.
+
+The magnetics handoff now has a server-side path, which is what the web app does
+with a cross-origin postMessage round-trip: `magnetic_inputs` emits a magnetic's
+MAS Inputs, the OpenMagnetics server (`WebFrontend/mcp`, port 8409 in the pool)
+advises a real core and coil for them, and the chosen MAS comes back through
+`bind_part`. The model brokers it across the two connectors — nothing here calls
+that engine directly.
 
 ## Files and auth
 

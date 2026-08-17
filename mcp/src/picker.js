@@ -24,6 +24,7 @@ const state = {
   considered: null,
   poolSize: null,
   caveat: null,
+  sourced: null,
   selected: null,
   expanded: new Set(),
   error: "",
@@ -103,15 +104,21 @@ function render() {
   }
 
   const isCross = state.mode === "crossref";
+  const isBom = state.mode === "bom";
   const cols = columnsFor(state.candidates);
 
   // header
   const sub = isCross
     ? `substitutes for ${state.original?.mpn ?? "the original"} · ${state.poolSize ?? "?"} parts considered`
-    : `${state.category} · ranked by ${state.tiebreaker ?? "the engine"} · ${state.considered ?? "?"} rows considered`;
+    : isBom
+      ? `${state.sourced.done}/${state.sourced.of} lines sourced`
+        + (state.sourced.done < state.sourced.of
+           ? ` — ${state.sourced.of - state.sourced.done} still without a part`
+           : "")
+      : `${state.category} · ranked by ${state.tiebreaker ?? "the engine"} · ${state.considered ?? "?"} rows considered`;
   root.append(
     el("div", { class: "head" },
-      el("h1", {}, isCross ? "Cross-reference" : "Candidates"),
+      el("h1", {}, isCross ? "Cross-reference" : isBom ? "Bill of materials" : "Candidates"),
       el("div", { class: "sub" }, sub)));
 
   if (isCross && state.originalSpecs) {
@@ -214,19 +221,30 @@ async function choose(row) {
  * forcing one server's vocabulary on the rest.
  */
 /**
- * select_parts answers for a WHOLE design: components[], each with its own ranked list. It is
- * flattened into one table with the reference designator carried per row, because the question
- * an engineer asks of a BOM is "which part for Q1", not "show me twelve lists".
+ * A `bom` result answers for a WHOLE design: one line per position, each carrying the
+ * candidates ranked FOR that line. It is flattened into one table with the reference
+ * designator on every row, because the question an engineer asks of a BOM is "which part for
+ * Q1", not "show me twelve lists" — but the ref travels with each row so the flattening never
+ * loses which position a part was ranked for.
+ *
+ * A line with no candidates still gets a row: `unsourced` means nobody looked (a controller
+ * deferred until the topology is known) and `no_substitute` means nothing qualified. Showing
+ * them identically would state a negative result nobody established.
  */
-function fromComponents(components) {
+function fromLines(lines) {
   const rows = [];
-  for (const c of components ?? []) {
-    const cands = (c.selection?.candidates) ?? [];
+  for (const line of lines ?? []) {
+    const cands = line.candidates ?? [];
     for (const cand of cands) {
-      rows.push({ ...cand, _ref: c.ref, _family: c.family, _chosen: cand.mpn === c.mpn });
+      rows.push({ ...cand, _ref: line.ref, _family: line.kind,
+                  _chosen: cand.mpn != null && cand.mpn === line.mpn });
     }
-    if (!cands.length && c.error) {
-      rows.push({ mpn: `${c.ref}: UNFILLED`, manufacturer: null, notes: [c.error], _ref: c.ref });
+    if (!cands.length) {
+      const why = line.status === "unsourced"
+        ? `not sourced — ${line.notes ?? "deferred, not searched for"}`
+        : (line.notes ?? "no candidate met the requirements");
+      rows.push({ mpn: `${line.ref}: ${line.status.toUpperCase()}`, manufacturer: null,
+                  notes: [why], _ref: line.ref });
     }
   }
   return rows;
@@ -234,22 +252,24 @@ function fromComponents(components) {
 
 function ingest(sc) {
   state.error = "";
-  state.mode = sc.mode ?? (Array.isArray(sc.components) ? "bom" : "");
-  state.category = sc.category ?? sc.family ?? "";
-  // `candidates` is the envelope Kelvin normalises to, but a ranked list arrives
-  // from other servers as `ranked` or as a plain page of `rows`. Accept all three
-  // rather than render "waiting for candidates" at a payload that has them.
-  state.candidates = Array.isArray(sc.components)
-    ? fromComponents(sc.components)
-    : ([sc.candidates, sc.ranked, sc.rows].find(Array.isArray) ?? []);
-  const orig = sc.original ?? null;
-  state.original = typeof orig === "string" ? { mpn: orig } : orig;
+  state.mode = sc.mode ?? "";
+  state.category = sc.family ?? "";
+  state.candidates = sc.mode === "bom"
+    ? fromLines(sc.lines)
+    : (Array.isArray(sc.candidates) ? sc.candidates : []);
+  // `original` is an OBJECT with an mpn under the contract — never a bare string, because a
+  // comparison whose subject is a name and whose candidates are parameter blocks cannot be
+  // shown side by side.
+  state.original = sc.original ?? null;
   state.originalSpecs = sc.originalSpecs
     ?? (state.original ? specsOf(state.original) : null);
   state.tiebreaker = sc.tiebreaker ?? null;
-  state.considered = sc.totalRowsConsidered ?? sc.total ?? null;
-  state.poolSize = sc.poolSize ?? sc.poolTotal ?? null;
+  state.considered = sc.total ?? null;
+  state.poolSize = sc.catalogueTotal ?? null;
   state.caveat = sc.caveat ?? null;
+  // A BOM says how much of itself is still unsourced, and that is the number most likely to
+  // be glossed over when a table of parts is sitting right above it.
+  state.sourced = sc.mode === "bom" ? { of: sc.total, done: sc.sourced } : null;
   state.selected = null;
   state.expanded = new Set();
   render();

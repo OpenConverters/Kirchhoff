@@ -72,13 +72,18 @@ async function reportContext(eventText, extra = {}) {
   });
 }
 
+/** The TAS out of a `document` result — or out of a plain {topology, tas} redraw. */
 function ingest(sc) {
   state.error = "";
   state.note = "";
   state.candidates = null;
   state.selected = "";
-  state.topology = sc.topology || "";
-  state.tas = sc.tas || null;
+  const document = sc.mode === "document" ? sc.document : sc.tas;
+  // The topology names itself in `subject`. It cannot live inside the TAS — that schema holds
+  // stages and interStageConnections and nothing that says which converter they form — and
+  // the schematic renderer picks its layout by exactly this key.
+  state.topology = sc.subject || sc.topology || "";
+  state.tas = document || null;
   if (!state.tas) {
     state.error = "No TAS in the tool result.";
     return;
@@ -121,13 +126,17 @@ async function loadCandidates(ref) {
       name: "select_parts",
       arguments: plain({ tas: state.tas, options: { topology: state.topology } }),
     });
+    // select_parts answers as a BOM: one line per position, its candidates on the line.
     const sc = res.structuredContent || {};
-    const hit = (sc.components || []).find((c) => c.ref === ref);
-    state.candidates = hit?.selection?.candidates ?? [];
+    const line = (sc.lines || []).find((l) => l.ref === ref);
+    state.candidates = line?.candidates ?? [];
     if (!state.candidates.length) {
-      state.error = hit?.error
-        ? `No part fits ${ref}: ${hit.error}`
-        : `No candidates returned for ${ref}.`;
+      // "Nobody looked" and "nothing fits" are different answers and must not read alike.
+      state.error = line?.status === "unsourced"
+        ? `${ref} was not sourced: ${line.notes ?? "deferred until the design settles"}`
+        : line?.notes
+          ? `No part fits ${ref}: ${line.notes}`
+          : `No candidates returned for ${ref}.`;
     }
   } catch (e) {
     // A missing catalogue is the common case here and says so plainly, rather
@@ -151,9 +160,12 @@ async function bindCandidate(candidate) {
     const res = await app.callServerTool({
       name: "bind_part",
       arguments: plain({ tas: state.tas, ref: state.selected,
-                         envelope: candidate.envelope }),
+                         // `_envelope` is the datasheet blob the engine attaches to a
+                         // candidate. Underscored because it is bookkeeping a consumer hands
+                         // BACK verbatim, never something it reads or renders.
+                         envelope: candidate._envelope }),
     });
-    const bound = res.structuredContent?.tas;
+    const bound = res.structuredContent?.document;
     if (!bound) throw new Error("bind_part returned no TAS");
     state.bound[state.selected] = candidate.mpn;
     const ref = state.selected;
@@ -252,7 +264,10 @@ createApp(Root).mount("#app");
 // ui/initialize handshake, and a late listener misses it.
 app.ontoolresult = async (result) => {
   const sc = result.structuredContent;
-  if (!sc || !sc.tas) {
+  // A `document` result carries the TAS under `document`; the redraw after a bind passes
+  // {topology, tas} straight in. Accept both, and refuse anything else by name rather than
+  // rendering an empty frame over it.
+  if (!sc || !(sc.document || sc.tas)) {
     state.error = "No design in the tool result.";
     return;
   }
