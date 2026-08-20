@@ -7,8 +7,15 @@
 // one capacitance while the transient ran another — with every gate green. A reader takes the printed
 // number to the bench; it has to be the number the design means.
 //
-// Restricted to R/L/C, which are exactly the parts whose printed value IS the simulated parameter (a
-// MOSFET's line carries a model name, not a quantity). The deck instance for ref X is "<letter>X".
+// Covers R/L/C (deck instance "<letter>X") AND the magnetics, whose deck instances are per-winding
+// ("L<ref>_pri", "L<ref>_sec1", ... coupled by K lines): the printed inductance must be the primary's
+// simulated henries, and every printed turns ratio must be sqrt(Lpri/Lsec) of a simulated secondary —
+// the drawing de-duplicates repeated identical ratios (bom.js headlineValue), so the comparison is
+// set-to-set, not list-to-list. Until this half existed, all 95 magnetic labels (every L and T on the
+// 39 schematics) fell through the instance-name match and were silently skipped — a "0 problems" that
+// had compared none of them. A MOSFET's "RDS(on) <= x" stays out of scope on purpose: it is a device
+// RATING, while the deck idealises the switch (.model SW Ron=0.01), so there is no simulated Rds to
+// hold the label to.
 import init from '../../build-wasm-ng/kirchhoff.js'
 import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
 import { renderForAudit, hasCiasSchematic } from '../src/ciasSchematic.js'
@@ -43,21 +50,55 @@ export function valueFidelity(svg, deck) {
   const problems = []
   let compared = 0
   const deckVal = new Map()
+  const coils = new Map()          // magnetic ref -> Map(winding -> simulated henries)
   for (const line of deck.split('\n')) {
     const tk = line.trim().split(/\s+/)
     if (!/^[RLC][A-Za-z0-9_]*$/.test(tk[0] ?? '') || tk.length < 4) continue
     const n = spiceNumber(tk[3])
-    if (n !== null) deckVal.set(tk[0], { v: n, type: tk[0][0] })
+    if (n === null) continue
+    const w = /^L(.+)_(pri|sec\d+)$/.exec(tk[0])
+    if (w) (coils.get(w[1]) ?? coils.set(w[1], new Map()).get(w[1])).set(w[2], n)
+    else deckVal.set(tk[0], { v: n, type: tk[0][0] })
   }
   for (const g of svg.split('<g class="sch-hot').slice(1)) {
     const ref = g.match(/data-ref="([^"]+)"/)?.[1]
     if (!ref) continue
+    const texts0 = [...g.matchAll(/<text[^>]*>([^<]*)<\/text>/g)].map((m) => m[1])
+    const mag = coils.get(ref)
+    if (mag) {
+      const pri = mag.get('pri')
+      const printedL = texts0.flatMap(quantities).find((q) => q.unit === 'H')
+      if (pri === undefined) { problems.push(`${ref}: deck windings [${[...mag.keys()]}] carry no primary`); continue }
+      if (!printedL) { problems.push(`${ref}: the deck simulates L${ref}_pri=${pri} H but the drawing prints no H value (${texts0.join(' | ')})`); continue }
+      compared++
+      const relL = Math.abs(printedL.value - pri) / pri
+      if (relL > TOL) problems.push(`${ref}: the drawing says ${printedL.text} but the deck simulates L${ref}_pri=${pri} H (${(relL * 100).toFixed(0)}% apart)`)
+      // the ratios, when the label prints any: each drawn n must be a simulated sqrt(Lpri/Lsec) and
+      // every DISTINCT simulated ratio must be drawn (the label de-duplicates repeats, so sets match)
+      const nTxt = texts0.join(' ').match(/n=([\d.]+(?:\s*\/\s*[\d.]+)*)/)
+      const secs = [...mag].filter(([k]) => k !== 'pri').map(([, L]) => Math.sqrt(pri / L))
+      if (nTxt) {
+        const drawn = nTxt[1].split('/').map((x) => Number(x.trim()))
+        const simSet = secs.filter((r, i) => secs.findIndex((q) => Math.abs(q - r) / r <= TOL) === i)
+        for (const d of drawn) {
+          compared++
+          if (!secs.some((r) => Math.abs(d - r) / r <= TOL))
+            problems.push(`${ref}: the drawing says n=${d} but no simulated winding pair has that ratio (deck: ${secs.map((r) => r.toFixed(3)).join(', ')})`)
+        }
+        for (const r of simSet)
+          if (!drawn.some((d) => Math.abs(d - r) / r <= TOL))
+            problems.push(`${ref}: the deck simulates a winding ratio ${r.toFixed(3)} the label n=${nTxt[1]} does not print`)
+      } else if (secs.length) {
+        problems.push(`${ref}: the deck couples ${secs.length} secondary winding(s) but the drawing prints no turns ratio`)
+      }
+      continue
+    }
     let inst = null
     for (const [name, d] of deckVal)
       if (name === ref || name.slice(1) === ref || name === d.type + ref) { inst = { name, ...d }; break }
     if (!inst) continue
     const want = UNIT_OF[inst.type]
-    const texts = [...g.matchAll(/<text[^>]*>([^<]*)<\/text>/g)].map((m) => m[1])
+    const texts = texts0
     const printed = texts.flatMap(quantities).find((q) => q.unit === want)
     if (!printed) {
       problems.push(`${ref}: the deck simulates ${inst.name}=${inst.v} ${want} but the drawing prints no ${want} value (${texts.join(' | ')})`)
