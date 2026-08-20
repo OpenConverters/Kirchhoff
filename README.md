@@ -41,7 +41,8 @@ git clone --recurse-submodules git@github.com:OpenConverters/Kirchhoff.git
 cd Kirchhoff
 cmake -S . -B build -G Ninja
 cmake --build build -j4
-ctest --test-dir build            # 21-topology MKF-equivalence gate + schema checks
+scripts/run_catch2_tests.sh build   # every Catch2 binary: MKF-equivalence gate, schema checks, …
+                                  # (invokes the binaries DIRECTLY, never ctest — see ABT #670)
 
 # a single end-to-end demo:
 cmake --build build -j4 --target flyback_demo && ./build/flyback_demo
