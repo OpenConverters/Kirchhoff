@@ -122,7 +122,7 @@ MAS::OperatingPoint analytical_forward(double inputVoltage,
                                        double diodeVoltageDrop = 0.0);
 
 // Two-switch forward (CCM + DCM). `turnsRatios` is [sec0, sec1, …] (no demag winding). Pushes
-// "First primary" + one Secondary i per output. Ported from MKF TwoSwitchForward.cpp:41. Throws
+// "Primary" + one Secondary i per output. Ported from MKF TwoSwitchForward.cpp:41. Throws
 // if t_on > T/2.
 MAS::OperatingPoint analytical_two_switch_forward(double inputVoltage,
                                                   const std::vector<double>& outputVoltages,
@@ -284,7 +284,7 @@ MAS::OperatingPoint analytical_isolated_buck_boost(double inputVoltage, double p
 // Vclamp = D/(1−D)·Vin → volt-second balanced). `inductance` is the magnetizing inductance,
 // `mainOutputInductance` the main output-filter L (DCM boundary), `dutyCycle` the forward-switch
 // max/operating duty (MKF get_maximum_duty_cycle, default 0.45) that shapes the secondary waveforms.
-// Pushes "First primary" + one Secondary i per output. Ported from MKF ActiveClampForward.cpp:41. Throws
+// Pushes "Primary" + one Secondary i per output. Ported from MKF ActiveClampForward.cpp:41. Throws
 // if t1 > T/2 or the clamp voltage is undefined (duty == 1).
 MAS::OperatingPoint analytical_active_clamp_forward(double inputVoltage,
                                                     const std::vector<double>& outputVoltages,

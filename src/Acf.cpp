@@ -144,7 +144,7 @@ json build_acf_tas(const AcfDesign& d) {
     }
 
     // --- MAIN magnetic (the transformer T1) sourced from the SINGLE FHA solver ---
-    // analytical_active_clamp_forward returns "First primary" + Secondary 0..N-1 — matching T1's
+    // analytical_active_clamp_forward returns "Primary" + Secondary 0..N-1 — matching T1's
     // turnsRatios = [n0,n1,…]. The output-filter inductors Lout_i are SEPARATE magnetics (inline excitation);
     // the magnetizing reset current (clamp-switch rating) also stays inline. Worst-case corner (Vin_min)
     // drives the main-switch rating; the declared nominal OP is what the TAS embeds.

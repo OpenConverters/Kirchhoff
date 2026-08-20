@@ -651,7 +651,7 @@ MAS::OperatingPoint analytical_two_switch_forward(double inputVoltage,
         voltageWaveform.set_time(std::vector<double>{0, 0, t1, t1, t1 + td, t1 + td, period});
         voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
         operatingPoint.get_mutable_excitations_per_winding().push_back(
-            WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "First primary"));
+            WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Primary"));
     }
     double actualDutyCycle = t1 / period;
     for (size_t i = 0; i < outputVoltages.size(); ++i) {
@@ -1369,7 +1369,7 @@ MAS::OperatingPoint analytical_active_clamp_forward(double inputVoltage,
     const double maxPriIT2 = magnetizationCurrent / 2;
 
     MAS::OperatingPoint operatingPoint;
-    // Primary ("First primary") — CUSTOM: ramp up during t1 (forward), magnetizing ramp down during reset.
+    // Primary — CUSTOM: ramp up during t1 (forward), magnetizing ramp down during reset.
     {
         MAS::Waveform currentWaveform, voltageWaveform;
         currentWaveform.set_ancillary_label(Lbl::CUSTOM);
@@ -1385,7 +1385,7 @@ MAS::OperatingPoint analytical_active_clamp_forward(double inputVoltage,
             voltageWaveform.set_time(std::vector<double>{0, t1, t1, t1 + t2, t1 + t2, period, period});
         }
         operatingPoint.get_mutable_excitations_per_winding().push_back(
-            WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "First primary"));
+            WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Primary"));
     }
     // Secondaries
     for (size_t i = 0; i < outputVoltages.size(); ++i) {

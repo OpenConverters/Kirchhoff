@@ -129,7 +129,7 @@ json build_two_switch_forward_tas(const TwoSwitchForwardDesign& d) {
     }
 
     // --- MAIN magnetic (the transformer T1) sourced from the SINGLE FHA solver ---
-    // analytical_two_switch_forward returns "First primary" + Secondary 0..N-1 — matching T1's
+    // analytical_two_switch_forward returns "Primary" + Secondary 0..N-1 — matching T1's
     // turnsRatios = [n0,n1,…]. The output-filter inductors Lout_i are SEPARATE magnetics (inline excitation).
     // The magnetizing reset peak (clamp-diode rating) stays inline — a clean Vin*D*T/Lm.
     //

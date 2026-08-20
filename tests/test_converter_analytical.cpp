@@ -161,7 +161,7 @@ TEST_CASE("analytical_two_switch_forward CCM: 2 windings, secondary peak", "[ana
     const double vin = 48, vout = 5, iout = 10, fsw = 100000, ripple = 0.3;
     MAS::OperatingPoint op = analytical_two_switch_forward(vin, {vout}, {iout}, {4}, fsw, 1e-3, 10e-6, ripple);
 
-    REQUIRE(op.get_excitations_per_winding().size() == 2);   // First primary + Secondary 0
+    REQUIRE(op.get_excitations_per_winding().size() == 2);   // Primary + Secondary 0
     CHECK(*processed_current(op, 1).get_peak() == Catch::Approx(iout * (1 + ripple / 2)).margin(0.3));   // 11.5 A
     CHECK(voltage_average(op, 0) == Catch::Approx(0.0).margin(0.6));
 }
@@ -376,7 +376,7 @@ TEST_CASE("analytical_active_clamp_forward CCM: 2 windings, secondary peak, clam
     const double vin = 48, vout = 5, iout = 10, fsw = 100000, ripple = 0.3;
     MAS::OperatingPoint op = analytical_active_clamp_forward(vin, {vout}, {iout}, {4}, fsw, 1e-3, 10e-6, ripple);
 
-    REQUIRE(op.get_excitations_per_winding().size() == 2);   // First primary + Secondary 0
+    REQUIRE(op.get_excitations_per_winding().size() == 2);   // Primary + Secondary 0
     // Secondary winding current peak = max output-inductor current = Iout + ripple*Iout/2.
     CHECK(*processed_current(op, 1).get_peak() == Catch::Approx(iout * (1 + ripple / 2)).margin(0.3));   // 11.5 A
     // Primary volt-second balance: +Vin during t1, -Vclamp during t2, Vclamp = D/(1-D)*Vin -> zero mean.
