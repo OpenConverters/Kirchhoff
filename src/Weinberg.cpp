@@ -257,8 +257,12 @@ json build_weinberg_tas(const WeinbergDesign& d) {
         conn("snDn", {pin("CsnDn", "2"), pin("RsnDn", "1")})};
     // out_node / gnd endpoints are accumulated by the branches, then emitted once at the end.
     std::vector<json> outEps{pin("Cout", "1"), prt("vout"), pin("RsnDp", "2"), pin("RsnDn", "2")};
-    std::vector<json> gndEps{pin("Cout", "2"), prt("gnd"),
-                             pin("T1", "secondary2_start"), pin("T1", "secondary3_end")};
+    // Primary return and secondary centre tap are DIFFERENT nodes (ABT #778). One gnd_net put both
+    // sides of T1 together, so the barrier the drawing shows did not exist in the netlist. Only the
+    // primary drive branches below add to gndEps; the output rail's return stays here.
+    std::vector<json> gndEps{prt("gnd")};
+    std::vector<json> sgndEps{pin("Cout", "2"), prt("sgnd"),
+                              pin("T1", "secondary2_start"), pin("T1", "secondary3_end")};
     std::vector<std::string> gatePorts;
 
     // ── secondary CT-FW rectifier ──
@@ -342,9 +346,10 @@ json build_weinberg_tas(const WeinbergDesign& d) {
 
     conns.push_back(conn("out_node", outEps));
     conns.push_back(conn("gnd_net", gndEps));
+    conns.push_back(conn("sgnd_net", sgndEps));
 
     json cell; cell["name"] = "weinberg-cell";
-    std::vector<json> portList{port("vin"), port("gnd"), port("vout")};
+    std::vector<json> portList{port("vin"), port("gnd"), port("sgnd"), port("vout")};
     for (const auto& g : gatePorts) portList.push_back(port(g.c_str()));
     cell["ports"] = portList;
     cell["components"] = comps;
@@ -368,6 +373,7 @@ json build_weinberg_tas(const WeinbergDesign& d) {
     tas["topology"]["interStageConnections"] = json::array({
         isc("Vin", "externalPort", "input", {sp("weinbergCell", "vin")}),
         isc("GND", "externalPort", "input", {sp("weinbergCell", "gnd")}),
+        isc("SGND", "externalPort", "input", {sp("weinbergCell", "sgnd")}),
         isc("Vout", "externalPort", "output", {sp("weinbergCell", "vout")})});
 
     json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);

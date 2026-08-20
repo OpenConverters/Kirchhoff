@@ -220,7 +220,7 @@ json build_clllc_tas(const ClllcDesign& d) {
     // A small in-line sense resistor in the secondary tank exposes the tank-current sign (senseP/senseM)
     // so the control stage can drive the SR diagonals current-aware.
     json pcell; pcell["name"] = "clllc-power";
-    pcell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("g1"), port("g2"),
+    pcell["ports"] = json::array({port("vin"), port("gnd"), port("sgnd"), port("vout"), port("g1"), port("g2"),
                                   port("senseP"), port("senseM")});
     pcell["components"] = json::array({
         // primary full bridge + body diodes (DS1..DS4 = Q1..Q4 body diodes -> bare seed, deferred)
@@ -257,9 +257,12 @@ json build_clllc_tas(const ClllcDesign& d) {
         // SR full bridge (diode-emulating SR via the control stage). Body diodes rectify / enable start.
         conn("vout_net", {pin("QE","drain"), pin("QG","drain"), pin("DSE","cathode"), pin("DSG","cathode"),
                           pin("Cout","1"), prt("vout")}),
+        // Primary and secondary returns are DIFFERENT nodes (ABT #778): one gnd_net put both bridges'
+        // low-side returns on a single net, so every winding of T1 sat on one galvanic island.
         conn("gnd_net",  {pin("Q2","source"), pin("Q4","source"), pin("DS2","anode"), pin("DS4","anode"),
-                          pin("QF","source"), pin("QH","source"), pin("DSF","anode"), pin("DSH","anode"),
-                          pin("Cout","2"), prt("gnd")}),
+                          prt("gnd")}),
+        conn("sgnd_net", {pin("QF","source"), pin("QH","source"), pin("DSF","anode"), pin("DSH","anode"),
+                          pin("Cout","2"), prt("sgnd")}),
         // Gates: both bridges run off the SAME two stimulus signals. Primary diagonals (Q1,Q4) on g1 /
         // (Q2,Q3) on g2 give vab=±Vin; the secondary SR diagonals are driven SYNCHRONOUS with them —
         // diagonal A (QE,QH) on g1, diagonal B (QF,QG) on g2 — so each SR FET conducts in lock-step with
@@ -319,10 +322,12 @@ json build_clllc_tas(const ClllcDesign& d) {
         ? json::array({
             isc("Vout", "externalPort", "input",  {sp("clllcPower", "vout")}),   // LV rail sources
             isc("GND",  "externalPort", "input",  {sp("clllcPower", "gnd")}),
+            isc("SGND", "externalPort", "input",  {sp("clllcPower", "sgnd")}),
             isc("Vin",  "externalPort", "output", {sp("clllcPower", "vin")})})    // HV rail delivered
         : json::array({
             isc("Vin",  "externalPort", "input",  {sp("clllcPower", "vin")}),
             isc("GND",  "externalPort", "input",  {sp("clllcPower", "gnd")}),
+            isc("SGND", "externalPort", "input",  {sp("clllcPower", "sgnd")}),
             isc("Vout", "externalPort", "output", {sp("clllcPower", "vout")})});
     // tank-current sense: power -> control (the SR controller IC is sourced for the BOM and reads the sense
     // resistor; the SR power gates are driven in lock-step off g1/g2 in the power cell, so no driveA/driveB

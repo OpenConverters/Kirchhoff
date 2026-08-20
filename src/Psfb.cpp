@@ -298,7 +298,7 @@ json build_psfb_tas(const PsfbDesign& d) {
         dr["role"] = "bleed"; return c; };
 
     json cell; cell["name"] = "psfb-cell";
-    cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"),
+    cell["ports"] = json::array({port("vin"), port("gnd"), port("sgnd"), port("vout"),
                                  port("gateA"), port("gateB"), port("gateC"), port("gateD")});
 
     // Primary full bridge + Lr + transformer primary — identical for every rectifier variant.
@@ -323,6 +323,10 @@ json build_psfb_tas(const PsfbDesign& d) {
     std::vector<json> gndEps{pin("QB", "source"), pin("QD", "source"),
                              pin("DB", "anode"), pin("DD", "anode"),
                              pin("CsnA", "2"), pin("CsnC", "2")};
+    // Primary return and secondary return are DIFFERENT nodes (ABT #778). Every rectifier branch
+    // below used to append its secondary endpoints to gnd_net, which put both sides of T1 on one
+    // net — so the isolation the drawing shows (and rule D enforces) was absent from the netlist.
+    std::vector<json> sgndEps;
 
     switch (d.rectifierType) {
     case RectifierType::FullBridge: {
@@ -337,10 +341,12 @@ json build_psfb_tas(const PsfbDesign& d) {
         conns.push_back(conn("out_rect", {pin("Dr1", "cathode"), pin("Dr2", "cathode"),
                                           pin("Lout", "primary_start")}));
         conns.push_back(conn("vout_net", {pin("Lout", "primary_end"), prt("vout")}));
-        gndEps.insert(gndEps.end(), {pin("Dr3", "anode"), pin("Dr4", "anode"),
+        sgndEps.insert(sgndEps.end(), {pin("Dr3", "anode"), pin("Dr4", "anode"),
                                      pin("CsnSA", "2"), pin("CsnSB", "2"),
-                                     pin("Rbsa", "2"), pin("Rbsb", "2"), prt("gnd")});
+                                     pin("Rbsa", "2"), pin("Rbsb", "2"), prt("sgnd")});
+        gndEps.push_back(prt("gnd"));
         conns.push_back(conn("gnd_net", gndEps));
+        conns.push_back(conn("sgnd_net", sgndEps));
         break; }
     case RectifierType::CenterTapped: {
         // Two REAL secondary half-windings -> 2 diodes -> output inductor; secondary CT = gnd. (A proper
@@ -353,9 +359,11 @@ json build_psfb_tas(const PsfbDesign& d) {
         conns.push_back(conn("out_rect", {pin("Dr1", "cathode"), pin("Dr2", "cathode"),
                                           pin("Lout", "primary_start")}));
         conns.push_back(conn("vout_net", {pin("Lout", "primary_end"), prt("vout")}));
-        gndEps.insert(gndEps.end(), {pin("T1", "secondary1_end"), pin("T1", "secondary2_start"),
-                                     pin("CsnSA", "2"), pin("CsnSB", "2"), prt("gnd")});
+        sgndEps.insert(sgndEps.end(), {pin("T1", "secondary1_end"), pin("T1", "secondary2_start"),
+                                     pin("CsnSA", "2"), pin("CsnSB", "2"), prt("sgnd")});
+        gndEps.push_back(prt("gnd"));
         conns.push_back(conn("gnd_net", gndEps));
+        conns.push_back(conn("sgnd_net", sgndEps));
         break; }
     case RectifierType::CurrentDoubler: {
         // ONE secondary winding (its two ends = node_a/node_b) -> 2 catch diodes (cathode at each end,
@@ -370,9 +378,11 @@ json build_psfb_tas(const PsfbDesign& d) {
                                         pin("Lo2", "primary_start"), pin("CsnSB", "1")}));
         conns.push_back(conn("lo2_out", {pin("Lo2", "primary_end"), pin("Rlb", "1")}));
         conns.push_back(conn("vout_net", {pin("Lout", "primary_end"), pin("Rlb", "2"), prt("vout")}));
-        gndEps.insert(gndEps.end(), {pin("Dr1", "anode"), pin("Dr2", "anode"),
-                                     pin("CsnSA", "2"), pin("CsnSB", "2"), prt("gnd")});
+        sgndEps.insert(sgndEps.end(), {pin("Dr1", "anode"), pin("Dr2", "anode"),
+                                     pin("CsnSA", "2"), pin("CsnSB", "2"), prt("sgnd")});
+        gndEps.push_back(prt("gnd"));
         conns.push_back(conn("gnd_net", gndEps));
+        conns.push_back(conn("sgnd_net", sgndEps));
         break; }
     case RectifierType::VoltageDoubler:
         throw std::runtime_error("Kirchhoff PSFB: voltageDoubler rectifier not supported");
@@ -409,7 +419,8 @@ json build_psfb_tas(const PsfbDesign& d) {
         pstage("filter", "outputFilter", filt, bind("in", "pulsatingDc"), bind("in", "dcOutput"))});
     tas["topology"]["interStageConnections"] = json::array({
         isc("Vin", "externalPort", "input", {sp("psfbCell", "vin")}),
-        isc("GND", "externalPort", "input", {sp("psfbCell", "gnd"), sp("filter", "rtn")}),
+        isc("GND", "externalPort", "input", {sp("psfbCell", "gnd")}),
+        isc("SGND", "externalPort", "input", {sp("psfbCell", "sgnd"), sp("filter", "rtn")}),
         isc("Vout", "externalPort", "output", {sp("psfbCell", "vout"), sp("filter", "in")})});
 
     json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);

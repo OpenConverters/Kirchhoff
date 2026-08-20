@@ -206,12 +206,15 @@ json build_acf_tas(const AcfDesign& d) {
     // (Sc: vin->clamp_node, Cc: clamp_node->sw), and per-output synchronous forward output (SRfwd_i + SRfw_i
     // + Lout_i). Main rail keeps its Cout in the output-filter stage; extra rails carry Cout_i in the cell.
     std::vector<json> comps{comp("Q1", mainSw), comp("Sc", clampSw), comp("Cc", cc), comp("T1", xfmr)};
-    std::vector<json> cports{port("vin"), port("gnd"), port("vout"), port("gate_main"), port("gate_clamp")};
+    std::vector<json> cports{port("vin"), port("gnd"), port("sgnd"), port("vout"), port("gate_main"), port("gate_clamp")};
     std::vector<json> conns;
     conns.push_back(conn("vin_net",  {pin("Q1", "drain"), pin("Sc", "drain"), prt("vin")}));
     conns.push_back(conn("sw_node",  {pin("Q1", "source"), pin("T1", "primary_start"), pin("Cc", "2"), pin("Csn", "1")}));
     conns.push_back(conn("clamp_node", {pin("Sc", "source"), pin("Cc", "1"), pin("Csn2", "1")}));
     std::vector<json> gndEps{pin("T1", "primary_end")};
+    // The secondary return is its OWN node (ABT #778): one gnd_net put both sides of T1 together, so
+    // the drawn isolation barrier was a fiction. The clamp snubbers stay primary-side.
+    std::vector<json> sgndEps;
     std::vector<json> gateMainEps{pin("Q1", "gate")}, gateClampEps{pin("Sc", "gate")};
 
     for (size_t i = 0; i < nOut; ++i) {
@@ -263,11 +266,11 @@ json build_acf_tas(const AcfDesign& d) {
             cports.push_back(port(voutP.c_str()));
             conns.push_back(conn((voutP + "_net").c_str(), {pin(loutN.c_str(), "primary_end"),
                                                             pin(coutN.c_str(), "1"), prt(voutP.c_str())}));
-            gndEps.push_back(pin(coutN.c_str(), "2"));
+            sgndEps.push_back(pin(coutN.c_str(), "2"));
         }
-        gndEps.push_back(pin("T1", swE.c_str()));
-        gndEps.push_back(pin(srfwN.c_str(), "source"));
-        gndEps.push_back(pin(dsfwN.c_str(), "anode"));
+        sgndEps.push_back(pin("T1", swE.c_str()));
+        sgndEps.push_back(pin(srfwN.c_str(), "source"));
+        sgndEps.push_back(pin(dsfwN.c_str(), "anode"));
         gateMainEps.push_back(pin(srfwdN.c_str(), "gate"));
         gateClampEps.push_back(pin(srfwN.c_str(), "gate"));
     }
@@ -279,6 +282,8 @@ json build_acf_tas(const AcfDesign& d) {
     gateMainEps.push_back(prt("gate_main"));
     gateClampEps.push_back(prt("gate_clamp"));
     conns.push_back(conn("gnd_net", gndEps));
+    sgndEps.push_back(prt("sgnd"));
+    conns.push_back(conn("sgnd_net", sgndEps));
     conns.push_back(conn("gate_main_net", gateMainEps));
     conns.push_back(conn("gate_clamp_net", gateClampEps));
 
@@ -317,7 +322,8 @@ json build_acf_tas(const AcfDesign& d) {
         pstage("filter", "outputFilter", filt, bind("in", "pulsatingDc"), bind("in", "dcOutput"))});
     std::vector<json> iscs{
         isc("Vin", "externalPort", "input", {sp("acfCell", "vin")}),
-        isc("GND", "externalPort", "input", {sp("acfCell", "gnd"), sp("filter", "rtn")}),
+        isc("GND", "externalPort", "input", {sp("acfCell", "gnd")}),
+        isc("SGND", "externalPort", "input", {sp("acfCell", "sgnd"), sp("filter", "rtn")}),
         isc("Vout", "externalPort", "output", {sp("acfCell", "vout"), sp("filter", "in")})};
     for (size_t i = 1; i < nOut; ++i) {
         const std::string g = "Vout" + std::to_string(i + 1), pt = "vout" + std::to_string(i + 1);

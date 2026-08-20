@@ -17,7 +17,7 @@
 // under /circuitjs/ (mirrored, no external hosts) so the bench has no runtime dependency on
 // falstad.com; the canvas is themed to the KH phosphor palette via kh-theme.css + the color params.
 
-import { flattenNets, ciasComponents, resolveDim } from './cias.js'
+import { flattenNets, ciasComponents, resolveDim, referenceNets } from './cias.js'
 
 const VISUAL_HZ = 500 // what the design's fsw is scaled down to (watchable scope + current dots)
 
@@ -1675,6 +1675,11 @@ export function falstadExport(topoId, tas, scopeSet = 'overview') {
     if (e.wire) par.set(find(String(e.posts[0])), find(String(e.posts[1]))) // only wires (and shared coords) join nodes
   }
   const pinNet = flattenNets(tas)
+  // Both declared returns collapse to the simulator's single ground (see referenceNets in cias.js):
+  // CircuitJS1 has one ground symbol, so a layout drawing primary earth and the isolated secondary
+  // return on one rail is drawing the reference the simulation needs, not a short between two nodes.
+  const REF = referenceNets(tas)
+  const canon = (n) => (REF.has(n) ? '@simulator-ground' : n)
   const netRoot = new Map() // CIAS net id -> falstad node root
   const rootNet = new Map() // falstad node root -> CIAS net id (short check)
   for (const [key, coord] of pinCoord) {
@@ -1682,8 +1687,8 @@ export function falstadExport(topoId, tas, scopeSet = 'overview') {
     // SVG checker). A CIAS gate net is often shared across a high-side + low-side switch that physically
     // need SEPARATE drives (floating vs ground); enforcing it would false-flag a "split net".
     if (key.endsWith('|gate')) continue
-    const net = pinNet.get(key)
-    if (net === undefined) throw new Error(`CIAS has no net for pin ${key}`)
+    const net = canon(pinNet.get(key))
+    if (pinNet.get(key) === undefined) throw new Error(`CIAS has no net for pin ${key}`)
     const root = find(coord)
     if (netRoot.has(net) && netRoot.get(net) !== root) throw new Error(`net '${net}' is split in the drawing at ${key}`)
     if (rootNet.has(root) && rootNet.get(root) !== net) throw new Error(`drawing shorts nets '${rootNet.get(root)}' and '${net}' at ${key}`)
@@ -1691,7 +1696,7 @@ export function falstadExport(topoId, tas, scopeSet = 'overview') {
   }
   for (const [coord, key] of attachChecks) {
     if (key.endsWith('|gate')) continue // gate drives aren't connectivity-verified (control signal)
-    if (find(coord) !== netRoot.get(pinNet.get(key))) throw new Error(`synthesized element at (${coord}) missed the net of ${key}`)
+    if (find(coord) !== netRoot.get(canon(pinNet.get(key)))) throw new Error(`synthesized element at (${coord}) missed the net of ${key}`)
   }
 
   // ── drawing hygiene: no post left hanging, no element drawn over a wire ───────────────────────

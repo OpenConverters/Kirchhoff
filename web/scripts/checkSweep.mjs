@@ -9,6 +9,9 @@
 //   NETS    checkSchematic rules A-F (netlist consistency, isolation, dangling ends, 2-terminal parts)
 //   DRAW    auditSchematics    (phantom parts, overlaps, wires through bodies, junction dots, bounds)
 //   LABEL   auditSchematicLabels (MEASURED text boxes vs wires / parts / each other)
+//   VALUE   checkSchematicValues  (no drawn quantity may be zero, negative or non-finite)
+//   GLYPH   checkSchematicGlyphs  (every character printed has a glyph in a face the app ships)
+//   DECK    checkValueFidelity    (the number printed beside a part is the number the deck simulates)
 //
 // A design that cannot be solved at a point (the engine throws) is skipped and counted — that is a
 // legitimate answer from the engine, not a drawing defect.
@@ -21,6 +24,14 @@ import { renderForAudit, hasCiasSchematic } from '../src/ciasSchematic.js'
 import { checkSchematic } from '../src/schematicCheck.js'
 import { auditDrawing } from './auditSchematics.mjs'
 import { auditLabels, measure } from './auditSchematicLabels.mjs'
+// The three rules that are pure functions of the SOLVED VALUES, and so belong here more than anywhere:
+// the header above says clean-at-the-preset says nothing at 1.2 V / 40 A, and a value's magnitude is
+// exactly what changes across these points — which SI prefix gets printed (and whether the app ships a
+// glyph for it), whether any quantity collapses to zero, and whether the number beside a part is still
+// the number the deck simulates.
+import { valueProblems } from './checkSchematicValues.mjs'
+import { uncoveredChars } from './checkSchematicGlyphs.mjs'
+import { valueFidelity } from './checkValueFidelity.mjs'
 import { chromium } from '@playwright/test'
 
 // Points are multiplicative on the card's own preset so each stays in the topology's own domain:
@@ -50,7 +61,7 @@ const withPage = async (fn) => {
 const only = process.argv[2]
 const onlyPoint = process.env.KH_POINT   // run a single design point (line-frequency topologies are slow)
 
-let combos = 0, skipped = 0, flagged = 0, total = 0
+let combos = 0, skipped = 0, flagged = 0, total = 0, compared = 0
 const skips = []   // every unsolvable point WITH the engine's reason — see the note at the end
 for (const t of TOPOLOGIES) {
   if (!hasCiasSchematic(t.id)) continue
@@ -78,11 +89,19 @@ for (const t of TOPOLOGIES) {
       const tas = JSON.parse(out).tas
       const { svg, pins } = renderForAudit(t.id, tas, opt ?? 'standard')
       const tasRefs = new Set((tas?.topology?.stages ?? []).flatMap((st) => (st.circuit?.components ?? []).map((c) => c.name)))
+      const deck = M.generate_ngspice_circuit(JSON.stringify(tas), JSON.stringify({ origin: 'REQUIREMENTS' }))
+      const fid = deck.startsWith('Exception')
+        ? { problems: [`deck generation failed: ${deck.slice(0, 100)}`], compared: 0 }
+        : valueFidelity(svg, deck)
       const problems = [
         ...checkSchematic({ svg, pins, tas }).map((x) => 'NETS  ' + x),
         ...auditDrawing(svg, tasRefs, pins).map((x) => 'DRAW  ' + x),
         ...auditLabels(await withPage((pg) => measure(pg, svg)), pins.filter((q) => q.pin === 'gate')).map((x) => 'LABEL ' + x),
+        ...valueProblems(svg).problems.map((x) => 'VALUE ' + x),
+        ...uncoveredChars(svg).map((c) => `GLYPH U+${c.codepoint.toString(16).toUpperCase().padStart(4, '0')} '${c.char}' is in no shipped face — "${c.text}"`),
+        ...fid.problems.map((x) => 'DECK  ' + x),
       ]
+      compared += fid.compared
       combos++
       total += problems.length
       if (problems.length) { flagged++; console.log(`\n✗ ${name}`); for (const p of problems) console.log('    ' + p) }
@@ -98,4 +117,7 @@ if (skips.length) {
   for (const s of skips) console.log('   ' + s)
 }
 console.log(`\n${combos} design points checked (${skipped} not solvable, skipped) — ${total} problem(s) in ${flagged}`)
+// Say what the value rules actually covered. "0 problems" over 0 comparisons is the failure this suite
+// keeps rediscovering, and it reads identically to real coverage unless the count is printed.
+console.log(`${compared} printed R/L/C value(s) compared against the deck across those points`)
 process.exit(flagged ? 1 : 0)

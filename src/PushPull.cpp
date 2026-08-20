@@ -245,13 +245,16 @@ json build_push_pull_tas(const PushPullDesign& d) {
     // Base components (primary side, shared): transformer + two low-side switches; per-rail rectifier +
     // output inductor (+ per-rail snubbers) are appended in the loop; primary snubbers + leakage damper last.
     std::vector<json> comps{comp("T1", xfmr), comp("Q1", mosfetReq()), comp("Q2", mosfetReq())};
-    std::vector<json> cports{port("vin"), port("gnd"), port("vout"), port("gate1"), port("gate2")};
+    std::vector<json> cports{port("vin"), port("gnd"), port("sgnd"), port("vout"), port("gate1"), port("gate2")};
     std::vector<json> conns;
     conns.push_back(conn("vin_net", {pin("T1", "primary_end"), pin("T1", "secondary1_start"), prt("vin")}));
     conns.push_back(conn("pri_top", {pin("T1", "primary_start"), pin("Q1", "drain"), pin("Csn1", "1"), pin("Rdmp", "1")}));
     conns.push_back(conn("pri_bot", {pin("T1", "secondary1_end"), pin("Q2", "drain"), pin("Csn2", "1"), pin("Cdmp", "2")}));
     conns.push_back(conn("dmp_mid", {pin("Rdmp", "2"), pin("Cdmp", "1")}));
     std::vector<json> gndEps{pin("Q1", "source"), pin("Q2", "source")};
+    // The secondary centre tap is its OWN node (ABT #778). It used to join gnd_net with the primary
+    // switch sources, putting both sides of T1 on one net and making the drawn barrier a fiction.
+    std::vector<json> sgndEps;
 
     for (size_t i = 0; i < nOut; ++i) {
         const auto& leg = d.outputs[i];
@@ -280,21 +283,23 @@ json build_push_pull_tas(const PushPullDesign& d) {
             comps.push_back(comp(coutN.c_str(), capi));
             cports.push_back(port(voutP.c_str()));
             conns.push_back(conn((voutP + "_net").c_str(), {pin(loutN.c_str(), "primary_end"), pin(coutN.c_str(), "1"), prt(voutP.c_str())}));
-            gndEps.push_back(pin(coutN.c_str(), "2"));
+            sgndEps.push_back(pin(coutN.c_str(), "2"));
         }
         // rail center tap (= gnd) + this rail's secondary snubber returns
-        gndEps.push_back(pin("T1", (half1 + "_end").c_str()));
-        gndEps.push_back(pin("T1", (half2 + "_start").c_str()));
+        sgndEps.push_back(pin("T1", (half1 + "_end").c_str()));
+        sgndEps.push_back(pin("T1", (half2 + "_start").c_str()));
         comps.push_back(comp(csnT.c_str(), snub()));
         comps.push_back(comp(csnB.c_str(), snub()));
-        gndEps.push_back(pin(csnT.c_str(), "2"));
-        gndEps.push_back(pin(csnB.c_str(), "2"));
+        sgndEps.push_back(pin(csnT.c_str(), "2"));
+        sgndEps.push_back(pin(csnB.c_str(), "2"));
     }
     // primary snubbers + drain-to-drain leakage damper (appended after the per-rail block)
     comps.push_back(comp("Csn1", snub()));  comps.push_back(comp("Csn2", snub()));
     comps.push_back(comp("Rdmp", dampR())); comps.push_back(comp("Cdmp", dampC()));
     gndEps.push_back(pin("Csn1", "2"));  gndEps.push_back(pin("Csn2", "2"));  gndEps.push_back(prt("gnd"));
     conns.push_back(conn("gnd_net", gndEps));
+    sgndEps.push_back(prt("sgnd"));
+    conns.push_back(conn("sgnd_net", sgndEps));
     conns.push_back(conn("gate1_net", {pin("Q1", "gate"), prt("gate1")}));
     conns.push_back(conn("gate2_net", {pin("Q2", "gate"), prt("gate2")}));
 
@@ -333,7 +338,8 @@ json build_push_pull_tas(const PushPullDesign& d) {
         pstage("filter", "outputFilter", filt, bind("in", "pulsatingDc"), bind("in", "dcOutput"))});
     std::vector<json> iscs{
         isc("Vin", "externalPort", "input", {sp("pushPullCell", "vin")}),
-        isc("GND", "externalPort", "input", {sp("pushPullCell", "gnd"), sp("filter", "rtn")}),
+        isc("GND", "externalPort", "input", {sp("pushPullCell", "gnd")}),
+        isc("SGND", "externalPort", "input", {sp("pushPullCell", "sgnd"), sp("filter", "rtn")}),
         isc("Vout", "externalPort", "output", {sp("pushPullCell", "vout"), sp("filter", "in")})};
     for (size_t i = 1; i < nOut; ++i) {
         const std::string g = "Vout" + std::to_string(i + 1), pt = "vout" + std::to_string(i + 1);

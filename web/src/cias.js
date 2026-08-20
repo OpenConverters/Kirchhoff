@@ -5,7 +5,9 @@
 // Flatten the hierarchical TAS (per-stage circuits linked by inter-stage connections) into global
 // nets. Returns pinNet: "component|pin" -> netId (string union-find root). Moved verbatim from
 // scripts/checkSchematicNets.mjs so the offline checker and the runtime emitters share one impl.
-export function flattenNets(tas) {
+// Every CIAS token -> its net: component pins AND the stage ports that name the external connections.
+// flattenNets is the component-pin view of this; referenceNets needs the stage ports too.
+export function flattenTokens(tas) {
   const par = new Map()
   const find = (x) => { if (!par.has(x)) par.set(x, x); while (par.get(x) !== x) { par.set(x, par.get(par.get(x))); x = par.get(x) } return x }
   const uni = (a, b) => { par.set(find(a), find(b)) }
@@ -21,9 +23,38 @@ export function flattenNets(tas) {
     const eps = isc.endpoints ?? []
     for (let i = 1; i < eps.length; i++) uni(tok(null, eps[0]), tok(null, eps[i]))
   }
+  const out = new Map()
+  for (const k of par.keys()) out.set(k, find(k))
+  return out
+}
+
+export function flattenNets(tas) {
   const pinNet = new Map()
-  for (const k of par.keys()) if (k.startsWith('C:')) pinNet.set(k.slice(2), find(k))
+  for (const [k, net] of flattenTokens(tas)) if (k.startsWith('C:')) pinNet.set(k.slice(2), net)
   return pinNet
+}
+
+// The nets a SIMULATOR ties to its single ground. An isolated design declares TWO returns — primary
+// earth and the isolated secondary return — and since ABT #778 they are genuinely different CIAS nodes,
+// which is the whole point: the netlist now carries the barrier the schematic draws. But a simulator has
+// only ONE ground. ngspice collapses every externalPort named *gnd* to node 0 (NgspiceNodes.hpp), and
+// CircuitJS1 has a single global ground symbol. So a visual layout that puts both returns on one ground
+// rail is not drawing a short — it is drawing the reference the simulation needs.
+//
+// That aliasing is DECLARED here rather than waived inside each exporter's short check, so there is one
+// place that says which nets are references and why. A short between two non-reference nets still fails.
+export function referenceNets(tas) {
+  const tokens = flattenTokens(tas)
+  const out = new Set()
+  for (const ic of tas?.topology?.interStageConnections ?? []) {
+    if (ic.kind !== 'externalPort' || !/gnd|rtn/i.test(ic.name ?? '')) continue
+    for (const ep of ic.endpoints ?? []) {
+      const tok = ep.component !== undefined ? 'C:' + ep.component + '|' + ep.pin
+        : ep.stage !== undefined ? 'P:' + ep.stage + '::' + ep.port : null
+      if (tok && tokens.has(tok)) out.add(tokens.get(tok))
+    }
+  }
+  return out
 }
 
 // Every power-path component of the TAS: [{ ref, stage, data, req }]. Skips what the BOM skips

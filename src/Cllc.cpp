@@ -230,7 +230,7 @@ json build_cllc_tas(const CllcDesign& d) {
         std::nullopt, 25.0, AN::excitations_processed(aopT1, "T1"));
 
     json cell; cell["name"] = "cllc-cell";
-    cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"),
+    cell["ports"] = json::array({port("vin"), port("gnd"), port("sgnd"), port("vout"),
                                  port("g1"), port("g2")});
     cell["components"] = json::array({
         // primary full bridge + body diodes (DS1..DS4 = Q1..Q4 body diodes -> bare seed, deferred)
@@ -271,10 +271,13 @@ json build_cllc_tas(const CllcDesign& d) {
         // the converter start once the output is precharged (simulation.initialConditions).
         conn("vout_net", {pin("Qa", "drain"), pin("Qc", "drain"),
                           pin("DSa", "cathode"), pin("DSc", "cathode"), pin("Cout", "1"), prt("vout")}),
+        // Primary and secondary returns are DIFFERENT nodes (ABT #778). One gnd_net here put the
+        // primary bridge's low-side sources on the same net as the secondary SR bridge's, so every
+        // winding of T1 sat on one galvanic island and the drawn barrier did not exist.
         conn("gnd_net",  {pin("Q2", "source"), pin("Q4", "source"),
-                          pin("DS2", "anode"), pin("DS4", "anode"),
-                          pin("Qb", "source"), pin("Qd", "source"),
-                          pin("DSb", "anode"), pin("DSd", "anode"), pin("Cout", "2"), prt("gnd")}),
+                          pin("DS2", "anode"), pin("DS4", "anode"), prt("gnd")}),
+        conn("sgnd_net", {pin("Qb", "source"), pin("Qd", "source"),
+                          pin("DSb", "anode"), pin("DSd", "anode"), pin("Cout", "2"), prt("sgnd")}),
         conn("g1_net", {pin("Q1", "gate"), pin("Q4", "gate"), pin("Qa", "gate"), pin("Qd", "gate"), prt("g1")}),
         conn("g2_net", {pin("Q2", "gate"), pin("Q3", "gate"), pin("Qb", "gate"), pin("Qc", "gate"), prt("g2")})});
 
@@ -307,10 +310,12 @@ json build_cllc_tas(const CllcDesign& d) {
         ? json::array({
             isc("Vout", "externalPort", "input",  {sp("cllcCell", "vout")}),   // LV rail sources
             isc("GND",  "externalPort", "input",  {sp("cllcCell", "gnd")}),
+            isc("SGND", "externalPort", "input",  {sp("cllcCell", "sgnd")}),
             isc("Vin",  "externalPort", "output", {sp("cllcCell", "vin")})})    // HV rail delivered
         : json::array({
             isc("Vin",  "externalPort", "input",  {sp("cllcCell", "vin")}),
             isc("GND",  "externalPort", "input",  {sp("cllcCell", "gnd")}),
+            isc("SGND", "externalPort", "input",  {sp("cllcCell", "sgnd")}),
             isc("Vout", "externalPort", "output", {sp("cllcCell", "vout")})});
 
     json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);

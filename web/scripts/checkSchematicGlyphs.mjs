@@ -62,9 +62,26 @@ for (const css of sheets)
 if (ranges.length < 5) throw new Error(`checkSchematicGlyphs: only ${ranges.length} @font-face ranges found for ${families.join(', ')} — the stylesheets did not parse`)
 const covered = (cp) => ranges.filter((r) => cp >= r.lo && cp <= r.hi)
 
-const M = await init()
+// Importable so the sweep can apply the same coverage rule at every design point: which CHARACTERS a
+// drawing prints is a function of the solved values (a 1 MHz or 20 A point introduces SI prefixes the
+// preset never shows), so checking the presets alone leaves the interesting cases untested.
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])
+// svg -> [{ char, codepoint }] for every character no shipped face covers.
+export function uncoveredChars(svg) {
+  const out = []
+  const seen = new Set()
+  for (const m of svg.matchAll(/<text[^>]*>([^<]*)<\/text>/g))
+    for (const c of m[1].replace(/&[a-z]+;/g, ' ')) {
+      if (c === ' ' || c === '\u00a0' || seen.has(c)) continue
+      seen.add(c)
+      if (!covered(c.codePointAt(0)).length) out.push({ char: c, codepoint: c.codePointAt(0), text: m[1] })
+    }
+  return out
+}
+
+const M = isMain ? await init() : null
 const where = new Map()   // character -> where it is drawn (first sighting)
-for (const t of TOPOLOGIES) {
+if (isMain) for (const t of TOPOLOGIES) {
   const v = VARIANTS[t.id]
   for (const opt of (v ? v.options.map((o) => o.id) : [null])) {
     const spec = buildSpec({ ...t.preset, variant: opt ?? 'standard' }, t.id)
@@ -79,6 +96,7 @@ for (const t of TOPOLOGIES) {
         if (!where.has(c)) where.set(c, `${t.id}${opt ? '/' + opt : ''}  "${m[1]}"`)
   }
 }
+if (isMain) {
 if (where.size < 20) throw new Error(`checkSchematicGlyphs: only ${where.size} characters found across every schematic — nothing was rendered`)
 
 let bad = 0
@@ -94,3 +112,4 @@ console.log(bad
   ? `\n${bad} character(s) the app draws but does not ship a glyph for`
   : `Every one of the ${where.size} characters drawn across the 39 schematics is covered by a face the app ships`)
 process.exit(bad ? 1 : 0)   // a gate that cannot fail is not a gate
+}

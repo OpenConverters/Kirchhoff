@@ -29,6 +29,7 @@ import init from '../../build-wasm-ng/kirchhoff.js'
 import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
 import { renderForAudit, hasCiasSchematic } from '../src/ciasSchematic.js'
 import { flattenNets } from '../src/cias.js'
+import { wireGraph } from '../src/schematicCheck.js'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 
@@ -37,8 +38,33 @@ const only = process.argv[2]
 const label = (n) => String(n).replace(/^[CPX]:/, '')
 
 // The galvanic graph: nets are nodes, a conducting component is an edge between the nets on its pins.
-export function islands(tas) {
+export // Every CIAS token -> its net, including the STAGE PORTS that flattenNets drops. flattenNets returns
+// component pins only, but an external port is named as a stage port, and that is precisely what the
+// direction test below has to look up. Same union-find, same net identity; nothing is filtered out.
+function allTokens(tas) {
+  const par = new Map()
+  const find = (x) => { if (!par.has(x)) par.set(x, x); while (par.get(x) !== x) { par.set(x, par.get(par.get(x))); x = par.get(x) } return x }
+  const uni = (a, b) => { par.set(find(a), find(b)) }
+  const tok = (ctx, ep) => ep.component !== undefined ? 'C:' + ep.component + '|' + ep.pin
+    : ep.stage !== undefined ? 'P:' + ep.stage + '::' + ep.port
+      : ctx !== null ? 'P:' + ctx + '::' + ep.port : 'X:' + ep.port
+  for (const st of tas.topology?.stages ?? []) for (const conn of st.circuit?.connections ?? []) {
+    const eps = conn.endpoints ?? []
+    for (let i = 1; i < eps.length; i++) uni(tok(st.name, eps[0]), tok(st.name, eps[i]))
+    if (eps.length) find(tok(st.name, eps[0]))
+  }
+  for (const isc of tas.topology?.interStageConnections ?? []) {
+    const eps = isc.endpoints ?? []
+    for (let i = 1; i < eps.length; i++) uni(tok(null, eps[0]), tok(null, eps[i]))
+  }
+  const out = new Map()
+  for (const k of par.keys()) out.set(k, find(k))
+  return out
+}
+
+function islands(tas) {
   const nets = flattenNets(tas)
+  const tokenNet = allTokens(tas)
   const skip = new Set()
   const mag = new Set()
   for (const st of tas.topology?.stages ?? []) for (const c of st.circuit?.components ?? []) {
@@ -77,7 +103,10 @@ export function islands(tas) {
     const power = [...new Set(ps.filter((p) => p.pin !== 'gate').map((p) => p.net))]
     for (let i = 1; i < power.length; i++) join(power[0], power[i], ref)
   }
-  return { nets, mag, find, edges }
+  // Tokens, not just component pins: an external port is named as a STAGE port, and the island a
+  // direction sits on is exactly what this gate asks about.
+  const tokenRoot = (tok) => (tokenNet.has(tok) ? find(tokenNet.get(tok)) : null)
+  return { nets, mag, find, edges, tokenRoot }
 }
 
 // The evidence: the actual chain of parts that carries the primary return across to the secondary.
@@ -119,49 +148,84 @@ if (isMain) for (const t of TOPOLOGIES) {
     if (out.startsWith('Exception')) throw new Error(`${key}: design failed: ${out.slice(0, 200)}`)
     const tas = JSON.parse(out).tas
     checked++
-    const { nets, mag, find, edges } = islands(tas)
-    // Ask it WITHOUT trusting the winding names. The engine does not use 'secondaryN' to mean 'the far
-    // side of the barrier': push_pull's centre-tapped primary is modelled as primary + secondary1, and
-    // secondary1 lands on the primary rail by design. A rule that read the name would call that a breach
-    // and be right by accident on the others. What actually defines a barrier is structural — a
-    // transformer's windings must span AT LEAST TWO galvanic islands. All of them on one island means
-    // the part isolates nothing, whatever its pins are called.
-    const windings = new Map()
-    for (const [k, n] of nets) {
-      const [ref] = k.split('|')
-      if (mag.has(ref)) (windings.get(ref) ?? windings.set(ref, []).get(ref)).push({ pin: k, net: n })
-    }
-    const xfmrs = [...windings].filter(([, ps]) => new Set(ps.map((p) => p.pin.replace(/^[^|]+\|/, '').replace(/_(start|end)$/, ''))).size > 1)
-    if (!xfmrs.length) continue                     // no multi-winding magnetic: nothing to keep apart
+    const { nets, find, tokenRoot } = islands(tas)
+    // COMPARE THE TWO VIEWS DIRECTLY. Earlier forms of this rule tried to infer the barrier from the
+    // netlist alone — first from winding NAMES (wrong: push_pull calls a primary half 'secondary1'),
+    // then from a multi-winding magnetic spanning two islands (wrong: weinberg's L1 is a coupled
+    // inductor that is meant to conduct across), then from input rail vs output rail (wrong: the
+    // flybuck's declared output is its PRIMARY buck rail and its isolated secondary is internal).
+    // The claim being checked was never a property of the netlist on its own — it is the DRAWING's:
+    // it prints two different reference symbols. So resolve those two symbols to their nets and ask
+    // whether the netlist agrees they are two nodes.
+    if (!hasCiasSchematic(t.id)) continue
+    const { svg, pins } = renderForAudit(t.id, tas, opt ?? 'standard')
+    const earthPins = pins.filter((p) => p.ref === '@gnd')
+    const rtnPins = pins.filter((p) => p.ref === '@sgnd' || (p.ref === '@port' && /rtn/i.test(p.pin)))
+    if (!rtnPins.length) continue                 // the drawing asserts no barrier; nothing to check
     isolated++
-    const bad = xfmrs.filter(([, ps]) => new Set(ps.map((p) => find(p.net))).size < 2)
-    if (!bad.length) { console.log(`✓ ${key.padEnd(26)} netlist keeps the barrier`); continue }
-    breached++
-    const [Tref, ps] = bad[0]
-    // name two windings that ought to be apart, for the chain below
-    const grp = (p) => p.pin.replace(/^[^|]+\|/, '').replace(/_(start|end)$/, '')
-    const a = ps[0], b = ps.find((p) => grp(p) !== grp(ps[0])) ?? ps[1]
-    const [pk, pn, sk, sn] = [a.pin, a.net, b.pin, b.net]
-    console.log(`\n✗ ${key}`)
-    console.log(`    every winding of ${Tref} sits on ONE galvanic island — it isolates nothing` +
-                ` (${new Set(ps.map((p) => grp(p))).size} windings, 1 island)`)
-    console.log(`    e.g. ${pk} and ${sk} are the same island`)
-    const path = bridgePath(sn, pn, edges)
-    if (path) for (const step of path) console.log(`      ${step}`)
-    else console.log(`      ${label(sn)} and ${label(pn)} are the same net outright`)
-    // What the drawing claims, for contrast — this is the half the reader sees.
-    // Read it from the recorded terminals, not from the markup: the return is a REGISTERED reference pin
-    // ('@sgnd', or a port pin named rtn) — which is the same thing rule D reads when it demands the two
-    // be kept apart, so this quotes rule D's own evidence back at it rather than a second guess at it.
-    if (hasCiasSchematic(t.id)) {
-      const { pins } = renderForAudit(t.id, tas, opt ?? 'standard')
-      const earth = pins.filter((p) => p.ref === '@gnd').length
-      const rtn = pins.filter((p) => p.ref === '@sgnd' || (p.ref === '@port' && /rtn/i.test(p.pin))).length
-      console.log(rtn
-        ? `      the drawing registers ${rtn} isolated-return terminal(s) against ${earth} primary earth(s) — rule D`
-          + ` requires them kept apart, so the picture asserts an isolation the netlist does not have`
-        : `      the drawing registers NO isolated return (${earth} primary earth(s)) — check the layout`)
+    // A reference glyph carries no net of its own: it names the piece of wire it stands on. Resolve it
+    // the way rule D does — through the drawn wire graph — then take the net of any component terminal
+    // sitting on that same piece.
+    const g = wireGraph(svg)
+    const pinNet = flattenNets(tas)
+    const netAtRoot = new Map()
+    for (const p of pins) {
+      if (p.ref.startsWith('@') || p.pin === 'gate') continue
+      const net = pinNet.get(`${p.ref}|${p.pin}`) ?? pinNet.get(`${p.ref}|${p.pin === 'p0' ? '1' : p.pin === 'p1' ? '2' : p.pin}`)
+      const r = g.rootAt([p.x, p.y], 4)
+      if (net && r !== null && !netAtRoot.has(r)) netAtRoot.set(r, net)
     }
+    const islandsOf = (ps) => {
+      const out = new Set()
+      for (const p of ps) {
+        const r = g.rootAt([p.x, p.y], 4)
+        if (r !== null && netAtRoot.has(r)) out.add(find(netAtRoot.get(r)))
+      }
+      return out
+    }
+    const eIsl = islandsOf(earthPins), rIsl = islandsOf(rtnPins)
+    // Where a reference glyph stands on a piece whose only terminal is a WINDING, the drawing cannot be
+    // resolved that way: a magnetic's drawn terminal names (p0/s0/sct) are not its netlist winding names.
+    // Fall back to the CIAS's own reference PORTS — the declared primary earth and isolated return — which
+    // is the same question asked of the other view rather than a weaker version of it.
+    if (!eIsl.size || !rIsl.size) {
+      const refIsl = new Map()
+      for (const ic of tas.topology?.interStageConnections ?? []) {
+        if (ic.kind !== 'externalPort' || !/gnd|rtn/i.test(ic.name ?? '')) continue
+        for (const ep of ic.endpoints ?? []) {
+          const r = tokenRoot(ep.component !== undefined ? 'C:' + ep.component + '|' + ep.pin
+                                                         : 'P:' + ep.stage + '::' + ep.port)
+          if (r !== null) (refIsl.get(ic.name) ?? refIsl.set(ic.name, new Set()).get(ic.name)).add(r)
+        }
+      }
+      const distinct = new Set([...refIsl.values()].flatMap((v) => [...v]))
+      if (refIsl.size >= 2 && distinct.size >= 2) {
+        console.log(`✓ ${key.padEnd(26)} netlist keeps the barrier (via its declared reference ports ${[...refIsl.keys()].join('/')})`)
+        continue
+      }
+      if (refIsl.size) {
+        breached++
+        console.log(`\n✗ ${key}`)
+        console.log(`    the drawing prints ${earthPins.length} primary earth and ${rtnPins.length} isolated-return symbol(s),`)
+        console.log(`    but the CIAS declares ${refIsl.size} reference port(s) resolving to ${distinct.size} island(s)`)
+        continue
+      }
+    }
+    // Refuse to pass on evidence that was never obtained: an unresolvable reference is not a clean bill.
+    if (!eIsl.size || !rIsl.size) {
+      breached++
+      console.log(`\n✗ ${key}`)
+      console.log(`    could not resolve the drawn ${!eIsl.size ? 'primary earth' : 'isolated return'} to a net` +
+                  ` (${earthPins.length} earth / ${rtnPins.length} return terminals drawn) — not checked, not passed`)
+      continue
+    }
+    const shared = [...rIsl].filter((r) => eIsl.has(r))
+    if (!shared.length) { console.log(`✓ ${key.padEnd(26)} netlist keeps the barrier`); continue }
+    breached++
+    console.log(`\n✗ ${key}`)
+    console.log(`    the drawing prints ${earthPins.length} primary earth and ${rtnPins.length} isolated-return` +
+                ` symbol(s), but the CIAS puts them on ONE galvanic island (${String(shared[0]).replace(/^[CPX]:/, '')})`)
+    console.log(`    rule D requires the two kept apart in the drawing; the netlist it is drawn from does not keep them apart`)
   }
 }
 

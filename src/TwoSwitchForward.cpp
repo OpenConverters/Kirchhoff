@@ -168,9 +168,12 @@ json build_two_switch_forward_tas(const TwoSwitchForwardDesign& d) {
     // Main rail (output 0) keeps its Cout in the output-filter stage; extra rails carry Cout_i in the cell.
     std::vector<json> comps{comp("Q1", mosfetReq()), comp("Q2", mosfetReq()),
                             comp("D1", clampDiode()), comp("D2", clampDiode()), comp("T1", xfmr)};
-    std::vector<json> cports{port("vin"), port("gnd"), port("vout"), port("gate")};
+    std::vector<json> cports{port("vin"), port("gnd"), port("sgnd"), port("vout"), port("gate")};
     std::vector<json> conns;
     std::vector<json> gndEps{pin("Q2", "source"), pin("D1", "anode")};
+    // The secondary return is its OWN node (ABT #778): one gnd_net put both sides of T1 together, so
+    // the drawn isolation barrier was a fiction.
+    std::vector<json> sgndEps;
     std::vector<json> priGndEps{pin("T1", "primary_end"), pin("Q2", "drain"), pin("D2", "anode")};
     // Numerical node snubber on the clamp node (pri_gnd) — REQUIRED only for the multi-output deck: the extra
     // secondaries add coupled-winding LC rings that make the ideal clamp diode D2 recovery hit "timestep too
@@ -232,13 +235,15 @@ json build_two_switch_forward_tas(const TwoSwitchForwardDesign& d) {
             cports.push_back(port(voutP.c_str()));
             conns.push_back(conn((voutP + "_net").c_str(), {pin(loutN.c_str(), "primary_end"),
                                                             pin(coutN.c_str(), "1"), prt(voutP.c_str())}));
-            gndEps.push_back(pin(coutN.c_str(), "2"));
+            sgndEps.push_back(pin(coutN.c_str(), "2"));
         }
-        gndEps.push_back(pin("T1", swE.c_str()));
-        gndEps.push_back(pin(dfwN.c_str(), "anode"));
+        sgndEps.push_back(pin("T1", swE.c_str()));
+        sgndEps.push_back(pin(dfwN.c_str(), "anode"));
     }
     gndEps.push_back(prt("gnd"));
     conns.push_back(conn("gnd_net", gndEps));
+    sgndEps.push_back(prt("sgnd"));
+    conns.push_back(conn("sgnd_net", sgndEps));
     conns.push_back(conn("gate_net", {pin("Q1", "gate"), pin("Q2", "gate"), prt("gate")}));
 
     json cell; cell["name"] = "two-switch-forward-cell";
@@ -276,7 +281,8 @@ json build_two_switch_forward_tas(const TwoSwitchForwardDesign& d) {
         pstage("filter", "outputFilter", filt, bind("in", "pulsatingDc"), bind("in", "dcOutput"))});
     std::vector<json> iscs{
         isc("Vin", "externalPort", "input", {sp("forwardCell", "vin")}),
-        isc("GND", "externalPort", "input", {sp("forwardCell", "gnd"), sp("filter", "rtn")}),
+        isc("GND", "externalPort", "input", {sp("forwardCell", "gnd")}),
+        isc("SGND", "externalPort", "input", {sp("forwardCell", "sgnd"), sp("filter", "rtn")}),
         isc("Vout", "externalPort", "output", {sp("forwardCell", "vout"), sp("filter", "in")})};
     for (size_t i = 1; i < nOut; ++i) {
         const std::string g = "Vout" + std::to_string(i + 1), pt = "vout" + std::to_string(i + 1);

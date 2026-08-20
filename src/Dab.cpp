@@ -324,7 +324,7 @@ json build_dab_tas(const DabDesign& d) {
     auto mosfetPri = [&]() { return mosfet(req::mosfet("mainSwitch", ratedVdsPri, IpkTank, maxRdsOnPri, 125.0)); };
 
     // Ports: primary vin/gnd/vout + primary gates; each EXTRA rail adds its own vout<i> + gateE..H<i>.
-    std::vector<json> ports{port("vin"), port("gnd"), port("vout"),
+    std::vector<json> ports{port("vin"), port("gnd"), port("sgnd"), port("vout"),
                             port("gateA"), port("gateB"), port("gateC"), port("gateD")};
     // Components in the single-output order: primary bridge, per-rail secondary bridges, Lr(if discrete)+T1,
     // per-rail Cout, primary snubbers, per-rail secondary snubbers, real RC snubber. For nOut==1 the per-rail
@@ -456,9 +456,12 @@ json build_dab_tas(const DabDesign& d) {
     // Shared ground: primary low-side sources/anodes + low snubber returns, then every rail's ground pins.
     std::vector<json> gndEps{pin("QB", "source"), pin("QD", "source"), pin("DB", "anode"), pin("DD", "anode"),
                              pin("RbiasA_lo", "2"), pin("CsnA_lo", "2"), pin("RbiasC_lo", "2"), pin("CsnC_lo", "2")};
-    for (auto& e : gndSecEps) gndEps.push_back(std::move(e));
+    // The secondary returns are their OWN node (ABT #778). They used to be folded into gnd_net, which
+    // put both sides of T1 on one net and made the drawn isolation barrier a fiction.
     gndEps.push_back(prt("gnd"));
     conns.push_back(conn("gnd_net", gndEps));
+    gndSecEps.push_back(prt("sgnd"));
+    conns.push_back(conn("sgnd_net", gndSecEps));
 
     conns.push_back(conn("gateA_net", {pin("QA", "gate"), prt("gateA")}));
     conns.push_back(conn("gateB_net", {pin("QB", "gate"), prt("gateB")}));
@@ -493,6 +496,7 @@ json build_dab_tas(const DabDesign& d) {
     std::vector<json> iscs{
         isc("Vin", "externalPort", "input", {sp("dabCell", "vin")}),
         isc("GND", "externalPort", "input", {sp("dabCell", "gnd")}),
+        isc("SGND", "externalPort", "input", {sp("dabCell", "sgnd")}),
         isc("Vout", "externalPort", "output", {sp("dabCell", "vout")})};
     for (size_t i = 1; i < nOut; ++i) {
         const std::string g = "Vout" + std::to_string(i + 1), pt = "vout" + std::to_string(i + 1);

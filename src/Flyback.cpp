@@ -441,7 +441,10 @@ json build_flyback_tas(const FlybackDesign& d) {
     // (galvanic isolation between rails is a later phase; the sim references all rails to one ground). ---
     std::vector<json> rectFiltStages;
     std::vector<json> outIscs;                        // (sec wire, Vout external) per rail, in output order
-    std::vector<json> gndEps{sp("inverter", "dc-")};  // GND ISC endpoints (primary return first)
+    std::vector<json> gndEps{sp("inverter", "dc-")};  // GND ISC endpoints (primary return only)
+    // The secondary returns form their OWN external port. They used to join GND, which put both sides
+    // of T1 on one net — the drawing asserted an isolation the netlist did not have (ABT #778).
+    std::vector<json> sgndEps;
 
     for (size_t i = 0; i < nOut; ++i) {
         const auto& leg = d.outputs[i];
@@ -504,8 +507,8 @@ json build_flyback_tas(const FlybackDesign& d) {
                               {sp("transformer", secP.c_str()), sp(rectStage.c_str(), "ac_in")}));
         outIscs.push_back(isc(voutPort, "externalPort", "output",
                               {sp(rectStage.c_str(), "dc_out"), sp(filtStage.c_str(), "in")}));
-        gndEps.push_back(sp("transformer", secRtnP.c_str()));
-        gndEps.push_back(sp(filtStage.c_str(), "rtn"));
+        sgndEps.push_back(sp("transformer", secRtnP.c_str()));
+        sgndEps.push_back(sp(filtStage.c_str(), "rtn"));
     }
 
     xfmr["ports"] = xports;
@@ -540,6 +543,7 @@ json build_flyback_tas(const FlybackDesign& d) {
     std::vector<json> iscs{
         isc("Vin", "externalPort", "input", {sp("inverter", "dc+"), sp("transformer", "pri")}),
         isc("GND", "externalPort", "input", gndEps),
+        isc("SGND", "externalPort", "input", sgndEps),
         isc("sw_node", "wire", "", {sp("inverter", "sw"), sp("transformer", "pri_rtn")})};
     for (auto& c : outIscs) iscs.push_back(c);
     tas["topology"]["interStageConnections"] = iscs;

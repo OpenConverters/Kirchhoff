@@ -296,7 +296,7 @@ json build_ahb_tas(const AhbDesign& d) {
         dr["powerRating"] = 0.25; dr["role"] = "balancing"; return c; };
 
     json cell; cell["name"] = "ahb-cell";
-    cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("gate1"), port("gate2")});
+    cell["ports"] = json::array({port("vin"), port("gnd"), port("sgnd"), port("vout"), port("gate1"), port("gate2")});
 
     // Half bridge + DC-blocking cap + transformer primary — identical for every rectifier variant.
     std::vector<json> comps{
@@ -310,6 +310,10 @@ json build_ahb_tas(const AhbDesign& d) {
         conn("cb_mid",   {pin("Cb", "2"), pin("T1", "primary_start"), pin("Rdmp", "1")}),
         conn("dmp_mid",  {pin("Rdmp", "2"), pin("Cdmp", "1")})};
     std::vector<json> gndEps{pin("Q2", "source"), pin("D2", "anode"), pin("Csw", "2")};
+    // Primary return and secondary return are DIFFERENT nodes (ABT #778). Every rectifier branch
+    // below used to append its secondary endpoints to gnd_net, which put both sides of T1 on one
+    // net — so the isolation the drawing shows (and rule D enforces) was absent from the netlist.
+    std::vector<json> sgndEps;
 
     if (d.ahbFlyback) {
         // Active-clamp FLYBACK secondary: a SINGLE rectifier diode Dr1 feeding Cout directly — NO output
@@ -318,8 +322,10 @@ json build_ahb_tas(const AhbDesign& d) {
         comps.insert(comps.end(), {comp("Dr1", diodeReq), comp("CsnSA", snub())});
         conns.push_back(conn("sec_a", {pin("T1", "secondary1_start"), pin("Dr1", "anode"), pin("CsnSA", "1")}));
         conns.push_back(conn("vout_net", {pin("Dr1", "cathode"), prt("vout")}));
-        gndEps.insert(gndEps.end(), {pin("T1", "secondary1_end"), pin("CsnSA", "2"), prt("gnd")});
+        sgndEps.insert(sgndEps.end(), {pin("T1", "secondary1_end"), pin("CsnSA", "2"), prt("sgnd")});
+        gndEps.push_back(prt("gnd"));
         conns.push_back(conn("gnd_net", gndEps));
+        conns.push_back(conn("sgnd_net", sgndEps));
     } else
     switch (d.rectifierType) {
     case RectifierType::FullBridge: {
@@ -332,9 +338,11 @@ json build_ahb_tas(const AhbDesign& d) {
         conns.push_back(conn("out_rect", {pin("Dr1", "cathode"), pin("Dr2", "cathode"),
                                           pin("Lout", "primary_start")}));
         conns.push_back(conn("vout_net", {pin("Lout", "primary_end"), prt("vout")}));
-        gndEps.insert(gndEps.end(), {pin("Dr3", "anode"), pin("Dr4", "anode"),
-                                     pin("CsnSA", "2"), pin("CsnSB", "2"), prt("gnd")});
+        sgndEps.insert(sgndEps.end(), {pin("Dr3", "anode"), pin("Dr4", "anode"),
+                                     pin("CsnSA", "2"), pin("CsnSB", "2"), prt("sgnd")});
+        gndEps.push_back(prt("gnd"));
         conns.push_back(conn("gnd_net", gndEps));
+        conns.push_back(conn("sgnd_net", sgndEps));
         break; }
     case RectifierType::CenterTapped: {
         comps.insert(comps.end(), {comp("Dr1", diodeReq), comp("Dr2", diodeReq), comp("Lout", lout),
@@ -344,9 +352,11 @@ json build_ahb_tas(const AhbDesign& d) {
         conns.push_back(conn("out_rect", {pin("Dr1", "cathode"), pin("Dr2", "cathode"),
                                           pin("Lout", "primary_start")}));
         conns.push_back(conn("vout_net", {pin("Lout", "primary_end"), prt("vout")}));
-        gndEps.insert(gndEps.end(), {pin("T1", "secondary1_end"), pin("T1", "secondary2_start"),
-                                     pin("CsnSA", "2"), pin("CsnSB", "2"), prt("gnd")});
+        sgndEps.insert(sgndEps.end(), {pin("T1", "secondary1_end"), pin("T1", "secondary2_start"),
+                                     pin("CsnSA", "2"), pin("CsnSB", "2"), prt("sgnd")});
+        gndEps.push_back(prt("gnd"));
         conns.push_back(conn("gnd_net", gndEps));
+        conns.push_back(conn("sgnd_net", sgndEps));
         break; }
     case RectifierType::CurrentDoubler: {
         comps.insert(comps.end(), {comp("Dr1", diodeReq), comp("Dr2", diodeReq),
@@ -358,9 +368,11 @@ json build_ahb_tas(const AhbDesign& d) {
                                         pin("Lo2", "primary_start"), pin("CsnSB", "1")}));
         conns.push_back(conn("lo2_out", {pin("Lo2", "primary_end"), pin("Rlb", "1")}));
         conns.push_back(conn("vout_net", {pin("Lout", "primary_end"), pin("Rlb", "2"), prt("vout")}));
-        gndEps.insert(gndEps.end(), {pin("Dr1", "anode"), pin("Dr2", "anode"),
-                                     pin("CsnSA", "2"), pin("CsnSB", "2"), prt("gnd")});
+        sgndEps.insert(sgndEps.end(), {pin("Dr1", "anode"), pin("Dr2", "anode"),
+                                     pin("CsnSA", "2"), pin("CsnSB", "2"), prt("sgnd")});
+        gndEps.push_back(prt("gnd"));
         conns.push_back(conn("gnd_net", gndEps));
+        conns.push_back(conn("sgnd_net", sgndEps));
         break; }
     case RectifierType::VoltageDoubler:
         throw std::runtime_error("Kirchhoff AHB: voltageDoubler rectifier not supported");
@@ -395,7 +407,8 @@ json build_ahb_tas(const AhbDesign& d) {
         pstage("filter", "outputFilter", filt, bind("in", "pulsatingDc"), bind("in", "dcOutput"))});
     tas["topology"]["interStageConnections"] = json::array({
         isc("Vin", "externalPort", "input", {sp("ahbCell", "vin")}),
-        isc("GND", "externalPort", "input", {sp("ahbCell", "gnd"), sp("filter", "rtn")}),
+        isc("GND", "externalPort", "input", {sp("ahbCell", "gnd")}),
+        isc("SGND", "externalPort", "input", {sp("ahbCell", "sgnd"), sp("filter", "rtn")}),
         isc("Vout", "externalPort", "output", {sp("ahbCell", "vout"), sp("filter", "in")})});
 
     json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);

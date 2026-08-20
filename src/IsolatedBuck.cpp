@@ -155,7 +155,7 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
             comp("QS2", mosfet(req::mosfet("mainSwitch", ratedVds, IpkPri, maxRdsOn, 125.0))),
             comp("DS1", diode(req::body_diode(ratedVds, IpkPri))), comp("DS2", diode(req::body_diode(ratedVds, IpkPri))),
             comp("T1", xfmr), comp("Cpri", cpri)};
-        std::vector<json> cports{port("vin"), port("gnd"), port("vout"), port("g1"), port("g2")};
+        std::vector<json> cports{port("vin"), port("gnd"), port("sgnd"), port("vout"), port("g1"), port("g2")};
         std::vector<json> conns{
             conn("vin_net",  {pin("QS1", "drain"), pin("DS1", "cathode"), prt("vin")}),
             conn("sw_node",  {pin("QS1", "source"), pin("QS2", "drain"), pin("T1", "primary_start"),
@@ -163,6 +163,9 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
             conn("vpri_out", {pin("T1", "primary_end"), pin("Cpri", "1"), prt("vout")})};
         // gnd rail accumulates the low-side switch, DS2, Cpri return, and each secondary's dot + Csec return.
         std::vector<json> gndEps{pin("QS2", "source"), pin("DS2", "anode"), pin("Cpri", "2")};
+        // The secondary return is its OWN node (ABT #778): joining it to gnd_net put both sides of
+        // T1 on one net, so the drawing asserted an isolation the netlist did not have.
+        std::vector<json> sgndEps;
 
         for (size_t k = 0; k < nSec; ++k) {
             const auto& leg = d.secondaries[k];
@@ -186,11 +189,13 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
             // Secondary winding (dot/start at gnd) -> flyback diode -> isolated rail -> external port.
             conns.push_back(conn(("sec_in" + kk).c_str(),  {pin("T1", wEnd.c_str()), pin(dName.c_str(), "anode")}));
             conns.push_back(conn((voutP + "_net").c_str(), {pin(dName.c_str(), "cathode"), pin(cName.c_str(), "1"), prt(voutP.c_str())}));
-            gndEps.push_back(pin("T1", wStart.c_str()));
-            gndEps.push_back(pin(cName.c_str(), "2"));
+            sgndEps.push_back(pin("T1", wStart.c_str()));
+            sgndEps.push_back(pin(cName.c_str(), "2"));
         }
         gndEps.push_back(prt("gnd"));
         conns.push_back(conn("gnd_net", gndEps));
+        sgndEps.push_back(prt("sgnd"));
+        conns.push_back(conn("sgnd_net", sgndEps));
         conns.push_back(conn("g1_net", {pin("QS1", "gate"), prt("g1")}));
         conns.push_back(conn("g2_net", {pin("QS2", "gate"), prt("g2")}));
 
@@ -223,6 +228,7 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
         std::vector<json> iscs{
             isc("Vin", "externalPort", "input", {sp("flybuckCell", "vin")}),
             isc("GND", "externalPort", "input", {sp("flybuckCell", "gnd")}),
+            isc("SGND", "externalPort", "input", {sp("flybuckCell", "sgnd")}),
             isc("Vout", "externalPort", "output", {sp("flybuckCell", "vout")})};
         for (size_t k = 0; k < nSec; ++k) {
             const std::string g = "Vout" + std::to_string(k + 2), pt = "vout" + std::to_string(k + 2);
@@ -298,7 +304,7 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
     rsec["inputs"]["designRequirements"]["role"] = "bleed";
 
     json cell; cell["name"] = "flybuck-cell";
-    cell["ports"] = json::array({port("vin"), port("gnd"), port("vout"), port("g1"), port("g2")});
+    cell["ports"] = json::array({port("vin"), port("gnd"), port("sgnd"), port("vout"), port("g1"), port("g2")});
     cell["components"] = json::array({
         comp("QS1", mosfet(req::mosfet("mainSwitch", ratedVds, IpkPri, maxRdsOn, 125.0))),
         comp("QS2", mosfet(req::mosfet("mainSwitch", ratedVds, IpkPri, maxRdsOn, 125.0))),
@@ -323,8 +329,11 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
         // (T1.secondary1_start) matches MKF's "Lsec 0 sec_in" so the diode conducts during QS1 OFF.
         conn("sec_in",   {pin("T1", "secondary1_end"), pin("Dsec", "anode")}),
         conn("vout_sec", {pin("Dsec", "cathode"), pin("Csec", "1"), pin("Rsec", "1")}),
-        conn("gnd_net",  {pin("QS2", "source"), pin("DS2", "anode"), pin("T1", "secondary1_start"),
-                          pin("Cpri", "2"), pin("Csec", "2"), pin("Rsec", "2"), prt("gnd")}),
+        // Primary return and the isolated secondary return are DIFFERENT nodes (ABT #778). One gnd_net
+        // here put T1's secondary dot on the primary rail, so the flybuck's barrier existed only in the
+        // drawing.
+        conn("gnd_net",  {pin("QS2", "source"), pin("DS2", "anode"), pin("Cpri", "2"), prt("gnd")}),
+        conn("sgnd_net", {pin("T1", "secondary1_start"), pin("Csec", "2"), pin("Rsec", "2"), prt("sgnd")}),
         conn("g1_net", {pin("QS1", "gate"), prt("g1")}),
         conn("g2_net", {pin("QS2", "gate"), prt("g2")})});
 
@@ -346,6 +355,7 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
     tas["topology"]["interStageConnections"] = json::array({
         isc("Vin", "externalPort", "input", {sp("flybuckCell", "vin")}),
         isc("GND", "externalPort", "input", {sp("flybuckCell", "gnd")}),
+        isc("SGND", "externalPort", "input", {sp("flybuckCell", "sgnd")}),
         isc("Vout", "externalPort", "output", {sp("flybuckCell", "vout")})});
 
     json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);

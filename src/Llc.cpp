@@ -401,7 +401,8 @@ json build_llc_tas(const LlcDesign& d) {
 
     json cell; cell["name"] = "llc-cell";
     // Cell ports: vin/gnd/vout/g1/g2 for the main rail; extra isolated rails append a vout<i> port below.
-    std::vector<json> cports{port("vin"), port("gnd"), port("vout"), port("g1"), port("g2")};
+    // sgnd is the isolated secondary return (ABT #778)
+    std::vector<json> cports{port("vin"), port("gnd"), port("sgnd"), port("vout"), port("g1"), port("g2")};
 
     // Primary side: series resonant tank + either a split-cap half-bridge or a 4-MOSFET full bridge
     // (config.bridgeType, ABT #91). Identical secondary rectifier for both. NOTE: the resonant deck is
@@ -463,6 +464,9 @@ json build_llc_tas(const LlcDesign& d) {
     // ONE gnd_net after the extra-rail loop (prt("gnd") last). Single-output reproduces the original
     // [gndPrimary…, rail-0 returns, gnd] byte-for-byte (no extra rails append anything).
     std::vector<json> gndEps = gndPrimary;
+    // Primary return and secondary return are DIFFERENT nodes (ABT #778): one gnd_net put both
+    // sides of T1 on a single net, so the isolation the drawing shows was absent from the netlist.
+    std::vector<json> sgndEps;
     switch (d.rectifierType) {
     case RectifierType::CenterTapped: {
         // Two half-windings -> 2 diodes -> vout; secondary CT = gnd. RC snubber across each diode.
@@ -477,7 +481,7 @@ json build_llc_tas(const LlcDesign& d) {
         conns.push_back(conn("vout_net", {pin("D1", "cathode"), pin("D2", "cathode"),
                           pin("Rsn1", "2"), pin("Csn1", "2"), pin("Rsn2", "2"), pin("Csn2", "2"),
                           pin("Cout", "1"), prt("vout")}));
-        gndEps.insert(gndEps.end(), {pin("T1", "secondary1_end"), pin("T1", "secondary2_start"),
+        sgndEps.insert(sgndEps.end(), {pin("T1", "secondary1_end"), pin("T1", "secondary2_start"),
                                      pin("Cout", "2")});
         break; }
     case RectifierType::FullBridge: {
@@ -492,7 +496,7 @@ json build_llc_tas(const LlcDesign& d) {
                                        pin("DL2", "cathode")}));
         conns.push_back(conn("vout_net", {pin("DH1", "cathode"), pin("DH2", "cathode"),
                           pin("Rsn1", "2"), pin("Csn1", "2"), pin("Cout", "1"), prt("vout")}));
-        gndEps.insert(gndEps.end(), {pin("DL1", "anode"), pin("DL2", "anode"), pin("Cout", "2")});
+        sgndEps.insert(sgndEps.end(), {pin("DL1", "anode"), pin("DL2", "anode"), pin("Cout", "2")});
         break; }
     case RectifierType::CurrentDoubler: {
         // One winding -> 2 catch diodes (cathode at each winding end, anode at gnd) + 2 output inductors
@@ -509,7 +513,7 @@ json build_llc_tas(const LlcDesign& d) {
         conns.push_back(conn("lo2_out", {pin("Lo2", "primary_end"), pin("Rlb", "1")}));
         conns.push_back(conn("vout_net", {pin("Lo1", "primary_end"), pin("Rlb", "2"),
                           pin("Cout", "1"), prt("vout")}));
-        gndEps.insert(gndEps.end(), {pin("D1", "anode"), pin("D2", "anode"), pin("Cout", "2")});
+        sgndEps.insert(sgndEps.end(), {pin("D1", "anode"), pin("D2", "anode"), pin("Cout", "2")});
         break; }
     case RectifierType::VoltageDoubler: {
         // One winding: end A = the diode junction (Dh.anode / Dl.cathode), end B = the cap-stack midpoint
@@ -524,7 +528,7 @@ json build_llc_tas(const LlcDesign& d) {
                           pin("Colo", "1"), pin("Rvd_hi", "2"), pin("Rvd_lo", "1")}));
         conns.push_back(conn("vout_net", {pin("Dh", "cathode"), pin("Cohi", "1"),
                           pin("Rvd_hi", "1"), prt("vout")}));
-        gndEps.insert(gndEps.end(), {pin("Dl", "anode"), pin("Colo", "2"), pin("Rvd_lo", "2")});
+        sgndEps.insert(sgndEps.end(), {pin("Dl", "anode"), pin("Colo", "2"), pin("Rvd_lo", "2")});
         break; }
     }
 
@@ -564,7 +568,7 @@ json build_llc_tas(const LlcDesign& d) {
             conns.push_back(conn((voutP + "_net").c_str(), {pin(D1.c_str(), "cathode"), pin(D2.c_str(), "cathode"),
                               pin(Rs1.c_str(), "2"), pin(Cs1.c_str(), "2"), pin(Rs2.c_str(), "2"), pin(Cs2.c_str(), "2"),
                               pin(Co.c_str(), "1"), prt(voutP.c_str())}));
-            gndEps.insert(gndEps.end(), {pin("T1", wAe.c_str()), pin("T1", wB.c_str()), pin(Co.c_str(), "2")});
+            sgndEps.insert(sgndEps.end(), {pin("T1", wAe.c_str()), pin("T1", wB.c_str()), pin(Co.c_str(), "2")});
             break; }
         case RectifierType::FullBridge: {
             const std::string DH1 = "DH1_" + sfx, DH2 = "DH2_" + sfx, DL1 = "DL1_" + sfx, DL2 = "DL2_" + sfx,
@@ -578,7 +582,7 @@ json build_llc_tas(const LlcDesign& d) {
                                                            pin(DL2.c_str(), "cathode")}));
             conns.push_back(conn((voutP + "_net").c_str(), {pin(DH1.c_str(), "cathode"), pin(DH2.c_str(), "cathode"),
                               pin(Rs1.c_str(), "2"), pin(Cs1.c_str(), "2"), pin(Co.c_str(), "1"), prt(voutP.c_str())}));
-            gndEps.insert(gndEps.end(), {pin(DL1.c_str(), "anode"), pin(DL2.c_str(), "anode"), pin(Co.c_str(), "2")});
+            sgndEps.insert(sgndEps.end(), {pin(DL1.c_str(), "anode"), pin(DL2.c_str(), "anode"), pin(Co.c_str(), "2")});
             break; }
         default:
             throw std::invalid_argument("Kirchhoff LLC multi-output: rectifierType '" +
@@ -589,6 +593,8 @@ json build_llc_tas(const LlcDesign& d) {
     }
     gndEps.push_back(prt("gnd"));
     conns.push_back(conn("gnd_net", gndEps));
+    sgndEps.push_back(prt("sgnd"));
+    conns.push_back(conn("sgnd_net", sgndEps));
     // Gate nets: half-bridge Q1->g1, Q2->g2; full-bridge diagonal pairs (Q1,Q4)->g1, (Q2,Q3)->g2 (ABT #91).
     if (!d.fullBridge) {
         conns.push_back(conn("g1_net", {pin("Q1", "gate"), prt("g1")}));
@@ -626,6 +632,7 @@ json build_llc_tas(const LlcDesign& d) {
     std::vector<json> iscs{
         isc("Vin", "externalPort", "input", {sp("llcCell", "vin")}),
         isc("GND", "externalPort", "input", {sp("llcCell", "gnd")}),
+        isc("SGND", "externalPort", "input", {sp("llcCell", "sgnd")}),
         isc("Vout", "externalPort", "output", {sp("llcCell", "vout")})};
     for (size_t i = 1; i < nOut; ++i) {
         const std::string g = "Vout" + std::to_string(i + 1), pt = "vout" + std::to_string(i + 1);

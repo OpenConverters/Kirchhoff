@@ -185,13 +185,17 @@ json build_forward_tas(const ForwardDesign& d) {
     // stage (byte-identical single-output deck); extra rails carry Cout_i inside the cell + an external
     // vout_i port whose load the assembler synthesizes. ---
     std::vector<json> comps{comp("Q1", mosfet), comp("T1", xfmr), comp("Ddemag", ddemag)};
-    std::vector<json> cports{port("vin"), port("gnd"), port("vout"), port("gate")};
+    std::vector<json> cports{port("vin"), port("gnd"), port("sgnd"), port("vout"), port("gate")};
     std::vector<json> conns;
     conns.push_back(conn("vin_net",  {pin("Q1", "drain"), pin("Ddemag", "cathode"), prt("vin")}));
     conns.push_back(conn("pri_node", {pin("Q1", "source"), pin("T1", "primary_start")}));
     // demag (secondary1): start at gnd (reversed), end -> demag diode anode
     conns.push_back(conn("demag_in", {pin("T1", "secondary1_end"), pin("Ddemag", "anode")}));
     std::vector<json> gndEps{pin("T1", "primary_end"), pin("T1", "secondary1_start")};
+    // The secondary return is its OWN node. It used to be pushed onto gnd_net with the primary's,
+    // which put both sides of T1 on one net and left the drawing asserting an isolation the netlist
+    // did not have (ABT #778). The demag winding (secondary1) is PRIMARY-side and stays above.
+    std::vector<json> sgndEps;
 
     json capd; capd["capacitor"] = json::object();   // main-rail output cap (output-filter stage)
     capd["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;
@@ -242,13 +246,15 @@ json build_forward_tas(const ForwardDesign& d) {
             cports.push_back(port(voutP.c_str()));
             conns.push_back(conn((voutP + "_net").c_str(), {pin(loutN.c_str(), "primary_end"),
                                                             pin(coutN.c_str(), "1"), prt(voutP.c_str())}));
-            gndEps.push_back(pin(coutN.c_str(), "2"));
+            sgndEps.push_back(pin(coutN.c_str(), "2"));
         }
-        gndEps.push_back(pin("T1", ("secondary" + std::to_string(2 + i) + "_end").c_str()));
-        gndEps.push_back(pin(dfwN.c_str(), "anode"));
+        sgndEps.push_back(pin("T1", ("secondary" + std::to_string(2 + i) + "_end").c_str()));
+        sgndEps.push_back(pin(dfwN.c_str(), "anode"));
     }
     gndEps.push_back(prt("gnd"));
     conns.push_back(conn("gnd_net", gndEps));
+    sgndEps.push_back(prt("sgnd"));
+    conns.push_back(conn("sgnd_net", sgndEps));
     conns.push_back(conn("gate_net", {pin("Q1", "gate"), prt("gate")}));
 
     json cell; cell["name"] = "forward-cell";
@@ -286,7 +292,8 @@ json build_forward_tas(const ForwardDesign& d) {
         pstage("filter", "outputFilter", filt, bind("in", "pulsatingDc"), bind("in", "dcOutput"))});
     std::vector<json> iscs{
         isc("Vin", "externalPort", "input", {sp("forwardCell", "vin")}),
-        isc("GND", "externalPort", "input", {sp("forwardCell", "gnd"), sp("filter", "rtn")}),
+        isc("GND", "externalPort", "input", {sp("forwardCell", "gnd")}),
+        isc("SGND", "externalPort", "input", {sp("forwardCell", "sgnd"), sp("filter", "rtn")}),
         isc("Vout", "externalPort", "output", {sp("forwardCell", "vout"), sp("filter", "in")})};
     for (size_t i = 1; i < nOut; ++i) {
         const std::string g = "Vout" + std::to_string(i + 1), pt = "vout" + std::to_string(i + 1);

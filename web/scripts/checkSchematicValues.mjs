@@ -17,13 +17,18 @@ import init from '../../build-wasm-ng/kirchhoff.js'
 import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
 import { renderForAudit } from '../src/ciasSchematic.js'
 
-const M = await init()
+import { fileURLToPath } from 'node:url'
+import path from 'node:path'
+// Importable so the sweep can apply the same rule at every design point — the values are what CHANGE
+// with the operating point, so checking them only at the preset is the thinnest possible coverage.
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])
+const M = isMain ? await init() : null
 
 // "12.4 mΩ" / "0 F" / "1.37 mH · n=6.51" → the numbers with their SI prefixes resolved.
 const PREFIX = { y: 1e-24, z: 1e-21, a: 1e-18, f: 1e-15, p: 1e-12, n: 1e-9, µ: 1e-6, u: 1e-6, m: 1e-3,
                  k: 1e3, M: 1e6, G: 1e9, T: 1e12 }
 const UNIT = /^(Hz|F|H|Ω|V|A|W|s)$/
-function quantities(text) {
+export function quantities(text) {
   const out = []
   // The terminator is a lookahead, NOT \b. \b is defined against [A-Za-z0-9_], and Ω is none of those —
   // so "100 Ω" has no word boundary after the unit and the original pattern matched NOTHING for ohms.
@@ -37,8 +42,26 @@ function quantities(text) {
   return out
 }
 
+// { svg } -> { problems, checked }: every drawn value must be a quantity a part can have.
+export function valueProblems(svg) {
+  const problems = []
+  let checked = 0
+  for (const m of svg.matchAll(/<text class="sch-val"[^>]*>([^<]*)<\/text>/g)) {
+    const text = m[1]
+    checked++
+    if (/NaN|Infinity|undefined|null/.test(text)) { problems.push(`NONFINITE "${text}"`); continue }
+    for (const q of quantities(text))
+      if (!(q.value > 0)) problems.push(`ZERO "${text}" — ${q.text} is not a quantity a part can have`)
+    // "· n=6.51" or "· n=1 / 0": a zero ratio is a winding that transfers nothing.
+    const n = text.match(/n=([\d./\s]+)/)?.[1]
+    if (n) for (const r of n.split('/'))
+      if (r.trim() && !(Number(r) > 0)) problems.push(`RATIO "${text}" — a turns ratio of ${r.trim()}`)
+  }
+  return { problems: [...new Set(problems)], checked }
+}
+
 let flagged = 0, checked = 0
-for (const t of TOPOLOGIES) {
+if (isMain) for (const t of TOPOLOGIES) {
   const v = VARIANTS[t.id]
   for (const opt of (v ? v.options.map((o) => o.id) : [null])) {
     const key = `${t.id}${opt ? '/' + opt : ''}`
@@ -49,23 +72,15 @@ for (const t of TOPOLOGIES) {
     // sweep reports "clean" over a schematic it never rendered.
     if (out.startsWith('Exception')) throw new Error(`${key}: design failed: ${out.slice(0, 200)}`)
     const { svg } = renderForAudit(t.id, JSON.parse(out).tas, opt ?? 'standard')
-    const problems = []
-    for (const m of svg.matchAll(/<text class="sch-val"[^>]*>([^<]*)<\/text>/g)) {
-      const text = m[1]
-      checked++
-      if (/NaN|Infinity|undefined|null/.test(text)) { problems.push(`NONFINITE "${text}"`); continue }
-      for (const q of quantities(text))
-        if (!(q.value > 0)) problems.push(`ZERO "${text}" — ${q.text} is not a quantity a part can have`)
-      // "· n=6.51" or "· n=1 / 0": a zero ratio is a winding that transfers nothing.
-      const n = text.match(/n=([\d./\s]+)/)?.[1]
-      if (n) for (const r of n.split('/'))
-        if (r.trim() && !(Number(r) > 0)) problems.push(`RATIO "${text}" — a turns ratio of ${r.trim()}`)
-    }
-    if (problems.length) { flagged++; console.log(`\n== ${key}`); for (const p of [...new Set(problems)]) console.log('   ' + p) }
+    const r = valueProblems(svg)
+    checked += r.checked
+    if (r.problems.length) { flagged++; console.log(`\n== ${key}`); for (const p of r.problems) console.log('   ' + p) }
   }
 }
+if (isMain) {
 if (!checked) throw new Error('checkSchematicValues read no value labels at all — nothing was rendered')
 console.log(flagged
   ? `\n${flagged} schematic(s) stating a value no component can have`
   : `\nEvery one of the ${checked} values drawn across the 39 schematics is a quantity a part can have`)
 process.exit(flagged ? 1 : 0)   // a gate that cannot fail is not a gate
+}
