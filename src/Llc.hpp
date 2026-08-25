@@ -28,8 +28,13 @@ namespace Kirchhoff {
 // ratio n_i (sized so n_i·(Vout_i+…Vd_i) matches the shared bridge drive → every secondary reflects to the
 // same primary clamp and conducts together), rectifier diode drop, output cap, load, and (currentDoubler
 // only) output inductor. The shared Lr–Cr–Lm tank is sized against the SUM of reflected loads (parallel Rac).
+// `voltage` is the MAGNITUDE |Vout_i|; `polarity` (+1 / -1) is the sign the caller asked for
+// (ABT #904). A negative rail is magnetically identical to its positive twin, so every design
+// computation runs on the magnitude and only the output-side TERMINAL LABELS swap: the node that
+// would have been the rail becomes secondary ground and vice versa. Nothing is reversed.
 struct LlcOutputLeg {
     double voltage, power, turnsRatio, diodeDrop, loadResistance, outputCapacitance, outputInductance;
+    int polarity;
 };
 
 struct LlcDesign {

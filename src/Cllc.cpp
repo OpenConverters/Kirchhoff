@@ -23,6 +23,12 @@ CllcDesign design_cllc(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     CllcDesign d{};
     d.config = cfg::object_of(tasInputs);
+    // Rail polarity (ABT #904): reject a negative setpoint loudly. Without this it would flow
+    // straight into the design math (negative load resistance and friends) and emit nonsense.
+    for (const auto& o : dr.at("outputs"))
+        if (nominal(o.at("voltage")) < 0)
+            throw std::invalid_argument(
+                "Kirchhoff CLLC: a negative output rail is not supported by this topology. Its secondary is an ACTIVE BRIDGE, whose output polarity is set by the gate PATTERN rather than by device orientation, so the mirror used for the diode-rectified topologies (flyback, forward family, push-pull, acf, llc, src) does not apply here. Send |Vout| — refusing rather than silently designing a POSITIVE rail (ABT #904).");
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 1.0);

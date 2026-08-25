@@ -196,11 +196,75 @@ nlohmann::json component_waveforms(const json& tas, const PEAS::Fidelity& fideli
         }
     }
 
-    return json{
+    // ── External rails (ABT #905 follow-up) ───────────────────────────────────────────────────
+    // The converter view wants the converter's own terminals, not only the per-component overlays:
+    // without these the input rail and each output rail are only visible indirectly (as the output
+    // cap's voltage). The assembler names external ports Vin / Vout / Vout2… and synthesizes the
+    // source as V<port> and each load as Rload / Rload<i>, so read those. A rail whose vector is not
+    // in the run is OMITTED rather than faked — same rule the component loop uses.
+    std::string inPort;
+    std::vector<std::string> outPorts;
+    for (const auto& ic : topo.value("interStageConnections", json::array())) {
+        if (ic.value("kind", std::string{}) != "externalPort") continue;
+        const std::string nm = ic.value("name", std::string{});
+        const std::string dir = ic.value("direction", std::string{});
+        if (dir == "output") outPorts.push_back(nm);
+        // GND / SGND are returns, not the driven input rail.
+        else if (dir == "input" && inPort.empty() && nm != "GND" && nm != "SGND") inPort = nm;
+    }
+
+    // Flat {data,time} — the shape the wizard's converter view consumes for rails (components use
+    // the nested signal shape instead).
+    auto rail_signal = [&](const std::vector<double>& v) {
+        return json(resample_last_period(r.time, v, period));
+    };
+    // ngspice spells a saved branch current either "@<dev>[i]" (savecurrents) or "<dev>#branch"
+    // (voltage sources). Try both before giving up.
+    auto branch_current = [&](const std::string& dev, bool& ok) -> const std::vector<double>* {
+        ok = false;
+        for (const std::string key : {"@" + dev + "[i]", dev + "#branch"}) {
+            auto it = r.vectors.find(key);
+            if (it != r.vectors.end()) { ok = true; return &it->second; }
+        }
+        return nullptr;
+    };
+
+    json out = json{
         {"engine", "ngspice"},
         {"referencePeriod", period},
         {"components", std::move(components)},
     };
+
+    if (!inPort.empty()) {
+        bool ok = false;
+        const std::vector<double> vin = node_voltage(lower(sanitize(inPort)), r, ok);
+        if (ok) out["inputVoltage"] = rail_signal(vin);
+        bool iok = false;
+        // The synthesized DC source is V<port> (e.g. port "Vin" -> element VVin -> vector vvin).
+        // SPICE reports a source's branch current INTO its + terminal, so a supply delivering power
+        // reads negative. Negate it: "Input Current" means the current the converter DRAWS.
+        if (const std::vector<double>* iin = branch_current("v" + lower(sanitize(inPort)), iok)) {
+            std::vector<double> drawn(iin->size());
+            for (size_t k = 0; k < iin->size(); ++k) drawn[k] = -(*iin)[k];
+            out["inputCurrent"] = rail_signal(drawn);
+        }
+    }
+
+    json outV = json::array(), outI = json::array();
+    for (size_t i = 0; i < outPorts.size(); ++i) {
+        bool ok = false;
+        const std::vector<double> v = node_voltage(lower(sanitize(outPorts[i])), r, ok);
+        outV.push_back(ok ? rail_signal(v) : json(nullptr));
+        // Loads are named bare for output 0 and numeric-suffixed after it (TasAssembler).
+        const std::string load = "rload" + (i == 0 ? std::string{} : std::to_string(i));
+        bool iok = false;
+        const std::vector<double>* iv = branch_current(load, iok);
+        outI.push_back(iok ? rail_signal(*iv) : json(nullptr));
+    }
+    if (!outV.empty()) out["outputVoltages"] = std::move(outV);
+    if (!outI.empty()) out["outputCurrents"] = std::move(outI);
+
+    return out;
 }
 
 }  // namespace Kirchhoff

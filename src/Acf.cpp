@@ -22,7 +22,8 @@ AcfDesign design_acf(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     AcfDesign d{};
     d.config = cfg::object_of(tasInputs);
-    d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
+    // Rail polarity (ABT #904): design math on |Vout|; the sign only relabels terminals.
+    d.outputVoltage = std::fabs(nominal(dr.at("outputs").at(0).at("voltage")));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 0.9);
     if (tasInputs.contains("operatingPoints") && !tasInputs.at("operatingPoints").empty()) {
@@ -81,7 +82,9 @@ AcfDesign design_acf(const json& tasInputs) {
     const size_t nOut = dr.at("outputs").size();
     for (size_t i = 0; i < nOut; ++i) {
         AcfOutputLeg leg{};
-        leg.voltage = nominal(dr.at("outputs").at(i).at("voltage"));
+        const double vSigned = nominal(dr.at("outputs").at(i).at("voltage"));
+        leg.voltage  = std::fabs(vSigned);
+        leg.polarity = (vSigned < 0) ? -1 : 1;
         if (tasInputs.contains("operatingPoints") && !tasInputs.at("operatingPoints").empty())
             leg.power = tasInputs.at("operatingPoints").at(0).at("outputs").at(i).at("power").get<double>();
         else
@@ -255,8 +258,27 @@ json build_acf_tas(const AcfDesign& d) {
         conns.push_back(conn(("sec_rect" + sfx).c_str(), {pin(srfwdN.c_str(), "drain"), pin(dsfwdN.c_str(), "cathode"),
                                                           pin(srfwN.c_str(), "drain"), pin(dsfwN.c_str(), "cathode"),
                                                           pin(loutN.c_str(), "primary_start")}));
+        // Rail polarity (ABT #904). A NEGATIVE rail is the SAME rectifier with its two output
+        // terminals relabelled: the inductor's output end becomes secondary ground and the winding
+        // return (plus the freewheel devices' low side) becomes the rail. Nothing is reversed. The
+        // synchronous FETs are safe under this: the emitted `S` elements are ideal switches whose
+        // control pair is (gate, 0), independent of their power terminals' potential, so moving the
+        // source node does not disturb the gate drive.
+        const bool negativeRail = (leg.polarity < 0);
+        std::vector<json> railEps, secGndEps;
+        std::vector<json> lowSide{pin("T1", swE.c_str()), pin(srfwN.c_str(), "source"),
+                                  pin(dsfwN.c_str(), "anode")};
+        if (negativeRail) {
+            railEps = lowSide;
+            secGndEps.push_back(pin(loutN.c_str(), "primary_end"));
+        } else {
+            railEps.push_back(pin(loutN.c_str(), "primary_end"));
+            secGndEps = lowSide;
+        }
+
         if (i == 0) {
-            conns.push_back(conn("vout_net", {pin("Lout", "primary_end"), prt("vout")}));
+            railEps.push_back(prt("vout"));
+            conns.push_back(conn("vout_net", railEps));
         } else {
             json capi; capi["capacitor"] = json::object();
             capi["inputs"]["designRequirements"]["capacitance"]["nominal"] = leg.outputCapacitance;
@@ -264,13 +286,12 @@ json build_acf_tas(const AcfDesign& d) {
             comps.push_back(comp(coutN.c_str(), capi));
             const std::string voutP = "vout" + sfx;
             cports.push_back(port(voutP.c_str()));
-            conns.push_back(conn((voutP + "_net").c_str(), {pin(loutN.c_str(), "primary_end"),
-                                                            pin(coutN.c_str(), "1"), prt(voutP.c_str())}));
-            sgndEps.push_back(pin(coutN.c_str(), "2"));
+            railEps.push_back(pin(coutN.c_str(), negativeRail ? "2" : "1"));
+            secGndEps.push_back(pin(coutN.c_str(), negativeRail ? "1" : "2"));
+            railEps.push_back(prt(voutP.c_str()));
+            conns.push_back(conn((voutP + "_net").c_str(), railEps));
         }
-        sgndEps.push_back(pin("T1", swE.c_str()));
-        sgndEps.push_back(pin(srfwN.c_str(), "source"));
-        sgndEps.push_back(pin(dsfwN.c_str(), "anode"));
+        for (const auto& ep : secGndEps) sgndEps.push_back(ep);
         gateMainEps.push_back(pin(srfwdN.c_str(), "gate"));
         gateClampEps.push_back(pin(srfwN.c_str(), "gate"));
     }
@@ -310,7 +331,11 @@ json build_acf_tas(const AcfDesign& d) {
     opDoc["outputs"] = json::array();
     for (size_t i = 0; i < nOut; ++i) {
         const std::string oname = (i == 0) ? "out" : "out" + std::to_string(i + 1);
-        json o; o["name"] = oname; o["voltage"]["nominal"] = d.outputs[i].voltage; o["regulation"] = "voltage";
+        // Signed: the TAS states where the rail actually sits, so the synthesized load and
+        // the deck's .meas see -|Vout| (same convention as flyback / forward / cuk).
+        json o; o["name"] = oname;
+        o["voltage"]["nominal"] = d.outputs[i].polarity * d.outputs[i].voltage;
+        o["regulation"] = "voltage";
         dreq["outputs"].push_back(o);
         json oo; oo["name"] = oname; oo["power"] = d.outputs[i].power; opDoc["outputs"].push_back(oo);
     }

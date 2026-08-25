@@ -169,3 +169,48 @@ TEST_CASE("component_waveforms map matches the deck's savecurrents devices", "[c
         CHECK(mn > -std::abs(mx) * 0.1); // negligible reverse current (ideal diode)
     }
 }
+
+TEST_CASE("component_waveforms exposes the converter's own rails, not just its parts",
+          "[components][rails]") {
+    // ABT #905 follow-up. Without these the wizard's converter view can only show the output rail
+    // indirectly, as the output capacitor's voltage. The rails are emitted FLAT ({data,time}) because
+    // that is the shape ConverterWizardBase.convertConverterWaveforms consumes for them, while
+    // components stay nested under {waveform, processed}.
+    if (!Kirchhoff::ngspice_in_process_available()) { WARN("no libngspice — skipped"); return; }
+    json tas = Kirchhoff::build_buck_tas(Kirchhoff::design_buck(spec_for(48, 12, 60, 100000)));
+    const json j = json::parse(
+        Kirchhoff::api::component_waveforms(tas.dump(), R"({"origin":"REQUIREMENTS"})"));
+
+    REQUIRE(j.contains("inputVoltage"));
+    REQUIRE(j.at("inputVoltage").at("data").size() == 128);
+    REQUIRE(j.at("inputVoltage").at("time").size() == 128);
+    REQUIRE(j.contains("outputVoltages"));
+    REQUIRE(j.at("outputVoltages").size() == 1);
+    REQUIRE(j.at("outputVoltages").at(0).at("data").size() == 128);
+
+    // The rails must carry the actual operating point, not a placeholder.
+    double vinSum = 0, voutSum = 0;
+    for (const auto& x : j.at("inputVoltage").at("data")) vinSum += x.get<double>();
+    for (const auto& x : j.at("outputVoltages").at(0).at("data")) voutSum += x.get<double>();
+    const double vinAvg = vinSum / 128.0, voutAvg = voutSum / 128.0;
+    INFO("Vin avg = " << vinAvg << ", Vout avg = " << voutAvg);
+    CHECK(vinAvg == Catch::Approx(48).margin(2));
+    CHECK(voutAvg == Catch::Approx(12).margin(3));
+
+    // "Input Current" must read as the current the converter DRAWS, not SPICE's into-the-plus-terminal
+    // source convention — otherwise a working converter plots a negative input current.
+    if (j.contains("inputCurrent") && !j.at("inputCurrent").is_null()) {
+        double iSum = 0;
+        for (const auto& x : j.at("inputCurrent").at("data")) iSum += x.get<double>();
+        INFO("Iin avg = " << iSum / 128.0);
+        CHECK(iSum / 128.0 > 0.0);
+    }
+
+    // Currents come from the synthesized source / load branches when ngspice saved them.
+    if (j.contains("outputCurrents") && !j.at("outputCurrents").at(0).is_null()) {
+        double iSum = 0;
+        for (const auto& x : j.at("outputCurrents").at(0).at("data")) iSum += x.get<double>();
+        INFO("Iout avg = " << iSum / 128.0);
+        CHECK(std::fabs(iSum / 128.0) == Catch::Approx(5).margin(2));   // 60 W / 12 V
+    }
+}

@@ -18,8 +18,13 @@
 namespace Kirchhoff {
 
 // One isolated output rail (multi-output active-clamp forward, ABT #86). outputs[0] mirrors the scalars.
+// `voltage` is the MAGNITUDE |Vout_i|; `polarity` (+1 / -1) is the sign the caller asked for
+// (ABT #904). A negative rail is magnetically identical to its positive twin, so every design
+// computation runs on the magnitude and only the output-side TERMINAL LABELS swap: the node that
+// would have been the rail becomes secondary ground and vice versa. Nothing is reversed.
 struct AcfOutputLeg {
     double voltage, power, turnsRatio, diodeDrop, outputInductance, outputCapacitance, loadResistance;
+    int polarity;
 };
 
 struct AcfDesign {

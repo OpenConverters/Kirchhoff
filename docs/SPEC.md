@@ -67,16 +67,27 @@ collapses it with `resolve_dimensional_values(j, preferred)`:
 **Field resolution (all converters):**
 - `designRequirements.outputs[i].voltage` — dimensional, resolved **NOMINAL**. Required.
   **Sign = rail polarity** on the topologies that support it — `flyback`, `forward`,
-  `two_switch_forward`, `push_pull`: a NEGATIVE nominal asks for a rail below ground, **per rail**, so
-  a mixed `+5 / +12 / -12` design is one converter. The design math always runs on `|Vout|`: a negative
-  rail is magnetically identical to its positive twin (same turns ratio, same volt-seconds, same
-  winding V and I), and every component rating is unchanged. What changes is only which of the
-  rectifier's two output terminals is called the rail and which is called secondary ground — no diode
-  and no winding is reversed, so the emitted sub-circuit is bit-for-bit the one that was designed. The
-  TAS carries the sign on `outputs[i].voltage.nominal`, so the assembled deck settles at `-|Vout|`.
-  Every OTHER topology still expects a positive magnitude — `cuk` / `isolated_buck_boost` are
-  inherently inverting and apply the sign themselves (see their rows), so passing a negative there
-  would double-negate.
+  `two_switch_forward`, `push_pull`, `acf`, `llc`, `src`: a NEGATIVE nominal asks for a rail below
+  ground, **per rail**, so a mixed `+5 / +12 / -12` design is one converter. The design math always
+  runs on `|Vout|`: a negative rail is magnetically identical to its positive twin (same turns ratio,
+  same volt-seconds, same winding V and I), and every component rating is unchanged. The TAS carries
+  the sign on `outputs[i].voltage.nominal`, so the assembled deck settles at `-|Vout|`.
+
+  **The mirror is not one transformation — it follows the output stage:**
+  - *Output inductor* (`forward`, `two_switch_forward`, `push_pull`, `acf`): RELABEL the stage's two
+    output terminals — what would have been the rail becomes secondary ground and vice versa. Nothing
+    is reversed. (Reversing diodes here makes the ideal-diode deck diverge.)
+  - *Capacitor-output rectifier* (`flyback`, `llc`, `src`): REVERSE the rectifier diodes; the centre
+    tap / return is the symmetry point and stays at ground. (Relabelling here diverges instead.)
+  - *Active bridge* (`dab`, `cllc`, `clllc`): NEITHER applies — an ideal switch is bidirectional, so
+    polarity comes from the gate PATTERN, not device orientation. These **throw** on a negative rail
+    rather than silently designing a positive one.
+
+  `llc` / `src` support a negative rail on the `centerTapped` and `fullBridge` rectifiers only; the
+  current/voltage-doubler variants add output inductors / a capacitor stack whose mirror is not
+  verified, and throw. Every OTHER topology still expects a positive magnitude — `cuk` /
+  `isolated_buck_boost` are inherently inverting and apply the sign themselves (see their rows), so
+  passing a negative there would double-negate.
 - `designRequirements.switchingFrequency` — dimensional, resolved **NOMINAL**. Required.
 - `designRequirements.inputVoltage` — dimensional, resolved **MAXIMUM + MINIMUM** (and NOMINAL as the
   operating-point fallback). Required.
@@ -230,7 +241,7 @@ out-of-range `phaseCount` throws. `phaseCount=1` (default) is byte-identical to 
 |---|---|---|---|---|
 | **forward** (single-switch) | 0.9 | inductance, **turnsRatios[1+i]** | `maxDutyCycle`(0.5), `inductorRippleRatio`(0.4) | 3-winding (demag+secondary), isolationSides {primary,primary,secondary,…}; second magnetic = output inductor; **multi-output** (N secondaries, ABT #86) ; **per-rail polarity** (negative `outputs[i].voltage.nominal` -> rail below ground) |
 | **two_switch_forward** | 0.9 | inductance, turnsRatios[i] | `maxDutyCycle`(0.5), `inductorRippleRatio`(0.4) | 2-winding; each switch blocks only Vin_max; **multi-output** (N secondaries, ABT #86; adds a tagged clamp-node snubber when >1 output) ; **per-rail polarity** (negative `outputs[i].voltage.nominal` -> rail below ground) |
-| **acf** (active-clamp forward) | 0.9 | inductance, turnsRatios[i] | `operatingDutyCycle`(0.45), `deadTimeFraction`(0.01), `nodeSnubberCap`(2.2e-9) | synchronous rectifiers (MOSFETs, not diodes); active clamp resets core; **multi-output** (N secondaries, ABT #86) |
+| **acf** (active-clamp forward) | 0.9 | inductance, turnsRatios[i] | `operatingDutyCycle`(0.45), `deadTimeFraction`(0.01), `nodeSnubberCap`(2.2e-9) | synchronous rectifiers (MOSFETs, not diodes); active clamp resets core; **multi-output** (N secondaries, ABT #86) ; **per-rail polarity** (negative `outputs[i].voltage.nominal` -> rail below ground) |
 | **push_pull** | 0.9 | inductance, **turnsRatios[1]** | `maxDutyCycle`(0.48), `outputCapacitance`(100e-6) | center-tapped primary; secondary ratios emitted as **{maximum}** ceilings ; **per-rail polarity** (negative `outputs[i].voltage.nominal` -> rail below ground) |
 | **weinberg** | **1.0** | inductance, **turnsRatios[1]** | `variant`("classic"), `synchronousRectifier`(false), `boostDutyTarget`(0.55), `l1RippleRatio`(0.30), `transformerCoupling`(0.999), `bridgeTurnsScale`(0.5), `deadTimeFraction`(0.02) | current-fed push-pull; **operatingPoints[0] mandatory**; boost regime (D>0.5); `variant="bridge"` = 4-switch H-bridge primary (diagonal PWM, halves primary switch Vds, `bridgeTurnsScale` rescales the shared transformer); `synchronousRectifier=true` swaps the CT-FW diodes for SR MOSFETs + body diodes (ABT #88) |
 
@@ -241,7 +252,7 @@ out-of-range `phaseCount` throws. `phaseCount=1` (default) is byte-identical to 
 | **ahb** (asymmetric half-bridge) | 0.9 | inductance, turnsRatios[0] | `operatingDutyCycle`(0.30), `deadTimeFraction`(0.01), `rectifierType`("fullBridge") | Lm emitted as **{minimum}** (ungapped); `voltageDoubler` throws |
 | **psfb** (phase-shifted full bridge) | 0.9 | inductance, turnsRatios[0] | `commandedDuty`(0.7), `switchDutyFraction`(0.48), `rectifierType`("fullBridge") | Lr computed (not pinnable); Lm {minimum}; `voltageDoubler` throws |
 | **pshb** (phase-shifted half bridge) | 0.9 | inductance, turnsRatios[0] | `commandedDuty`(0.7), `magnetizingCurrentFraction`(0.3), `rectifierType`("fullBridge") | 3-level NPC; ratings on **half** bus Vin/2; sets `config.nodeShuntCap=1e-9` internally |
-| **dab** (dual active bridge) | 0.9 | inductance, turnsRatios[0] | `dabPhaseShiftDeg`(25.0), `switchDutyFraction`(0.499) | **SPS only** (see below); Lr from phase shift; 8 driven switches |
+| **dab** (dual active bridge) | 0.9 | inductance, turnsRatios[0] | `dabPhaseShiftDeg`(25.0), `switchDutyFraction`(0.499) | **SPS only** (see below); Lr from phase shift; 8 driven switches ; negative rails NOT supported (active bridge — throws) |
 
 **DAB modulation — SPS / EPS / DPS / TPS.** The DAB accepts all three phase shifts (degrees):
 
@@ -266,10 +277,10 @@ commutate the ideal rectifier stiffly); SPS converges at full power. This limits
 
 | topology | efficiency default | pinning | key config (default) | quirks |
 |---|---|---|---|---|
-| **llc** | 1.0 | inductance(+tank), turnsRatios[0], resonant Lr/Cr | `rectifierType`("centerTapped"), `bridgeType`("halfBridge"), `driveAtSwitchingFrequency`(false), `resonantBandMin`(80e3)/`Max`(200e3), `qualityFactor`(0.4), `inductanceRatio`(5.0) | tank at `fr=√(fmin·fmax)`; **stimulus runs at fr, not switchingFrequency, unless `driveAtSwitchingFrequency`** (ABT #91); `bridgeType="fullBridge"` = 4-MOSFET primary at ±Vin (factor 1.0); leakage emitted |
-| **src** (series resonant) | 1.0 | turnsRatios[0], inductance(no tank re-size) | `gainHeadroom`(1.08), `qualityFactor`(0.8), `inductanceRatio`(10.0), `rectifierType`("centerTapped"), `bridgeType`("halfBridge") | `fr = switchingFrequency`; step-down only; `bridgeType="fullBridge"` = 4-MOSFET primary at ±Vin (factor 1.0, ABT #91); **voltageDoubler throws** |
-| **cllc** | 1.0 | inductance(+tank), turnsRatios[0] | `gainHeadroom`(1.08), `qualityFactor`(0.3), `inductanceRatio`(4.45), `powerFlowDirection`("forward") | full-bridge both sides; active SR; precharges the delivered bus; **bidirectional** (see below) |
-| **clllc** | 1.0 | inductance(+tank), turnsRatios[0] | `qualityFactor`(0.4), `inductanceRatio`(6.0), `senseResistance`(0.01), `powerFlowDirection`("forward") | CLLC + discrete secondary Lr; adds an SR-control stage; **bidirectional** (see below) |
+| **llc** | 1.0 | inductance(+tank), turnsRatios[0], resonant Lr/Cr | `rectifierType`("centerTapped"), `bridgeType`("halfBridge"), `driveAtSwitchingFrequency`(false), `resonantBandMin`(80e3)/`Max`(200e3), `qualityFactor`(0.4), `inductanceRatio`(5.0) | tank at `fr=√(fmin·fmax)`; **stimulus runs at fr, not switchingFrequency, unless `driveAtSwitchingFrequency`** (ABT #91); `bridgeType="fullBridge"` = 4-MOSFET primary at ±Vin (factor 1.0); leakage emitted ; **per-rail polarity** (centerTapped / fullBridge only) |
+| **src** (series resonant) | 1.0 | turnsRatios[0], inductance(no tank re-size) | `gainHeadroom`(1.08), `qualityFactor`(0.8), `inductanceRatio`(10.0), `rectifierType`("centerTapped"), `bridgeType`("halfBridge") | `fr = switchingFrequency`; step-down only; `bridgeType="fullBridge"` = 4-MOSFET primary at ±Vin (factor 1.0, ABT #91); **voltageDoubler throws** ; **per-rail polarity** (centerTapped / fullBridge only) |
+| **cllc** | 1.0 | inductance(+tank), turnsRatios[0] | `gainHeadroom`(1.08), `qualityFactor`(0.3), `inductanceRatio`(4.45), `powerFlowDirection`("forward") | full-bridge both sides; active SR; precharges the delivered bus; **bidirectional** (see below) ; negative rails NOT supported (active bridge — throws) |
+| **clllc** | 1.0 | inductance(+tank), turnsRatios[0] | `qualityFactor`(0.4), `inductanceRatio`(6.0), `senseResistance`(0.01), `powerFlowDirection`("forward") | CLLC + discrete secondary Lr; adds an SR-control stage; **bidirectional** (see below) ; negative rails NOT supported (active bridge — throws) |
 
 **CLLC / CLLLC power-flow direction (`config.powerFlowDirection`, ABT #85).** These are dual-active-bridge
 resonant converters whose defining feature is **bidirectional** power flow (V2G / on-board chargers).

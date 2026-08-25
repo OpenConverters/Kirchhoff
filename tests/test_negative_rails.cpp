@@ -16,6 +16,12 @@
 #include "Forward.hpp"
 #include "TwoSwitchForward.hpp"
 #include "PushPull.hpp"
+#include "Acf.hpp"
+#include "Llc.hpp"
+#include "Src.hpp"
+#include "Dab.hpp"
+#include "Cllc.hpp"
+#include "Clllc.hpp"
 #include "TasAssembler.hpp"
 #include "NgspiceRunner.hpp"
 #include "Fidelity.hpp"
@@ -161,8 +167,6 @@ json bd_spec(const std::vector<std::pair<double, double>>& rails, double vin = 4
 } // namespace
 
 
-
-
 TEST_CASE("forward: a negative rail designs identically and simulates below ground",
           "[forward][negative][ngspice]") {
     const double fsw = 100000;
@@ -211,4 +215,65 @@ TEST_CASE("forward: a mixed +5 / -12 design puts each rail on its own side of gr
     INFO("rails = " << rails[0] << ", " << rails[1]);
     CHECK(rails[0] > 0.0);
     CHECK(rails[1] < 0.0);
+}
+
+
+TEST_CASE("acf: a negative rail simulates below ground", "[acf][negative][ngspice]") {
+    const double fsw = 100000;
+    const auto pos = Kirchhoff::design_acf(bd_spec({{12.0, 2.0}}, 48, fsw));
+    const auto neg = Kirchhoff::design_acf(bd_spec({{-12.0, 2.0}}, 48, fsw));
+    CHECK(neg.outputs[0].polarity == -1);
+    CHECK_THAT(neg.turnsRatio, WithinRel(pos.turnsRatio, 1e-12));
+
+    const auto rails = simulate_rails(Kirchhoff::build_acf_tas(neg), 1, fsw);
+    INFO("Vout = " << rails[0]);
+    CHECK(rails[0] < 0.0);
+    CHECK(std::fabs(rails[0]) > 6.0);
+    CHECK(std::fabs(rails[0]) < 24.0);
+}
+
+
+// Resonant converters: a higher input rail and a resonant tank, so give them their own spec point.
+namespace {
+json res_spec(const std::vector<std::pair<double, double>>& rails, double vin = 400, double fsw = 100000) {
+    return bd_spec(rails, vin, fsw);
+}
+} // namespace
+
+TEST_CASE("llc: a negative rail simulates below ground", "[llc][negative][ngspice]") {
+    const double fsw = 100000;
+    const auto pos = Kirchhoff::design_llc(res_spec({{12.0, 2.0}}, 400, fsw));
+    const auto neg = Kirchhoff::design_llc(res_spec({{-12.0, 2.0}}, 400, fsw));
+    CHECK(neg.outputs[0].polarity == -1);
+    CHECK_THAT(neg.turnsRatio, WithinRel(pos.turnsRatio, 1e-12));
+
+    const auto rails = simulate_rails(Kirchhoff::build_llc_tas(neg), 1, fsw);
+    INFO("Vout = " << rails[0]);
+    CHECK(rails[0] < 0.0);
+    CHECK(std::fabs(rails[0]) > 4.0);
+}
+
+TEST_CASE("src: a negative rail simulates below ground", "[src][negative][ngspice]") {
+    const double fsw = 100000;
+    const auto neg = Kirchhoff::design_src(res_spec({{-12.0, 2.0}}, 400, fsw));
+    CHECK(neg.outputs[0].polarity == -1);
+    const auto rails = simulate_rails(Kirchhoff::build_src_tas(neg), 1, fsw);
+    INFO("Vout = " << rails[0]);
+    CHECK(rails[0] < 0.0);
+    CHECK(std::fabs(rails[0]) > 4.0);
+}
+
+
+
+
+TEST_CASE("active-bridge topologies refuse a negative rail instead of silently inverting it",
+          "[negative][guard]") {
+    // dab / cllc / clllc drive their secondary with an ACTIVE BRIDGE: polarity there comes from the
+    // gate pattern, not device orientation, so neither the relabel nor the diode-reversal mirror
+    // applies. They must throw rather than quietly design a POSITIVE rail (ABT #904).
+    CHECK_THROWS_AS(Kirchhoff::design_dab(res_spec({{-12.0, 2.0}}, 400, 100000)), std::invalid_argument);
+    CHECK_THROWS_AS(Kirchhoff::design_cllc(res_spec({{-12.0, 2.0}}, 400, 100000)), std::invalid_argument);
+    CHECK_THROWS_AS(Kirchhoff::design_clllc(res_spec({{-12.0, 2.0}}, 400, 100000)), std::invalid_argument);
+    // …and still design normally when asked for a positive one.
+    CHECK_NOTHROW(Kirchhoff::design_dab(res_spec({{12.0, 2.0}}, 400, 100000)));
 }

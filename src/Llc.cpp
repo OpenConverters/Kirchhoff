@@ -27,7 +27,8 @@ LlcDesign design_llc(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     LlcDesign d{};
     d.config = cfg::object_of(tasInputs);
-    d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
+    // Rail polarity (ABT #904): design math on |Vout|; the sign only relabels terminals.
+    d.outputVoltage = std::fabs(nominal(dr.at("outputs").at(0).at("voltage")));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 1.0);
     if (tasInputs.contains("operatingPoints") && !tasInputs.at("operatingPoints").empty()) {
@@ -144,7 +145,9 @@ LlcDesign design_llc(const json& tasInputs) {
     const size_t nOut = dr.at("outputs").size();
     for (size_t i = 0; i < nOut; ++i) {
         LlcOutputLeg leg{};
-        leg.voltage = nominal(dr.at("outputs").at(i).at("voltage"));
+        const double vSigned = nominal(dr.at("outputs").at(i).at("voltage"));
+        leg.voltage  = std::fabs(vSigned);
+        leg.polarity = (vSigned < 0) ? -1 : 1;
         if (tasInputs.contains("operatingPoints") && !tasInputs.at("operatingPoints").empty())
             leg.power = tasInputs.at("operatingPoints").at(0).at("outputs").at(i).at("power").get<double>();
         else
@@ -467,6 +470,23 @@ json build_llc_tas(const LlcDesign& d) {
     // Primary return and secondary return are DIFFERENT nodes (ABT #778): one gnd_net put both
     // sides of T1 on a single net, so the isolation the drawing shows was absent from the netlist.
     std::vector<json> sgndEps;
+    std::vector<json> railEps, secGndEps;
+    // Rail polarity (ABT #904). Unlike the buck-derived topologies (forward family, push-pull), a
+    // capacitor-output rectifier has no output inductor: its centre tap / return IS the symmetry
+    // point, so the mirror is done by REVERSING the rectifier diodes rather than by relabelling the
+    // output terminals. (Relabelling here makes the deck diverge; reversing gives an exact mirror —
+    // measured +11.9548 V -> -11.9548 V on the LLC centre-tapped reference point.)
+    const bool negativeRail = (d.outputs[0].polarity < 0);
+    const char* rA = negativeRail ? "cathode" : "anode";    // diode end facing the winding
+    const char* rK = negativeRail ? "anode"   : "cathode";  // diode end facing the rail
+    if (negativeRail && (d.rectifierType == RectifierType::CurrentDoubler ||
+                         d.rectifierType == RectifierType::VoltageDoubler)) {
+        throw std::invalid_argument(
+            "Kirchhoff LLC: a negative output rail is only supported for the centerTapped and fullBridge "
+            "rectifiers. The current/voltage-doubler variants add output inductors / a capacitor "
+            "stack, whose mirror is not the same transformation and has not been verified — refusing "
+            "rather than emitting a deck that would silently regulate to the wrong polarity.");
+    }
     switch (d.rectifierType) {
     case RectifierType::CenterTapped: {
         // Two half-windings -> 2 diodes -> vout; secondary CT = gnd. RC snubber across each diode.
@@ -474,15 +494,14 @@ json build_llc_tas(const LlcDesign& d) {
         comps.insert(comps.end(), {comp("D1", diodeReq(reqD)), comp("D2", diodeReq(reqD)), comp("Cout", cout),
             comp("Csw1", swSnub()),   // half-bridge sw_node dV/dt snubber (stripped when Coss is real)
             comp("Rsn1", snubR()), comp("Csn1", snubC()), comp("Rsn2", snubR()), comp("Csn2", snubC())});
-        conns.push_back(conn("sec_top", {pin("T1", "secondary1_start"), pin("D1", "anode"),
+        conns.push_back(conn("sec_top", {pin("T1", "secondary1_start"), pin("D1", rA),
                                          pin("Rsn1", "1"), pin("Csn1", "1")}));
-        conns.push_back(conn("sec_bot", {pin("T1", "secondary2_end"), pin("D2", "anode"),
+        conns.push_back(conn("sec_bot", {pin("T1", "secondary2_end"), pin("D2", rA),
                                          pin("Rsn2", "1"), pin("Csn2", "1")}));
-        conns.push_back(conn("vout_net", {pin("D1", "cathode"), pin("D2", "cathode"),
-                          pin("Rsn1", "2"), pin("Csn1", "2"), pin("Rsn2", "2"), pin("Csn2", "2"),
-                          pin("Cout", "1"), prt("vout")}));
-        sgndEps.insert(sgndEps.end(), {pin("T1", "secondary1_end"), pin("T1", "secondary2_start"),
-                                     pin("Cout", "2")});
+        railEps = {pin("D1", rK), pin("D2", rK),
+                   pin("Rsn1", "2"), pin("Csn1", "2"), pin("Rsn2", "2"), pin("Csn2", "2"),
+                   pin("Cout", "1")};
+        secGndEps = {pin("T1", "secondary1_end"), pin("T1", "secondary2_start"), pin("Cout", "2")};
         break; }
     case RectifierType::FullBridge: {
         // One secondary winding (sec_a=secondary1_start, sec_b=secondary1_end) into a 4-diode bridge:
@@ -490,13 +509,13 @@ json build_llc_tas(const LlcDesign& d) {
         comps.insert(comps.end(), {comp("DH1", diodeReq(reqD)), comp("DH2", diodeReq(reqD)),
             comp("DL1", diodeReq(reqD)), comp("DL2", diodeReq(reqD)), comp("Cout", cout),
             comp("Csw1", swSnub()), comp("Rsn1", snubR()), comp("Csn1", snubC())});
-        conns.push_back(conn("sec_a", {pin("T1", "secondary1_start"), pin("DH1", "anode"),
-                                       pin("DL1", "cathode"), pin("Rsn1", "1"), pin("Csn1", "1")}));
-        conns.push_back(conn("sec_b", {pin("T1", "secondary1_end"), pin("DH2", "anode"),
-                                       pin("DL2", "cathode")}));
-        conns.push_back(conn("vout_net", {pin("DH1", "cathode"), pin("DH2", "cathode"),
-                          pin("Rsn1", "2"), pin("Csn1", "2"), pin("Cout", "1"), prt("vout")}));
-        sgndEps.insert(sgndEps.end(), {pin("DL1", "anode"), pin("DL2", "anode"), pin("Cout", "2")});
+        conns.push_back(conn("sec_a", {pin("T1", "secondary1_start"), pin("DH1", rA),
+                                       pin("DL1", rA), pin("Rsn1", "1"), pin("Csn1", "1")}));
+        conns.push_back(conn("sec_b", {pin("T1", "secondary1_end"), pin("DH2", rA),
+                                       pin("DL2", rA)}));
+        railEps = {pin("DH1", rK), pin("DH2", rK),
+                   pin("Rsn1", "2"), pin("Csn1", "2"), pin("Cout", "1")};
+        secGndEps = {pin("DL1", rK), pin("DL2", rK), pin("Cout", "2")};
         break; }
     case RectifierType::CurrentDoubler: {
         // One winding -> 2 catch diodes (cathode at each winding end, anode at gnd) + 2 output inductors
@@ -505,15 +524,14 @@ json build_llc_tas(const LlcDesign& d) {
         comps.insert(comps.end(), {comp("D1", diodeReq(reqD)), comp("D2", diodeReq(reqD)),
             comp("Lo1", outInductor()), comp("Lo2", outInductor()), comp("Rlb", loopBreakR()),
             comp("Cout", cout), comp("Csw1", swSnub())});
-        conns.push_back(conn("node_a", {pin("T1", "secondary1_start"), pin("D1", "cathode"),
+        conns.push_back(conn("node_a", {pin("T1", "secondary1_start"), pin("D1", rK),
                                         pin("Lo1", "primary_start")}));
-        conns.push_back(conn("node_b", {pin("T1", "secondary1_end"), pin("D2", "cathode"),
+        conns.push_back(conn("node_b", {pin("T1", "secondary1_end"), pin("D2", rK),
                                         pin("Lo2", "primary_start")}));
         // Rlb (tiny) sits between Lo2's output and vout to break the winding+Lo1+Lo2 all-inductor loop.
         conns.push_back(conn("lo2_out", {pin("Lo2", "primary_end"), pin("Rlb", "1")}));
-        conns.push_back(conn("vout_net", {pin("Lo1", "primary_end"), pin("Rlb", "2"),
-                          pin("Cout", "1"), prt("vout")}));
-        sgndEps.insert(sgndEps.end(), {pin("D1", "anode"), pin("D2", "anode"), pin("Cout", "2")});
+        railEps = {pin("Lo1", "primary_end"), pin("Rlb", "2"), pin("Cout", "1")};
+        secGndEps = {pin("D1", rA), pin("D2", rA), pin("Cout", "2")};
         break; }
     case RectifierType::VoltageDoubler: {
         // One winding: end A = the diode junction (Dh.anode / Dl.cathode), end B = the cap-stack midpoint
@@ -526,11 +544,17 @@ json build_llc_tas(const LlcDesign& d) {
                                         pin("Dl", "cathode")}));
         conns.push_back(conn("vout_mid", {pin("T1", "secondary1_end"), pin("Cohi", "2"),
                           pin("Colo", "1"), pin("Rvd_hi", "2"), pin("Rvd_lo", "1")}));
-        conns.push_back(conn("vout_net", {pin("Dh", "cathode"), pin("Cohi", "1"),
-                          pin("Rvd_hi", "1"), prt("vout")}));
-        sgndEps.insert(sgndEps.end(), {pin("Dl", "anode"), pin("Colo", "2"), pin("Rvd_lo", "2")});
+        railEps = {pin("Dh", "cathode"), pin("Cohi", "1"), pin("Rvd_hi", "1")};
+        secGndEps = {pin("Dl", "anode"), pin("Colo", "2"), pin("Rvd_lo", "2")};
         break; }
     }
+
+    // Rail polarity (ABT #904): a NEGATIVE rail is the same rectifier with its two output terminals
+    // relabelled — what was the rail becomes secondary ground and vice versa. Nothing is reversed, so
+    // every variant above (including the doublers) mirrors correctly without variant-specific code.
+    railEps.push_back(prt("vout"));
+    conns.push_back(conn("vout_net", railEps));
+    sgndEps.insert(sgndEps.end(), secGndEps.begin(), secGndEps.end());
 
     // ── Extra isolated rails (outputs[1..], ABT #86) ──
     // Each hangs its own diode rectifier + output cap on its dedicated transformer secondary winding(s) and
@@ -554,6 +578,8 @@ json build_llc_tas(const LlcDesign& d) {
         const std::string wAe = "secondary" + std::to_string(base) + "_end";
         const std::string wB = "secondary" + std::to_string(base + 1) + "_start";
         const std::string wBe = "secondary" + std::to_string(base + 1) + "_end";
+        // Per-rail terminal groups, so a negative rail (ABT #904) just exchanges them.
+        std::vector<json> legRail, legGnd;
         switch (d.rectifierType) {
         case RectifierType::CenterTapped: {
             const std::string D1 = "D1_" + sfx, D2 = "D2_" + sfx, Co = "Cout_" + sfx,
@@ -565,10 +591,10 @@ json build_llc_tas(const LlcDesign& d) {
                                                              pin(Rs1.c_str(), "1"), pin(Cs1.c_str(), "1")}));
             conns.push_back(conn(("sec_bot" + sfx).c_str(), {pin("T1", wBe.c_str()), pin(D2.c_str(), "anode"),
                                                              pin(Rs2.c_str(), "1"), pin(Cs2.c_str(), "1")}));
-            conns.push_back(conn((voutP + "_net").c_str(), {pin(D1.c_str(), "cathode"), pin(D2.c_str(), "cathode"),
-                              pin(Rs1.c_str(), "2"), pin(Cs1.c_str(), "2"), pin(Rs2.c_str(), "2"), pin(Cs2.c_str(), "2"),
-                              pin(Co.c_str(), "1"), prt(voutP.c_str())}));
-            sgndEps.insert(sgndEps.end(), {pin("T1", wAe.c_str()), pin("T1", wB.c_str()), pin(Co.c_str(), "2")});
+            legRail = {pin(D1.c_str(), "cathode"), pin(D2.c_str(), "cathode"),
+                       pin(Rs1.c_str(), "2"), pin(Cs1.c_str(), "2"), pin(Rs2.c_str(), "2"), pin(Cs2.c_str(), "2"),
+                       pin(Co.c_str(), "1")};
+            legGnd  = {pin("T1", wAe.c_str()), pin("T1", wB.c_str()), pin(Co.c_str(), "2")};
             break; }
         case RectifierType::FullBridge: {
             const std::string DH1 = "DH1_" + sfx, DH2 = "DH2_" + sfx, DL1 = "DL1_" + sfx, DL2 = "DL2_" + sfx,
@@ -580,15 +606,18 @@ json build_llc_tas(const LlcDesign& d) {
                                                            pin(DL1.c_str(), "cathode"), pin(Rs1.c_str(), "1"), pin(Cs1.c_str(), "1")}));
             conns.push_back(conn(("sec_b" + sfx).c_str(), {pin("T1", wAe.c_str()), pin(DH2.c_str(), "anode"),
                                                            pin(DL2.c_str(), "cathode")}));
-            conns.push_back(conn((voutP + "_net").c_str(), {pin(DH1.c_str(), "cathode"), pin(DH2.c_str(), "cathode"),
-                              pin(Rs1.c_str(), "2"), pin(Cs1.c_str(), "2"), pin(Co.c_str(), "1"), prt(voutP.c_str())}));
-            sgndEps.insert(sgndEps.end(), {pin(DL1.c_str(), "anode"), pin(DL2.c_str(), "anode"), pin(Co.c_str(), "2")});
+            legRail = {pin(DH1.c_str(), "cathode"), pin(DH2.c_str(), "cathode"),
+                       pin(Rs1.c_str(), "2"), pin(Cs1.c_str(), "2"), pin(Co.c_str(), "1")};
+            legGnd  = {pin(DL1.c_str(), "anode"), pin(DL2.c_str(), "anode"), pin(Co.c_str(), "2")};
             break; }
         default:
             throw std::invalid_argument("Kirchhoff LLC multi-output: rectifierType '" +
                 cfg::get_str(d.config, "rectifierType", "centerTapped") +
                 "' is not supported for outputs[1..]; only centerTapped and fullBridge are (ABT #86)");
         }
+        legRail.push_back(prt(voutP.c_str()));
+        conns.push_back(conn((voutP + "_net").c_str(), legRail));
+        sgndEps.insert(sgndEps.end(), legGnd.begin(), legGnd.end());
         cports.push_back(port(voutP.c_str()));
     }
     gndEps.push_back(prt("gnd"));
@@ -620,7 +649,11 @@ json build_llc_tas(const LlcDesign& d) {
     op["outputs"] = json::array();
     for (size_t i = 0; i < nOut; ++i) {
         const std::string oname = (i == 0) ? "out" : "out" + std::to_string(i + 1);
-        json o; o["name"] = oname; o["voltage"]["nominal"] = d.outputs[i].voltage; o["regulation"] = "voltage";
+        // Signed: the TAS states where the rail actually sits, so the synthesized load and
+        // the deck's .meas see -|Vout| (same convention as flyback / forward / cuk).
+        json o; o["name"] = oname;
+        o["voltage"]["nominal"] = d.outputs[i].polarity * d.outputs[i].voltage;
+        o["regulation"] = "voltage";
         dreq["outputs"].push_back(o);
         json oo; oo["name"] = oname; oo["power"] = d.outputs[i].power; op["outputs"].push_back(oo);
     }
