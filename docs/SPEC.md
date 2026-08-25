@@ -66,6 +66,14 @@ collapses it with `resolve_dimensional_values(j, preferred)`:
 
 **Field resolution (all converters):**
 - `designRequirements.outputs[i].voltage` — dimensional, resolved **NOMINAL**. Required.
+  **Sign = rail polarity** where the topology supports it (currently `flyback`): a NEGATIVE nominal
+  asks for a rail below ground. The design math always runs on `|Vout|` — a negative rail is
+  magnetically identical to its positive twin (same turns ratio, same volt-seconds, same winding V
+  and I) — and only the output-side wiring mirrors: that secondary's two ends swap which one feeds
+  the rectifier and which one returns, and its diode is reversed. The emitted TAS carries the sign
+  on `outputs[i].voltage.nominal`, so the assembled deck settles at `-|Vout|`. Every OTHER topology
+  still expects a positive magnitude — `cuk` / `isolated_buck_boost` are inherently inverting and
+  apply the sign themselves (see their rows), so passing a negative there would double-negate.
 - `designRequirements.switchingFrequency` — dimensional, resolved **NOMINAL**. Required.
 - `designRequirements.inputVoltage` — dimensional, resolved **MAXIMUM + MINIMUM** (and NOMINAL as the
   operating-point fallback). Required.
@@ -209,7 +217,7 @@ out-of-range `phaseCount` throws. `phaseCount=1` (default) is byte-identical to 
 
 | topology | efficiency default | pinning | key config (default) | quirks |
 |---|---|---|---|---|
-| **flyback** | **0.88** | inductance, turnsRatios[0] | `tranStopTime`(**0.006**) | single output; `isolationVoltage` threaded to the magnetic (reinforced insulation) iff > 0; Lm gapped (nominal+0.1 tol) |
+| **flyback** | **0.88** | inductance, turnsRatios[0] | `tranStopTime`(**0.006**) | multi-output; `isolationVoltage` threaded to the magnetic (reinforced insulation) iff > 0; Lm gapped (nominal+0.1 tol); **per-rail polarity** — a negative `outputs[i].voltage.nominal` mirrors that rail about ground (winding ends swapped + diode reversed), magnetics unchanged |
 | **isolated_buck** (Fly-Buck) | 1.0 | inductance, turnsRatios[0] | `inductorRippleRatio`(0.4) | **needs 2 outputs** (primary + isolated); **operatingPoints[0] mandatory**; no isolationVoltage threading |
 | **isolated_buck_boost** | 1.0 | inductance, turnsRatios[0] | `inductorRippleRatio`(0.4) | **needs 2 outputs**; **operatingPoints[0] mandatory**; inverting primary rail (send magnitude) |
 

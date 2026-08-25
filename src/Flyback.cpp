@@ -31,7 +31,10 @@ FlybackDesign design_flyback(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     FlybackDesign d{};
     d.config = cfg::object_of(tasInputs);
-    d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"), "outputVoltage");
+    // Rail polarity (ABT #904): the design math is all on |Vout|; the sign only decides how the
+    // output side is wired (see FlybackOutputLeg). Read it here so a negative setpoint survives.
+    const double v0Signed = nominal(dr.at("outputs").at(0).at("voltage"), "outputVoltage");
+    d.outputVoltage = std::fabs(v0Signed);
     d.switchingFrequency = nominal(dr.at("switchingFrequency"), "switchingFrequency");
     d.efficiency = dr.value("efficiency", 0.88);
 
@@ -174,7 +177,9 @@ FlybackDesign design_flyback(const json& tasInputs) {
     const double Vor0 = d.turnsRatio * (d.outputVoltage + d.diodeDrop);
     for (size_t i = 0; i < nOut; ++i) {
         FlybackOutputLeg leg{};
-        leg.voltage = nominal(dr.at("outputs").at(i).at("voltage"), "outputVoltage");
+        const double vSigned = nominal(dr.at("outputs").at(i).at("voltage"), "outputVoltage");
+        leg.voltage  = std::fabs(vSigned);
+        leg.polarity = (vSigned < 0) ? -1 : 1;
         leg.power   = output_power_i(i);
         const double iout_i = leg.power / leg.voltage;
         leg.diodeDrop = req::dideal_diode_drop(iout_i);
@@ -476,18 +481,34 @@ json build_flyback_tas(const FlybackDesign& d) {
 
         // transformer secondary winding -> its (sec,sec_rtn) port pair (flyback diode conducts during OFF,
         // so the secondary_end/dot-opposite end feeds the rectifier anode; the dot end returns to ground).
+        // Rail polarity (ABT #904). A NEGATIVE rail is the positive circuit mirrored about ground: the
+        // secondary's two ends swap which one feeds the rectifier and which one returns, AND the diode
+        // is reversed. The transformer is untouched by this — with both swaps the winding still sees
+        // V(start)-V(end) = -(|Vout|+Vd) while the rectifier conducts and carries current in the same
+        // direction, which is why the magnetic design and every extracted winding waveform are
+        // identical to the positive rail's. What changes is only where ground sits, so the filter cap
+        // (and the synthesized load) charge to -|Vout| instead of +|Vout|.
+        const bool negativeRail = (leg.polarity < 0);
+        const std::string rectEnd = negativeRail ? wStart : wEnd;    // winding end feeding the rectifier
+        const std::string rtnEnd  = negativeRail ? wEnd   : wStart;  // winding end returning to sec gnd
         xports.push_back(port(secP.c_str()));
         xports.push_back(port(secRtnP.c_str()));
-        xconns.push_back(conn(("secondary" + sfx).c_str(),     {pin("T1", wEnd.c_str()),   prt(secP.c_str())}));
-        xconns.push_back(conn(("secondary_rtn" + sfx).c_str(), {pin("T1", wStart.c_str()), prt(secRtnP.c_str())}));
+        xconns.push_back(conn(("secondary" + sfx).c_str(),     {pin("T1", rectEnd.c_str()), prt(secP.c_str())}));
+        xconns.push_back(conn(("secondary_rtn" + sfx).c_str(), {pin("T1", rtnEnd.c_str()),  prt(secRtnP.c_str())}));
         secBinds.push_back(bind(secP.c_str(), "hfAc"));
 
         json rect; rect["name"] = "diode-rectifier" + sfx;
         rect["ports"] = json::array({port("ac_in"), port("dc_out")});
         rect["components"] = json::array({comp(dName.c_str(), diode)});
-        rect["connections"] = json::array({
-            conn("anode",   {pin(dName.c_str(), "anode"),   prt("ac_in")}),
-            conn("cathode", {pin(dName.c_str(), "cathode"), prt("dc_out")})});
+        // Positive rail: anode at the winding, cathode at the rail. Negative rail: reversed, so the
+        // rail node is pulled BELOW the secondary return.
+        rect["connections"] = negativeRail
+            ? json::array({
+                conn("cathode", {pin(dName.c_str(), "cathode"), prt("ac_in")}),
+                conn("anode",   {pin(dName.c_str(), "anode"),   prt("dc_out")})})
+            : json::array({
+                conn("anode",   {pin(dName.c_str(), "anode"),   prt("ac_in")}),
+                conn("cathode", {pin(dName.c_str(), "cathode"), prt("dc_out")})});
 
         // The output filter is part of the converter; the LOAD is not — it is synthesized from the
         // outputs requirement by the assembler (the dual of the input source). So this stage is Cout only.
@@ -527,7 +548,11 @@ json build_flyback_tas(const FlybackDesign& d) {
     opDoc["outputs"] = json::array();
     for (size_t i = 0; i < nOut; ++i) {
         const std::string oname = (i == 0) ? "out" : "out" + std::to_string(i + 1);
-        json o; o["name"] = oname; o["voltage"]["nominal"] = d.outputs[i].voltage; o["regulation"] = "voltage";
+        // Signed here (Cuk does the same for its inverting rail): the TAS states where the rail
+        // actually sits, so the assembler's synthesized load and the deck's .meas see -|Vout|.
+        json o; o["name"] = oname;
+        o["voltage"]["nominal"] = d.outputs[i].polarity * d.outputs[i].voltage;
+        o["regulation"] = "voltage";
         dreq["outputs"].push_back(o);
         json oo; oo["name"] = oname; oo["power"] = d.outputs[i].power; opDoc["outputs"].push_back(oo);
     }

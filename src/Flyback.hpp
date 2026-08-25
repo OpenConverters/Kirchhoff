@@ -20,8 +20,14 @@ namespace Kirchhoff {
 // Every secondary sees the same magnetizing flux, so each rail's turns ratio n_i = Np/Ns_i is scaled so
 // that n_i·(Vout_i+Vd_i) equals the shared reflected voltage Vor — i.e. each output regulates to its own
 // Vout at the common duty. Each rail carries its own rectifier, output capacitor and load.
+// `voltage` is always the MAGNITUDE |Vout_i|; `polarity` (+1 / -1) carries the sign the caller asked
+// for (ABT #904). Every design computation runs on the magnitude, because a negative rail is
+// magnetically identical to its positive twin: same turns ratio, same volt-seconds, same winding V and
+// I. Only the OUTPUT-SIDE wiring differs - the secondary's two ends swap which one feeds the rectifier
+// and which one returns, and the rectifier diode is reversed, mirroring the rail about ground.
 struct FlybackOutputLeg {
     double voltage, power, turnsRatio, diodeDrop, outputCapacitance, loadResistance;
+    int polarity;
 };
 
 struct FlybackDesign {

@@ -271,6 +271,9 @@ target_link_libraries(test_analytical PRIVATE kirchhoff Catch2::Catch2WithMain)
 add_executable(test_ptp tests/test_ptp.cpp)
 target_link_libraries(test_ptp PRIVATE kirchhoff Catch2::Catch2WithMain)
 
+add_executable(test_flyback_negative_rail tests/test_flyback_negative_rail.cpp)
+target_link_libraries(test_flyback_negative_rail PRIVATE kirchhoff Catch2::Catch2WithMain)
+
 add_executable(test_converter_analytical tests/test_converter_analytical.cpp src/KirchhoffApi.cpp)
 target_link_libraries(test_converter_analytical PRIVATE kirchhoff Catch2::Catch2WithMain)
 

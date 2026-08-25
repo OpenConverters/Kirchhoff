@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cctype>
 #include <stdexcept>
+#include <cmath>
 
 namespace Kirchhoff {
 
@@ -74,7 +75,10 @@ std::string emit_load_card(const std::string& node, const json& inputs, size_t o
         throw std::runtime_error("TasAssembler: output " + std::to_string(outputIndex) +
                                  " has neither current nor power to size the load");
     // Fill in the missing magnitude from Vout (schema guarantees exactly one of current/power).
-    const double P = hasPower ? power : vout * current;
+    // Vout may be NEGATIVE (an inverting rail: cuk, or a flyback secondary wired in reverse - ABT
+    // #904). Power is a magnitude, so derive it from |Vout|; the load current keeps Vout's sign,
+    // which is exactly right for the sink below (a negative rail draws current 0 -> node).
+    const double P = hasPower ? power : std::fabs(vout) * current;
     const double I = hasCurrent ? current : (vout != 0 ? power / vout : 0);
 
     // Distinct element name per output: bare for the primary (outputIndex 0, keeps the single-output
@@ -84,7 +88,7 @@ std::string emit_load_card(const std::string& node, const json& inputs, size_t o
     c.precision(10);
     if (loadType == "resistive") {
         if (P <= 0 || vout == 0)
-            throw std::runtime_error("TasAssembler: cannot size a resistive load (need Vout>0 and power>0)");
+            throw std::runtime_error("TasAssembler: cannot size a resistive load (need Vout != 0 and power > 0)");
         c << "Rload" << sfx << " " << node << " 0 " << (vout * vout / P) << "\n";
     } else if (loadType == "constantCurrent") {
         // Ideal current sink: I flows node -> 0 through the source, i.e. drawn out of the output.
@@ -96,10 +100,16 @@ std::string emit_load_card(const std::string& node, const json& inputs, size_t o
         // equilibrium. Use a CURRENT-LIMITED CPL: i = P/max(v, Vk). Below Vk it draws a constant Imax
         // = P/Vk (not a short, so the output can climb through startup); above Vk it is exact P/v —
         // and Vk = Vout/2 keeps the operating point (v ~ Vout) firmly in the true constant-power region.
-        if (P <= 0 || vout <= 0)
-            throw std::runtime_error("TasAssembler: cannot size a constant-power load (need Vout>0 and power>0)");
-        const double vKnee = 0.5 * vout;   // Imax = P/Vk = 2*Iop; constant power for v > Vout/2
-        c << "Bload" << sfx << " " << node << " 0 I = " << P << " / max(V(" << node << "), " << vKnee << ")\n";
+        if (P <= 0 || vout == 0)
+            throw std::runtime_error("TasAssembler: cannot size a constant-power load (need Vout != 0 and power > 0)");
+        // Work on |v|: on a negative rail the knee and the sink both mirror, so the branch draws
+        // constant power out of a rail sitting below ground exactly as it does above it.
+        const double vKnee = 0.5 * std::fabs(vout);   // Imax = P/Vk = 2*Iop; constant power for |v| > |Vout|/2
+        const std::string vAbs = "abs(V(" + node + "))";
+        if (vout > 0)
+            c << "Bload" << sfx << " " << node << " 0 I = " << P << " / max(" << vAbs << ", " << vKnee << ")\n";
+        else
+            c << "Bload" << sfx << " " << node << " 0 I = -" << P << " / max(" << vAbs << ", " << vKnee << ")\n";
     } else {
         throw std::runtime_error("TasAssembler: loadType '" + loadType + "' is not supported by the "
                                  "ngspice emitter yet (battery / converter loads need extra parameters)");
