@@ -481,34 +481,23 @@ json build_flyback_tas(const FlybackDesign& d) {
 
         // transformer secondary winding -> its (sec,sec_rtn) port pair (flyback diode conducts during OFF,
         // so the secondary_end/dot-opposite end feeds the rectifier anode; the dot end returns to ground).
-        // Rail polarity (ABT #904). A NEGATIVE rail is the positive circuit mirrored about ground: the
-        // secondary's two ends swap which one feeds the rectifier and which one returns, AND the diode
-        // is reversed. The transformer is untouched by this — with both swaps the winding still sees
-        // V(start)-V(end) = -(|Vout|+Vd) while the rectifier conducts and carries current in the same
-        // direction, which is why the magnetic design and every extracted winding waveform are
-        // identical to the positive rail's. What changes is only where ground sits, so the filter cap
-        // (and the synthesized load) charge to -|Vout| instead of +|Vout|.
+        // Rail polarity (ABT #904). A NEGATIVE rail is the SAME rectifier with its two output
+        // terminals relabelled (see the ISCs below): the rectifier's dc_out becomes secondary ground
+        // and the secondary's return becomes the rail. Nothing is reversed — no diode, no winding —
+        // so the leg is bit-for-bit the one that was designed; it just sits below ground.
         const bool negativeRail = (leg.polarity < 0);
-        const std::string rectEnd = negativeRail ? wStart : wEnd;    // winding end feeding the rectifier
-        const std::string rtnEnd  = negativeRail ? wEnd   : wStart;  // winding end returning to sec gnd
         xports.push_back(port(secP.c_str()));
         xports.push_back(port(secRtnP.c_str()));
-        xconns.push_back(conn(("secondary" + sfx).c_str(),     {pin("T1", rectEnd.c_str()), prt(secP.c_str())}));
-        xconns.push_back(conn(("secondary_rtn" + sfx).c_str(), {pin("T1", rtnEnd.c_str()),  prt(secRtnP.c_str())}));
+        xconns.push_back(conn(("secondary" + sfx).c_str(),     {pin("T1", wEnd.c_str()),   prt(secP.c_str())}));
+        xconns.push_back(conn(("secondary_rtn" + sfx).c_str(), {pin("T1", wStart.c_str()), prt(secRtnP.c_str())}));
         secBinds.push_back(bind(secP.c_str(), "hfAc"));
 
         json rect; rect["name"] = "diode-rectifier" + sfx;
         rect["ports"] = json::array({port("ac_in"), port("dc_out")});
         rect["components"] = json::array({comp(dName.c_str(), diode)});
-        // Positive rail: anode at the winding, cathode at the rail. Negative rail: reversed, so the
-        // rail node is pulled BELOW the secondary return.
-        rect["connections"] = negativeRail
-            ? json::array({
-                conn("cathode", {pin(dName.c_str(), "cathode"), prt("ac_in")}),
-                conn("anode",   {pin(dName.c_str(), "anode"),   prt("dc_out")})})
-            : json::array({
-                conn("anode",   {pin(dName.c_str(), "anode"),   prt("ac_in")}),
-                conn("cathode", {pin(dName.c_str(), "cathode"), prt("dc_out")})});
+        rect["connections"] = json::array({
+            conn("anode",   {pin(dName.c_str(), "anode"),   prt("ac_in")}),
+            conn("cathode", {pin(dName.c_str(), "cathode"), prt("dc_out")})});
 
         // The output filter is part of the converter; the LOAD is not — it is synthesized from the
         // outputs requirement by the assembler (the dual of the input source). So this stage is Cout only.
@@ -526,10 +515,19 @@ json build_flyback_tas(const FlybackDesign& d) {
 
         outIscs.push_back(isc("sec" + sfx, "wire", "",
                               {sp("transformer", secP.c_str()), sp(rectStage.c_str(), "ac_in")}));
-        outIscs.push_back(isc(voutPort, "externalPort", "output",
-                              {sp(rectStage.c_str(), "dc_out"), sp(filtStage.c_str(), "in")}));
-        sgndEps.push_back(sp("transformer", secRtnP.c_str()));
-        sgndEps.push_back(sp(filtStage.c_str(), "rtn"));
+        // Which end of the leg is the RAIL and which is secondary ground — the only thing a
+        // negative rail changes (ABT #904).
+        if (negativeRail) {
+            outIscs.push_back(isc(voutPort, "externalPort", "output",
+                                  {sp("transformer", secRtnP.c_str()), sp(filtStage.c_str(), "rtn")}));
+            sgndEps.push_back(sp(rectStage.c_str(), "dc_out"));
+            sgndEps.push_back(sp(filtStage.c_str(), "in"));
+        } else {
+            outIscs.push_back(isc(voutPort, "externalPort", "output",
+                                  {sp(rectStage.c_str(), "dc_out"), sp(filtStage.c_str(), "in")}));
+            sgndEps.push_back(sp("transformer", secRtnP.c_str()));
+            sgndEps.push_back(sp(filtStage.c_str(), "rtn"));
+        }
     }
 
     xfmr["ports"] = xports;

@@ -19,7 +19,9 @@ ForwardDesign design_forward(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     ForwardDesign d{};
     d.config = cfg::object_of(tasInputs);
-    d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
+    // Rail polarity (ABT #904): the design math is all on |Vout|; the sign only mirrors the
+    // output side. Keep the magnitude here so every derived quantity is unchanged.
+    d.outputVoltage = std::fabs(nominal(dr.at("outputs").at(0).at("voltage")));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 0.9);
     if (tasInputs.contains("operatingPoints") && !tasInputs.at("operatingPoints").empty()) {
@@ -72,7 +74,9 @@ ForwardDesign design_forward(const json& tasInputs) {
     const size_t nOut = dr.at("outputs").size();
     for (size_t i = 0; i < nOut; ++i) {
         ForwardOutputLeg leg{};
-        leg.voltage = nominal(dr.at("outputs").at(i).at("voltage"));
+        const double vSigned = nominal(dr.at("outputs").at(i).at("voltage"));
+        leg.voltage  = std::fabs(vSigned);
+        leg.polarity = (vSigned < 0) ? -1 : 1;
         if (tasInputs.contains("operatingPoints") && !tasInputs.at("operatingPoints").empty())
             leg.power = tasInputs.at("operatingPoints").at(0).at("outputs").at(i).at("power").get<double>();
         else
@@ -205,6 +209,7 @@ json build_forward_tas(const ForwardDesign& d) {
         const auto& leg = d.outputs[i];
         const std::string sfx  = (i == 0) ? std::string() : std::to_string(i + 1);   // "", "2", "3", …
         const std::string sw   = "secondary" + std::to_string(2 + i) + "_start";     // demag=secondary1, sec0=secondary2, …
+        const std::string swEnd = "secondary" + std::to_string(2 + i) + "_end";
         const std::string dfwdN = "Dfwd" + sfx, dfwN = "Dfw" + sfx, loutN = "Lout" + sfx, coutN = "Cout" + sfx;
         const double iout_i = leg.power / leg.voltage;
 
@@ -235,8 +240,33 @@ json build_forward_tas(const ForwardDesign& d) {
         conns.push_back(conn(("sec_in" + sfx).c_str(),   {pin("T1", sw.c_str()), pin(dfwdN.c_str(), "anode")}));
         conns.push_back(conn(("sec_rect" + sfx).c_str(), {pin(dfwdN.c_str(), "cathode"), pin(dfwN.c_str(), "cathode"),
                                                           pin(loutN.c_str(), "primary_start")}));
+
+        // Rail polarity (ABT #904). A NEGATIVE rail is the SAME rectifier with its two output
+        // terminals relabelled: the end that would have been the rail becomes secondary ground, and
+        // the winding return becomes the rail. Nothing is reversed — no diode, no winding — so the
+        // sub-circuit is bit-for-bit the one that was designed and simulates exactly as well; it just
+        // sits below ground instead of above it. (Reversing the diodes and swapping the winding ends
+        // is the other way to draw the mirror, and it is what the flyback does with its single diode;
+        // on a buck-derived stage that route makes the ideal-diode deck diverge, and it is redundant
+        // anyway — relabelling is the same circuit with none of the numerical risk.)
+        const bool negativeRail = (leg.polarity < 0);
+        // Endpoints that ride at secondary ground, and the ones that form the rail node.
+        std::vector<json> railEps, secGndEps;
+        if (negativeRail) {
+            railEps.push_back(pin("T1", swEnd.c_str()));
+            railEps.push_back(pin(dfwN.c_str(), "anode"));
+            secGndEps.push_back(pin(loutN.c_str(), "primary_end"));
+        } else {
+            railEps.push_back(pin(loutN.c_str(), "primary_end"));
+            secGndEps.push_back(pin("T1", swEnd.c_str()));
+            secGndEps.push_back(pin(dfwN.c_str(), "anode"));
+        }
+
         if (i == 0) {
-            conns.push_back(conn("vout_net", {pin("Lout", "primary_end"), prt("vout")}));
+            // The main rail's Cout lives in the separate output-filter stage, across (vout, sgnd) —
+            // so swapping what those two cell ports carry is all a negative main rail needs.
+            railEps.push_back(prt("vout"));
+            conns.push_back(conn("vout_net", railEps));
         } else {
             json capi; capi["capacitor"] = json::object();
             capi["inputs"]["designRequirements"]["capacitance"]["nominal"] = leg.outputCapacitance;
@@ -244,12 +274,13 @@ json build_forward_tas(const ForwardDesign& d) {
             comps.push_back(comp(coutN.c_str(), capi));
             const std::string voutP = "vout" + sfx;
             cports.push_back(port(voutP.c_str()));
-            conns.push_back(conn((voutP + "_net").c_str(), {pin(loutN.c_str(), "primary_end"),
-                                                            pin(coutN.c_str(), "1"), prt(voutP.c_str())}));
-            sgndEps.push_back(pin(coutN.c_str(), "2"));
+            // Cout straddles rail and secondary ground either way; only which plate is which moves.
+            railEps.push_back(pin(coutN.c_str(), negativeRail ? "2" : "1"));
+            secGndEps.push_back(pin(coutN.c_str(), negativeRail ? "1" : "2"));
+            railEps.push_back(prt(voutP.c_str()));
+            conns.push_back(conn((voutP + "_net").c_str(), railEps));
         }
-        sgndEps.push_back(pin("T1", ("secondary" + std::to_string(2 + i) + "_end").c_str()));
-        sgndEps.push_back(pin(dfwN.c_str(), "anode"));
+        for (const auto& ep : secGndEps) sgndEps.push_back(ep);
     }
     gndEps.push_back(prt("gnd"));
     conns.push_back(conn("gnd_net", gndEps));
@@ -280,7 +311,11 @@ json build_forward_tas(const ForwardDesign& d) {
     opDoc["outputs"] = json::array();
     for (size_t i = 0; i < nOut; ++i) {
         const std::string oname = (i == 0) ? "out" : "out" + std::to_string(i + 1);
-        json o; o["name"] = oname; o["voltage"]["nominal"] = d.outputs[i].voltage; o["regulation"] = "voltage";
+        // Signed: the TAS states where the rail actually sits, so the assembler's synthesized
+        // load and the deck's .meas see -|Vout| (same convention as flyback / cuk).
+        json o; o["name"] = oname;
+        o["voltage"]["nominal"] = d.outputs[i].polarity * d.outputs[i].voltage;
+        o["regulation"] = "voltage";
         dreq["outputs"].push_back(o);
         json oo; oo["name"] = oname; oo["power"] = d.outputs[i].power; opDoc["outputs"].push_back(oo);
     }

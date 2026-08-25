@@ -14,8 +14,14 @@ namespace Kirchhoff {
 // One isolated output rail. outputs[0] mirrors the top-level scalar fields (the primary/measured rail);
 // outputs[1..] are additional secondaries (multi-output forward). Each carries its own duty-derived turns
 // ratio, rectifier diode drop, output-filter inductor/capacitor, and load. (ABT #86)
+// `voltage` is the MAGNITUDE |Vout_i|; `polarity` (+1 / -1) is the sign the caller asked for
+// (ABT #904). A negative rail is magnetically identical to its positive twin — same turns ratio, same
+// volt-seconds, same winding V and I — so every design computation runs on the magnitude and only the
+// output side mirrors about ground: that secondary's ends swap, and every diode in its rectifier
+// reverses.
 struct ForwardOutputLeg {
     double voltage, power, turnsRatio, diodeDrop, outputInductance, outputCapacitance, loadResistance;
+    int polarity;
 };
 
 struct ForwardDesign {

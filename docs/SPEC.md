@@ -66,14 +66,17 @@ collapses it with `resolve_dimensional_values(j, preferred)`:
 
 **Field resolution (all converters):**
 - `designRequirements.outputs[i].voltage` — dimensional, resolved **NOMINAL**. Required.
-  **Sign = rail polarity** where the topology supports it (currently `flyback`): a NEGATIVE nominal
-  asks for a rail below ground. The design math always runs on `|Vout|` — a negative rail is
-  magnetically identical to its positive twin (same turns ratio, same volt-seconds, same winding V
-  and I) — and only the output-side wiring mirrors: that secondary's two ends swap which one feeds
-  the rectifier and which one returns, and its diode is reversed. The emitted TAS carries the sign
-  on `outputs[i].voltage.nominal`, so the assembled deck settles at `-|Vout|`. Every OTHER topology
-  still expects a positive magnitude — `cuk` / `isolated_buck_boost` are inherently inverting and
-  apply the sign themselves (see their rows), so passing a negative there would double-negate.
+  **Sign = rail polarity** on the topologies that support it — `flyback`, `forward`,
+  `two_switch_forward`, `push_pull`: a NEGATIVE nominal asks for a rail below ground, **per rail**, so
+  a mixed `+5 / +12 / -12` design is one converter. The design math always runs on `|Vout|`: a negative
+  rail is magnetically identical to its positive twin (same turns ratio, same volt-seconds, same
+  winding V and I), and every component rating is unchanged. What changes is only which of the
+  rectifier's two output terminals is called the rail and which is called secondary ground — no diode
+  and no winding is reversed, so the emitted sub-circuit is bit-for-bit the one that was designed. The
+  TAS carries the sign on `outputs[i].voltage.nominal`, so the assembled deck settles at `-|Vout|`.
+  Every OTHER topology still expects a positive magnitude — `cuk` / `isolated_buck_boost` are
+  inherently inverting and apply the sign themselves (see their rows), so passing a negative there
+  would double-negate.
 - `designRequirements.switchingFrequency` — dimensional, resolved **NOMINAL**. Required.
 - `designRequirements.inputVoltage` — dimensional, resolved **MAXIMUM + MINIMUM** (and NOMINAL as the
   operating-point fallback). Required.
@@ -217,7 +220,7 @@ out-of-range `phaseCount` throws. `phaseCount=1` (default) is byte-identical to 
 
 | topology | efficiency default | pinning | key config (default) | quirks |
 |---|---|---|---|---|
-| **flyback** | **0.88** | inductance, turnsRatios[0] | `tranStopTime`(**0.006**) | multi-output; `isolationVoltage` threaded to the magnetic (reinforced insulation) iff > 0; Lm gapped (nominal+0.1 tol); **per-rail polarity** — a negative `outputs[i].voltage.nominal` mirrors that rail about ground (winding ends swapped + diode reversed), magnetics unchanged |
+| **flyback** | **0.88** | inductance, turnsRatios[0] | `tranStopTime`(**0.006**) | multi-output; `isolationVoltage` threaded to the magnetic (reinforced insulation) iff > 0; Lm gapped (nominal+0.1 tol); **per-rail polarity** — a negative `outputs[i].voltage.nominal` puts that rail below ground (rail / secondary-ground terminals relabelled), magnetics unchanged |
 | **isolated_buck** (Fly-Buck) | 1.0 | inductance, turnsRatios[0] | `inductorRippleRatio`(0.4) | **needs 2 outputs** (primary + isolated); **operatingPoints[0] mandatory**; no isolationVoltage threading |
 | **isolated_buck_boost** | 1.0 | inductance, turnsRatios[0] | `inductorRippleRatio`(0.4) | **needs 2 outputs**; **operatingPoints[0] mandatory**; inverting primary rail (send magnitude) |
 
@@ -225,10 +228,10 @@ out-of-range `phaseCount` throws. `phaseCount=1` (default) is byte-identical to 
 
 | topology | efficiency default | pinning | key config (default) | quirks |
 |---|---|---|---|---|
-| **forward** (single-switch) | 0.9 | inductance, **turnsRatios[1+i]** | `maxDutyCycle`(0.5), `inductorRippleRatio`(0.4) | 3-winding (demag+secondary), isolationSides {primary,primary,secondary,…}; second magnetic = output inductor; **multi-output** (N secondaries, ABT #86) |
-| **two_switch_forward** | 0.9 | inductance, turnsRatios[i] | `maxDutyCycle`(0.5), `inductorRippleRatio`(0.4) | 2-winding; each switch blocks only Vin_max; **multi-output** (N secondaries, ABT #86; adds a tagged clamp-node snubber when >1 output) |
+| **forward** (single-switch) | 0.9 | inductance, **turnsRatios[1+i]** | `maxDutyCycle`(0.5), `inductorRippleRatio`(0.4) | 3-winding (demag+secondary), isolationSides {primary,primary,secondary,…}; second magnetic = output inductor; **multi-output** (N secondaries, ABT #86) ; **per-rail polarity** (negative `outputs[i].voltage.nominal` -> rail below ground) |
+| **two_switch_forward** | 0.9 | inductance, turnsRatios[i] | `maxDutyCycle`(0.5), `inductorRippleRatio`(0.4) | 2-winding; each switch blocks only Vin_max; **multi-output** (N secondaries, ABT #86; adds a tagged clamp-node snubber when >1 output) ; **per-rail polarity** (negative `outputs[i].voltage.nominal` -> rail below ground) |
 | **acf** (active-clamp forward) | 0.9 | inductance, turnsRatios[i] | `operatingDutyCycle`(0.45), `deadTimeFraction`(0.01), `nodeSnubberCap`(2.2e-9) | synchronous rectifiers (MOSFETs, not diodes); active clamp resets core; **multi-output** (N secondaries, ABT #86) |
-| **push_pull** | 0.9 | inductance, **turnsRatios[1]** | `maxDutyCycle`(0.48), `outputCapacitance`(100e-6) | center-tapped primary; secondary ratios emitted as **{maximum}** ceilings |
+| **push_pull** | 0.9 | inductance, **turnsRatios[1]** | `maxDutyCycle`(0.48), `outputCapacitance`(100e-6) | center-tapped primary; secondary ratios emitted as **{maximum}** ceilings ; **per-rail polarity** (negative `outputs[i].voltage.nominal` -> rail below ground) |
 | **weinberg** | **1.0** | inductance, **turnsRatios[1]** | `variant`("classic"), `synchronousRectifier`(false), `boostDutyTarget`(0.55), `l1RippleRatio`(0.30), `transformerCoupling`(0.999), `bridgeTurnsScale`(0.5), `deadTimeFraction`(0.02) | current-fed push-pull; **operatingPoints[0] mandatory**; boost regime (D>0.5); `variant="bridge"` = 4-switch H-bridge primary (diagonal PWM, halves primary switch Vds, `bridgeTurnsScale` rescales the shared transformer); `synchronousRectifier=true` swaps the CT-FW diodes for SR MOSFETs + body diodes (ABT #88) |
 
 ### Bridge & phase-shift

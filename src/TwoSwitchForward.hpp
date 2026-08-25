@@ -11,8 +11,14 @@
 namespace Kirchhoff {
 
 // One isolated output rail (multi-output two-switch forward, ABT #86). outputs[0] mirrors the scalars.
+// `voltage` is the MAGNITUDE |Vout_i|; `polarity` (+1 / -1) is the sign the caller asked for
+// (ABT #904). A negative rail is magnetically identical to its positive twin — same turns ratio, same
+// volt-seconds, same winding V and I — so every design computation runs on the magnitude and only the
+// output side mirrors about ground: that secondary's ends swap, and every diode in its rectifier
+// reverses.
 struct TwoSwitchForwardOutputLeg {
     double voltage, power, turnsRatio, diodeDrop, outputInductance, outputCapacitance, loadResistance;
+    int polarity;
 };
 
 struct TwoSwitchForwardDesign {

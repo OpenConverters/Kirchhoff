@@ -1,10 +1,11 @@
-// Negative output rails on the flyback (ABT #904).
+// Negative output rails (ABT #904) — flyback, forward, two-switch forward, push-pull.
 //
 // A rail asked for as -12 V must come out of ngspice at -12 V. The engine designs every rail from its
 // MAGNITUDE (a negative rail is magnetically identical to its positive twin — same turns ratio, same
-// volt-seconds, same winding V and I); the sign only mirrors the output side about ground: the
-// secondary's two ends swap which one feeds the rectifier and which one returns, and the diode is
-// reversed. These tests pin both halves of that claim: the magnetics must NOT move, and the rail must.
+// volt-seconds, same winding V and I); the sign only decides which of the rectifier's two output
+// terminals is called the rail and which is called secondary ground. Nothing is reversed — no diode,
+// no winding — so the emitted sub-circuit is the one that was designed, it just sits below ground.
+// These tests pin both halves of that claim: the magnetics must NOT move, and the rail must.
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <nlohmann/json.hpp>
@@ -12,6 +13,9 @@
 #include <regex>
 #include <string>
 #include "Flyback.hpp"
+#include "Forward.hpp"
+#include "TwoSwitchForward.hpp"
+#include "PushPull.hpp"
 #include "TasAssembler.hpp"
 #include "NgspiceRunner.hpp"
 #include "Fidelity.hpp"
@@ -52,6 +56,7 @@ std::vector<double> simulate_rails(const json& tas, size_t nRails, double fsw) {
     deck = std::regex_replace(deck, std::regex(R"(\.tran\s+\S+\s+\S+\s+\S+\s+\S+)"),
                               ".tran " + num(tstep) + " " + num(tstop) + " 0 " + num(tstep));
     Kirchhoff::NgspiceRunResult r = Kirchhoff::run_ngspice_in_process(deck);
+    INFO("ngspice error: " << r.error);
     REQUIRE(r.success);
     std::vector<double> out;
     for (size_t i = 0; i < nRails; ++i) {
@@ -81,7 +86,7 @@ TEST_CASE("flyback: a negative rail designs identically to its positive twin", "
     CHECK_THAT(neg.outputs[0].outputCapacitance, WithinRel(pos.outputs[0].outputCapacitance, 1e-12));
 }
 
-TEST_CASE("flyback: the TAS states the rail's real sign and reverses its rectifier",
+TEST_CASE("flyback: the TAS states the rail's real sign and keeps the rectifier as designed",
           "[flyback][negative]") {
     const json tas = Kirchhoff::build_flyback_tas(
         Kirchhoff::design_flyback(spec({{12.0, 2.0}, {-12.0, 1.0}})));
@@ -96,8 +101,10 @@ TEST_CASE("flyback: the TAS states the rail's real sign and reverses its rectifi
     PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
     const std::string deck = Kirchhoff::tas_to_ngspice(tas, ideal);
     INFO(deck);
-    CHECK(deck.find("DD1 ac_in dc_out") != std::string::npos);   // positive rail: forward
-    CHECK(deck.find("DD2 dc_out ac_in") != std::string::npos);   // negative rail: reversed
+    // Both rails keep an identically-wired rectifier — the polarity lives in which terminal the
+    // assembler calls the rail, not in a reversed component.
+    CHECK(deck.find("DD1 ac_in dc_out") != std::string::npos);
+    CHECK(deck.find("DD2 ac_in dc_out") != std::string::npos);
 }
 
 TEST_CASE("flyback: ngspice puts a -12 V rail at -12 V", "[flyback][negative][ngspice]") {
@@ -122,4 +129,86 @@ TEST_CASE("flyback: a mixed +5 / +12 / -12 design puts each rail on its own side
     CHECK(rails[2] < 0.0);
     // The two 12 V rails share a magnitude, so the negative one must mirror the positive one closely.
     CHECK_THAT(std::fabs(rails[2]), WithinRel(rails[1], 0.25));
+}
+
+
+// ---------------------------------------------------------------------------
+// The same mirror applies to every multi-output isolated topology whose rectifier is diodes: reverse
+// each diode in the rail's path and swap that secondary's ends (ABT #904). These pin the forward
+// family (two diodes + output inductor per rail) and push-pull (centre-tapped full wave).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A buck-derived isolated spec (forward family / push-pull): lower Vin, generous duty headroom.
+json bd_spec(const std::vector<std::pair<double, double>>& rails, double vin = 48, double fsw = 100000) {
+    json s;
+    s["designRequirements"]["efficiency"] = 0.9;
+    s["designRequirements"]["inputVoltage"] = {{"minimum", vin * 0.9}, {"nominal", vin}, {"maximum", vin * 1.1}};
+    s["designRequirements"]["switchingFrequency"]["nominal"] = fsw;
+    s["designRequirements"]["outputs"] = json::array();
+    json ops = json::array();
+    for (size_t i = 0; i < rails.size(); ++i) {
+        const std::string name = (i == 0) ? "out" : "out" + std::to_string(i + 1);
+        s["designRequirements"]["outputs"].push_back(
+            {{"name", name}, {"voltage", {{"nominal", rails[i].first}}}, {"regulation", "voltage"}});
+        ops.push_back({{"name", name}, {"power", std::fabs(rails[i].first) * rails[i].second}});
+    }
+    s["operatingPoints"] = json::array({{{"inputVoltage", vin}, {"outputs", ops}}});
+    return s;
+}
+
+} // namespace
+
+
+
+
+TEST_CASE("forward: a negative rail designs identically and simulates below ground",
+          "[forward][negative][ngspice]") {
+    const double fsw = 100000;
+    const auto pos = Kirchhoff::design_forward(bd_spec({{12.0, 2.0}}, 48, fsw));
+    const auto neg = Kirchhoff::design_forward(bd_spec({{-12.0, 2.0}}, 48, fsw));
+    CHECK(neg.outputs[0].polarity == -1);
+    CHECK_THAT(neg.turnsRatio, WithinRel(pos.turnsRatio, 1e-12));
+    CHECK_THAT(neg.outputs[0].outputInductance, WithinRel(pos.outputs[0].outputInductance, 1e-12));
+
+    const auto rails = simulate_rails(Kirchhoff::build_forward_tas(neg), 1, fsw);
+    INFO("Vout = " << rails[0]);
+    CHECK(rails[0] < 0.0);
+    CHECK(std::fabs(rails[0]) > 6.0);
+    CHECK(std::fabs(rails[0]) < 24.0);
+}
+
+TEST_CASE("two_switch_forward: a negative rail simulates below ground",
+          "[two_switch_forward][negative][ngspice]") {
+    const double fsw = 100000;
+    const auto neg = Kirchhoff::design_two_switch_forward(bd_spec({{-12.0, 2.0}}, 48, fsw));
+    CHECK(neg.outputs[0].polarity == -1);
+    const auto rails = simulate_rails(Kirchhoff::build_two_switch_forward_tas(neg), 1, fsw);
+    INFO("Vout = " << rails[0]);
+    CHECK(rails[0] < 0.0);
+    CHECK(std::fabs(rails[0]) > 6.0);
+    CHECK(std::fabs(rails[0]) < 24.0);
+}
+
+TEST_CASE("push_pull: a negative rail simulates below ground", "[push_pull][negative][ngspice]") {
+    const double fsw = 100000;
+    const auto neg = Kirchhoff::design_push_pull(bd_spec({{-12.0, 2.0}}, 48, fsw));
+    CHECK(neg.outputs[0].polarity == -1);
+    const auto rails = simulate_rails(Kirchhoff::build_push_pull_tas(neg), 1, fsw);
+    INFO("Vout = " << rails[0]);
+    CHECK(rails[0] < 0.0);
+    CHECK(std::fabs(rails[0]) > 6.0);
+    CHECK(std::fabs(rails[0]) < 24.0);
+}
+
+TEST_CASE("forward: a mixed +5 / -12 design puts each rail on its own side of ground",
+          "[forward][negative][ngspice]") {
+    const double fsw = 100000;
+    const auto rails = simulate_rails(
+        Kirchhoff::build_forward_tas(Kirchhoff::design_forward(bd_spec({{5.0, 3.0}, {-12.0, 1.0}}, 48, fsw))),
+        2, fsw);
+    INFO("rails = " << rails[0] << ", " << rails[1]);
+    CHECK(rails[0] > 0.0);
+    CHECK(rails[1] < 0.0);
 }

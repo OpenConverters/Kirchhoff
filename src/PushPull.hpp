@@ -13,8 +13,14 @@ namespace Kirchhoff {
 
 // outputs[1..] are additional isolated secondaries (multi-output push-pull, ABT #86). Each rail is its
 // OWN center-tapped secondary pair (turnsRatio N_i = primary-half:secondary-half), rectifier + Lout_i/Cout_i.
+// `voltage` is the MAGNITUDE |Vout_i|; `polarity` (+1 / -1) is the sign the caller asked for
+// (ABT #904). A negative rail is magnetically identical to its positive twin — same turns ratio, same
+// volt-seconds, same winding V and I — so every design computation runs on the magnitude and only the
+// output side mirrors about ground: that secondary's ends swap, and every diode in its rectifier
+// reverses.
 struct PushPullOutputLeg {
     double voltage, power, turnsRatio, diodeDrop, outputInductance, outputCapacitance, loadResistance;
+    int polarity;
 };
 
 struct PushPullDesign {

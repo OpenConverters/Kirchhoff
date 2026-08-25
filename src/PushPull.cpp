@@ -19,7 +19,9 @@ PushPullDesign design_push_pull(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     PushPullDesign d{};
     d.config = cfg::object_of(tasInputs);
-    d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));
+    // Rail polarity (ABT #904): the design math is all on |Vout|; the sign only mirrors the
+    // output side. Keep the magnitude here so every derived quantity is unchanged.
+    d.outputVoltage = std::fabs(nominal(dr.at("outputs").at(0).at("voltage")));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
     d.efficiency = dr.value("efficiency", 0.9);
     d.maxDutyCycle = cfg::get(d.config, "maxDutyCycle", kMaxDuty);
@@ -73,7 +75,9 @@ PushPullDesign design_push_pull(const json& tasInputs) {
     const size_t nOut = dr.at("outputs").size();
     for (size_t i = 0; i < nOut; ++i) {
         PushPullOutputLeg leg{};
-        leg.voltage = nominal(dr.at("outputs").at(i).at("voltage"));
+        const double vSigned = nominal(dr.at("outputs").at(i).at("voltage"));
+        leg.voltage  = std::fabs(vSigned);
+        leg.polarity = (vSigned < 0) ? -1 : 1;
         if (tasInputs.contains("operatingPoints") && !tasInputs.at("operatingPoints").empty())
             leg.power = tasInputs.at("operatingPoints").at(0).at("outputs").at(i).at("power").get<double>();
         else
@@ -273,8 +277,32 @@ json build_push_pull_tas(const PushPullDesign& d) {
         conns.push_back(conn(("sec_top" + sfx).c_str(),  {pin("T1", (half1 + "_start").c_str()), pin(dtop.c_str(), "anode"), pin(csnT.c_str(), "1")}));
         conns.push_back(conn(("sec_bot" + sfx).c_str(),  {pin("T1", (half2 + "_end").c_str()),   pin(dbot.c_str(), "anode"), pin(csnB.c_str(), "1")}));
         conns.push_back(conn(("sec_rect" + sfx).c_str(), {pin(dtop.c_str(), "cathode"), pin(dbot.c_str(), "cathode"), pin(loutN.c_str(), "primary_start")}));
+
+        comps.push_back(comp(csnT.c_str(), snub()));
+        comps.push_back(comp(csnB.c_str(), snub()));
+
+        // Rail polarity (ABT #904). A NEGATIVE rail is the SAME centre-tapped rectifier with its two
+        // output terminals relabelled: the centre tap becomes the rail and the inductor's output end
+        // becomes secondary ground. Nothing is reversed — no diode, no winding — so the sub-circuit is
+        // bit-for-bit the one that was designed and simulates exactly as well; it just sits below
+        // ground. The snubber returns stay tied to the centre tap, so they follow it either way.
+        const bool negativeRail = (leg.polarity < 0);
+        std::vector<json> centreTapEps{pin("T1", (half1 + "_end").c_str()),
+                                       pin("T1", (half2 + "_start").c_str()),
+                                       pin(csnT.c_str(), "2"), pin(csnB.c_str(), "2")};
+        std::vector<json> railEps, secGndEps;
+        if (negativeRail) {
+            railEps = centreTapEps;
+            secGndEps.push_back(pin(loutN.c_str(), "primary_end"));
+        } else {
+            railEps.push_back(pin(loutN.c_str(), "primary_end"));
+            secGndEps = centreTapEps;
+        }
+
         if (i == 0) {
-            conns.push_back(conn("vout_net", {pin("Lout", "primary_end"), prt("vout")}));   // main rail -> output-filter stage
+            // The main rail's Cout lives in the output-filter stage, across (vout, sgnd).
+            railEps.push_back(prt("vout"));
+            conns.push_back(conn("vout_net", railEps));
         } else {
             json capi; capi["capacitor"] = json::object();
             capi["inputs"]["designRequirements"]["capacitance"]["nominal"] = leg.outputCapacitance;
@@ -282,16 +310,12 @@ json build_push_pull_tas(const PushPullDesign& d) {
             const std::string coutN = "Cout" + sfx, voutP = "vout" + sfx;
             comps.push_back(comp(coutN.c_str(), capi));
             cports.push_back(port(voutP.c_str()));
-            conns.push_back(conn((voutP + "_net").c_str(), {pin(loutN.c_str(), "primary_end"), pin(coutN.c_str(), "1"), prt(voutP.c_str())}));
-            sgndEps.push_back(pin(coutN.c_str(), "2"));
+            railEps.push_back(pin(coutN.c_str(), negativeRail ? "2" : "1"));
+            secGndEps.push_back(pin(coutN.c_str(), negativeRail ? "1" : "2"));
+            railEps.push_back(prt(voutP.c_str()));
+            conns.push_back(conn((voutP + "_net").c_str(), railEps));
         }
-        // rail center tap (= gnd) + this rail's secondary snubber returns
-        sgndEps.push_back(pin("T1", (half1 + "_end").c_str()));
-        sgndEps.push_back(pin("T1", (half2 + "_start").c_str()));
-        comps.push_back(comp(csnT.c_str(), snub()));
-        comps.push_back(comp(csnB.c_str(), snub()));
-        sgndEps.push_back(pin(csnT.c_str(), "2"));
-        sgndEps.push_back(pin(csnB.c_str(), "2"));
+        for (const auto& ep : secGndEps) sgndEps.push_back(ep);
     }
     // primary snubbers + drain-to-drain leakage damper (appended after the per-rail block)
     comps.push_back(comp("Csn1", snub()));  comps.push_back(comp("Csn2", snub()));
@@ -326,7 +350,11 @@ json build_push_pull_tas(const PushPullDesign& d) {
     opDoc["outputs"] = json::array();
     for (size_t i = 0; i < nOut; ++i) {
         const std::string oname = (i == 0) ? "out" : "out" + std::to_string(i + 1);
-        json o; o["name"] = oname; o["voltage"]["nominal"] = d.outputs[i].voltage; o["regulation"] = "voltage";
+        // Signed: the TAS states where the rail actually sits, so the assembler's synthesized
+        // load and the deck's .meas see -|Vout| (same convention as flyback / cuk).
+        json o; o["name"] = oname;
+        o["voltage"]["nominal"] = d.outputs[i].polarity * d.outputs[i].voltage;
+        o["regulation"] = "voltage";
         dreq["outputs"].push_back(o);
         json oo; oo["name"] = oname; oo["power"] = d.outputs[i].power; opDoc["outputs"].push_back(oo);
     }
