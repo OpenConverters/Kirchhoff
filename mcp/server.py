@@ -262,6 +262,27 @@ def _quantities(pairs: dict) -> dict:
     return out
 
 
+def _designs_result(summary: str, designs: list, kind: str,
+                    caveat: str | None = None) -> CallToolResult:
+    """Ranked things this ENGINE produced — a filter sized to a target, not a part to order.
+
+    Deliberately not `candidates`: a candidate carries an mpn because somebody can buy it, and
+    a choke sized from a spec is a thing you would have to have made.
+    """
+    rows = []
+    for i, entry in enumerate(designs or []):
+        row = {"rank": i + 1}
+        for key in ("label", "score", "properties", "document", "ref", "notes"):
+            value = entry.get(key)
+            if value is not None:
+                row[key] = value
+        rows.append(row)
+    payload = {"mode": "design", "kind": kind, "designs": rows}
+    if caveat:
+        payload["caveat"] = caveat
+    return _result(summary, payload)
+
+
 def _quantity_result(summary: str, *, subject: str, model: str, quantities: dict | None = None,
                      statistics: dict | None = None, conditions: dict | None = None,
                      caveat: str | None = None) -> CallToolResult:
@@ -374,15 +395,36 @@ TAS_STORE = Path(os.environ.get("KIRCHHOFF_WORK_DIR")
                  or Path(tempfile.gettempdir()) / "kirchhoff-tas")
 
 
-def _register_tas(tas: dict) -> str:
-    """Persist a TAS and return the handle that stands in for it."""
-    blob = json.dumps(tas, sort_keys=True).encode()
+def _register_doc(document: dict, scheme: str = "tas") -> str:
+    """Persist a document and return the handle that stands in for it.
+
+    The scheme names what the handle POINTS AT. A TAS and a set of MAS Inputs are not the
+    same kind of thing, and a `tas://` handle to filter inputs would be a small lie that a
+    reader has to discover by opening it.
+    """
+    blob = json.dumps(document, sort_keys=True).encode()
     handle = hashlib.sha256(blob).hexdigest()[:16]
     TAS_STORE.mkdir(parents=True, exist_ok=True)
     path = TAS_STORE / f"{handle}.json"
     if not path.exists():
         path.write_bytes(blob)
-    return f"tas://{handle}"
+    return f"{scheme}://{handle}"
+
+
+def _register_tas(tas: dict) -> str:
+    return _register_doc(tas, "tas")
+
+
+def _resolve_handle(ref: str) -> dict:
+    """Any handle this server issued, whatever its scheme."""
+    handle = ref.split("://", 1)[-1].strip()
+    if not handle or "/" in handle or ".." in handle:
+        raise ValueError(f"{ref!r} is not a handle this server issued")
+    path = TAS_STORE / f"{handle}.json"
+    if not path.exists():
+        raise ValueError(f"{ref} is not in this server's store — handles live as long as the "
+                         f"server does; re-run the call that produced it")
+    return json.loads(path.read_text())
 
 
 def _resolve_tas(tas: dict | None = None, tas_ref: str | None = None) -> dict:
@@ -1597,19 +1639,75 @@ def design_dmc(spec: dict) -> CallToolResult:
     """
     result = kh.design_dmc_inputs(spec)
     d = result.get("dmcDiagnostics") or {}
-    return _document_result(
+    # THE DOCUMENT DOES NOT GO INLINE. A DM choke's excitation is a line period sampled finely
+    # enough to carry switching ripple — 16,384 points per signal, 1,328,335 characters in the
+    # measured case, which a client refuses outright: the model then sees nothing, retries with
+    # another tool, and the turn ends with no answer while this engine reports success.
+    #
+    # The points are NOT padding and are not dropped: stripping them takes the result to 4,274
+    # characters and the magnetics adviser then refuses it with "Waveform must have at least 2
+    # data points". They are physics, so they stay — on this side of the handle.
+    inputs = {k: v for k, v in result.items() if k != "dmcDiagnostics"}
+    return _designs_result(
         f"DMC sized: L = {_eng(d.get('computedInductance'), 'H')}, "
         f"{d.get('numberWindings')} winding(s), band "
         f"{_eng(d.get('computedMinFrequency'), 'Hz')}–{_eng(d.get('computedMaxFrequency'), 'Hz')} "
-        f"(|Z| at f_min {_eng(d.get('impedanceAtMinFrequency'), 'Ω')}).",
-        schema="MAS Inputs", operation="produced",
-        document={k: v for k, v in result.items() if k != "dmcDiagnostics"},
-        derived_from="a differential-mode filter spec",
-        diagnostics=[f"computed inductance {_eng(d.get('computedInductance'), 'H')}",
-                     f"{d.get('numberWindings')} winding(s)",
-                     f"band {_eng(d.get('computedMinFrequency'), 'Hz')} to "
-                     f"{_eng(d.get('computedMaxFrequency'), 'Hz')}",
-                     f"|Z| at f_min {_eng(d.get('impedanceAtMinFrequency'), 'Ω')}"])
+        f"(|Z| at f_min {_eng(d.get('impedanceAtMinFrequency'), 'Ω')}). The MAS Inputs are "
+        f"behind the handle below; fetch_document reads any part of them.",
+        [{"label": "differential-mode choke",
+          "properties": {
+              "inductance_H": d.get("computedInductance"),
+              "windings": d.get("numberWindings"),
+              "band_min_Hz": d.get("computedMinFrequency"),
+              "band_max_Hz": d.get("computedMaxFrequency"),
+              "impedance_at_f_min_ohm": d.get("impedanceAtMinFrequency")},
+          "ref": _register_doc(inputs, "mas")}],
+        "filter")
+
+
+@mcp.tool(
+    title="Read part of a stored document",
+    description=(
+        "Read one part of a document held by handle — the MAS Inputs behind a sized filter, "
+        "or a stored TAS. Returned by handle rather than inline because these documents reach "
+        "millions of characters."
+    ),
+    structured_output=False,
+)
+def fetch_document(ref: str, path: str = "") -> CallToolResult:
+    """A subtree of a stored document.
+
+    Args:
+        ref: a handle this server issued (`mas://…`, `tas://…`).
+        path: dotted path, e.g. `inputs.designRequirements` or
+            `inputs.operatingPoints.0.excitationsPerWinding.0.current.harmonics`. Empty
+            returns the whole document, which is usually too large to be accepted.
+    """
+    document, node, walked = _resolve_handle(ref), None, []
+    node = document
+    for step in [x for x in path.split(".") if x]:
+        walked.append(step)
+        if isinstance(node, list):
+            try:
+                node = node[int(step)]
+            except (ValueError, IndexError):
+                raise ValueError(f"{'.'.join(walked)} does not exist: that level is a list of "
+                                 f"{len(node)} item(s), so the step must be an index.")
+        elif isinstance(node, dict):
+            if step not in node:
+                raise ValueError(f"{'.'.join(walked)} does not exist. Available here: "
+                                 f"{', '.join(sorted(node)[:14]) or '(nothing)'}")
+            node = node[step]
+        else:
+            raise ValueError(f"{'.'.join(walked[:-1])} is a {type(node).__name__}, which has "
+                             f"no {step!r} inside it.")
+    size = len(json.dumps(node, separators=(",", ":")))
+    if not isinstance(node, (dict, list)):
+        node = {path.rsplit(".", 1)[-1] or "value": node}
+    return _document_result(
+        f"{path or 'the whole document'}: {size:,} characters"
+        + ("  — large; ask for a narrower path if this is refused" if size > 60_000 else ""),
+        schema="MAS", operation="read", document=node)
 
 
 @mcp.tool(
