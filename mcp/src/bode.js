@@ -26,8 +26,14 @@ import { App } from "@modelcontextprotocol/ext-apps";
 
 const app = new App({ name: "Kirchhoff Bode", version: "0.1.0" });
 
+// `applied` is the difference between "no result has reached this window" and "the result
+// that reached it had nothing to draw". They looked identical before — both rendered the
+// empty chart's "No curve in the tool result." — and they are opposite faults: one is the
+// host or the handshake, the other is the sweep. A reader who cannot tell them apart goes
+// looking for a broken circuit when the circuit was never the problem.
 const state = { title: "", subtitle: "", note: "", xLabel: "frequency (Hz)", yLabel: "dB",
-                y2Label: "", series: [], exceedances: [], tally: null, error: "" };
+                y2Label: "", series: [], exceedances: [], tally: null, error: "",
+                applied: false, waited: false };
 
 /** A series belongs to the second ordinate only if it says so. */
 const onY2 = (s) => s.axis === "y2";
@@ -69,7 +75,20 @@ const padR = () => (state.y2Label ? 54 : 14);
 
 function draw() {
   const pts = state.series.flatMap((s) => s.points || []);
-  if (!pts.length) return el("div", { class: "readout muted" }, "No curve in the tool result.");
+  if (!pts.length) {
+    if (state.applied) {
+      return el("div", { class: "readout muted" }, "No curve in the tool result.");
+    }
+    // Before the result lands this window is legitimately empty for a moment. After
+    // WAIT_MS it is not a moment any more, and the honest reading is that nothing is
+    // coming — which is a fault in the host that mounted it, not in the analysis.
+    return state.waited
+      ? el("div", { class: "err" },
+           "No tool result reached this window. It was mounted and never given one — "
+           + "the sweep may well have run; check the answer beside this window, and the "
+           + "browser console for a bridge error.")
+      : el("div", { class: "readout muted" }, "Waiting for the tool result\u2026");
+  }
   const PAD_R = padR();
 
   // A frequency axis is logarithmic, so a non-positive frequency has no place on it — and
@@ -194,6 +213,9 @@ function render() {
 }
 
 app.ontoolresult = (result) => {
+  // Set for EVERY result, including the rejected shape below: what makes the message
+  // right is that something arrived, not that it was usable.
+  state.applied = true;
   const sc = result?.structuredContent;
   if (!Array.isArray(sc?.series) || (sc.mode !== "curves" && sc.mode !== "verdict")) {
     state.error = "No frequency-domain data in the tool result.";
@@ -217,6 +239,17 @@ app.ontoolresult = (result) => {
   state.error = "";
   render();
 };
+
+// The host sends the result as soon as the ui/initialize handshake completes, so one
+// arrives within a moment of this window appearing. Waiting several seconds longer than
+// that before calling it missing keeps a slow mount from being reported as a failure.
+const WAIT_MS = 8000;
+setTimeout(() => {
+  if (!state.applied) {
+    state.waited = true;
+    render();
+  }
+}, WAIT_MS);
 
 render();
 await app.connect();
