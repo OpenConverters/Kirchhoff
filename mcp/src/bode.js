@@ -77,6 +77,11 @@ function draw() {
   const pts = state.series.flatMap((s) => s.points || []);
   if (!pts.length) {
     if (state.applied) {
+      // Defensive, and known to be unreachable from this engine's own tools: simulate_ac
+      // only appends a series when it has more than one point, and verify_dmc omits the
+      // `series` key entirely when it has none, which lands in the branch above. It stays
+      // because a payload is a contract with whoever writes the next tool, not with these
+      // two — but nobody should spend an afternoon trying to reproduce it from here.
       return el("div", { class: "readout muted" }, "No curve in the tool result.");
     }
     // Before the result lands this window is legitimately empty for a moment. After
