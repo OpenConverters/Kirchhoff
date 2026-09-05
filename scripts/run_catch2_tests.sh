@@ -28,7 +28,15 @@ fi
 
 # Per-binary timeout: a hung test must fail the run, not hold it forever. Generous, because the resonant
 # and MKF-equivalence binaries run real ngspice transients.
-TIMEOUT="${KH_TEST_TIMEOUT:-1200}"
+#
+# 1200 s was not generous enough and the difference matters: test_ptp takes 17m54s on a
+# quiet box (297 assertions, 7 cases, all passing) and was being KILLED at 20:00, which
+# the report showed as "FAIL test_ptp (exit 124)" -- indistinguishable from a hang, and
+# read as one. A timeout that fires on a healthy test teaches people to ignore it.
+# 2700 s leaves headroom over the slowest binary without letting a genuine hang sit all
+# day. Raise KH_TEST_TIMEOUT if a future test is slower still, but measure it first --
+# the number should be a fact about the suite, not a guess.
+TIMEOUT="${KH_TEST_TIMEOUT:-2700}"
 LOGDIR="$(mktemp -d)"
 pass=0; fail=0; failed=()
 
