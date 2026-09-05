@@ -46,6 +46,7 @@ EMSCRIPTEN_BINDINGS(kirchhoff) {
                      std::vector<unsigned char> v = em::vecFromJSArray<unsigned char>(bytes);
                      return api::kelvin_load_shard(family, std::string(v.begin(), v.end()));
                  }));
+    em::function("kelvin_shard_format_version", &api::kelvin_shard_format_version);
     em::function("kelvin_select", &api::kelvin_select);
     em::function("diagnostics", &api::diagnostics);
     em::function("main_magnetic_inputs", &api::main_magnetic_inputs);

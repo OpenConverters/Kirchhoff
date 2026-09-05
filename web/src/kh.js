@@ -252,8 +252,24 @@ async function manifestEntry(category) {
 // Shard bytes, cache-busted by buildId in Cache Storage so they persist across reloads and a new
 // build (new buildId → new URL) orphans the stale entry (which we evict). Falls back to a plain
 // fetch where Cache Storage is unavailable (a non-secure context).
+// The shard layout this engine build reads, asked of the engine so it cannot
+// drift from the C++ constant.
+let _fmtPromise = null
+function shardFormatVersion() {
+  if (!_fmtPromise) _fmtPromise = call('kelvin_shard_format_version')
+  return _fmtPromise
+}
+
 async function fetchShardBytes(category, buildId) {
-  const url = `${KELVIN_BASE}/${category}.kidx?b=${buildId}`
+  // buildId hashes the serialized ROWS and nothing else, so a format bump that
+  // leaves a family's rows byte-identical leaves its URL unchanged — while
+  // .kidx is served "public, immutable" for a year. The browser then answers
+  // from its own cache forever and the new engine rejects what it gets:
+  // "unsupported shard format version 10", seen in production after v10 -> v11
+  // on every family the bump did not touch. The version the engine expects is
+  // part of what makes a response acceptable, so it goes in the URL.
+  const fmt = await shardFormatVersion()
+  const url = `${KELVIN_BASE}/${category}.kidx?b=${buildId}&v=${fmt}`
   if (typeof caches === 'undefined') {
     const res = await fetch(url)
     if (!res.ok) throw new Error(`Kelvin shard '${category}' not hosted (HTTP ${res.status})`)
@@ -263,7 +279,8 @@ async function fetchShardBytes(category, buildId) {
   const hit = await cache.match(url)
   if (hit) return new Uint8Array(await hit.arrayBuffer())
   for (const req of await cache.keys()) {            // drop older builds of this family
-    if (req.url.includes(`/${category}.kidx?`) && !req.url.endsWith(`b=${buildId}`)) await cache.delete(req)
+    if (req.url.includes(`/${category}.kidx?`) && req.url !== new Request(url).url)
+      await cache.delete(req)
   }
   const res = await fetch(url)
   if (!res.ok) throw new Error(`Kelvin shard '${category}' not hosted (HTTP ${res.status})`)

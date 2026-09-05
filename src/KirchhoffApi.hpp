@@ -110,6 +110,12 @@ KH_API std::string bind_part(const std::string& tasJson, const std::string& ref,
 // bind_part. kelvin_load_shard returns {family,rowCount,buildId}; kelvin_select returns a
 // SelectionResult, or {error:"NoCandidates",rejections,...} when nothing satisfies the request.
 KH_API std::string kelvin_load_shard(const std::string& family, const std::string& shardBytes);
+// The shard layout the linked Kelvin reads. Part of the browser's CACHE KEY:
+// a shard's URL carries the buildId, which hashes the serialized rows only, so
+// a format bump that leaves a family's rows unchanged leaves its URL unchanged
+// — and .kidx is served "immutable, 1 year". The version has to be in the URL
+// or a stale shard is served back forever (seen on Faraday after v10 -> v11).
+KH_API unsigned kelvin_shard_format_version();
 KH_API std::string kelvin_select(const std::string& category, const std::string& designReqJson,
                                  const std::string& optionsJson);
 

@@ -8,6 +8,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "Index.hpp"     // kelvin::shard_format_version
 #include "KelvinApi.hpp"  // kelvin::api::Engine / select_components / bind_part
 #include "Select.hpp"     // kelvin::NoCandidates
 
@@ -63,6 +64,8 @@ std::string kelvin_load_shard(const std::string& family, const std::string& shar
             .dump();
     });
 }
+
+unsigned kelvin_shard_format_version() { return kelvin::shard_format_version(); }
 
 std::string kelvin_select(const std::string& category, const std::string& reqJson,
                           const std::string& optionsJson) {
