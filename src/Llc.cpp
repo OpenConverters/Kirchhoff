@@ -509,13 +509,21 @@ json build_llc_tas(const LlcDesign& d) {
         comps.insert(comps.end(), {comp("DH1", diodeReq(reqD)), comp("DH2", diodeReq(reqD)),
             comp("DL1", diodeReq(reqD)), comp("DL2", diodeReq(reqD)), comp("Cout", cout),
             comp("Csw1", swSnub()), comp("Rsn1", snubR()), comp("Csn1", snubC())});
+        // The LOW-side pair is the mirror of the high-side pair, so it uses the
+        // aliases the other way round: a bridge's return diode conducts GROUND ->
+        // winding, which puts its winding-facing end at rK and its ground-facing
+        // end at rA. Written with rA on the winding (copied from the DH lines just
+        // above) both DL diodes point winding -> ground instead, and every positive
+        // half-cycle is shorted to ground through one of them: the output never
+        // charges. That is what it did — Vout settled at -0.07 V, one diode drop
+        // below ground, at an efficiency of 8e-05.
         conns.push_back(conn("sec_a", {pin("T1", "secondary1_start"), pin("DH1", rA),
-                                       pin("DL1", rA), pin("Rsn1", "1"), pin("Csn1", "1")}));
+                                       pin("DL1", rK), pin("Rsn1", "1"), pin("Csn1", "1")}));
         conns.push_back(conn("sec_b", {pin("T1", "secondary1_end"), pin("DH2", rA),
-                                       pin("DL2", rA)}));
+                                       pin("DL2", rK)}));
         railEps = {pin("DH1", rK), pin("DH2", rK),
                    pin("Rsn1", "2"), pin("Csn1", "2"), pin("Cout", "1")};
-        secGndEps = {pin("DL1", rK), pin("DL2", rK), pin("Cout", "2")};
+        secGndEps = {pin("DL1", rA), pin("DL2", rA), pin("Cout", "2")};
         break; }
     case RectifierType::CurrentDoubler: {
         // One winding -> 2 catch diodes (cathode at each winding end, anode at gnd) + 2 output inductors
