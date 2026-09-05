@@ -11,6 +11,7 @@
 #include <nlohmann/json.hpp>
 #include <cmath>
 #include <regex>
+#include <sstream>
 #include <string>
 #include "Flyback.hpp"
 #include "Forward.hpp"
