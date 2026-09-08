@@ -208,6 +208,8 @@ async function choose(row) {
         params: row.params_full ?? row.params ?? null,
       },
       context: { mode: state.mode, original: state.original?.mpn ?? null },
+      // A real click, said in the field a host can read without parsing prose.
+      interaction: "user",
     })),
   });
 }

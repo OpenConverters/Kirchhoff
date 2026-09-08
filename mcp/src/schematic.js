@@ -114,7 +114,10 @@ async function selectComponent(ref) {
   await reportContext(
     `[selected] ${ref}${row?.value ? ` = ${row.value}` : ""}`
     + `${row?.kind ? ` (${row.kind})` : ""}`,
-    { selected_ref: ref });
+    // The user clicked this. `interaction` is how a host tells a report that
+    // ASKS something from one that merely states what is on screen — the mount
+    // report below carries no such mark, and must not start a turn.
+    { selected_ref: ref, interaction: "user" });
   await loadCandidates(ref);
 }
 
@@ -181,7 +184,8 @@ async function bindCandidate(candidate) {
     await reportContext(
       `[fitted] ${ref} = ${candidate.mpn}`
       + `${candidate.manufacturer ? ` (${candidate.manufacturer})` : ""} — that `
-      + `component is now at DATASHEET fidelity.`);
+      + `component is now at DATASHEET fidelity.`,
+      { interaction: "user" });
   } catch (e) {
     state.error = `Could not bind ${candidate.mpn}: ${e.message}`;
   } finally {
@@ -202,7 +206,8 @@ async function exportFalstad() {
       `[falstad] ${state.topology} visual sim ready `
       + `(${sim.text.split("\n").length} elements, Vin ${sim.vin} V → Vout ${sim.vout} V, `
       + `f_sw ${sim.fsw} Hz): ${sim.url}`,
-      { falstad: { url: sim.url, elements: sim.text.split("\n").length } });
+      { falstad: { url: sim.url, elements: sim.text.split("\n").length },
+        interaction: "user" });
     state.note = "Falstad circuit exported — the link is in the conversation.";
   } catch (e) {
     state.error = `Falstad export failed: ${e.message}`;
@@ -282,6 +287,10 @@ app.ontoolresult = async (result) => {
   // The BOM comes from the web app's own bom.js — there is no C++ extractBom,
   // and a second implementation on the server would be free to drift from it.
   if (state.bom.length) {
+    // DELIBERATELY unmarked. This fires when the design ARRIVES, before anyone
+    // has touched anything, and a host that reads it as a click will answer a
+    // question nobody asked — which is exactly what Moebius did: a schematic
+    // mounting sent "I selected: [design] … designed" and set six tools running.
     await reportContext(`[design] ${state.topology} converter designed.`);
   }
 };
