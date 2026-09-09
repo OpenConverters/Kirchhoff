@@ -32,7 +32,7 @@ check('simulate produced a transient', sim.points > 1000);
 check('simulate has per-vector summaries', sim.vectors && Object.keys(sim.vectors).length > 0);
 
 // extract_operating_point with the ngspice engine (rebuilds winding currents from the sim).
-const op = JSON.parse(M.extract_operating_point(tas, 'ngspice', ''));
+const op = JSON.parse(M.extract_operating_point(tas, 'ngspice', '', JSON.stringify({ origin: 'REQUIREMENTS' })));
 check('extract(ngspice) has windings', (op.excitationsPerWinding || []).length >= 1);
 
 console.log(fails === 0 ? '\nALL NGSPICE-WASM CHECKS PASSED' : `\n${fails} FAILED`);
