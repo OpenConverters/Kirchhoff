@@ -6,6 +6,7 @@ import { extractBom } from './bom.js'
 import { falstadExport, hasVisualSim } from './falstad.js'
 import { renderVerifiedSchematic, hasCiasSchematic } from './ciasSchematic.js'
 import { si, pct } from './units.js'
+import { resolveExcitations, designSignals, magneticSignals, componentSignals, toCsv, designExcitationsJson, stripNulls } from './waveExport.js'
 import { trackEvent } from './telemetry.js'
 import PartDrawer from './components/PartDrawer.vue'
 import FamilyDial from './components/FamilyDial.vue'
@@ -440,34 +441,14 @@ const waveOps = computed(() => waveMag.value?.inputs?.operatingPoints ?? [])
 // branches — it leaves voltage without a waveform. So in ngspice mode we splice the
 // analytical voltage (which we already captured, per winding) back in: current is
 // then measured, voltage predicted. Each is labelled so nothing is silently mixed.
-const waveSource = computed(() => {
-  const name = waveMag.value?.name
-  if (!name) return { excitations: [], kind: 'none', voltageKind: null }
-  const analyticalFull = result.value?.analyticalWaveforms?.[name]?.excitationsPerWinding
-  const sim = ngspiceOps.value[name]
-  if (sim) {
-    const excitations = (sim.excitationsPerWinding ?? []).map((e, i) => {
-      const av = analyticalFull?.[i]?.voltage
-      const hasSimV = e.voltage?.waveform?.data?.length > 1
-      if (!hasSimV && av?.waveform?.data?.length > 1) return { ...e, voltage: av }
-      return e
-    })
-    return {
-      excitations,
-      kind: 'ngspice',
-      // voltage came from the analytical capture only when the sim didn't provide it
-      voltageKind: analyticalFull ? 'analytical' : null,
-    }
-  }
-  const full = result.value?.analyticalWaveforms?.[name]
-  if (full?.excitationsPerWinding?.length)
-    return { excitations: full.excitationsPerWinding, kind: 'analytical (full waveforms)', voltageKind: null }
-  return {
-    excitations: waveOps.value[waveOpIdx.value]?.excitationsPerWinding ?? [],
-    kind: 'analytical (processed)',
-    voltageKind: null,
-  }
-})
+// The hierarchy itself lives in waveExport.js, so the pane and every exported file resolve the
+// source through ONE function — a chart and a CSV that disagreed about which engine produced a
+// winding would be worse than either alone.
+const waveSource = computed(() => resolveExcitations(waveMag.value?.name, {
+  analyticalWaveforms: result.value?.analyticalWaveforms,
+  ngspiceOps: ngspiceOps.value,
+  operatingPoint: waveOps.value[waveOpIdx.value],
+}))
 const waveExcitations = computed(() => waveSource.value.excitations)
 
 // ── unified waveform picker: magnetics (per-winding) + devices (per-component V/I) ──────────
@@ -628,25 +609,83 @@ async function makeDeck() {
 function copyDeck() {
   navigator.clipboard?.writeText(deck.value)
 }
-function downloadDeck() {
-  const ext = deckFlavor.value === 'ltspice' ? 'asc.cir' : 'cir'
-  trackEvent('export', { target: 'netlist', flavor: deckFlavor.value, topology: topoId.value })
+function saveFile(name, mime, text) {
   const a = document.createElement('a')
-  a.href = URL.createObjectURL(new Blob([deck.value], { type: 'text/plain' }))
-  a.download = `${topoId.value}.${ext}`
+  a.href = URL.createObjectURL(new Blob([text], { type: mime }))
+  a.download = name
   a.click()
   URL.revokeObjectURL(a.href)
 }
+function downloadDeck() {
+  const ext = deckFlavor.value === 'ltspice' ? 'asc.cir' : 'cir'
+  trackEvent('export', { target: 'netlist', flavor: deckFlavor.value, topology: topoId.value })
+  saveFile(`${topoId.value}.${ext}`, 'text/plain', deck.value)
+}
+// The MagneticAdviser handoff. stripNulls is not cosmetic here: the engine writes every unset
+// optional as an explicit `null`, and a null is a PRESENT property to a schema, so the raw object
+// fails MAS inputs.json in 78 places on a plain flyback (the waveform `oneOf` among them). Absent
+// is what "unset" means.
 function downloadMagneticInputs() {
   if (!waveMag.value) return
   trackEvent('export', { target: 'mas_inputs', topology: topoId.value, magnetic: waveMag.value.name })
-  const a = document.createElement('a')
-  a.href = URL.createObjectURL(
-    new Blob([JSON.stringify(waveMag.value.inputs, null, 2)], { type: 'application/json' })
-  )
-  a.download = `${topoId.value}_${waveMag.value.name}_mas_inputs.json`
-  a.click()
-  URL.revokeObjectURL(a.href)
+  saveFile(`${topoId.value}_${waveMag.value.name}_mas_inputs.json`, 'application/json',
+           JSON.stringify(stripNulls(waveMag.value.inputs), null, 2))
+}
+
+// ── waveform export ────────────────────────────────────────────────────────
+// The context every export builder reads. `periods` is what the panes draw, so a CSV is
+// sample-for-sample the chart on screen.
+function exportCtx() {
+  return {
+    topology: topoId.value,
+    magnetics: waveMagnetics.value,
+    analyticalWaveforms: result.value?.analyticalWaveforms,
+    ngspiceOps: ngspiceOps.value,
+    componentWaves: componentWaves.value,
+    opIdx: waveOpIdx.value,
+    periods: form.showPeriods,
+  }
+}
+function exportMeta(scope) {
+  return {
+    topology: topoId.value,
+    scope,
+    operatingPoint: waveOps.value[waveOpIdx.value]?.name ?? (waveOps.value.length > 1 ? `index ${waveOpIdx.value}` : null),
+    periods: form.showPeriods,
+    exported: new Date().toISOString(),
+  }
+}
+// The selection: the magnetic (all its windings) or the component the Waveforms tab is showing.
+function exportSelectionCsv() {
+  const ctx = exportCtx()
+  const mag = targetIsMagnetic.value ? waveMag.value : null
+  const signals = mag
+    ? magneticSignals({ ...ctx, magnetics: [mag] })
+    : componentSignals({ ...ctx, componentWaves: { ...componentWaves.value, components: deviceComp.value ? [deviceComp.value] : [] } })
+  const who = mag ? mag.name : deviceRef.value
+  trackEvent('export', { target: 'waveforms_csv', topology: topoId.value, scope: 'selection' })
+  saveFile(`${topoId.value}_${who}_waveforms.csv`, 'text/csv',
+           toCsv(signals, exportMeta(`${who} (the selected target)`)))
+}
+// Every magnetic winding and, once an ngspice component run has filled them, every component.
+function exportDesignCsv() {
+  const ctx = exportCtx()
+  trackEvent('export', { target: 'waveforms_csv', topology: topoId.value, scope: 'design' })
+  saveFile(`${topoId.value}_waveforms.csv`, 'text/csv',
+           toCsv(designSignals(ctx), exportMeta('the whole design')))
+}
+// The same waveform set as PEAS/MAS operating points (see waveExport.js for what validates against what).
+function exportDesignJson() {
+  trackEvent('export', { target: 'waveforms_json', topology: topoId.value })
+  saveFile(`${topoId.value}_waveforms.json`, 'application/json',
+           JSON.stringify(designExcitationsJson(exportCtx()), null, 1))
+}
+// An export that throws (an unmapped component kind, a design with no operating conditions) must say
+// so where the user is looking, not only in the console.
+const exportError = ref(null)
+function runExport(fn) {
+  exportError.value = null
+  try { fn() } catch (e) { exportError.value = e.message }
 }
 
 // Everything the two OutputPanes render is shared through this context (they are pure views).
@@ -654,6 +693,7 @@ provide('kh', {
   result, topo, diag, bomRows, selectedPart, schematicSvg, schematicError, schematicClick, schematicKey, openPart,
   waveTarget, waveMagnetics, deviceGroups, targetIsMagnetic, waveOps, waveOpIdx, waveSource,
   waveExcitations, waveMag, ngspiceOps, ngspiceBusy, simulateMagnetic, downloadMagneticInputs,
+  exportSelectionCsv, exportDesignCsv, exportDesignJson, runExport, exportError,
   deviceExcitation, deviceComp, componentBusy, fetchComponentWaves,
   componentStress, stressSummary, verdict, mainExcNames, form,
   deck, deckFlavor, deckFidelity, simStop, simStep, deckBusy, designStop, designStep, periodsShown,

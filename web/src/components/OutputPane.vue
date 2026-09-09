@@ -26,6 +26,7 @@ const {
   result, topo, diag, bomRows, selectedPart, schematicSvg, schematicError, schematicClick, schematicKey, openPart,
   waveTarget, waveMagnetics, deviceGroups, targetIsMagnetic, waveOps, waveOpIdx, waveSource,
   waveExcitations, waveMag, ngspiceOps, ngspiceBusy, simulateMagnetic, downloadMagneticInputs,
+  exportSelectionCsv, exportDesignCsv, exportDesignJson, runExport, exportError,
   deviceExcitation, deviceComp, componentBusy, fetchComponentWaves,
   componentStress, stressSummary, verdict, mainExcNames, form, visualSim, visualScopeSet,
   deck, deckFlavor, deckFidelity, simStop, simStep, deckBusy, designStop, designStep, periodsShown,
@@ -89,6 +90,11 @@ function startResize(e) {
 const windingIdx = ref(0)
 watch([waveTarget, waveOpIdx, () => waveExcitations.value.length], () => { windingIdx.value = 0 })
 const winding = computed(() => waveExcitations.value[windingIdx.value] ?? null)
+
+// The selection export needs something to export: a magnetic with excitations, or a component whose
+// waveforms an ngspice run has already produced.
+const hasSelectionWaves = computed(() =>
+  targetIsMagnetic.value ? waveExcitations.value.length > 0 : !!deviceComp.value)
 </script>
 
 <template>
@@ -162,6 +168,23 @@ const winding = computed(() => waveExcitations.value[windingIdx.value] ?? null)
                   :disabled="ngspiceBusy" @click="simulateMagnetic">
             {{ ngspiceBusy ? 'Simulating…' : '▶ ngspice' }}
           </button>
+          <!-- Export: this target, the whole design, or the design as PEAS/MAS operating points.
+               Column headers in the CSV are the JSON paths in the .json — same signal, same name. -->
+          <button class="btn ghost" data-testid="export-selection-csv"
+                  :disabled="!hasSelectionWaves"
+                  title="CSV of the selected target's waveforms (one column per signal)"
+                  @click="runExport(exportSelectionCsv)">⭳ CSV</button>
+          <button class="btn ghost" data-testid="export-design-csv"
+                  :disabled="!waveMagnetics.length"
+                  title="CSV of every magnetic winding and every simulated component"
+                  @click="runExport(exportDesignCsv)">⭳ CSV all</button>
+          <button class="btn ghost" data-testid="export-design-json"
+                  :disabled="!waveMagnetics.length"
+                  title="The whole waveform set as PEAS/MAS operating points"
+                  @click="runExport(exportDesignJson)">⭳ JSON</button>
+        </div>
+        <div v-if="exportError" class="err-banner" data-testid="export-error">
+          <b>EXPORT ▸</b> {{ exportError }}
         </div>
 
         <template v-if="targetIsMagnetic">

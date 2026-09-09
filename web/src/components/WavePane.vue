@@ -4,6 +4,7 @@
 import { computed } from 'vue'
 import WaveformChart from './WaveformChart.vue'
 import { synthesizeWaveform } from '../synth.js'
+import { tile } from '../waveExport.js'
 import { si, pct } from '../units.js'
 
 const props = defineProps({
@@ -15,20 +16,9 @@ const props = defineProps({
 
 const freq = computed(() => props.excitation.frequency)
 
-// All sources carry exactly ONE steady-state switching cycle; the multi-period
-// view repeats it (that is what periodic steady state means — no data invented).
-function tile(data, time, n) {
-  if (!(n > 1)) return { data, time }
-  const T = time[time.length - 1] - time[0]
-  const d = [], t = []
-  for (let k = 0; k < n; ++k) {
-    for (let i = 0; i < data.length; ++i) {
-      d.push(data[i])
-      t.push(time[i] + k * T)
-    }
-  }
-  return { data: d, time: t }
-}
+// All sources carry exactly ONE steady-state switching cycle; the multi-period view repeats it
+// (that is what periodic steady state means — no data invented). `tile` lives in waveExport.js so
+// an exported CSV of N periods is sample-for-sample what this pane draws.
 
 function signalTraces(side, unit) {
   const sig = props.excitation[side]

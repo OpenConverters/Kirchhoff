@@ -33,7 +33,7 @@ CRT oscilloscope.
   terminal current via `.options savecurrents` and its voltage from the node
   differences — so a MOSFET shows its V_DS + switch current, a diode its V_AK
   + forward current, a cap its ripple voltage + current. Includes a MAS-Inputs
-  JSON download for the MagneticAdviser.
+  JSON download for the MagneticAdviser, and the three export buttons below.
 - **Click any part** (schematic hotspot or BOM row) → the drawer shows its
   requirements *and* its simulated waveforms.
 - **Diagnostics tab** — CCM/DCM, duty, per-OP winding stress table,
@@ -41,6 +41,47 @@ CRT oscilloscope.
 - **Netlist tab** — generate/copy/download the ngspice or LTspice deck of
   the exact design (fidelity: ideal / datasheet / MKF models), with stop
   time and max step overrides.
+
+## Waveform export
+
+The Waveforms tab exports what it draws, in two formats (`src/waveExport.js`):
+
+- **⭳ CSV** — the selected target; **⭳ CSV all** — every magnetic winding plus
+  every component an ngspice run has produced. Wide layout: one `time [s]`
+  column, one column per signal, and a `provenance` row under the header saying
+  whether each column is `sampled` or `synthesized`.
+- **⭳ JSON** — the same set as PEAS/MAS operating points: each magnetic is a MAS
+  `inputs/operatingPoint.json`, each two-terminal part a PEAS
+  `twoTerminalOperatingPoint.json`, each MOSFET a PEAS
+  `multiPortOperatingPoint.json` whose `drain` port carries the V_DS/I_D pair.
+
+A CSV column header **is** the signal's path in the companion JSON
+(`T1.excitationsPerWinding[0].current [A]`), so the two files name the same
+thing the same way, in the schemas' own vocabulary.
+
+Two honesty rules the format enforces:
+
+- A **synthesized** column is the closed form of the `processed` descriptor
+  evaluated on the file's time grid (exact for a piecewise-linear
+  reconstruction) — never presented as simulated.
+- A **sampled** signal on a different time base (a PFC line-cycle window beside
+  a switching-cycle one) is *not* resampled and *not* dropped: it is omitted
+  from the wide CSV, named in a `#` header line, and exported in full in the
+  JSON.
+
+The engine serialises unset optionals as explicit `null`, and a null is a
+*present* property to a schema — `{ancillaryLabel: null, numberPeriods: null,
+data, time}` matches neither branch of the waveform `oneOf`. The export strips
+them, which is what makes it validate. Gates:
+
+```bash
+npm run test:unit                                        # the builders
+npx playwright test --project=export                     # the downloaded bytes
+PYTHONPATH=build-native python3 ../tests/test_export_schema.py   # PEAS/MAS validity
+```
+
+`web/scripts/buildExportJson.mjs` builds the same export outside the browser
+(engine dump on stdin → JSON, or `--csv`), which is what the schema gate drives.
 
 ## Develop / build
 
