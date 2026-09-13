@@ -348,7 +348,11 @@ export async function bindPart(tas, ref, kind, candidate) {
     }
     const entry = await manifestEntry(category)
     const res = await fetch(`${KELVIN_BASE}/${category}.ndjson`,
-      { headers: { Range: `bytes=${srcOffset}-${srcOffset + srcLength - 1}` } })
+      // cache: 'no-store' — never let the HTTP cache join in. Chrome keeps ranged reads as a sparse
+      // cache entry and sends the NEXT range with If-Range: <cached ETag>. After a data deploy that ETag
+      // is stale, so the server (correctly) answers 200 with the whole catalogue, and the 206 check
+      // below refuses it: "host ignored Range" for every user who had range-read the file before.
+      { headers: { Range: `bytes=${srcOffset}-${srcOffset + srcLength - 1}` }, cache: 'no-store' })
     // A 206 is a genuine ranged read. A 200 means the host IGNORED Range and would stream the whole
     // catalog — refuse without reading the body rather than download hundreds of MB into the tab.
     if (res.status !== 206) {
