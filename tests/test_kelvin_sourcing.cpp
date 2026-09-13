@@ -115,3 +115,63 @@ TEST_CASE("kelvin sourcing: design -> select_components -> bind_part -> DATASHEE
             REQUIRE(c.value("deferred", std::string()) == "already bound");
         }
 }
+
+// The production report (2026-09-13): picking Würth 750811248 from Kelvin for the default flyback's
+// transformer threw "MAS DATASHEET: no transformer/coupledInductor entry in datasheetInfo.electrical
+// of 'transformer' (1 configuration(s) present)". The catalogue had filed that 40:10:10 flyback
+// transformer as a single-winding 300 uH inductor. Rebuilt from the Midcom Smart Transformer Selector
+// workbook, it carries two wirings, and the 1-secondary flyback must bind and simulate on its datasheet.
+TEST_CASE("kelvin sourcing: the Midcom flyback transformer 750811248 binds and simulates in a flyback",
+          "[kelvin][magnetic]") {
+    std::string dir = data_dir();
+    if (dir.empty() || !std::ifstream(dir + "/magnetics.ndjson").good()) {
+        WARN("TAS magnetics catalogue not readable — skipping");
+        return;
+    }
+    std::string record;
+    {
+        std::ifstream f(dir + "/magnetics.ndjson");
+        for (std::string line; std::getline(f, line);)
+            if (line.find("\"reference\":\"750811248\"") != std::string::npos) { record = line; break; }
+    }
+    REQUIRE_FALSE(record.empty());
+    const json rec = json::parse(record);
+    const json& electrical = rec.at("magnetic").at("manufacturerInfo").at("datasheetInfo").at("electrical");
+    REQUIRE(electrical.size() == 2);
+    CHECK(electrical[0].at("subtype") == "transformer");
+
+    // The web GUI's default flyback: 36-60 V in, one 12 V / 24 W output.
+    const char* spec = R"({
+        "designRequirements": { "efficiency": 0.88,
+            "inputVoltage": { "minimum": 36.0, "nominal": 48.0, "maximum": 60.0 },
+            "switchingFrequency": { "nominal": 100000 },
+            "outputs": [ { "name": "out", "voltage": { "nominal": 12.0 } } ] },
+        "operatingPoints": [ { "inputVoltage": 48.0, "outputs": [ { "power": 24.0 } ] } ]
+    })";
+    std::string tas = kapi::design_tas("flyback", spec);
+    REQUIRE_FALSE(is_exception(tas));
+    const json tasDoc = json::parse(tas);  // named: a range-for over json::parse(...).at(...) dangles
+    std::string ref;
+    for (const auto& stage : tasDoc.at("topology").at("stages"))
+        for (const auto& comp : stage.at("circuit").at("components"))
+            if (comp.contains("data") && comp.at("data").is_object() && comp.at("data").contains("magnetic"))
+                ref = comp.at("name").get<std::string>();
+    REQUIRE_FALSE(ref.empty());
+
+    std::string bound = kapi::bind_part(tas, ref, record);
+    REQUIRE_FALSE(is_exception(bound));
+    std::string waves = kapi::component_waveforms(bound, R"({"origin":"REQUIREMENTS"})");
+    INFO(waves.substr(0, 400));
+    CHECK_FALSE(is_exception(waves));
+
+    // Counter-check: the record as it was catalogued before the rebuild still fails, loudly.
+    const json old = json::parse(R"({"magnetic":{"manufacturerInfo":{"name":"Würth Elektronik",
+        "reference":"750811248","status":"production","datasheetInfo":{"electrical":[{"subtype":"inductor",
+        "inductance":{"nominal":0.0003},"dcResistance":{"nominal":0.155,"maximum":0.025},
+        "saturationCurrentPeak":3.5}]}}}})");
+    std::string oldBound = kapi::bind_part(tas, ref, old.dump());
+    REQUIRE_FALSE(is_exception(oldBound));
+    std::string oldWaves = kapi::component_waveforms(oldBound, R"({"origin":"REQUIREMENTS"})");
+    CHECK(is_exception(oldWaves));
+    CHECK(oldWaves.find("no transformer/coupledInductor entry") != std::string::npos);
+}

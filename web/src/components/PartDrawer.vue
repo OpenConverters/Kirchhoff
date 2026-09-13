@@ -208,6 +208,14 @@ function margin(cand, key) {
   if (m === null || m === undefined) return null
   return m
 }
+// Kelvin's windingStructure verdict: none of the part's wiring configurations has the number of
+// secondaries this circuit wires (e.g. a single-winding inductor offered for a flyback transformer).
+function windingTitle(c) {
+  const want = result.value?.target?.secondaryWindings
+  const has = c.evidence?.secondaryWindingCounts
+  return `wrong winding structure: the circuit needs ${want} secondary winding(s); `
+    + `this part offers ${Array.isArray(has) ? has.join(' or ') : 'an unknown number'}`
+}
 function fmtx(v) { return v == null ? '—' : `×${v >= 100 ? Math.round(v) : v.toFixed(1)}` }
 </script>
 
@@ -427,9 +435,16 @@ function fmtx(v) { return v == null ? '—' : `×${v >= 100 ? Math.round(v) : v.
                 <span v-if="margin(c, 'id_margin') != null" title="Id rating / required">{{ fmtx(margin(c, 'id_margin')) }}A</span>
                 <span v-if="margin(c, 'if_avg_margin') != null" title="If rating / required">{{ fmtx(margin(c, 'if_avg_margin')) }}A</span>
                 <span v-if="margin(c, 'rds_on_headroom') != null" title="Rds(on) headroom">Rds {{ fmtx(margin(c, 'rds_on_headroom')) }}</span>
+                <span v-if="margin(c, 'inductance_ratio') != null" title="inductance / required">L {{ fmtx(margin(c, 'inductance_ratio')) }}</span>
+                <span v-if="margin(c, 'saturation_headroom') != null" title="saturation current / peak current">Isat {{ fmtx(margin(c, 'saturation_headroom')) }}</span>
+                <span v-if="margin(c, 'turns_ratio_ratio') != null" title="turns ratio / required">n {{ fmtx(margin(c, 'turns_ratio_ratio')) }}</span>
               </td>
               <td>
                 <span v-if="c.evidence?.datasheetUsable === false" class="badge warn" title="datasheet link unusable">⚠</span>
+                <span
+                  v-if="c.verdictByDimension?.windingStructure === 'fail'" class="badge warn"
+                  data-testid="winding-structure-fail" :title="windingTitle(c)"
+                >✗ windings</span>
                 <span v-if="c.evidence?.thermalPresent" class="badge ok" title="thermal data present">θ</span>
               </td>
               <td class="use-cell">
