@@ -16,7 +16,9 @@
 #include "KirchhoffApi.hpp"
 
 #include <cmath>
+#include <cstdio>
 #include <functional>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -324,3 +326,40 @@ TEST_CASE("extract: main_magnetic_inputs = the adviser's MAS::Inputs", "[extract
 }
 
 
+
+TEST_CASE("the deck's transient never stops inside a gate edge", "[extract][tran][isolatedbuck]") {
+    // The isolated-buck wizard default asks for 52 switching periods at 750 kHz. That stop time falls on
+    // the rising gate edge at every period start, and the browser's ngspice (45.2 WASM) never returned on
+    // it. The assembler moves the stop 1 ns past the transition; the averaging window follows it.
+    const double fsw = 750000.0, period = 1.0 / fsw, requested = 52.0 / fsw;
+    json spec = json::parse(R"({"designRequirements":{"inputType":"dc","inputVoltage":{"minimum":36,"maximum":72},
+        "switchingFrequency":{"nominal":750000},"outputs":[{"name":"out","voltage":{"nominal":10},"regulation":"voltage"},
+        {"name":"out2","voltage":{"nominal":10},"regulation":"voltage"}],"efficiency":0.9},
+        "operatingPoints":[{"name":"full_load","inputVoltage":54,"ambientTemperature":25,
+        "outputs":[{"name":"out","power":0.2},{"name":"out2","power":1}]}],"config":{"rippleRatio":0.4}})");
+    spec["config"]["tranStopTime"] = requested;
+    const std::string tas = Kirchhoff::api::design_tas("isolated_buck", spec.dump());
+    REQUIRE(tas.rfind("Exception", 0) != 0);
+    const std::string deck = Kirchhoff::api::generate_ngspice_circuit(tas, R"({"origin":"REQUIREMENTS"})");
+    INFO(deck);
+    const auto tranPos = deck.find("\n.tran ");
+    REQUIRE(tranPos != std::string::npos);
+    double tstep = 0, tstop = 0;
+    REQUIRE(std::sscanf(deck.c_str() + tranPos + 7, "%lf %lf", &tstep, &tstop) == 2);
+    // Moved just past the edge at the requested time: [requested + 1 ns, requested + 2 ns].
+    CHECK(tstop > requested + 1e-9 - 1e-15);
+    CHECK(tstop < requested + 2e-9 + 1e-15);
+    CHECK(std::fmod(tstop, period) > 1e-9);
+    // The averaging window ends at the same, moved stop time (same printed token as the .tran stop).
+    std::istringstream tranLine(deck.substr(tranPos + 7));
+    std::string stepToken, stopToken;
+    tranLine >> stepToken >> stopToken;
+    CHECK(deck.find("to=" + stopToken + "\n") != std::string::npos);
+    // A stop time clear of every edge is left exactly as requested.
+    spec["config"]["tranStopTime"] = 52.5 / fsw;
+    const std::string deck2 = Kirchhoff::api::generate_ngspice_circuit(
+        Kirchhoff::api::design_tas("isolated_buck", spec.dump()), R"({"origin":"REQUIREMENTS"})");
+    const auto p2 = deck2.find("\n.tran ");
+    REQUIRE(std::sscanf(deck2.c_str() + p2 + 7, "%lf %lf", &tstep, &tstop) == 2);
+    CHECK(tstop == Catch::Approx(52.5 / fsw).epsilon(1e-9));
+}

@@ -25,6 +25,37 @@ using nlohmann::json;
 
 namespace {
 
+// Rise = fall time of every PWM gate PULSE the assembler emits ("1n" in the deck).
+constexpr double kPulseEdgeTime = 1e-9;
+struct PulseEdge { double start; double period; };   // transition start within the period, and the period
+
+// A transient must not END inside (or within one edge time of) a gate transition. The browser's ngspice
+// (45.2, built by MKF's CMake for WASM) never returns when .tran's stop time lands on a PULSE edge: the
+// isolated-buck wizard default (750 kHz, stop = 52 periods, the rising gate edge at every period start)
+// ran > 400 s in node while the same deck finishes in 64 ms natively (system ngspice); stopping 2.7 ns
+// before or 1.3 ns after the edge finishes in < 0.5 s. Callers ask for a whole number of periods, which
+// is exactly where edges sit, so every switching deck is exposed. Moving the stop time 1 ns past the end
+// of the offending transition costs nothing: the extraction windows the LAST period ending at the stop
+// time, and any full-period window of a periodic steady state is a full period.
+double stop_time_clear_of_gate_edges(double stopTime, const std::vector<PulseEdge>& edges) {
+    for (size_t pass = 0; pass <= edges.size(); ++pass) {
+        bool moved = false;
+        for (const auto& e : edges) {
+            double phase = std::fmod(stopTime - e.start, e.period);
+            if (phase < 0) phase += e.period;
+            // Inside [start - edge, start + edge] (the transition plus one edge time before it).
+            const double sinceStart = (phase > e.period - kPulseEdgeTime) ? phase - e.period : phase;
+            if (sinceStart >= -kPulseEdgeTime && sinceStart <= kPulseEdgeTime) {
+                stopTime += (2.0 * kPulseEdgeTime - sinceStart);   // → 1 ns past the transition's end
+                moved = true;
+            }
+        }
+        if (!moved) return stopTime;
+    }
+    throw std::runtime_error("TasAssembler: could not place the transient stop time clear of the gate edges "
+                             "(edges closer than 2 ns apart)");
+}
+
 bool contains_ci(const std::string& s, const std::string& sub) {
     std::string a = s, b = sub;
     std::transform(a.begin(), a.end(), a.begin(), ::tolower);
@@ -541,6 +572,9 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
 
     double fsw = 0.0;
     bool fswKnown = false;   // set once a pwm stimulus supplies the switching frequency
+    // Every PULSE transition (start time within the period, and the period): used below to keep the
+    // transient's stop time out of a gate edge.
+    std::vector<PulseEdge> pulseEdges;
     for (const auto& st : sim.value("stimulus", json::array())) {
         const json& wf = st.at("waveform");
         if (wf.value("type", "") != "pwm") continue;
@@ -571,6 +605,8 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
             const double td = (phaseDeg / 360.0) * period;
             os << "Vstim_" << stage << "_" << comp << " " << stimNode << " 0 PULSE(0 5 "
                << td << " 1n 1n " << ton << " " << period << ")\n";
+            pulseEdges.push_back({td, period});                          // rising edge
+            pulseEdges.push_back({td + kPulseEdgeTime + ton, period});   // falling edge
         }
     }
 
@@ -597,6 +633,7 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
                                  "stimulus frequency and no lineFrequency to size the transient / averaging window");
     if (stopTime <= 0) stopTime = 600 * refPeriod;
     if (maxStep <= 0) maxStep = refPeriod / 200.0;
+    stopTime = stop_time_clear_of_gate_edges(stopTime, pulseEdges);
 
     // Optional initial conditions: pre-charge nodes at t=0 (e.g. a resonant converter's output cap)
     // and run the transient with use-initial-conditions (UIC) so ngspice SKIPS the DC operating point.
