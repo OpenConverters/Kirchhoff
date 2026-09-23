@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cmath>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -155,6 +156,39 @@ std::vector<std::string> winding_names(int n) {
     return v;
 }
 
+// The LAST `period` of a raw transient trace, time rebased to [0, period]. WaveformProcessor takes a
+// timed waveform's span as ONE period of the frequency it is given (calculate_sampled_waveform infers
+// the period from time.back() - time.front()), so handing it the whole multi-period trace makes it
+// read N cycles as one: every harmonic lands at N·f and a clean sine comes back with hundreds of
+// percent THD (ABT #1356). The window's first point is interpolated at exactly tEnd - period so the
+// span is the period itself, not whatever ngspice timepoint happens to fall after it; the samples
+// inside the window are kept as computed (complete_excitation resamples them). Throws when the trace
+// is shorter than one period: there is no steady-state cycle to report.
+void last_period(const std::vector<double>& time, const std::vector<double>& sig, double period,
+                 std::vector<double>& outTime, std::vector<double>& outSig) {
+    if (time.size() < 2 || sig.size() != time.size())
+        throw std::runtime_error("CMC ideal simulation: trace has " + std::to_string(time.size()) +
+                                 " timepoints and " + std::to_string(sig.size()) + " samples");
+    const double tEnd = time.back();
+    const double tBeg = tEnd - period;
+    if (time.front() > tBeg)
+        throw std::runtime_error("CMC ideal simulation: captured trace spans " +
+                                 std::to_string(tEnd - time.front()) + " s, shorter than one period (" +
+                                 std::to_string(period) + " s)");
+    // First index strictly after tBeg; the sample before it brackets tBeg.
+    size_t k = static_cast<size_t>(std::upper_bound(time.begin(), time.end(), tBeg) - time.begin());
+    outTime.clear();
+    outSig.clear();
+    const double t0 = time[k - 1], t1 = time[k];
+    const double f = (t1 > t0) ? (tBeg - t0) / (t1 - t0) : 0.0;
+    outTime.push_back(0.0);
+    outSig.push_back(sig[k - 1] + f * (sig[k] - sig[k - 1]));
+    for (; k < time.size(); ++k) {
+        outTime.push_back(time[k] - tBeg);
+        outSig.push_back(sig[k]);
+    }
+}
+
 double peak_abs(const std::vector<double>& v) {
     double m = 0.0;
     for (double x : v) m = std::max(m, std::abs(x));
@@ -195,12 +229,15 @@ json simulate_cmc_ideal_waveforms(const CmcDesign& d, double inductance, double 
 
         std::vector<double> voltage(vIn.size());
         for (size_t i = 0; i < vIn.size(); ++i) voltage[i] = vIn[i] - vOut[i];
-        // Normalize the time origin to 0 (ngspice starts at tStart); the sampler assumes [0, 1/f).
-        const double t0 = time.front();
-        if (t0 != 0.0) for (auto& t : time) t -= t0;
+        // One steady-state period, time origin 0: complete_excitation reads a timed waveform's span
+        // as exactly one period of excFreq (ABT #1356).
+        const double period = 1.0 / excFreq;
+        std::vector<double> ct, cd, vt, vd;
+        last_period(time, current, period, ct, cd);
+        last_period(time, voltage, period, vt, vd);
 
-        MAS::Waveform cw; cw.set_data(current); cw.set_time(time);
-        MAS::Waveform vw; vw.set_data(voltage); vw.set_time(time);
+        MAS::Waveform cw; cw.set_data(cd); cw.set_time(ct);
+        MAS::Waveform vw; vw.set_data(vd); vw.set_time(vt);
         op.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(cw, vw, excFreq, names[static_cast<size_t>(w)]));
     }

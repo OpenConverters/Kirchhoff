@@ -251,6 +251,25 @@ TEST_CASE("api::simulate_cmc_* run the ngspice decks (or report success:false wi
     CHECK(excs.size() == 2);   // Line + Neutral
     CHECK(ideal["cmcDiagnostics"]["computedInductance"].get<double>() > 0.0);
 
+    // ABT #1356: each excitation is ONE steady-state period of the 150 kHz sine drive. The deck runs
+    // numberOfPeriods = 2 by default; handing both to complete_excitation (which reads a timed
+    // waveform's span as one period) put the fundamental at 300 kHz with ~266 % THD.
+    const double excFreq = 150000.0;
+    for (const auto& e : excs) {
+        CHECK(e["frequency"].get<double>() == Approx(excFreq));
+        for (const char* side : {"current", "voltage"}) {
+            INFO("winding " << e["name"].get<std::string>() << ", " << side);
+            const auto& t = e[side]["waveform"]["time"];
+            REQUIRE(t.size() >= 2);
+            // The stored waveform spans one period (128 points on [0, T), so last = T·127/128).
+            CHECK(t.back().get<double>() - t.front().get<double>() == Approx(1.0 / excFreq).epsilon(0.02));
+            const auto& p = e[side]["processed"];
+            CHECK(p["acEffectiveFrequency"].get<double>() == Approx(excFreq).epsilon(0.02));
+            CHECK(p["thd"].get<double>() < 0.05);
+            CHECK(p["label"].get<std::string>() == "sinusoidal");
+        }
+    }
+
     // LISN sim: one converterWaveforms entry per spec frequency, with a finite attenuation.
     REQUIRE(lisn.value("success", false));
     REQUIRE(lisn["converterWaveforms"].is_array());
