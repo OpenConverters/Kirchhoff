@@ -76,7 +76,7 @@ std::string dmc_deck(double inductance, double filterCap, double frequency,
     c << "Cfilt filter_out 0 " << std::scientific << filterCap << std::defaultfloat << "\n";
     c << "Rload filter_out 0 " << loadResistance << "\n";
     c << ".tran " << std::scientific << stepTime << " " << simTime << std::defaultfloat << "\n";
-    c << ".save v(noise_src) v(filter_out) i(Vsense)\n";
+    c << ".save v(noise_src) v(dmc_in) v(dmc_out) v(filter_out) i(Vsense)\n";
     c << kDmcOptions << ".end\n";
     return c.str();
 }
@@ -147,6 +147,15 @@ json simulate_dmc_waveforms(const DmcDesign& d, double inductance, double capaci
         const std::vector<double> inputVoltage = vec_of(r, "noise_src");
         const std::vector<double> outputVoltage = vec_of(r, "filter_out");
         const std::vector<double> inductorCurrent = vec_of(r, "vsense");
+        // The choke's own winding voltage: across Ldmc (dmc_in -> dmc_out). v(noise_src) is the DC rail plus
+        // the noise source, which is NOT the voltage on the winding (it carries the full 230 V rail).
+        const std::vector<double> dmcIn = vec_of(r, "dmc_in");
+        const std::vector<double> dmcOut = vec_of(r, "dmc_out");
+        if (dmcIn.empty() || dmcIn.size() != dmcOut.size())
+            throw std::runtime_error("DMC simulation @ " + std::to_string(frequency) +
+                                     " Hz: v(dmc_in)/v(dmc_out) missing from the ngspice result");
+        std::vector<double> inductorVoltageRaw(dmcIn.size());
+        for (size_t i = 0; i < dmcIn.size(); ++i) inductorVoltageRaw[i] = dmcIn[i] - dmcOut[i];
         // The attenuation is measured over the WHOLE steady-state window (every captured period)...
         const double attenuation = dm_attenuation(inputVoltage, outputVoltage);
         // ...but the waveforms are returned as ONE canonical period rebased to t = 0 (SimWindow.hpp). The
@@ -158,12 +167,15 @@ json simulate_dmc_waveforms(const DmcDesign& d, double inductance, double capaci
         last_period(r.time, inputVoltage, period, t, vin, who);
         last_period(r.time, outputVoltage, period, tv, vout, who);
         last_period(r.time, inductorCurrent, period, tl, il, who);
+        std::vector<double> tlv, vl;
+        last_period(r.time, inductorVoltageRaw, period, tlv, vl, who);
         converterWaveforms.push_back(json{
             {"frequency", frequency},
             {"time", std::move(t)},
             {"inputVoltage", std::move(vin)},
             {"outputVoltage", std::move(vout)},
             {"inductorCurrent", std::move(il)},
+            {"inductorVoltage", std::move(vl)},   // v(dmc_in) - v(dmc_out): the winding voltage
             {"operatingPointName", "DMC_" + std::to_string(static_cast<int>(frequency / 1000)) + "kHz"},
             {"dmAttenuation", attenuation},
         });

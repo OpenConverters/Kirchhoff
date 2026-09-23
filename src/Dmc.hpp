@@ -81,7 +81,8 @@ nlohmann::json propose_dmc_design(const nlohmann::json& spec);
 // simulate collects them in "failedFrequencies" (success:false when ALL fail); verify marks the row
 // simulated:false with a null measuredAttenuation and judges on the theoretical value, saying so.
 // simulate_dmc_waveforms: LC low-pass sim over the test frequencies → {success, converterWaveforms:
-// [{frequency, time, inputVoltage, outputVoltage, inductorCurrent, dmAttenuation}], failedFrequencies?}.
+// [{frequency, time, inputVoltage, outputVoltage, inductorCurrent, inductorVoltage, dmAttenuation}],
+// failedFrequencies?}. Signals are ONE period on [0, 1/f]; inductorVoltage = v(dmc_in) - v(dmc_out).
 // verify_dmc_attenuation: per-point {frequency, requiredAttenuation, measuredAttenuation|null,
 // theoreticalAttenuation, simulated, passed, message} (required = 20·log10(Z/Rload); pass ≥ 0.9·required).
 nlohmann::json simulate_dmc_waveforms(const DmcDesign& d, double inductance, double capacitance = 0.0);

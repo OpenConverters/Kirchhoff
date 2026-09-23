@@ -299,8 +299,21 @@ TEST_CASE("api::simulate_dmc_waveforms + verify_dmc_attenuation run the LC decks
         REQUIRE(t.size() >= 2);
         CHECK(t.front().get<double>() == 0.0);
         CHECK(t.back().get<double>() == Approx(1.0 / f).epsilon(1e-9));
-        for (const char* sig : {"inputVoltage", "outputVoltage", "inductorCurrent"})
+        for (const char* sig : {"inputVoltage", "outputVoltage", "inductorCurrent", "inductorVoltage"})
             CHECK(cw[sig].size() == t.size());
+        // The winding voltage is the voltage ACROSS the choke: its DC mean is ~0 (not the 230 V rail) and
+        // its AC amplitude is omega*L*I_ac of the inductor current (the 10 mOhm ESR is outside the choke).
+        auto ac_amp_and_mean = [](const json& v) {
+            std::vector<double> x = v.get<std::vector<double>>();
+            double mean = 0; for (double e : x) mean += e; mean /= x.size();
+            double mx = -1e300, mn = 1e300; for (double e : x) { mx = std::max(mx, e); mn = std::min(mn, e); }
+            return std::pair<double, double>{(mx - mn) / 2.0, mean};
+        };
+        const auto [vAmp, vMean] = ac_amp_and_mean(cw["inductorVoltage"]);
+        const auto [iAmp, iMean] = ac_amp_and_mean(cw["inductorCurrent"]);
+        INFO("f=" << f << " vAmp=" << vAmp << " vMean=" << vMean << " iAmp=" << iAmp << " iMean=" << iMean);
+        CHECK(std::abs(vMean) < 0.05 * vAmp);
+        CHECK(vAmp == Approx(2.0 * M_PI * f * L * iAmp).epsilon(0.05));
     }
     // verify returns one row per test point; with ngspice available every row must be a REAL
     // measurement (simulated:true) of the SAME filter, and this spec comfortably passes both points
