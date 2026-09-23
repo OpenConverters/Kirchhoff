@@ -13,6 +13,7 @@
 #include "KirchhoffApi.hpp"
 
 #include <cmath>
+#include <regex>
 #include <string>
 
 using json = nlohmann::json;
@@ -290,6 +291,16 @@ TEST_CASE("api::simulate_dmc_waveforms + verify_dmc_attenuation run the LC decks
     for (const auto& cw : wf["converterWaveforms"]) {
         CHECK(cw["time"].is_array());
         CHECK(std::isfinite(cw["dmAttenuation"].get<double>()));
+        // ONE canonical steady-state period at the row's frequency, starting at t = 0 (SimWindow.hpp).
+        // The raw 20-period window starting mid-simulation made MKF's sampler throw "Error while sampling
+        // waveform in point: 0" when the DMC wizard handed a row to it as one period.
+        const double f = cw["frequency"].get<double>();
+        const auto& t = cw["time"];
+        REQUIRE(t.size() >= 2);
+        CHECK(t.front().get<double>() == 0.0);
+        CHECK(t.back().get<double>() == Approx(1.0 / f).epsilon(1e-9));
+        for (const char* sig : {"inputVoltage", "outputVoltage", "inductorCurrent"})
+            CHECK(cw[sig].size() == t.size());
     }
     // verify returns one row per test point; with ngspice available every row must be a REAL
     // measurement (simulated:true) of the SAME filter, and this spec comfortably passes both points
@@ -302,4 +313,24 @@ TEST_CASE("api::simulate_dmc_waveforms + verify_dmc_attenuation run the LC decks
         CHECK(r["passed"].get<bool>());
         CHECK(r["message"].get<std::string>().find("kHz") != std::string::npos);
     }
+}
+
+TEST_CASE("api::generate_dmc_ngspice_circuit returns the LC deck as netlist text", "[dmc][api][netlist]") {
+    // The wizard's SPICE button: the deck simulate_dmc_waveforms runs, at the first test frequency (the
+    // first impedance requirement) with the designed inductance — not the design JSON.
+    json spec = dmc_spec();
+    spec["filterCapacitance"] = 1e-6;
+    const std::string net = Kirchhoff::api::generate_dmc_ngspice_circuit(spec.dump());
+    INFO(net);
+    REQUIRE(net.rfind("Exception", 0) != 0);
+    CHECK(std::regex_search(net, std::regex(R"(^\s*\.tran\b)", std::regex::multiline)));
+    CHECK(std::regex_search(net, std::regex(R"(^\s*\.end\b)", std::regex::multiline)));
+    CHECK(net.find("@ 150 kHz") != std::string::npos);
+    CHECK(std::regex_search(net, std::regex(R"(^Cfilt filter_out 0 1\.0+e-06)", std::regex::multiline)));
+    const Kirchhoff::DmcDesign d = Kirchhoff::design_dmc(spec);
+    std::smatch m;
+    REQUIRE(std::regex_search(net, m, std::regex(R"(^Ldmc \S+ \S+ (\S+))", std::regex::multiline)));
+    CHECK(std::stod(m[1]) == Approx(d.computedInductance).epsilon(1e-6));
+    // A spec with no inductance target is an error, not a made-up choke.
+    CHECK(Kirchhoff::api::generate_dmc_ngspice_circuit("{}").rfind("Exception: ", 0) == 0);
 }

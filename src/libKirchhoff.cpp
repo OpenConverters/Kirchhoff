@@ -69,4 +69,6 @@ EMSCRIPTEN_BINDINGS(kirchhoff) {
     // DMC EMI/attenuation sims (simulate_dmc_waveforms + verify_dmc_attenuation)
     em::function("simulate_dmc_waveforms", &api::simulate_dmc_waveforms);
     em::function("verify_dmc_attenuation", &api::verify_dmc_attenuation);
+    em::function("generate_cmc_ngspice_circuit", &api::generate_cmc_ngspice_circuit);
+    em::function("generate_dmc_ngspice_circuit", &api::generate_dmc_ngspice_circuit);
 }

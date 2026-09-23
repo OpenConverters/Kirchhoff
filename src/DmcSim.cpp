@@ -1,5 +1,6 @@
 #include "Dmc.hpp"
 #include "NgspiceRunner.hpp"          // run_ngspice_in_process + ngspice_in_process_available
+#include "SimWindow.hpp"             // last_period (one canonical period, shared with the CMC sim)
 
 #include <algorithm>
 #include <cctype>
@@ -143,17 +144,28 @@ json simulate_dmc_waveforms(const DmcDesign& d, double inductance, double capaci
             continue;
         }
         r.drop_samples_before(settle);   // measure steady state only (see dmc_settle_time)
-        std::vector<double> inputVoltage = vec_of(r, "noise_src");
-        std::vector<double> outputVoltage = vec_of(r, "filter_out");
-        std::vector<double> inductorCurrent = vec_of(r, "vsense");
+        const std::vector<double> inputVoltage = vec_of(r, "noise_src");
+        const std::vector<double> outputVoltage = vec_of(r, "filter_out");
+        const std::vector<double> inductorCurrent = vec_of(r, "vsense");
+        // The attenuation is measured over the WHOLE steady-state window (every captured period)...
+        const double attenuation = dm_attenuation(inputVoltage, outputVoltage);
+        // ...but the waveforms are returned as ONE canonical period rebased to t = 0 (SimWindow.hpp). The
+        // raw window was 20 periods starting mid-simulation, which the wizard handed to MKF as one period
+        // of `frequency`: MKF's sampler rejected it ("Error while sampling waveform in point: 0").
+        const std::string who = "DMC simulation @ " + std::to_string(frequency) + " Hz";
+        const double period = 1.0 / frequency;
+        std::vector<double> t, vin, vout, il, tv, tl;
+        last_period(r.time, inputVoltage, period, t, vin, who);
+        last_period(r.time, outputVoltage, period, tv, vout, who);
+        last_period(r.time, inductorCurrent, period, tl, il, who);
         converterWaveforms.push_back(json{
             {"frequency", frequency},
-            {"time", r.time},
-            {"inputVoltage", inputVoltage},
-            {"outputVoltage", outputVoltage},
-            {"inductorCurrent", std::move(inductorCurrent)},
+            {"time", std::move(t)},
+            {"inputVoltage", std::move(vin)},
+            {"outputVoltage", std::move(vout)},
+            {"inductorCurrent", std::move(il)},
             {"operatingPointName", "DMC_" + std::to_string(static_cast<int>(frequency / 1000)) + "kHz"},
-            {"dmAttenuation", dm_attenuation(inputVoltage, outputVoltage)},
+            {"dmAttenuation", attenuation},
         });
     }
     if (converterWaveforms.empty() && !failedFrequencies.empty())
@@ -164,6 +176,18 @@ json simulate_dmc_waveforms(const DmcDesign& d, double inductance, double capaci
     json out{{"success", true}, {"converterWaveforms", std::move(converterWaveforms)}};
     if (!failedFrequencies.empty()) out["failedFrequencies"] = std::move(failedFrequencies);
     return out;
+}
+
+// ═══ generate_dmc_ngspice_netlist — the LC low-pass deck simulate_dmc_waveforms runs, for the SPICE
+// button, at the FIRST test frequency (the first impedance requirement, else the switching frequency) with
+// the same resolved filter capacitance. One netlist is one circuit; the sweep runs this deck per frequency.
+
+std::string generate_dmc_ngspice_netlist(const DmcDesign& d, double inductance, double capacitance) {
+    if (!(inductance > 0))
+        throw std::invalid_argument("generate_dmc_ngspice_circuit: inductance must be > 0");
+    const double filterCap = resolve_filter_capacitance(d, inductance, capacitance);
+    const double frequency = test_frequencies(d).front();
+    return dmc_deck(inductance, filterCap, frequency, d.inputVoltage, d.operatingCurrent);
 }
 
 // ═══ verify_dmc_attenuation — MKF verify_attenuation (:572). Required attenuation per impedance point

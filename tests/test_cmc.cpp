@@ -11,6 +11,7 @@
 #include "KirchhoffApi.hpp"
 
 #include <cmath>
+#include <regex>
 #include <string>
 
 using json = nlohmann::json;
@@ -280,4 +281,34 @@ TEST_CASE("api::simulate_cmc_* run the ngspice decks (or report success:false wi
     CHECK(std::isfinite(cw["commonModeAttenuation"].get<double>()));
     CHECK(cw["time"].is_array());
     CHECK(cw["windingCurrents"].size() == 2);
+}
+
+TEST_CASE("api::generate_cmc_ngspice_circuit returns the ideal CM deck as netlist text", "[cmc][api][netlist]") {
+    // The wizard's SPICE button: a real ngspice netlist (the deck simulate_cmc_ideal_waveforms runs), not
+    // the design JSON the web runtime used to hand back.
+    json spec = wizard_spec();
+    spec["minimumImpedance"] = json::array({{{"frequency", 150000.0}, {"impedance", 1000.0}}});
+    spec["parasiticCap_pF"] = 100.0;
+    spec["dvdt_V_ns"] = 5.0;
+    const std::string net = Kirchhoff::api::generate_cmc_ngspice_circuit(spec.dump());
+    INFO(net);
+    REQUIRE(net.rfind("Exception", 0) != 0);
+    CHECK(std::regex_search(net, std::regex(R"(^\s*\.tran\b)", std::regex::multiline)));
+    CHECK(std::regex_search(net, std::regex(R"(^\s*\.end\b)", std::regex::multiline)));
+    // One CM source + one inductor per winding (Line + Neutral), at the design's inductance and 150 kHz.
+    CHECK(std::regex_search(net, std::regex(R"(^Icm0 .*SIN\(.* 150000 )", std::regex::multiline)));
+    CHECK(std::regex_search(net, std::regex(R"(^Icm1 )", std::regex::multiline)));
+    CHECK(std::regex_search(net, std::regex(R"(^Lcmc0 )", std::regex::multiline)));
+    CHECK(std::regex_search(net, std::regex(R"(^Lcmc1 )", std::regex::multiline)));
+    const Kirchhoff::CmcDesign d = Kirchhoff::design_cmc(spec);
+    std::smatch m;
+    REQUIRE(std::regex_search(net, m, std::regex(R"(^Lcmc0 \S+ \S+ (\S+))", std::regex::multiline)));
+    CHECK(std::stod(m[1]) == Approx(d.computedInductance).epsilon(1e-6));
+
+    // Without the noise spec the CM source has no amplitude: loud error, never a DC-only deck.
+    json noNoise = wizard_spec();
+    noNoise["minimumImpedance"] = spec["minimumImpedance"];
+    noNoise.erase("parasiticCap_pF");
+    noNoise.erase("dvdt_V_ns");
+    CHECK(Kirchhoff::api::generate_cmc_ngspice_circuit(noNoise.dump()).rfind("Exception: ", 0) == 0);
 }

@@ -171,6 +171,10 @@ KH_API std::string simulate_dmc_waveforms(const std::string& specJson, double in
                                           double capacitance = 0.0);
 KH_API std::string verify_dmc_attenuation(const std::string& specJson, double inductance,
                                           double capacitance);
+// SPICE-button netlists (text): the ideal CM deck of simulate_cmc_ideal_waveforms, and the LC deck of
+// simulate_dmc_waveforms at the first test frequency. Both take the wizard spec; errors → "Exception: ...".
+KH_API std::string generate_cmc_ngspice_circuit(const std::string& specJson);
+KH_API std::string generate_dmc_ngspice_circuit(const std::string& specJson);
 
 /// PFC "I know the design" helper (legacy webMKF determine_pfc_mode): given the wizard spec and a
 /// user-chosen inductance, label the actual conduction mode against the boundary (CrCM) inductance

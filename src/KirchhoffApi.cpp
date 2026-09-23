@@ -439,6 +439,25 @@ std::string verify_dmc_attenuation(const std::string& spec, double inductance, d
     });
 }
 
+// SPICE-button netlists for the two component wizards: the same decks their "Simulated" buttons run.
+std::string generate_cmc_ngspice_circuit(const std::string& spec) {
+    return guarded([&] {
+        const json specJson = json::parse(spec);
+        Kirchhoff::CmcDesign d = Kirchhoff::design_cmc(specJson);
+        return Kirchhoff::generate_cmc_ngspice_netlist(d, specJson.value("numberOfPeriods", 2),
+                                                       specJson.value("numberOfSteadyStatePeriods", 10));
+    });
+}
+
+std::string generate_dmc_ngspice_circuit(const std::string& spec) {
+    return guarded([&] {
+        // design_dmc resolves the inductance exactly as the wizard's design does (the LC branch shared
+        // with propose_dmc_design in help mode, the pinned minimumInductance in advanced mode).
+        Kirchhoff::DmcDesign d = Kirchhoff::design_dmc(json::parse(spec));
+        return Kirchhoff::generate_dmc_ngspice_netlist(d, d.computedInductance, 0.0);
+    });
+}
+
 std::string determine_pfc_mode(const std::string& spec, double inductance) {
     return guarded([&] {
         // Boundary (critical) inductance = the "crm" sizing branch of design_pfc, evaluated at the

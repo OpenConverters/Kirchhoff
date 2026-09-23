@@ -1,5 +1,6 @@
 #include "Cmc.hpp"
 #include "NgspiceRunner.hpp"          // run_ngspice_in_process + ngspice_in_process_available
+#include "SimWindow.hpp"             // last_period (shared with the DMC sim)
 #include "processors/WaveformProcessor.h"  // the shared DSP (MKF), reused — not re-implemented
 
 #include <algorithm>
@@ -156,39 +157,6 @@ std::vector<std::string> winding_names(int n) {
     return v;
 }
 
-// The LAST `period` of a raw transient trace, time rebased to [0, period]. WaveformProcessor takes a
-// timed waveform's span as ONE period of the frequency it is given (calculate_sampled_waveform infers
-// the period from time.back() - time.front()), so handing it the whole multi-period trace makes it
-// read N cycles as one: every harmonic lands at N·f and a clean sine comes back with hundreds of
-// percent THD (ABT #1356). The window's first point is interpolated at exactly tEnd - period so the
-// span is the period itself, not whatever ngspice timepoint happens to fall after it; the samples
-// inside the window are kept as computed (complete_excitation resamples them). Throws when the trace
-// is shorter than one period: there is no steady-state cycle to report.
-void last_period(const std::vector<double>& time, const std::vector<double>& sig, double period,
-                 std::vector<double>& outTime, std::vector<double>& outSig) {
-    if (time.size() < 2 || sig.size() != time.size())
-        throw std::runtime_error("CMC ideal simulation: trace has " + std::to_string(time.size()) +
-                                 " timepoints and " + std::to_string(sig.size()) + " samples");
-    const double tEnd = time.back();
-    const double tBeg = tEnd - period;
-    if (time.front() > tBeg)
-        throw std::runtime_error("CMC ideal simulation: captured trace spans " +
-                                 std::to_string(tEnd - time.front()) + " s, shorter than one period (" +
-                                 std::to_string(period) + " s)");
-    // First index strictly after tBeg; the sample before it brackets tBeg.
-    size_t k = static_cast<size_t>(std::upper_bound(time.begin(), time.end(), tBeg) - time.begin());
-    outTime.clear();
-    outSig.clear();
-    const double t0 = time[k - 1], t1 = time[k];
-    const double f = (t1 > t0) ? (tBeg - t0) / (t1 - t0) : 0.0;
-    outTime.push_back(0.0);
-    outSig.push_back(sig[k - 1] + f * (sig[k] - sig[k - 1]));
-    for (; k < time.size(); ++k) {
-        outTime.push_back(time[k] - tBeg);
-        outSig.push_back(sig[k]);
-    }
-}
-
 double peak_abs(const std::vector<double>& v) {
     double m = 0.0;
     for (double x : v) m = std::max(m, std::abs(x));
@@ -233,8 +201,8 @@ json simulate_cmc_ideal_waveforms(const CmcDesign& d, double inductance, double 
         // as exactly one period of excFreq (ABT #1356).
         const double period = 1.0 / excFreq;
         std::vector<double> ct, cd, vt, vd;
-        last_period(time, current, period, ct, cd);
-        last_period(time, voltage, period, vt, vd);
+        last_period(time, current, period, ct, cd, "CMC ideal simulation");
+        last_period(time, voltage, period, vt, vd, "CMC ideal simulation");
 
         MAS::Waveform cw; cw.set_data(cd); cw.set_time(ct);
         MAS::Waveform vw; vw.set_data(vd); vw.set_time(vt);
@@ -252,6 +220,25 @@ json simulate_cmc_ideal_waveforms(const CmcDesign& d, double inductance, double 
         {"converterWaveforms", json::array()},   // legacy: ideal waveforms live in the operating point
         {"cmcDiagnostics", json{{"computedInductance", d.computedInductance}}},
     };
+}
+
+// ═══ generate_cmc_ngspice_netlist — the deck the wizard's "Simulated" button runs (simulate_cmc_ideal_
+// waveforms), for the SPICE button. Same inductance rule as the design (the pinned desiredInductance in
+// advanced mode, else the synthesized CM inductance), same excitation frequency, same C·dV/dt CM source.
+// The noise spec is REQUIRED: without it the per-winding CM source has no amplitude and the deck would
+// show a DC-only circuit. ═══════════════════════════════════════════════════════════════════════════════
+
+std::string generate_cmc_ngspice_netlist(const CmcDesign& d, int numberOfPeriods, int numberOfSteadyStatePeriods) {
+    if (!(d.parasiticCapPf > 0) || !(d.dvdtVPerNs > 0))
+        throw std::invalid_argument(
+            "generate_cmc_ngspice_circuit: the CM excitation needs parasiticCap_pF and dvdt_V_ns (> 0) "
+            "— they set the per-winding CM source amplitude I_cm = C·dV/dt");
+    const double inductance = d.desiredInductance ? *d.desiredInductance : d.computedInductance;
+    if (!(inductance > 0))
+        throw std::invalid_argument("generate_cmc_ngspice_circuit: the design has no positive CM inductance");
+    return ideal_cmc_deck(d.numberOfWindings, inductance, d.operatingCurrent, d.operatingVoltage,
+                          cmc_excitation_frequency(d), d.parasiticCapPf, d.dvdtVPerNs,
+                          numberOfPeriods, numberOfSteadyStatePeriods);
 }
 
 // ═══ simulate_cmc_lisn_waveforms — MKF simulate_and_extract_waveforms (:608) over the impedance-spec

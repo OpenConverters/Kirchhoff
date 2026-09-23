@@ -99,5 +99,10 @@ nlohmann::json simulate_cmc_ideal_waveforms(const CmcDesign& d, double inductanc
                                             double dvdtVPerNs, int numberOfPeriods = 2,
                                             int numberOfSteadyStatePeriods = 10);
 nlohmann::json simulate_cmc_lisn_waveforms(const CmcDesign& d, double inductance);
+// The ideal CM deck simulate_cmc_ideal_waveforms runs, as netlist text (the wizard's SPICE button).
+// Inductance = desiredInductance (advanced) else computedInductance; THROWS without the noise spec
+// (parasiticCap_pF + dvdt_V_ns), which sets the CM source amplitude.
+std::string generate_cmc_ngspice_netlist(const CmcDesign& d, int numberOfPeriods = 2,
+                                         int numberOfSteadyStatePeriods = 10);
 
 } // namespace Kirchhoff

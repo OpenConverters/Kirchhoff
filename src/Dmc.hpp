@@ -86,5 +86,7 @@ nlohmann::json propose_dmc_design(const nlohmann::json& spec);
 // theoreticalAttenuation, simulated, passed, message} (required = 20·log10(Z/Rload); pass ≥ 0.9·required).
 nlohmann::json simulate_dmc_waveforms(const DmcDesign& d, double inductance, double capacitance = 0.0);
 nlohmann::json verify_dmc_attenuation(const DmcDesign& d, double inductance, double capacitance = 0.0);
+// The LC deck simulate_dmc_waveforms runs at the first test frequency, as netlist text (SPICE button).
+std::string generate_dmc_ngspice_netlist(const DmcDesign& d, double inductance, double capacitance = 0.0);
 
 } // namespace Kirchhoff
