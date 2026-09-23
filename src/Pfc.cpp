@@ -42,15 +42,32 @@ std::string normalize_pfc_mode(const std::string& raw) {
 std::string normalize_pfc_variant(const std::string& raw) {
     const std::string v = to_lower(raw);
     if (v == "boost" || v.empty()) return "boost";
+    // Bridgeless (dual-boost) and semi-bridgeless boost PFC remove (or halve) the input rectifier bridge
+    // to cut conduction loss, but the BOOST INDUCTOR still sees the identical rectified-sine (unipolar,
+    // |sin|-enveloped) current of a classic boost PFC: only the return-path devices differ. From the
+    // magnetic's standpoint they ARE boost — same inductance sizing, same waveforms, same unipolar
+    // switching deck — which is how MKF modelled them before the converter models moved here (MKF
+    // 944152fc, PowerFactorCorrection::validate_topology_variant). Unlike totem-pole (also bridgeless, but
+    // with the inductor on the AC side carrying BIPOLAR current) they need no separate deck. The variant
+    // keeps its own name; is_unipolar_boost_family() routes it to the boost sizing and deck.
+    if (v == "bridgeless" || v == "bridgelessboost" || v == "dualboost") return "bridgeless";
+    if (v == "semibridgeless" || v == "semi-bridgeless" || v == "semi_bridgeless") return "semiBridgeless";
     if (v == "totempole" || v == "totem-pole" || v == "totem_pole") return "totemPole";
     if (v == "interleaved" || v == "interleavedboost" || v == "interleaved-boost" ||
         v == "interleaved_boost") return "interleaved";
     if (v == "sepic") return "sepic";
     if (v == "cuk" || v == "ćuk" || v == "cúk") return "cuk";
     throw std::invalid_argument("design_pfc: unknown topologyVariant '" + raw +
-                                "' (expected boost | totemPole | interleaved | sepic | cuk)");
+                                "' (expected boost | bridgeless | semiBridgeless | totemPole | interleaved | "
+                                "sepic | cuk)");
 }
 } // namespace
+
+// Boost and the two boost-equivalent bridgeless variants: one unipolar boost inductor on the rectified
+// side, sized and simulated identically (see normalize_pfc_variant).
+bool is_unipolar_boost_family(const std::string& topologyVariant) {
+    return topologyVariant == "boost" || topologyVariant == "bridgeless" || topologyVariant == "semiBridgeless";
+}
 
 PfcDesign design_pfc(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
@@ -186,7 +203,7 @@ json build_pfc_tas(const PfcDesign& d) {
     if (d.topologyVariant == "totemPole") return build_pfc_totempole_tas(d);
     if (d.topologyVariant == "interleaved") return build_pfc_interleaved_tas(d);
     if (d.topologyVariant == "sepic" || d.topologyVariant == "cuk") return build_pfc_buckboost_tas(d);
-    if (d.topologyVariant != "boost")
+    if (!is_unipolar_boost_family(d.topologyVariant))
         throw std::invalid_argument("build_pfc_tas: topologyVariant '" + d.topologyVariant +
                                     "' deck is not implemented");
     auto port = [](const char* n) { json p; p["name"] = n; return p; };

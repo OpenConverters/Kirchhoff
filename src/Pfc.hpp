@@ -44,7 +44,7 @@ struct PfcDesign {
     double outputDividerGain;   // kv: V(voutScaled) = kv·V(vout) (output-voltage sense)
     // ── Conduction mode + topology variant (ABT #92) ────────────────────────────────────────────────
     std::string mode;           // "ccm" | "dcm" | "crm" | "transition" — drives boostInductance sizing
-    std::string topologyVariant;// "boost" | "totemPole" | "interleaved" | "sepic" | "cuk"
+    std::string topologyVariant;// "boost" | "bridgeless" | "semiBridgeless" | "totemPole" | "interleaved" | "sepic" | "cuk"
     int numberOfPhases;         // interleaved: number of phase-shifted boost legs (2 or 3); else 1
     bool bipolar;               // totem-pole: bridgeless, the inductor sees a TRUE bipolar sine (no bridge)
     // ── SEPIC / Ćuk (buck-boost class) front end (ABT #92) ───────────────────────────────────────────
@@ -56,6 +56,9 @@ struct PfcDesign {
 
 /** Design a single-phase current-mode (hysteretic) boost PFC. */
 PfcDesign design_pfc(const nlohmann::json& tasInputs);
+// Boost and its boost-equivalent bridgeless variants (bridgeless, semiBridgeless): one unipolar boost
+// inductor on the rectified side, same sizing and deck.
+bool is_unipolar_boost_family(const std::string& topologyVariant);
 /** Assemble a PFC design into a TWO-stage TAS document: a power stage + a swappable current controller. */
 nlohmann::json build_pfc_tas(const PfcDesign& d);
 

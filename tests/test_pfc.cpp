@@ -265,6 +265,35 @@ TEST_CASE("PFC conduction mode drives the boost-inductor sizing (CCM/DCM/CrM/Tra
     }
 }
 
+TEST_CASE("bridgeless and semi-bridgeless PFC size and simulate as the boost inductor", "[pfc][bridgeless]") {
+    // The web PFC wizard offers both variants (MAS pfcTopologyVariants). Their boost inductor carries the
+    // same rectified-sine current as a classic boost, so the design must equal boost's exactly, keep the
+    // variant's own name, and build the unipolar boost deck (MKF 944152fc modelled them the same way).
+    const double vrms = 120.0, vout = 400.0, fline = 400.0, fsw = 20e3, pout = 300.0;
+    const Kirchhoff::PfcDesign boost = Kirchhoff::design_pfc(pfc_inputs(vrms, vout, fline, fsw, pout));
+    for (const char* v : {"bridgeless", "semiBridgeless"}) {
+        INFO(v);
+        const Kirchhoff::PfcDesign d = Kirchhoff::design_pfc(pfc_inputs(vrms, vout, fline, fsw, pout,
+                                                                        json{{"topologyVariant", v}}));
+        CHECK(d.topologyVariant == v);
+        CHECK_FALSE(d.bipolar);
+        CHECK(d.numberOfPhases == 1);
+        CHECK(d.boostInductance == Catch::Approx(boost.boostInductance).epsilon(1e-12));
+        CHECK(d.currentHysteresis == Catch::Approx(boost.currentHysteresis).epsilon(1e-12));
+        CHECK(Kirchhoff::build_pfc_tas(d).dump() == Kirchhoff::build_pfc_tas(boost).dump());
+        // Every conduction mode that boost supports is supported here too.
+        for (const char* mode : {"ccm", "dcm", "crm", "transition"}) {
+            CHECK(Kirchhoff::design_pfc(pfc_inputs(vrms, vout, fline, fsw, pout,
+                                                   json{{"topologyVariant", v}, {"mode", mode}})).boostInductance
+                  == Catch::Approx(Kirchhoff::design_pfc(pfc_inputs(vrms, vout, fline, fsw, pout,
+                                                                    json{{"mode", mode}})).boostInductance));
+        }
+    }
+    CHECK(Kirchhoff::is_unipolar_boost_family("boost"));
+    CHECK_FALSE(Kirchhoff::is_unipolar_boost_family("totemPole"));
+    CHECK_FALSE(Kirchhoff::is_unipolar_boost_family("interleaved"));
+}
+
 TEST_CASE("interleaved boost PFC: per-phase sizing + the deck holds the bus", "[pfc][interleaved]") {
     const double vrms = 120.0, vout = 400.0, fline = 400.0, fsw = 20e3, pout = 300.0;
     // Single-phase reference inductance (boost).
