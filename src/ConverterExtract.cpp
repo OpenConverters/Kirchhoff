@@ -102,13 +102,6 @@ MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vecto
     // the currents with the simulated ones where we can find the matching branch.
     MAS::OperatingPoint op = analytical_operating_point_of(mags, idx);
 
-    const std::string deck = tas_to_ngspice(tas, fidelity);
-    NgspiceRunResult r = run_ngspice_in_process(deck);
-    if (!r.success)
-        throw std::runtime_error("extract_operating_point(NGSPICE): sim failed: " + r.error);
-    if (r.time.size() < 2)
-        throw std::runtime_error("extract_operating_point(NGSPICE): sim produced no transient data");
-
     // Switching frequency for the settle window + processing comes from the magnetic's own excitation
     // (the analytical build stamped every winding with the operating frequency). No fallback: if it is
     // absent the operating point is malformed and we must not silently invent a window.
@@ -121,54 +114,167 @@ MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vecto
         throw std::runtime_error("extract_operating_point(NGSPICE): magnetic '" + mags[idx].name
                                  + "' has no positive excitation frequency");
     const double period = 1.0 / fsw;
-    const double tEnd = r.time.back();
-    // The extraction resamples the LAST switching period [tEnd-period, tEnd]. A transient shorter than one
-    // period has no full cycle to read; extracting it would resample past the end of the time vector. Throw
-    // loudly (per the no-fallback rule) instead of extrapolating a bogus waveform.
-    if (tEnd < period)
-        throw std::runtime_error("extract_operating_point(NGSPICE): transient span " + std::to_string(tEnd)
-                                 + "s is shorter than one switching period " + std::to_string(period)
-                                 + "s — cannot extract a cycle for magnetic '" + mags[idx].name + "'");
-    double tBeg = tEnd - period;
+
     // AC-input converters (PFC, Vienna) carry the magnetic's operating point at the PEAK OF THE LINE (the
-    // analytical solvers size the switching period there). A run that ends on a whole number of line
-    // cycles ends on phase A's ZERO crossing, where the last switching period carries no current (Vienna
-    // came back all zeros). Read the switching period centred on the line peak of the winding's current in
-    // the last line cycle instead: the running one-switching-period average (the line envelope) at its
-    // largest magnitude. When the excitation is stamped at the line frequency (a full-line-cycle operating
-    // point) the window is the whole last cycle and this changes nothing.
+    // analytical solvers size the switching period there). Their run ends on a whole number of line
+    // cycles, which is a line ZERO crossing for phase A — reading the last switching period of the run
+    // returned an all-zero Vienna phase-A excitation. For them the window is the switching period at the
+    // line peak of the winding's current.
     const json& dreqTas = tas.at("inputs").at("designRequirements");
     const std::string inputType = dreqTas.value("inputType", std::string("dc"));
-    if (inputType == "acSinglePhase" || inputType == "acThreePhase") {
+    const bool acInput = (inputType == "acSinglePhase" || inputType == "acThreePhase");
+    double linePeriod = 0.0;
+    if (acInput) {
         if (!dreqTas.contains("lineFrequency"))
             throw std::runtime_error("extract_operating_point(NGSPICE): AC-input TAS without lineFrequency");
-        const double linePeriod = 1.0 / PEAS::resolve_dimensional_values(dreqTas.at("lineFrequency"));
-        if (tEnd - r.time.front() < linePeriod)
-            throw std::runtime_error("extract_operating_point(NGSPICE): AC-input transient shorter than one line cycle");
-        const std::string token0 = "l" + lower(mags[idx].name) + "_pri";
-        const std::vector<double>* sig = nullptr;
-        for (const auto& kv : r.vectors) {
-            const std::string k = lower(kv.first);
-            if (k.find("#branch") != std::string::npos && k.find(token0) != std::string::npos) { sig = &kv.second; break; }
+        linePeriod = 1.0 / PEAS::resolve_dimensional_values(dreqTas.at("lineFrequency"));
+    }
+    // The steady-state comparison window: one switching period (the check runs for DC converters only).
+    const double cmpPeriod = period;
+
+    // The ngspice branch token per winding (see below) — needed by the steady-state check as well.
+    const std::string magTok = "l" + lower(mags[idx].name) + "_";
+    auto branch_of = [&](const NgspiceRunResult& rr, size_t w) -> const std::vector<double>* {
+        const std::string suffix = (w == 0 ? std::string("pri") : "sec" + std::to_string(w));
+        const std::string token = magTok + suffix;
+        for (const auto& kv : rr.vectors) {
+            std::string k = lower(kv.first);
+            if (k.find("#branch") == std::string::npos) continue;
+            if (k.find(token) != std::string::npos) return &kv.second;
         }
+        return nullptr;
+    };
+
+    // STEADY STATE, VERIFIED (DC converters). The operating point is only meaningful once the converter has settled: a
+    // run that stops inside its start-up transient (output capacitors still charging, an output LC still
+    // ringing) returned currents several times the design value and winding voltages with a DC mean,
+    // and the advisers then found no core for them — silently. The caller's stop time (the wizard's
+    // steady-state periods) is where we START: each run is checked by comparing every winding current over
+    // its last comparison window with the same window at mid-run; if they still differ the run is repeated
+    // with twice the stop time (the previous run's end state is the new run's mid-point, so a steady
+    // circuit passes on the next attempt). A circuit that has not settled within kMaxDoublings doublings is
+    // an error, never an extracted operating point.
+    constexpr int    kMaxDoublings = 10;      // up to 1024 x the requested window ...
+    constexpr double kMaxComparisonPeriods = 20000.0;  // ... never longer than 20000 switching periods,
+                                              // so a browser run stays finite ...
+    constexpr double kMaxRunBytes = 512e6;    // ... and never a run whose captured vectors exceed ~512 MB:
+                                              // an AC-input deck (122 saved vectors, 0.5 us step) doubled
+                                              // blindly reached tens of GB and exhausted the host / WASM heap.
+    constexpr double kSteadyTolerance = 0.05; // NRMSE between the two windows, per winding current
+    json tasRun = tas;
+    NgspiceRunResult r;
+    double lastMismatch = 0.0;
+    std::string lastMismatchWinding;
+    bool steady = false;
+    for (int attempt = 0; attempt <= kMaxDoublings; ++attempt) {
+        std::string deck = tas_to_ngspice(tasRun, fidelity);
+        // The extraction reads only inductor branch currents and node voltages, which ngspice saves by
+        // default. `savecurrents` (every device terminal current, for the per-component overlays) is ~10x
+        // the vectors and was what made long settle runs expensive in memory; drop it for this run.
+        for (std::string::size_type at; (at = deck.find(" savecurrents")) != std::string::npos; )
+            deck.erase(at, std::string(" savecurrents").size());
+        r = run_ngspice_in_process(deck);
+        if (!r.success)
+            throw std::runtime_error("extract_operating_point(NGSPICE): sim failed: " + r.error);
+        if (r.time.size() < 2)
+            throw std::runtime_error("extract_operating_point(NGSPICE): sim produced no transient data");
+        // AC-input decks (PFC, Vienna) are read at the line peak of their LAST cycle and are not extended:
+        // their bus-voltage loops settle over many line cycles (Vienna's envelope still drifts ~10 % after
+        // 9 cycles), which a browser run cannot afford. Their settle verification is an open item; until
+        // then they keep the single run they always had rather than turning into errors here.
+        if (acInput) { steady = true; break; }
+        const double tEndRun = r.time.back();
+        // The earlier window ends a WHOLE number of comparison periods before the end (about mid-run), so a
+        // periodic waveform lines up with itself; comparing against the literal mid-point shifted the phase
+        // and flagged perfectly steady decks. A relative epsilon absorbs the float round-off of the stop time.
+        const double span = tEndRun - r.time.front();
+        if (span < 2.0 * cmpPeriod * (1.0 - 1e-6))
+            throw std::runtime_error("extract_operating_point(NGSPICE): transient span " + std::to_string(tEndRun)
+                                     + "s is shorter than two comparison windows of " + std::to_string(cmpPeriod)
+                                     + "s — cannot verify steady state for magnetic '" + mags[idx].name + "'");
+        const double periodsBack = std::max(1.0, std::floor(0.5 * span / cmpPeriod * (1.0 + 1e-9)));
+        const double tMid = tEndRun - periodsBack * cmpPeriod;
+        // Compare the winding currents over [tEnd-cmp, tEnd] and [tMid-cmp, tMid] on a common 256-point grid.
+        auto window = [&](const std::vector<double>& src, double tStop) {
+            const int M = 256;
+            std::vector<double> out(M);
+            for (int k = 0; k < M; ++k) {
+                const double t = tStop - cmpPeriod + cmpPeriod * k / M;
+                size_t j = static_cast<size_t>(std::upper_bound(r.time.begin(), r.time.end(), t) - r.time.begin());
+                if (j == 0) { out[k] = src.front(); continue; }
+                if (j >= r.time.size()) { out[k] = src.back(); continue; }
+                const double f = (t - r.time[j - 1]) / (r.time[j] - r.time[j - 1]);
+                out[k] = src[j - 1] + f * (src[j] - src[j - 1]);
+            }
+            return out;
+        };
+        // Normalise every winding's difference by the LARGEST winding rms, so a winding that legitimately
+        // carries almost nothing (an unloaded or blocked rail) is not judged on its own noise.
+        double refRms = 0.0;
+        std::vector<std::pair<std::vector<double>, std::vector<double>>> pairs;
+        for (size_t w = 0; w < excs0.size(); ++w) {
+            const std::vector<double>* sig = branch_of(r, w);
+            if (!sig) break;   // the extraction below throws the specific missing-branch error
+            auto a = window(*sig, tEndRun), b = window(*sig, tMid);
+            double ra = 0.0; for (double v : a) ra += v * v;
+            refRms = std::max(refRms, std::sqrt(ra / a.size()));
+            pairs.emplace_back(std::move(a), std::move(b));
+        }
+        if (pairs.size() != excs0.size()) { steady = true; break; }   // let the extraction name the branch
+        if (!(refRms > 0))
+            throw std::runtime_error("extract_operating_point(NGSPICE): every winding current of magnetic '"
+                                     + mags[idx].name + "' is zero at the end of the run");
+        lastMismatch = 0.0;
+        for (size_t w = 0; w < pairs.size(); ++w) {
+            double d2 = 0.0;
+            for (size_t k = 0; k < pairs[w].first.size(); ++k) {
+                const double dv = pairs[w].first[k] - pairs[w].second[k];
+                d2 += dv * dv;
+            }
+            const double nrmse = std::sqrt(d2 / pairs[w].first.size()) / refRms;
+            if (nrmse > lastMismatch) { lastMismatch = nrmse; lastMismatchWinding = std::to_string(w); }
+        }
+        if (lastMismatch <= kSteadyTolerance) { steady = true; break; }
+        // Not settled: run again for twice as long — unless that run would exceed the memory budget.
+        const double bytesThisRun = 8.0 * static_cast<double>(r.time.size()) * static_cast<double>(r.vectors.size() + 1);
+        if (2.0 * bytesThisRun > kMaxRunBytes) break;
+        if (2.0 * span > kMaxComparisonPeriods * cmpPeriod) break;
+        for (auto& an : tasRun.at("simulation").at("analyses"))
+            if (an.value("type", "") == "transient")
+                an["stopTime"] = 2.0 * an.at("stopTime").get<double>();
+    }
+    if (!steady)
+        throw std::runtime_error("extract_operating_point(NGSPICE): magnetic '" + mags[idx].name
+                                 + "' did not reach steady state within " + std::to_string(r.time.back())
+                                 + " s (winding " + lastMismatchWinding + " still changes by "
+                                 + std::to_string(100.0 * lastMismatch) + " % between mid-run and the end)");
+
+    const double tEnd = r.time.back();
+    // The extraction resamples ONE switching period. DC converters: the LAST period of the run. AC-input
+    // converters: the period centred on the line peak of the primary winding's current in the last line
+    // cycle (the running one-switching-period average, i.e. the line envelope, at its largest magnitude).
+    double tBeg = tEnd - period;
+    if (acInput) {
+        const std::vector<double>* sig = branch_of(r, 0);
         if (!sig)
-            throw std::runtime_error("extract_operating_point(NGSPICE): no ngspice branch matching '" + token0
-                                     + "' for winding 0 of magnetic '" + mags[idx].name + "'");
+            throw std::runtime_error("extract_operating_point(NGSPICE): no ngspice branch for winding 0 of magnetic '"
+                                     + mags[idx].name + "'");
+        const double t0 = tEnd - linePeriod;
+        // Prefix integral for the moving average over one switching period.
         std::vector<double> cum(r.time.size(), 0.0);
         for (size_t i = 1; i < r.time.size(); ++i)
             cum[i] = cum[i - 1] + 0.5 * ((*sig)[i] + (*sig)[i - 1]) * (r.time[i] - r.time[i - 1]);
         auto integral_at = [&](double t) {
-            const size_t j = static_cast<size_t>(std::upper_bound(r.time.begin(), r.time.end(), t) - r.time.begin());
-            if (j == 0) return cum.front();
+            size_t j = static_cast<size_t>(std::upper_bound(r.time.begin(), r.time.end(), t) - r.time.begin());
+            if (j == 0) return cum[0];
             if (j >= r.time.size()) return cum.back();
             const double f = (t - r.time[j - 1]) / (r.time[j] - r.time[j - 1]);
             return cum[j - 1] + f * (cum[j] - cum[j - 1]);
         };
-        const double t0 = tEnd - linePeriod;
         double best = -1.0;
         const int steps = 512;
         for (int k = 0; k <= steps; ++k) {
-            const double tc = t0 + period / 2 + (linePeriod - period) * k / steps;   // candidate window centre
+            const double tc = t0 + period / 2 + (linePeriod - period) * k / steps;   // window centre
             const double avg = (integral_at(tc + period / 2) - integral_at(tc - period / 2)) / period;
             if (std::abs(avg) > best) { best = std::abs(avg); tBeg = tc - period / 2; }
         }
@@ -218,7 +324,6 @@ MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vecto
     // look it up — NO name-heuristics and NO fallback: if a winding's branch is absent the extraction is
     // wrong and we throw loudly (per the no-silent-fallback rule) rather than silently keep the analytical
     // current.
-    const std::string magTok = "l" + lower(mags[idx].name) + "_";
     auto& excs = op.get_mutable_excitations_per_winding();
     for (size_t w = 0; w < excs.size(); ++w) {
         const std::string suffix = (w == 0 ? std::string("pri") : "sec" + std::to_string(w));

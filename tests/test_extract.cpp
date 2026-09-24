@@ -405,3 +405,60 @@ TEST_CASE("extract(NGSPICE): an AC-input operating point is read at the line pea
     INFO("analytical peak=" << analytical << " simulated peak=" << simulated);
     CHECK(simulated == Catch::Approx(analytical).epsilon(0.25));
 }
+
+
+// ─── Steady state before extraction ─────────────────────────────────────────────────────────────────────
+// The web's Simulated button sends a short settle window (the wizard's "steady-state periods": 50 for the
+// forward, 5 for Weinberg). From a cold start those decks were still in start-up when the run ended, and
+// the extracted operating point carried several times the design currents (two-switch forward 7.1 A peak
+// against 3.1 A; Weinberg 10.8 A against 5.2 A) — the advisers then found no core, silently. The
+// extraction must now verify steady state, extending the run until it holds; these are the web wizards'
+// own specs, verbatim.
+namespace {
+double peak_abs(const json& signal) {
+    double m = 0.0;
+    for (double v : signal.at("waveform").at("data").get<std::vector<double>>()) m = std::max(m, std::abs(v));
+    return m;
+}
+double primary_peak(const std::string& topo, const std::string& spec, const std::string& engine) {
+    const std::string out = Kirchhoff::api::process_converter(topo, spec, engine);
+    INFO("topology=" << topo << " engine=" << engine << " out=" << out.substr(0, 300));
+    REQUIRE(out.rfind("Exception:", 0) != 0);
+    const json j = json::parse(out);
+    const json& op = j.contains("operatingPoint") ? j.at("operatingPoint") : j.at("inputs").at("operatingPoints").at(0);
+    return peak_abs(op.at("excitationsPerWinding").at(0).at("current"));
+}
+}  // namespace
+
+TEST_CASE("extract(NGSPICE): a run that ends inside start-up is extended to steady state",
+          "[extract][steady-state]") {
+    if (!Kirchhoff::ngspice_in_process_available()) {
+        WARN("libngspice not linked — steady-state extract skipped");
+        return;
+    }
+    const std::vector<std::pair<std::string, std::string>> cases = {
+        {"two_switch_forward", R"KH({"designRequirements":{"inputType":"dc","inputVoltage":{"minimum":36,"maximum":72},"switchingFrequency":{"nominal":200000},"outputs":[{"name":"out","voltage":{"nominal":12},"regulation":"voltage"}],"efficiency":0.92},"operatingPoints":[{"name":"full_load","inputVoltage":54,"ambientTemperature":25,"outputs":[{"name":"out","power":36}]}],"config":{"rippleRatio":0.3,"tranStopTime":0.00026}})KH"},
+        {"weinberg",           R"KH({"designRequirements":{"inputType":"dc","inputVoltage":{"minimum":20,"maximum":30},"switchingFrequency":{"nominal":200000},"outputs":[{"name":"out","voltage":{"nominal":48},"regulation":"voltage"}],"efficiency":0.9,"turnsRatios":[{"nominal":1},{"nominal":0.5}]},"operatingPoints":[{"name":"full_load","inputVoltage":25,"ambientTemperature":25,"outputs":[{"name":"out","power":96}]}],"config":{"rippleRatio":0.4,"tranStopTime":0.000035}})KH"},
+    };
+    for (const auto& [topo, spec] : cases) {
+        const double analytical = primary_peak(topo, spec, "analytical");
+        const double simulated  = primary_peak(topo, spec, "ngspice");
+        INFO("topology=" << topo << " analytical peak=" << analytical << " simulated peak=" << simulated);
+        CHECK(simulated == Catch::Approx(analytical).epsilon(0.15));
+    }
+}
+
+TEST_CASE("extract(NGSPICE): a deck that never settles is an error, not an operating point",
+          "[extract][steady-state]") {
+    if (!Kirchhoff::ngspice_in_process_available()) {
+        WARN("libngspice not linked — steady-state extract skipped");
+        return;
+    }
+    // The web isolated-buck default: its output LC (240 uH, 100 uF, Q ~ 300) rings for ~0.3 s after
+    // start-up — far beyond any bounded run. It used to come back as 3.1 A primary peak against 0.14 A.
+    const std::string out = Kirchhoff::api::process_converter("isolated_buck",
+        R"KH({"designRequirements":{"inputType":"dc","inputVoltage":{"minimum":36,"maximum":72},"switchingFrequency":{"nominal":750000},"outputs":[{"name":"out","voltage":{"nominal":10},"regulation":"voltage"},{"name":"out2","voltage":{"nominal":10},"regulation":"voltage"}],"efficiency":0.9},"operatingPoints":[{"name":"full_load","inputVoltage":54,"ambientTemperature":25,"outputs":[{"name":"out","power":0.2},{"name":"out2","power":1}]}],"config":{"rippleRatio":0.4,"tranStopTime":0.00006933333333333333}})KH", "ngspice");
+    INFO(out.substr(0, 300));
+    REQUIRE(out.rfind("Exception:", 0) == 0);
+    CHECK(out.find("did not reach steady state") != std::string::npos);
+}
