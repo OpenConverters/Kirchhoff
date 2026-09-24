@@ -147,17 +147,22 @@ TEST_CASE("build_cmc_inputs: designRequirements carry the full CMC contract", "[
     CHECK(sides->size() == 3);
     for (auto s : *sides) CHECK(s == MAS::IsolationSide::PRIMARY);
 
-    // One operating point, one excitation per winding, at the dominant frequency, DC bias = line
-    // current (the CM ripple rides on it).
+    // One operating point, one excitation per winding, at the dominant frequency. The CM ripple rides on each
+    // winding's DIFFERENTIAL-mode level: MAS convention (2026-09-24) — line and return currents flow in
+    // opposite directions through the dotted windings, so the three-phase snapshot at phase A's peak is
+    // +6, −3, −3 A (Σ = 0: the DM flux cancels). Before, every winding carried +6 A, i.e. 18 A of DM
+    // ampere-turns that a common-mode choke never sees.
     REQUIRE(in.get_operating_points().size() == 1);
     const auto& op = in.get_operating_points()[0];
     REQUIRE(op.get_excitations_per_winding().size() == 3);
-    for (const auto& exc : op.get_excitations_per_winding()) {
+    const double dm[] = {6.0, -3.0, -3.0};
+    for (size_t w = 0; w < 3; ++w) {
+        const auto& exc = op.get_excitations_per_winding()[w];
         CHECK(exc.get_frequency() == Approx(150e3));
         auto cur = exc.get_current();
         REQUIRE(cur.has_value());
         REQUIRE(cur->get_processed().has_value());
-        CHECK(cur->get_processed()->get_offset() == Approx(6.0).margin(1e-6));
+        CHECK(cur->get_processed()->get_offset() == Approx(dm[w]).margin(1e-6));
     }
     CHECK(op.get_conditions().get_ambient_temperature() == Approx(25.0));
 }
@@ -176,13 +181,15 @@ TEST_CASE("build_cmc_inputs: advanced mode pins L nominal and excites at designF
     // Excitation frequency follows designFrequency, not the noise-synthesized 150 kHz point.
     CHECK(in.get_operating_points()[0].get_excitations_per_winding()[0].get_frequency()
           == Approx(250e3));
-    // V = L·ω·I_cm: the pinned L shapes the voltage amplitude (I_cm = C·dV/dt = 0.5 A at 230 V).
+    // V = L·ω·(Σ I_cm) = n·L·ω·I_cm: the pinned L shapes the voltage amplitude (I_cm = C·dV/dt = 0.5 A at
+    // 230 V per winding). MAS convention (2026-09-24): v_k = L·d(i_m)/dt with i_m = Σ_k i_k for the fully
+    // coupled CM windings — n times the former per-winding L·ω·I_cm.
     auto vol = in.get_operating_points()[0].get_excitations_per_winding()[0].get_voltage();
     REQUIRE(vol.has_value());
     REQUIRE(vol->get_processed().has_value());
     const double iCm = 100.0 * 5.0 * 1e-3;  // C·dV/dt in A, 230 V scaling is a no-op
     CHECK(vol->get_processed()->get_peak().value()
-          == Approx(2e-3 * 2.0 * M_PI * 250e3 * iCm).epsilon(0.02));
+          == Approx(d.numberOfWindings * 2e-3 * 2.0 * M_PI * 250e3 * iCm).epsilon(0.02));
 }
 
 TEST_CASE("api::design_cmc returns {inputs, cmcDiagnostics} and stays schema-clean",

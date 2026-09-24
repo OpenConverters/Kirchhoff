@@ -697,3 +697,50 @@ TEST_CASE("convention: analytical winding orientation matches the ngspice deck",
         }
     }
 }
+
+// Common-mode choke: every winding primary-side (passive), dotted so common-mode currents add. Differential-mode
+// (line/return) levels must cancel in the core, the common-mode ampere-turns must be the sum of the windings',
+// and Faraday must hold on i_m = Σ i_k.
+TEST_CASE("convention: common-mode choke (2, 3, 4 windings)", "[convention][cmc]") {
+    for (int n : {2, 3, 4}) {
+        const double L = 1e-3, Idm = 6.0, f = 150e3;
+        CaseSpec c;
+        c.name = "cmc " + std::to_string(n) + "-winding";
+        c.frequency = f;
+        c.magnetizingInductance = L;
+        c.op = AN::analytical_common_mode_choke(L, Idm, 230.0, f, n, 100.0, 5.0);
+        for (int k = 0; k < n; ++k) c.windings.push_back({1.0, true, -1, Metric::MEAN});
+        check(c);
+        // DM cancels: <i_m> ~ 0 against the line current; CM adds: |I_m1| = n·|I_k1|.
+        const auto& exc = c.op.get_excitations_per_winding();
+        std::vector<double> im(kSamples, 0.0);
+        for (const auto& e : exc) {
+            const auto ik = sample(*e.get_current()->get_waveform(), 1.0 / f);
+            for (int j = 0; j < kSamples; ++j) im[j] += ik[j];
+        }
+        const double cmPerWinding = std::abs(fundamental(sample(*exc[0].get_current()->get_waveform(), 1.0 / f)));
+        const double dmResidual = std::abs(mean(im));
+        const double cmRatio = std::abs(fundamental(im)) / (n * cmPerWinding);
+        std::printf("[convention] %-28s DM flux <i_m> %9.2e A (line %4.1f A) | CM |I_m1|/(n|I_k1|) %7.4f\n",
+                    c.name.c_str(), dmResidual, Idm, cmRatio);
+        CHECK(dmResidual < 1e-3 * Idm);   // resampling residue only; every winding at +Idm would give n·Idm
+        CHECK(std::abs(cmRatio - 1.0) < 0.01);
+    }
+}
+
+// Differential-mode choke: all windings primary-side and dotted so their line currents drive the flux the same
+// way (i_m = Σ i_k); the winding voltage must be L·d(i_m)/dt — Faraday at the line fundamental.
+TEST_CASE("convention: differential-mode choke (single-phase, balanced, three-phase)", "[convention][dmc]") {
+    using Cfg = AN::DmcConfiguration;
+    for (auto cfgWindings : {std::pair<Cfg, int>{Cfg::SINGLE_PHASE, 1}, {Cfg::SINGLE_PHASE_BALANCED, 2},
+                             {Cfg::THREE_PHASE_WITH_NEUTRAL, 4}}) {
+        const double L = 200e-6, fLine = 50.0;
+        CaseSpec c;
+        c.name = "dmc " + std::to_string(cfgWindings.second) + "-winding";
+        c.frequency = fLine;
+        c.magnetizingInductance = L;
+        c.op = AN::analytical_differential_mode_choke(L, 10.0, fLine, 100e3, cfgWindings.first);
+        for (int k = 0; k < cfgWindings.second; ++k) c.windings.push_back({1.0, true, -1, Metric::MEAN});
+        check(c);
+    }
+}

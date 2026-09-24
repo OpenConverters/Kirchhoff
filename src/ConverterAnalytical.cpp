@@ -3192,14 +3192,16 @@ static int dmc_number_of_windings(DmcConfiguration configuration) {
 
 // Ported from MKF converter_models/DifferentialModeChoke.cpp:145 (process_operating_points) +
 // resolve_peak_current (:128).
-MAS::OperatingPoint analytical_differential_mode_choke(double operatingCurrent,
-                                                       double inputVoltage,
+MAS::OperatingPoint analytical_differential_mode_choke(double magnetizingInductance,
+                                                       double operatingCurrent,
                                                        double lineFrequency,
                                                        double switchingFrequency,
                                                        DmcConfiguration configuration,
                                                        double peakCurrent,
                                                        double ambientTemperature) {
     using Lbl = MAS::WaveformLabel;
+    if (!(magnetizingInductance > 0))
+        throw std::invalid_argument("analytical_differential_mode_choke: magnetizingInductance must be > 0");
 
     // MKF :150-151 — operating (loss) frequency is the line frequency; ripple is at the switching frequency
     // (MKF require_input throws if it is missing/non-positive).
@@ -3230,7 +3232,6 @@ MAS::OperatingPoint analytical_differential_mode_choke(double operatingCurrent,
         currentRipple = operatingCurrent * 0.2;
 
     const int numWindings = dmc_number_of_windings(configuration);
-    const double operatingVoltage = inputVoltage;
 
     // MKF :185-194 — per-winding phase angles (0 / ±120° for 3-phase; the neutral shares 0°).
     std::vector<double> phaseAngles;
@@ -3244,46 +3245,65 @@ MAS::OperatingPoint analytical_differential_mode_choke(double operatingCurrent,
         phaseAngles = {0.0, 2.0 * M_PI / 3.0, 4.0 * M_PI / 3.0, 0.0};
     }
 
-    // Keep the RAW per-winding current waveforms so the magnetizing current (Σ I_k) is summed on the same
-    // 10000-point line-period grid MKF uses (complete_excitation stores the resampled waveform, not the raw).
-    std::vector<MAS::Waveform> rawCurrentWaveforms;
-    std::vector<MAS::OperatingPointExcitation> excitations;
-
+    // MKF :207-231 — each winding: a line-frequency sinusoid of amplitude √2·operatingCurrent (RMS→peak) + a
+    // triangular switching-frequency ripple of amplitude currentRipple, over one line period (10000 points;
+    // MKF's grid, so the magnetizing current Σ I_k is summed where MKF sums it). The neutral winding carries
+    // 10% of the phase amplitude.
+    const int numPoints = 10000;
+    const double period = 1.0 / operatingFrequency;
+    const double wLine = 2.0 * M_PI * operatingFrequency;
+    std::vector<double> timeData(numPoints);
+    for (int i = 0; i < numPoints; i++) timeData[i] = i * period / numPoints;
+    std::vector<std::vector<double>> currents(numWindings, std::vector<double>(numPoints));
+    std::vector<double> sumCurrent(numPoints, 0.0);
     for (int windingIdx = 0; windingIdx < numWindings; windingIdx++) {
         const double phaseAngle = phaseAngles[windingIdx];
         const bool isNeutral =
             (configuration == DmcConfiguration::THREE_PHASE_WITH_NEUTRAL && windingIdx == 3);
-
-        // MKF :207-231 — line-frequency sinusoid of amplitude √2·operatingCurrent (RMS→peak) + a triangular
-        // switching-frequency ripple of amplitude currentRipple, over one line period (10000 points). The
-        // neutral winding carries 10% of the phase amplitude.
         double currentAmplitude = operatingCurrent * std::sqrt(2.0);
         if (isNeutral) currentAmplitude *= 0.1;
-
-        const int numPoints = 10000;
-        const double period = 1.0 / operatingFrequency;
-        std::vector<double> timeData(numPoints), currentData(numPoints);
         for (int i = 0; i < numPoints; i++) {
-            const double t = i * period / numPoints;
-            timeData[i] = t;
-            currentData[i] = currentAmplitude * std::sin(2.0 * M_PI * operatingFrequency * t + phaseAngle);
+            const double t = timeData[i];
             const double ripplePhase = std::fmod(t * rippleFrequency, 1.0);
             const double ripple = (ripplePhase < 0.5) ? (4.0 * ripplePhase - 1.0) : (3.0 - 4.0 * ripplePhase);
-            currentData[i] += currentRipple * ripple;
+            currents[windingIdx][i] = currentAmplitude * std::sin(wLine * t + phaseAngle) + currentRipple * ripple;
+            sumCurrent[i] += currents[windingIdx][i];
         }
+    }
+    // MAS excitation convention: every DMC winding is primary-side (PASSIVE) and dotted so its line current
+    // drives the shared flux the same way, i_m = Σ_k i_k (the magnetizing current set below). Every winding
+    // voltage is therefore v = L·d(Σ i)/dt (fully coupled windings, L the magnetizing inductance) — derived
+    // from the currents, not the former fixed 5 %-of-Vin line-frequency sine, which obeyed no Faraday law. The
+    // derivative is taken on the SAME samples the current is emitted with (a central difference: the point
+    // derivative of the sampled current, no half-sample phase shift): the grid has only 5 samples per switching-ripple
+    // period, and evaluating the analytic ±4·ΔI·fsw slope at those instants flips sign on floating-point
+    // rounding of the ripple phase — ±160 V of noise at 200 µH that swamps the ~1 V line-frequency term.
+    // The waveform is periodic over the line period (an integer number of ripple periods), so it wraps.
+    const double dt = period / numPoints;
+    std::vector<double> voltageData(numPoints);
+    for (int i = 0; i < numPoints; i++)
+        voltageData[i] = magnetizingInductance
+                         * (sumCurrent[(i + 1) % numPoints] - sumCurrent[(i + numPoints - 1) % numPoints]) / (2.0 * dt);
 
+    // Close every waveform on t = T with its t = 0 value: without the closing sample the resampler bridges the
+    // last grid step by extrapolation, a one-step glitch that — on a ±hundreds-of-volts ripple square — leaks
+    // into the line-frequency fundamental as much as the ~1 V line term itself.
+    timeData.push_back(period);
+    for (auto& c : currents) c.push_back(c.front());
+    voltageData.push_back(voltageData.front());
+
+    std::vector<MAS::Waveform> rawCurrentWaveforms;
+    std::vector<MAS::OperatingPointExcitation> excitations;
+    for (int windingIdx = 0; windingIdx < numWindings; windingIdx++) {
         MAS::Waveform currentWaveform;
         currentWaveform.set_ancillary_label(Lbl::CUSTOM);
-        currentWaveform.set_data(currentData);
+        currentWaveform.set_data(currents[windingIdx]);
         currentWaveform.set_time(timeData);
         rawCurrentWaveforms.push_back(currentWaveform);
-
-        // MKF :248-258 — small line-frequency voltage across the inductor (~5% of input; neutral 10% of that).
-        double voltageAmplitude = operatingVoltage * 0.05;
-        if (isNeutral) voltageAmplitude *= 0.1;
-        MAS::Waveform voltageWaveform =
-            WP::create_waveform(Lbl::SINUSOIDAL, voltageAmplitude, operatingFrequency, 0.5);
-
+        MAS::Waveform voltageWaveform;
+        voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
+        voltageWaveform.set_data(voltageData);
+        voltageWaveform.set_time(timeData);
         // MKF :237-274 builds the current + voltage SignalDescriptors (processed + sampled + harmonics) then
         // the excitation; complete_excitation runs exactly that DSP at the line frequency.
         excitations.push_back(
@@ -3393,18 +3413,29 @@ MAS::OperatingPoint analytical_common_mode_choke(double magnetizingInductance,
         iCmPeak = 0.01;
     iCmPeak *= cmc_excitation_scaling(operatingVoltage);
 
-    // MKF :359-361 — CM voltage across the CM inductance: V = L·ω·I_cm_peak.
+    // MAS excitation convention (docs/inputs.md "Sign convention of the excitations"): every CMC winding is on
+    // the primary side (PASSIVE current, positive into the dotted terminal) and the windings are dotted so the
+    // COMMON-mode currents add: i_m = Σ_k i_k. The winding voltage is then v_k = L·d(Σ i)/dt with L the
+    // magnetizing (per-winding, fully coupled) inductance — n·L·ω·I_cm for n windings each carrying I_cm.
     const double omega   = 2.0 * M_PI * excFreq;
-    const double vCmPeak = magnetizingInductance * omega * iCmPeak;
-
+    const double vCmPeak = numberOfWindings * magnetizingInductance * omega * iCmPeak;
+    // Differential-mode (line) current over the short excitation period: the instantaneous line current, a DC
+    // level per winding. Line and return flow in OPPOSITE directions through the dotted windings, so their DM
+    // ampere-turns cancel in the core: 2 windings +I / −I; three-phase (snapshot at phase A's peak)
+    // +I, −I/2, −I/2; three-phase + neutral the same with 0 in the (balanced) neutral. Σ DM = 0 always.
+    std::vector<double> dmLevels;
+    switch (numberOfWindings) {
+        case 2:  dmLevels = {operatingCurrent, -operatingCurrent}; break;
+        case 3:  dmLevels = {operatingCurrent, -operatingCurrent / 2.0, -operatingCurrent / 2.0}; break;
+        default: dmLevels = {operatingCurrent, -operatingCurrent / 2.0, -operatingCurrent / 2.0, 0.0}; break;
+    }
     const auto names = cmc_winding_names(numberOfWindings);
-
     MAS::OperatingPoint operatingPoint;
     for (int w = 0; w < numberOfWindings; ++w) {
-        // MKF :378-406 — every winding gets the SAME CM ripple current (peak-to-peak 2·I_cm) riding on the
-        // line-current DC bias, and a CM voltage leading the current by 90° (ideal inductor V = L·dI/dt).
+        // Every winding gets the SAME CM current (peak-to-peak 2·I_cm) on its own DM level, and the same CM
+        // voltage leading the CM current by 90° (ideal coupled inductor v = L·d(Σ i)/dt).
         MAS::Waveform currentWaveform = WP::create_waveform(
-            Lbl::SINUSOIDAL, iCmPeak * 2.0, excFreq, 0.5, operatingCurrent, 0, 0, 0);
+            Lbl::SINUSOIDAL, iCmPeak * 2.0, excFreq, 0.5, dmLevels[w], 0, 0, 0);
         MAS::Waveform voltageWaveform = WP::create_waveform(
             Lbl::SINUSOIDAL, vCmPeak * 2.0, excFreq, 0.5, 0.0, 0, 0, M_PI / 2.0);
 

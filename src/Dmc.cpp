@@ -201,7 +201,7 @@ MAS::Inputs build_dmc_inputs(const DmcDesign& d) {
 
     const double peak = d.peakCurrent.value_or(std::numeric_limits<double>::quiet_NaN());
     MAS::OperatingPoint op = analytical::analytical_differential_mode_choke(
-        d.operatingCurrent, d.inputVoltage, d.lineFrequency, d.switchingFrequency,
+        d.computedInductance, d.operatingCurrent, d.lineFrequency, d.switchingFrequency,
         analytical_config(d.configuration), peak, d.ambientTemperature);
 
     return make_inputs(std::move(dr), std::move(op));

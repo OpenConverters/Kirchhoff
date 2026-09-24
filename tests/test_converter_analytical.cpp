@@ -1098,7 +1098,7 @@ TEST_CASE("analytical_differential_mode_choke single-phase: 1 winding, current R
     using Kirchhoff::analytical::analytical_differential_mode_choke;
     // 10 A line current, 230 V, 50 Hz line, 100 kHz switching ripple, single phase (default peak → 20% ripple).
     const double iop = 10, vin = 230, fline = 50, fsw = 100000;
-    MAS::OperatingPoint op = analytical_differential_mode_choke(iop, vin, fline, fsw);
+    MAS::OperatingPoint op = analytical_differential_mode_choke(100e-6, iop, fline, fsw);
 
     REQUIRE(op.get_excitations_per_winding().size() == 1);   // single winding
     // Line-frequency sinusoid of amplitude √2·Iop (RMS→peak) + a switching ripple of amplitude
@@ -1118,7 +1118,7 @@ TEST_CASE("analytical_differential_mode_choke three-phase: 3 windings, identical
     using Kirchhoff::analytical::DmcConfiguration;
     const double iop = 10;
     MAS::OperatingPoint op = analytical_differential_mode_choke(
-        iop, 230, 50, 100000, DmcConfiguration::THREE_PHASE);
+        100e-6, iop, 50, 100000, DmcConfiguration::THREE_PHASE);
 
     REQUIRE(op.get_excitations_per_winding().size() == 3);   // Phase A / B / C
     // The three windings carry the same-magnitude line current (120° apart) → identical RMS ≈ Iop.
@@ -1134,14 +1134,15 @@ TEST_CASE("analytical_differential_mode_choke three-phase: 3 windings, identical
 TEST_CASE("analytical_differential_mode_choke rejects non-positive frequencies / missing current",
           "[analytical][component][dmc]") {
     using Kirchhoff::analytical::analytical_differential_mode_choke;
-    CHECK_THROWS(analytical_differential_mode_choke(10, 230, 50, 0.0));     // switchingFrequency = 0
-    CHECK_THROWS(analytical_differential_mode_choke(10, 230, 0.0, 100000)); // lineFrequency = 0
+    CHECK_THROWS(analytical_differential_mode_choke(100e-6, 10, 50, 0.0));     // switchingFrequency = 0
+    CHECK_THROWS(analytical_differential_mode_choke(100e-6, 10, 0.0, 100000)); // lineFrequency = 0
     // Neither peakCurrent (NaN default) nor a positive operatingCurrent → cannot size the choke.
-    CHECK_THROWS(analytical_differential_mode_choke(0.0, 230, 50, 100000));
+    CHECK_THROWS(analytical_differential_mode_choke(100e-6, 0.0, 50, 100000));
+    CHECK_THROWS(analytical_differential_mode_choke(0.0, 10, 50, 100000));    // magnetizing inductance = 0
 }
 
 // Common-mode choke. Ported from MKF converter_models/CommonModeChoke.cpp:327 (scalar-arg overload).
-TEST_CASE("analytical_common_mode_choke: N windings, DC bias = line current, small CM ripple, identical",
+TEST_CASE("analytical_common_mode_choke: 2 windings, DM line/return levels cancel, small identical CM ripple",
           "[analytical][component][cmc]") {
     using Kirchhoff::analytical::analytical_common_mode_choke;
     // Lm = 1 mH, 5 A line current, 230 V mains (scaling no-op), 150 kHz dominant impedance frequency, 2 windings.
@@ -1156,12 +1157,14 @@ TEST_CASE("analytical_common_mode_choke: N windings, DC bias = line current, sma
     const double iCmPeak = 0.01;
     CHECK(*processed_current(op, 0).get_average() == Catch::Approx(iop).margin(0.05));           // DC = line I
     CHECK(*processed_current(op, 0).get_peak_to_peak() == Catch::Approx(2.0 * iCmPeak).margin(0.005));
-    // Both windings carry the identical CM waveform (precondition for the CM-choke magnetizing-current path).
-    CHECK(*processed_current(op, 1).get_average() == Catch::Approx(*processed_current(op, 0).get_average()).margin(0.01));
+    // MAS convention (2026-09-24): the return winding carries the line current back, so in the common dot
+    // reference its DM level is the NEGATED line current (the DM ampere-turns cancel in the core); both
+    // windings carry the identical CM ripple, so their rms (what MKF's can_be_common_mode_choke compares) match.
+    CHECK(*processed_current(op, 1).get_average() == Catch::Approx(-*processed_current(op, 0).get_average()).margin(0.01));
     CHECK(*processed_current(op, 1).get_rms() == Catch::Approx(*processed_current(op, 0).get_rms()).margin(0.01));
-    // CM voltage present, peak = L·ω·I_cm.
+    // CM voltage present, peak = L·ω·Σ I_cm = n·L·ω·I_cm (v = L·d(i_m)/dt, i_m = Σ i_k; was L·ω·I_cm).
     REQUIRE(op.get_excitations_per_winding()[0].get_voltage().has_value());
-    const double vCmPeak = Lm * 2.0 * M_PI * fexc * iCmPeak;                                      // ≈ 9.42 V
+    const double vCmPeak = 2.0 * Lm * 2.0 * M_PI * fexc * iCmPeak;                                // ≈ 18.85 V
     CHECK(*processed_voltage(op, 0).get_peak() == Catch::Approx(vCmPeak).margin(0.2));
 }
 
@@ -1172,7 +1175,12 @@ TEST_CASE("analytical_common_mode_choke honors winding count and C·dV/dt CM cur
     MAS::OperatingPoint op = analytical_common_mode_choke(1e-3, 5, 230, 150000, 4, 100.0, 10.0);
     REQUIRE(op.get_excitations_per_winding().size() == 4);   // Phase A/B/C + Neutral
     CHECK(*processed_current(op, 0).get_peak_to_peak() == Catch::Approx(2.0).margin(0.05));   // 2·I_cm = 2.0
-    CHECK(*processed_current(op, 3).get_average() == Catch::Approx(5.0).margin(0.05));        // DC = line I
+    // DM snapshot at phase A's peak (MAS convention, 2026-09-24): A = +5, B = C = −2.5, balanced neutral 0 —
+    // Σ = 0 (the DM flux cancels). Was +5 A on every winding, incl. the neutral.
+    CHECK(*processed_current(op, 0).get_average() == Catch::Approx(5.0).margin(0.05));
+    CHECK(*processed_current(op, 1).get_average() == Catch::Approx(-2.5).margin(0.05));
+    CHECK(*processed_current(op, 2).get_average() == Catch::Approx(-2.5).margin(0.05));
+    CHECK(*processed_current(op, 3).get_average() == Catch::Approx(0.0).margin(0.05));
 }
 
 TEST_CASE("analytical_common_mode_choke rejects bad winding count / non-positive inputs",
@@ -1238,8 +1246,8 @@ TEST_CASE("all solvers scale with load (no load-blind regression)", "[analytical
     }
     // Differential-mode choke: winding rms scales with the line current.
     {
-        double lo = rms0(analytical_differential_mode_choke(5,230,50,100000));
-        double hi = rms0(analytical_differential_mode_choke(10,230,50,100000));
+        double lo = rms0(analytical_differential_mode_choke(100e-6,5,50,100000));
+        double hi = rms0(analytical_differential_mode_choke(100e-6,10,50,100000));
         CHECK(hi > 1.8 * lo);
     }
 }

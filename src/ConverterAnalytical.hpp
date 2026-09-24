@@ -648,7 +648,8 @@ enum class DmcConfiguration { SINGLE_PHASE, SINGLE_PHASE_BALANCED, THREE_PHASE, 
 // Each winding current is the line-frequency sinusoid of amplitude √2·operatingCurrent (RMS→peak), phase-
 // shifted per phase (0 / ±120° for 3-phase), with a triangular switching-frequency ripple of amplitude
 // `currentRipple = peakCurrent − operatingCurrent` superimposed (CUSTOM waveform, one line period). The
-// winding voltage is a small line-frequency sinusoid (5% of `inputVoltage`). The first winding's excitation
+// winding voltage is v = L·d(Σ i)/dt (MAS convention: all windings primary-side, i_m = Σ i_k, L =
+// `magnetizingInductance`), identical on every winding. The first winding's excitation
 // additionally carries the magnetizing current = point-by-point sum of all winding currents (in a DMC every
 // winding drives the flux the same way, so MMF ∝ Σ I_k). `peakCurrent` defaults to NaN → derived as
 // operatingCurrent·(1+0.20) exactly as MKF's resolve_peak_current(0.20). Ported from MKF converter_models/
@@ -656,8 +657,8 @@ enum class DmcConfiguration { SINGLE_PHASE, SINGLE_PHASE_BALANCED, THREE_PHASE, 
 // attenuation/propose_design paths and the DesignRequirements are NOT part of the excitation and are omitted.
 // Throws on non-positive switchingFrequency / lineFrequency, and (per MKF) when neither peakCurrent nor a
 // positive operatingCurrent is available to size the choke.
-MAS::OperatingPoint analytical_differential_mode_choke(double operatingCurrent,
-                                                       double inputVoltage,
+MAS::OperatingPoint analytical_differential_mode_choke(double magnetizingInductance,
+                                                       double operatingCurrent,
                                                        double lineFrequency,
                                                        double switchingFrequency,
                                                        DmcConfiguration configuration = DmcConfiguration::SINGLE_PHASE,
