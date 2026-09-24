@@ -105,6 +105,44 @@ cmake -S .. -B ../build-wasm-ng -DENABLE_NGSPICE=ON \
 cmake --build ../build-wasm-ng --target libKirchhoff -j
 ```
 
+## As a Vue 3 package
+
+The bench's engine facade and three of its views ship as a library (`src/lib/index.js`, built with
+`npm run build:lib` → `dist-lib/kirchhoff-vue.js` + `dist-lib/kirchhoff-vue.css`, Vue external). The
+app itself is built on the same pieces.
+
+```js
+import { createKirchhoff, KhConverterForm, KhSchematic, KhWaveforms } from './dist-lib/kirchhoff-vue.js'
+import './dist-lib/kirchhoff-vue.css'
+
+const kh = createKirchhoff({
+  wasmUrl: '/engine/kirchhoff.js',  // the single-file WASM build, served by the host (required)
+  kelvinUrl: null,                  // Kelvin shard base URL; null = part sourcing disabled (calls throw)
+  telemetry: false,                 // true → OpenConverters sink, or a function (event, props)
+})
+createApp(App).use(kh)              // provides the instance to the components (or pass :engine)
+```
+
+- `<KhConverterForm>` — topology dial/list, variant, spec, knobs, Solve. Props `state?` (a
+  `useConverterForm()` object, when the host owns the form), `engine?`, `topology?`, `solver?`;
+  emits `solved(result)`, `error(message)`.
+- `<KhSchematic>` — props `topology`, `tas` or `result`, `bom?`, `variant?`, `selectable?:
+  (component) => boolean` (component = BOM row: `{ ref, kind, … }`), `selectedRef?`; emits
+  `select(ref)`. Parts the predicate rejects are faded and neither clickable nor focusable.
+- `<KhWaveforms>` — props `componentRef`, `waves?` (a `componentWaveforms()` payload) or `tas?` (it
+  then simulates), `periods?`, `fill?`; emits `loaded`, `error`.
+
+Importing the package does nothing by itself — no worker, fetch, telemetry or window global. Every
+rule in the stylesheet is scoped as `:where(.kh-root) …`, so put the components inside an element with
+class `kh-root`. Colours and fonts are `--kh-*` custom properties declared on `.kh-root` (the default
+set is the app's dark theme); override any of them on your wrapper, or add `kh-theme-wurth` next to
+`kh-root` for the bundled light theme (Würth red `#e3000b` on white, `src/lib/themes/wurth.css`):
+
+```html
+<div class="kh-root kh-theme-wurth">…</div>
+<style>.kh-root.my-brand { --kh-amber: #0055a4; --kh-amber-rgb: 0, 85, 164; }</style>
+```
+
 ## Engines
 
 Both engines run **in the browser**, inside a Web Worker (`src/worker.js`)
