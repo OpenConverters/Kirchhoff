@@ -435,6 +435,11 @@ json build_psfb_tas(const PsfbDesign& d) {
     tas["simulation"]["stimulus"] = json::array({
         stim("QA", 0.0), stim("QB", 180.0),
         stim("QC", d.phaseDeg), stim("QD", 180.0 + d.phaseDeg)});
+    // Precharge the output rail to its design voltage. From 0 V the deck spent its whole simulated window
+    // in start-up (the output capacitor charging through the output inductor), and the extracted operating
+    // point carried several times the design currents; the extractor now also verifies steady state.
+    { json ic; ic["node"] = "Vout"; ic["voltage"] = d.outputVoltage;
+      tas["simulation"]["initialConditions"] = json::array({ic}); }
     req::finalize_control_seeds(tas, Topology::PHASE_SHIFTED_FULL_BRIDGE_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }

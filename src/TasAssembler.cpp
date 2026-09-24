@@ -645,9 +645,16 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
     // just the ngspice realisation.
     const json initialConditions = sim.value("initialConditions", json::array());
     const bool useIc = !initialConditions.empty();
-    for (const auto& ic : initialConditions)
-        os << ".ic v(" << group_node(ic.at("node").get<std::string>()) << ")="
-           << ic.at("voltage").get<double>() << "\n";
+    // A node is either an inter-stage group / external-port name, or "<stage>.<net>" for a net INSIDE a
+    // stage's subcircuit (e.g. an isolated rail that has no external port): the stage is instantiated as
+    // X<stage>, and ngspice addresses its internal node as X<stage>.<net>.
+    for (const auto& ic : initialConditions) {
+        const std::string node = ic.at("node").get<std::string>();
+        const auto dot = node.find('.');
+        const std::string deckNode = (dot == std::string::npos) ? group_node(node)
+                                                                : "X" + sanitize(node.substr(0, dot)) + "." + node.substr(dot + 1);
+        os << ".ic v(" << deckNode << ")=" << ic.at("voltage").get<double>() << "\n";
+    }
 
     // Gear integration + tight tolerances tame the stiff ideal diodes; both ngspice and LTspice accept these
     // option names + the Gear method. For a REAL deck only, append cshunt (cfg::node_shunt_cap, overridable):

@@ -415,6 +415,11 @@ json build_weinberg_tas(const WeinbergDesign& d) {
         stimuli.push_back(srStim("Sneg", srPhase + (swap ? 0.0 : 180.0)));
     }
     tas["simulation"]["stimulus"] = stimuli;
+    // Precharge the output rail(s) to their design voltage. From 0 V the deck spent its whole simulated
+    // window in start-up (output capacitors charging through the inductors), and the extracted operating
+    // point carried several times the design currents; the extractor now also verifies steady state.
+    { json ic; ic["node"] = "Vout"; ic["voltage"] = d.outputVoltage;
+      tas["simulation"]["initialConditions"] = json::array({ic}); }
     req::finalize_control_seeds(tas, Topology::WEINBERG_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }

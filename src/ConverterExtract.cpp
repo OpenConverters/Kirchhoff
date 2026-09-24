@@ -129,7 +129,50 @@ MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vecto
         throw std::runtime_error("extract_operating_point(NGSPICE): transient span " + std::to_string(tEnd)
                                  + "s is shorter than one switching period " + std::to_string(period)
                                  + "s — cannot extract a cycle for magnetic '" + mags[idx].name + "'");
-    const double tBeg = tEnd - period;
+    double tBeg = tEnd - period;
+    // AC-input converters (PFC, Vienna) carry the magnetic's operating point at the PEAK OF THE LINE (the
+    // analytical solvers size the switching period there). A run that ends on a whole number of line
+    // cycles ends on phase A's ZERO crossing, where the last switching period carries no current (Vienna
+    // came back all zeros). Read the switching period centred on the line peak of the winding's current in
+    // the last line cycle instead: the running one-switching-period average (the line envelope) at its
+    // largest magnitude. When the excitation is stamped at the line frequency (a full-line-cycle operating
+    // point) the window is the whole last cycle and this changes nothing.
+    const json& dreqTas = tas.at("inputs").at("designRequirements");
+    const std::string inputType = dreqTas.value("inputType", std::string("dc"));
+    if (inputType == "acSinglePhase" || inputType == "acThreePhase") {
+        if (!dreqTas.contains("lineFrequency"))
+            throw std::runtime_error("extract_operating_point(NGSPICE): AC-input TAS without lineFrequency");
+        const double linePeriod = 1.0 / PEAS::resolve_dimensional_values(dreqTas.at("lineFrequency"));
+        if (tEnd - r.time.front() < linePeriod)
+            throw std::runtime_error("extract_operating_point(NGSPICE): AC-input transient shorter than one line cycle");
+        const std::string token0 = "l" + lower(mags[idx].name) + "_pri";
+        const std::vector<double>* sig = nullptr;
+        for (const auto& kv : r.vectors) {
+            const std::string k = lower(kv.first);
+            if (k.find("#branch") != std::string::npos && k.find(token0) != std::string::npos) { sig = &kv.second; break; }
+        }
+        if (!sig)
+            throw std::runtime_error("extract_operating_point(NGSPICE): no ngspice branch matching '" + token0
+                                     + "' for winding 0 of magnetic '" + mags[idx].name + "'");
+        std::vector<double> cum(r.time.size(), 0.0);
+        for (size_t i = 1; i < r.time.size(); ++i)
+            cum[i] = cum[i - 1] + 0.5 * ((*sig)[i] + (*sig)[i - 1]) * (r.time[i] - r.time[i - 1]);
+        auto integral_at = [&](double t) {
+            const size_t j = static_cast<size_t>(std::upper_bound(r.time.begin(), r.time.end(), t) - r.time.begin());
+            if (j == 0) return cum.front();
+            if (j >= r.time.size()) return cum.back();
+            const double f = (t - r.time[j - 1]) / (r.time[j] - r.time[j - 1]);
+            return cum[j - 1] + f * (cum[j] - cum[j - 1]);
+        };
+        const double t0 = tEnd - linePeriod;
+        double best = -1.0;
+        const int steps = 512;
+        for (int k = 0; k <= steps; ++k) {
+            const double tc = t0 + period / 2 + (linePeriod - period) * k / steps;   // candidate window centre
+            const double avg = (integral_at(tc + period / 2) - integral_at(tc - period / 2)) / period;
+            if (std::abs(avg) > best) { best = std::abs(avg); tBeg = tc - period / 2; }
+        }
+    }
 
     // Resample a full-length simulated signal (one sample per r.time point) onto N=128 points over the LAST
     // switching period, mapped to t∈[0,period) — the exact grid ComponentWaveforms and the winding current

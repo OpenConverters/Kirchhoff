@@ -247,6 +247,15 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
         tas["simulation"]["stimulus"] = json::array({
             stim("QS1", d.dutyCycle, 0.0),
             stim("QS2", (1.0 - d.dutyCycle) - 2.0 * deadFrac, (d.dutyCycle + deadFrac) * 360.0)});
+        // Precharge every rail to its design voltage. From 0 V the start-up inrush overcharged them to
+        // about twice their value and the light loads take tens of ms to drain them — long after any
+        // simulated window; the secondaries then never conducted.
+        { json ics = json::array();
+          json ic; ic["node"] = "Vout"; ic["voltage"] = d.primaryVoltage; ics.push_back(ic);
+          for (size_t k = 0; k < nSec; ++k) {
+              json ick; ick["node"] = "Vout" + std::to_string(k + 2); ick["voltage"] = d.secondaries[k].voltage;
+              ics.push_back(ick); }
+          tas["simulation"]["initialConditions"] = ics; }
         req::finalize_control_seeds(tas, Topology::ISOLATED_BUCK_CONVERTER);
         return tas;
     }
@@ -372,6 +381,12 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
     tas["simulation"]["stimulus"] = json::array({
         stim("QS1", d.dutyCycle, 0.0),
         stim("QS2", (1.0 - d.dutyCycle) - 2.0 * deadFrac, (d.dutyCycle + deadFrac) * 360.0)});
+    // Precharge both rails to their design voltage (the isolated one is internal to the cell). From 0 V
+    // the start-up inrush overcharged them to about twice their value; the light loads then take tens of
+    // ms to drain them, and meanwhile the secondary diode never conducts.
+    { json icPri; icPri["node"] = "Vout"; icPri["voltage"] = d.primaryVoltage;
+      json icSec; icSec["node"] = "flybuckCell.vout_sec"; icSec["voltage"] = d.secondaryVoltage;
+      tas["simulation"]["initialConditions"] = json::array({icPri, icSec}); }
     req::finalize_control_seeds(tas, Topology::ISOLATED_BUCK_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }

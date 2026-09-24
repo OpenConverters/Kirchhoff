@@ -323,6 +323,15 @@ json build_two_switch_forward_tas(const TwoSwitchForwardDesign& d) {
     st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;
     st["waveform"]["dutyCycle"] = d.dutyCycle;
     tas["simulation"]["stimulus"] = json::array({st});
+    // Precharge the output rail(s) to their design voltage. From 0 V the deck spent its whole simulated
+    // window in start-up (output capacitors charging through the inductors), and the extracted operating
+    // point carried several times the design currents; the extractor now also verifies steady state.
+    { json ics = json::array();
+      for (size_t i = 0; i < nOut; ++i) {
+          json ic; ic["node"] = (i == 0) ? std::string("Vout") : "Vout" + std::to_string(i + 1);
+          ic["voltage"] = d.outputs[i].polarity * d.outputs[i].voltage;
+          ics.push_back(ic); }
+      tas["simulation"]["initialConditions"] = ics; }
     req::finalize_control_seeds(tas, Topology::TWO_SWITCH_FORWARD_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }

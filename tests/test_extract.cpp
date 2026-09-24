@@ -15,6 +15,7 @@
 #include "Kirchhoff.hpp"
 #include "KirchhoffApi.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <functional>
@@ -362,4 +363,45 @@ TEST_CASE("the deck's transient never stops inside a gate edge", "[extract][tran
     const auto p2 = deck2.find("\n.tran ");
     REQUIRE(std::sscanf(deck2.c_str() + p2 + 7, "%lf %lf", &tstep, &tstop) == 2);
     CHECK(tstop == Catch::Approx(52.5 / fsw).epsilon(1e-9));
+}
+
+
+TEST_CASE("initial conditions reach a net inside a stage's subcircuit", "[extract][initial-conditions]") {
+    // The single-secondary isolated buck's isolated rail is internal to the flybuck cell; its precharge
+    // is declared as "<stage>.<net>" and must land on X<stage>.<net> in the deck.
+    const std::string tas = Kirchhoff::api::design_tas("isolated_buck",
+        R"KH({"designRequirements":{"inputType":"dc","inputVoltage":{"minimum":36,"maximum":72},"switchingFrequency":{"nominal":750000},"outputs":[{"name":"out","voltage":{"nominal":10},"regulation":"voltage"},{"name":"out2","voltage":{"nominal":10},"regulation":"voltage"}],"efficiency":0.9},"operatingPoints":[{"name":"full_load","inputVoltage":54,"ambientTemperature":25,"outputs":[{"name":"out","power":0.2},{"name":"out2","power":1}]}],"config":{"rippleRatio":0.4,"tranStopTime":0.00006933333333333333}})KH");
+    const std::string deck = Kirchhoff::api::generate_ngspice_circuit(tas, R"({"origin":"REQUIREMENTS"})");
+    INFO(deck.substr(deck.find(".ic"), 200));
+    CHECK(deck.find(".ic v(XflybuckCell.vout_sec)=10") != std::string::npos);
+    CHECK(deck.find(".ic v(Vout)=10") != std::string::npos);
+}
+
+
+TEST_CASE("extract(NGSPICE): an AC-input operating point is read at the line peak, not the zero crossing",
+          "[extract][ac-input]") {
+    if (!Kirchhoff::ngspice_in_process_available()) {
+        WARN("libngspice not linked — AC-input extract skipped");
+        return;
+    }
+    // The web Vienna wizard's spec, forced to stop after exactly two 50 Hz cycles: phase A's zero crossing.
+    // Reading the last switching period there returned a phase-A current of microamps against ~23 A
+    // analytical (both are the peak-of-line operating point).
+    const std::string spec = R"KH({"designRequirements":{"inputType":"acThreePhase","inputVoltage":{"minimum":207.84609690826528,"nominal":230.94010767585033,"maximum":254.03411844343535},"switchingFrequency":{"nominal":20000},"outputs":[{"name":"out","voltage":{"nominal":800},"regulation":"voltage"}],"efficiency":0.97,"lineFrequency":{"nominal":50}},"operatingPoints":[{"name":"full_load","inputVoltage":230.94010767585033,"ambientTemperature":40,"outputs":[{"name":"out","power":10000}]}],"config":{"rippleRatio":0.25,"samplingStrategy":"peakOfLineOnly","phaseCount":1,"tranStopTime":0.04}})KH";
+    const std::string ana = Kirchhoff::api::process_converter("vienna", spec, "analytical");
+    const std::string sim = Kirchhoff::api::process_converter("vienna", spec, "ngspice");
+    INFO(sim.substr(0, 300));
+    REQUIRE(ana.rfind("Exception:", 0) != 0);
+    REQUIRE(sim.rfind("Exception:", 0) != 0);
+    auto peak_of = [](const std::string& out) {
+        const json j = json::parse(out);
+        const json& op = j.contains("operatingPoint") ? j.at("operatingPoint") : j.at("inputs").at("operatingPoints").at(0);
+        double m = 0.0;
+        for (double v : op.at("excitationsPerWinding").at(0).at("current").at("waveform").at("data").get<std::vector<double>>())
+            m = std::max(m, std::abs(v));
+        return m;
+    };
+    const double analytical = peak_of(ana), simulated = peak_of(sim);
+    INFO("analytical peak=" << analytical << " simulated peak=" << simulated);
+    CHECK(simulated == Catch::Approx(analytical).epsilon(0.25));
 }
