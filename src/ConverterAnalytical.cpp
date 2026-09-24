@@ -824,20 +824,23 @@ MAS::OperatingPoint analytical_push_pull(double inputVoltage,
 
     MAS::OperatingPoint operatingPoint;
     // The per-winding shapes below are written in each winding's OWN "positive while conducting" reference.
-    // MAS convention: Primary Half 1 and Secondary Half 2 conduct while the flux rises (first half period)
-    // and are already in the dot reference; Primary Half 2 and Secondary Half 1 conduct while it falls, so
-    // they are emitted with BOTH voltage and current negated (toDotReference). Then every winding voltage
-    // is in phase, the primary halves are PASSIVE and the secondary halves SOURCE, and
+    // MAS convention: Primary Half 1 and Secondary Half 2 conduct in the first half period, Primary Half 2 and
+    // Secondary Half 1 in the second, so the latter pair is brought to the former's dot reference by negating
+    // BOTH voltage and current (toDotReference). The dots are the TAS "start" pins build_push_pull_tas wires:
+    // Primary Half 1 starts at Q1's drain, so while Q1 conducts its dot-reference voltage is −Vin — every
+    // winding is therefore emitted with the opposite sign of the first-half-positive shapes (all together,
+    // which keeps the ampere-turn identity): the first pair negated, the second pair as written. Then every
+    // winding voltage is in phase, the primary halves are PASSIVE and the secondary halves SOURCE, and
     // i_m = i_P1 + i_P2 - (i_S1 + i_S2)/N is the continuous ±m/2 magnetizing triangle.
     auto pushCustom = [&](const std::vector<double>& iData, const std::vector<double>& iTime,
                           const std::vector<double>& vData, const std::vector<double>& vTime,
                           const std::string& name, bool toDotReference) {
         MAS::Waveform currentWaveform, voltageWaveform;
         currentWaveform.set_ancillary_label(Lbl::CUSTOM);
-        currentWaveform.set_data(toDotReference ? negated(iData) : iData);
+        currentWaveform.set_data(toDotReference ? iData : negated(iData));
         currentWaveform.set_time(iTime);
         voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
-        voltageWaveform.set_data(toDotReference ? negated(vData) : vData);
+        voltageWaveform.set_data(toDotReference ? vData : negated(vData));
         voltageWaveform.set_time(vTime);
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, name));
@@ -932,21 +935,11 @@ MAS::OperatingPoint analytical_push_pull(double inputVoltage,
 }
 
 // Weinberg helpers (ported from MKF Weinberg.cpp:19-112).
-static int weinberg_detect_operating_regime(double dutyCycle) {
-    constexpr double eps = 1e-6;
-    if (dutyCycle < 0.5 - eps) return 0;   // buck-like
-    if (dutyCycle > 0.5 + eps) return 2;   // boost-like
-    return 1;                              // boundary
-}
 static double weinberg_conversion_ratio_boost(double dutyCycle, double turnsRatio) {
     if (turnsRatio <= 0.0) throw std::invalid_argument("analytical_weinberg: turnsRatio must be > 0");
     double oneMinusD = 1.0 - dutyCycle;
     if (oneMinusD <= 1e-6) throw std::invalid_argument("analytical_weinberg: D too close to 1 — singular gain");
     return 1.0 / (2.0 * turnsRatio * oneMinusD);
-}
-static double weinberg_conversion_ratio_buck(double dutyCycle, double turnsRatio) {
-    if (turnsRatio <= 0.0) throw std::invalid_argument("analytical_weinberg: turnsRatio must be > 0");
-    return 2.0 * dutyCycle / turnsRatio;
 }
 static double weinberg_duty_cycle(double inputVoltage, double outputVoltage, double turnsRatio,
                                   double diodeVoltageDrop, double efficiency, double maximumDutyCycle) {
@@ -974,93 +967,75 @@ MAS::OperatingPoint analytical_weinberg(double inputVoltage, double outputVoltag
                                         double diodeVoltageDrop, double efficiency,
                                         bool bridgeVariant, double maximumDutyCycle) {
     using Lbl = MAS::WaveformLabel;
-    double dutyCycle = weinberg_duty_cycle(inputVoltage, outputVoltage, turnsRatio, diodeVoltageDrop, efficiency, maximumDutyCycle);
-    int regime = weinberg_detect_operating_regime(dutyCycle);
-    double overlap = std::max(0.0, 2.0 * dutyCycle - 1.0);
-    double M = (regime == 2) ? weinberg_conversion_ratio_boost(dutyCycle, turnsRatio)
-                             : weinberg_conversion_ratio_buck(dutyCycle, turnsRatio);
-
-    // Input current from power balance: Vin·Iin = Vout·Iout/η, and M = Vout/Vin (conversion ratio), so
-    // Iin = Iout·M/η. (The earlier Iout/(η·M) was inverted — ~M² too small; confirmed vs the ngspice deck,
-    // which draws Iin = Pin/Vin ≈ Iout·M and splits it Iin/2 per L1 / push-pull-primary winding.)
-    double inputCurrent = (M > 0) ? outputCurrent * M / efficiency : 0.0;
-    double inductanceL1 = inductance;
-    double deltaIL1 = inductanceL1 > 0 ? (inputVoltage * std::max(overlap, dutyCycle)) / (inductanceL1 * switchingFrequency) : 0.0;
-
-    const double period = 1.0 / switchingFrequency;
+    if (!(inductance > 0)) throw std::invalid_argument("analytical_weinberg: input inductance L1 must be > 0");
+    if (!(switchingFrequency > 0)) throw std::invalid_argument("analytical_weinberg: switching frequency must be > 0");
+    const double D = weinberg_duty_cycle(inputVoltage, outputVoltage, turnsRatio, diodeVoltageDrop, efficiency,
+                                         maximumDutyCycle);
+    // The classic Weinberg carries TWO magnetics fed only through the switches: the 1:1 input coupled
+    // inductor L1 (one half in series with each T1 primary half) and the push-pull transformer T1. With both
+    // switches OFF the L1 current has no path, so the buck-like regime (D < 0.5, no overlap) needs an extra
+    // L1 freewheel winding + diode that this model (and the Kirchhoff deck) does not have. Refuse it rather
+    // than emit waveforms that violate the ampere-turn balance.
+    if (D < 0.5 - 1e-9)
+        throw std::invalid_argument("analytical_weinberg: the operating point needs D = " + std::to_string(D) +
+                                    " < 0.5 (buck regime, M = 2D/n); the classic Weinberg (L1 "
+                                    "fed only through the switches) is modelled in the boost regime D >= 0.5 only — "
+                                    "lower the turns ratio n so M = 1/(2·n·(1−D)) lands D above 0.5");
+    // Boost regime, M = (Vo+Vd)/(Vin·η) = 1/(2·n·(1−D)). The secondaries deliver n·Iin during 2·(1−D)·T, so
+    // ampere-turn balance fixes Iin = Iout/(2n(1−D)) = Iout·M — which is also the power balance
+    // Vin·Iin = (Vo+Vd)·Iout/η, since M already carries η (the former Iout·M/η counted η twice).
+    const double M = weinberg_conversion_ratio_boost(D, turnsRatio);
+    const double Iin = outputCurrent * M;
     const double n = turnsRatio;
-    const double D = dutyCycle;
-    const double Iin = inputCurrent;
-    const double halfDeltaIL1 = 0.5 * deltaIL1;
+    const double period = 1.0 / switchingFrequency, half = period / 2.0;
+    const double tOv = (2.0 * D - 1.0) * half;      // each overlap (both switches on), twice per period
+    const double tS = half - tOv;                    // each single conduction, = (1−D)·T
+    if (!(tS > 0)) throw std::invalid_argument("analytical_weinberg: D = 1 leaves no single-conduction interval");
+    // L1 (flux of the 1:1 coupled pair, referred to one winding): +Vin during each overlap, −vReset during each
+    // single conduction (volt-second balanced: vReset = Vin·tOv/tS = n(Vo+Vd) − Vin at η = 1). Its total
+    // current iL = i_L1a + i_L1b is the triangle Iin ± ΔI/2 at 2·fsw, ΔI = Vin·tOv/L1.
+    const double vReset = inputVoltage * tOv / tS;
+    const double dI = inputVoltage * tOv / inductance;
+    const double iMin = Iin - dI / 2.0, iMax = Iin + dI / 2.0;
+    // T1 is clamped by the conducting rectifier: ±(Vo+Vd) on the secondary, ±n(Vo+Vd) on each primary half
+    // while ONE switch conducts, 0 during the overlaps (the two primary MMFs cancel).
+    const double vSecLevel = outputVoltage + diodeVoltageDrop;
+    const double vPriLevel = n * vSecLevel;
 
-    // Weinberg carries TWO magnetics; this solver emits all SIX windings in a fixed order so the build can
-    // slice them: [0,1] = input coupled inductor L1 (two 1:1 halves), [2,3] = T1 push-pull primary halves,
-    // [4,5] = T1 push-pull secondary halves. Per-winding currents match the current-fed push-pull ngspice
-    // deck: each primary/L1 half is a trapezoidal PULSE (peak Iin) over its switch-on window D·T; each
-    // secondary half conducts ONLY during single-conduction (1−D)·T — during the overlap both primaries
-    // drive and the center-tapped secondary voltage cancels, so no secondary current. The two halves (a/b)
-    // are phase-shifted by T/2. L1's windings share sense (both +Iin/2); the T1 push-pull halves are
-    // opposite-wound, so their DC offsets take OPPOSITE sign → net transformer DC-MMF ~0 (as measured).
-    const double tOv  = std::max(0.0, 2.0 * D - 1.0) * period / 2.0;   // overlap duration
-    const double tOnP = std::min(D, 1.0) * period;                     // primary switch-on window
-    const double tSec = std::max(0.0, 1.0 - D) * period;               // secondary single-conduction window
-    auto priPulse = [&](double t) -> double {
-        if (t < 0.0 || t > tOnP || tOnP <= 0.0) return 0.0;
-        const double lvl = Iin + halfDeltaIL1 * (2.0 * t / tOnP - 1.0);  // small ripple across the pulse
-        if (tOv > 0.0 && t < tOv)        return lvl * (t / tOv);         // leading-overlap ramp
-        if (tOv > 0.0 && t > tOnP - tOv) return lvl * ((tOnP - t) / tOv);
-        return lvl;
-    };
-    auto secPulse = [&](double t) -> double {
-        const double ts = t - tOv;
-        if (ts < 0.0 || ts > tSec || tSec <= 0.0) return 0.0;
-        const double lvl = Iin * n;
-        const double edge = 0.10 * tSec;                                // short ramps (trapezoid, not boxcar)
-        if (edge > 0.0 && ts < edge)        return lvl * (ts / edge);
-        if (edge > 0.0 && ts > tSec - edge) return lvl * ((tSec - ts) / edge);
-        return lvl;
-    };
-    const int N = 256;
-    const double dt = period / N;
-    auto wrap = [&](double t){ t = std::fmod(t, period); return t < 0 ? t + period : t; };
-    std::vector<double> iTime(N + 1), iPriA(N + 1), iPriB(N + 1), iSecA(N + 1), iSecB(N + 1);
-    for (int k = 0; k <= N; ++k) {
-        const double t = k * dt;
-        iTime[k] = t;
-        iPriA[k] = priPulse(t);
-        iPriB[k] = priPulse(wrap(t + 0.5 * period));   // L1 half b: same sense, phase-shifted T/2
-        iSecA[k] = secPulse(t);
-        iSecB[k] = secPulse(wrap(t + 0.5 * period));
-    }
-    std::vector<double> iPriBneg(N + 1), iSecBneg(N + 1);   // opposite-wound T1 halves
-    for (int k = 0; k <= N; ++k) { iPriBneg[k] = -iPriB[k]; iSecBneg[k] = -iSecB[k]; }
+    // Exact piecewise-linear shapes on the switching events 0, tOv, T/2, T/2+tOv, T:
+    //   overlap         : each primary / L1 half carries iL/2 (equal and opposite T1 MMFs), secondaries 0;
+    //   single A (B off): primary a and L1a carry the whole iL (L1's MMF is conserved at B's turn-off),
+    //                     secondary a carries n·iL — the T1 ampere-turns balance at every instant;
+    //   single B        : the mirror on the b halves.
+    const std::vector<double> t{0.0, tOv, tOv, half, half, half + tOv, half + tOv, period};
+    const std::vector<double> iA{iMin / 2, iMax / 2, iMax, iMin, iMin / 2, iMax / 2, 0.0, 0.0};
+    const std::vector<double> iB{iMin / 2, iMax / 2, 0.0, 0.0, iMin / 2, iMax / 2, iMax, iMin};
+    const std::vector<double> sA{0.0, 0.0, n * iMax, n * iMin, 0.0, 0.0, 0.0, 0.0};
+    const std::vector<double> sB{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, n * iMax, n * iMin};
+    const std::vector<double> vL1{inputVoltage, inputVoltage, -vReset, -vReset, inputVoltage, inputVoltage, -vReset, -vReset};
+    const std::vector<double> vPri{0.0, 0.0, vPriLevel, vPriLevel, 0.0, 0.0, -vPriLevel, -vPriLevel};
+    const std::vector<double> vSec{0.0, 0.0, vSecLevel, vSecLevel, 0.0, 0.0, -vSecLevel, -vSecLevel};
+    auto wf = [&](const std::vector<double>& d) {
+        MAS::Waveform w; w.set_ancillary_label(Lbl::CUSTOM); w.set_data(d); w.set_time(t); return w; };
 
-    // L1 input inductor voltage: charges at +Vin for the effective fraction dEff, resets at −vL1Reset
-    // (volt-second balanced). dEff = max(2D−1, D) (the boost-overlap charge fraction).
-    const double dEff = std::max(2.0 * dutyCycle - 1.0, dutyCycle);
-    const double vL1Reset = (dEff < 1.0) ? inputVoltage * dEff / (1.0 - dEff) : inputVoltage;
-    auto customCurrent = [&](const std::vector<double>& data) {
-        MAS::Waveform w; w.set_ancillary_label(Lbl::CUSTOM); w.set_data(data); w.set_time(iTime); return w; };
-
+    // Emitted in the MAS convention. L1: both windings primary-side, same sense, PASSIVE, i_m(L1) = iL. T1: the
+    // b halves are wound opposite to the a halves, so in the common dot reference their voltage equals the a
+    // half's and their conducting current is NEGATIVE (primary b passive, secondary b source). The dots are the
+    // TAS "start" pins build_weinberg_tas wires: primary a starts at Q1's drain, so while Q1 conducts
+    // (single A) the dot-reference primary voltage is −n(Vo+Vd) and its current negative — the T1 shapes above
+    // are therefore emitted NEGATED (all windings together, which keeps the ampere-turn identity), matching
+    // the simulated V(start)−V(end) and branch currents of the deck.
     MAS::OperatingPoint operatingPoint;
     auto& exc = operatingPoint.get_mutable_excitations_per_winding();
-    // [0,1] L1 coupled inductor (two halves, same sense): pulse current, voltage +Vin (dEff) / −vL1Reset.
-    MAS::Waveform vL1 = WP::create_waveform(Lbl::RECTANGULAR, inputVoltage + vL1Reset, switchingFrequency, dEff, 0.0, 0);
-    exc.push_back(WP::complete_excitation(customCurrent(iPriA), vL1, switchingFrequency, "L1 primary a"));
-    exc.push_back(WP::complete_excitation(customCurrent(iPriB), vL1, switchingFrequency, "L1 primary b"));
-    // [2,3] T1 push-pull primary halves (opposite-wound → opposite DC sign), voltage ±n·Vout
-    // (n = Np/Ns; the secondary is diode-clamped to ±Vout, so the primary reflects to n·Vout).
-    // The bridge variant (ABT #88) drives the same two halves in SERIES from a 4-switch H-bridge; the
-    // per-half reflected voltage and current are unchanged (only the switch that carries them differs),
-    // so the excitations are shared and only the description records the drive.
+    exc.push_back(WP::complete_excitation(wf(iA), wf(vL1), switchingFrequency, "L1 primary a"));
+    exc.push_back(WP::complete_excitation(wf(iB), wf(vL1), switchingFrequency, "L1 primary b"));
+    // The bridge variant (ABT #88) drives the same two halves in SERIES from a 4-switch H-bridge; the per-half
+    // voltage and current are unchanged (only the switch that carries them differs).
     const char* priDrive = bridgeVariant ? "bridge" : "push-pull";
-    MAS::Waveform vPri = WP::create_waveform(Lbl::BIPOLAR_RECTANGULAR, 2.0 * outputVoltage * turnsRatio, switchingFrequency, 0.5, 0.0, 0);
-    exc.push_back(WP::complete_excitation(customCurrent(iPriA),    vPri, switchingFrequency, std::string("T1 ") + priDrive + " primary a"));
-    exc.push_back(WP::complete_excitation(customCurrent(iPriBneg), vPri, switchingFrequency, std::string("T1 ") + priDrive + " primary b"));
-    // [4,5] T1 push-pull secondary halves (opposite-wound), voltage ±Vout.
-    MAS::Waveform vSec = WP::create_waveform(Lbl::BIPOLAR_RECTANGULAR, 2.0 * outputVoltage, switchingFrequency, 0.5, 0.0, 0);
-    exc.push_back(WP::complete_excitation(customCurrent(iSecA),    vSec, switchingFrequency, "T1 secondary a"));
-    exc.push_back(WP::complete_excitation(customCurrent(iSecBneg), vSec, switchingFrequency, "T1 secondary b"));
+    exc.push_back(WP::complete_excitation(wf(negated(iA)), wf(negated(vPri)), switchingFrequency, std::string("T1 ") + priDrive + " primary a"));
+    exc.push_back(WP::complete_excitation(wf(iB), wf(negated(vPri)), switchingFrequency, std::string("T1 ") + priDrive + " primary b"));
+    exc.push_back(WP::complete_excitation(wf(negated(sA)), wf(negated(vSec)), switchingFrequency, "T1 secondary a"));
+    exc.push_back(WP::complete_excitation(wf(sB), wf(negated(vSec)), switchingFrequency, "T1 secondary b"));
     return operatingPoint;
 }
 
@@ -1952,6 +1927,12 @@ MAS::OperatingPoint analytical_asymmetric_half_bridge(double inputVoltage,
             emit(t, Vpri_neg, (Im0 + dILm_pp) - frac * dILm_pp, ILo1_max - frac * dILo1_pp);
         }
     }
+
+    // Orientation: the dots are the TAS "start" pins build_ahb_tas wires — the primary starts at the DC-blocking
+    // capacitor Cb and ends at the switch node, so during interval A (switch node at Vin) the dot-reference
+    // primary voltage is −(1−D)·Vin. The shapes above are written interval-A-positive, so every winding is
+    // emitted NEGATED (all together, which keeps the ampere-turn identity; iLm with them).
+    for (auto* v : {&vPri, &iPri, &iLm, &vSec_a, &iSec_a, &vSec_b, &iSec_b}) *v = negated(*v);
 
     auto wfm = [](const std::vector<double>& d, const std::vector<double>& t) {
         MAS::Waveform w;

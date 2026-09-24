@@ -28,7 +28,9 @@
 #include "Clllc.hpp"
 #include "ConverterExtract.hpp"
 #include "Flyback.hpp"
+#include "Weinberg.hpp"
 #include "NgspiceRunner.hpp"
+#include "KirchhoffApi.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -491,7 +493,11 @@ TEST_CASE("convention: current transformer (ideal transformer)", "[convention]")
 TEST_CASE("convention: Weinberg transformer T1", "[convention]") {
     // analytical_weinberg emits [L1 a, L1 b, T1 primary a, T1 primary b, T1 secondary a, T1 secondary b]; T1
     // (windings 2..5) is the multi-winding transformer. Its model has no magnetizing inductance (ideal T1).
-    const double n = 2.0;
+    // D = 0.75 (M = Vo/Vin = 1/(2n(1−D)) -> n = 2·Vin/Vo): every switching edge (T/4, T/2, 3T/4)
+    // then falls on the 128-point uniform grid complete_excitation stores the waveform on, so the check measures
+    // the model rather than where the resampling puts an off-grid step (an edge between samples shifts a
+    // winding average by up to one sample, ~5 % on an 18-sample conduction window).
+    const double n = 2.0 * 28.0 / 50.0;
     const MAS::OperatingPoint all = AN::analytical_weinberg(28.0, 50.0, 2.0, 100e3, 100e-6, n, 0.0, 1.0);
     const auto& exc = all.get_excitations_per_winding();
     REQUIRE(exc.size() == 6);
@@ -503,6 +509,15 @@ TEST_CASE("convention: Weinberg transformer T1", "[convention]") {
                   {1.0 / n, false, 0, Metric::MEAN}, {1.0 / n, false, 0, Metric::MEAN}};
     c.outputs = {{50.0, 2.0}};
     check(c);
+
+    // L1: the 1:1 input coupled inductor (both windings primary-side, same sense) — Faraday with L1.
+    CaseSpec l1;
+    l1.name = "weinberg L1";
+    l1.frequency = 200e3;   // L1 is excited at 2·fsw (two overlaps per period); evaluate its fundamental there
+    l1.magnetizingInductance = 100e-6;
+    l1.op.get_mutable_excitations_per_winding().assign(exc.begin(), exc.begin() + 2);
+    l1.windings = {{1.0, true, -1, Metric::MEAN}, {1.0, true, -1, Metric::MEAN}};
+    check(l1);
 }
 
 // Reverse power flow (the Vout side drives): the builder swaps the solver's driver/receiver windings back onto
@@ -596,4 +611,89 @@ TEST_CASE("convention: simulated flyback operating point", "[convention][ngspice
     CHECK(phaseDev <= 15.0);
     CHECK(mean(ip) > 0.0);                                             // passive primary: input current in
     CHECK(secondaryAverage == Catch::Approx(-2.5).epsilon(0.10));      // source secondary: -Iout
+}
+
+// Orientation against the ngspice deck: the analytical excitations the TAS embeds must use the SAME dots as the
+// deck (the TAS "start" pins), or a consumer of the magnetic sees inverted windings. For every multi-winding
+// magnetic of every transformer topology, each winding's analytical voltage and current must correlate
+// POSITIVELY with the simulated V(start) − V(end) and (convention-signed) branch current over one period.
+// Correlation, not equality: the FHA / ideal-commutation shapes differ in detail from the deck. The simulated
+// waveform is clipped to 1.5x the analytical peak first, so the deck's commutation/snubber spikes (tens of amps
+// for a few ns on a 0.8 A push-pull primary) cannot dominate the correlation either way.
+namespace {
+double correlation(const std::vector<double>& a, std::vector<double> b) {
+    double peak = 0;
+    for (double x : a) peak = std::max(peak, std::abs(x));
+    for (auto& x : b) x = std::clamp(x, -1.5 * peak, 1.5 * peak);
+    const double ma = mean(a), mb = mean(b);
+    double sab = 0, saa = 0, sbb = 0;
+    for (size_t j = 0; j < a.size(); ++j) {
+        sab += (a[j] - ma) * (b[j] - mb); saa += (a[j] - ma) * (a[j] - ma); sbb += (b[j] - mb) * (b[j] - mb);
+    }
+    if (saa <= 0 || sbb <= 0) return std::numeric_limits<double>::quiet_NaN();
+    return sab / std::sqrt(saa * sbb);
+}
+nlohmann::json orientation_spec(double vin, double vout, double pout, double fs, bool secondRail) {
+    nlohmann::json d;
+    d["designRequirements"]["efficiency"] = 1.0;
+    d["designRequirements"]["inputVoltage"] = {{"nominal", vin}, {"minimum", vin * 0.95}, {"maximum", vin * 1.05}};
+    d["designRequirements"]["switchingFrequency"]["nominal"] = fs;
+    nlohmann::json o; o["name"] = "out"; o["voltage"]["nominal"] = vout;
+    d["designRequirements"]["outputs"] = nlohmann::json::array({o});
+    nlohmann::json op; op["inputVoltage"] = vin; nlohmann::json oo; oo["power"] = pout;
+    op["outputs"] = nlohmann::json::array({oo});
+    if (secondRail) {   // flybuck / fly-buck-boost: the isolated rail mirrors the primary rail
+        nlohmann::json o2; o2["name"] = "vsec"; o2["voltage"]["nominal"] = vout;
+        d["designRequirements"]["outputs"].push_back(o2);
+        op["outputs"].push_back(oo);
+    }
+    d["operatingPoints"] = nlohmann::json::array({op});
+    d["simStimulusFsw"] = nlohmann::json::array({fs});
+    return d;
+}
+}  // namespace
+
+TEST_CASE("convention: analytical winding orientation matches the ngspice deck", "[convention][ngspice][orientation]") {
+    if (!Kirchhoff::ngspice_in_process_available()) {
+        FAIL("libngspice is not linked into this build; the orientation cross-check cannot run");
+    }
+    struct Point { const char* topo; double vin, vout, pout, fs; bool secondRail; };
+    const std::vector<Point> points = {
+        {"flyback", 48.0, 12.0, 30.0, 100e3, false},         {"forward", 48.0, 5.0, 50.0, 200e3, false},
+        {"two_switch_forward", 48.0, 12.0, 96.0, 250e3, false}, {"push_pull", 12.0, 5.0, 5.0, 200e3, false},
+        {"acf", 48.0, 12.0, 192.0, 250e3, false},             {"ahb", 100.0, 12.0, 192.0, 100e3, false},
+        {"psfb", 400.0, 24.0, 1200.0, 100e3, false},          {"pshb", 400.0, 24.0, 1200.0, 100e3, false},
+        {"dab", 400.0, 48.0, 1920.0, 80e3, false},            {"llc", 400.0, 24.0, 240.0, 100e3, false},
+        {"src", 400.0, 48.0, 480.0, 110e3, false},            {"cllc", 400.0, 48.0, 480.0, 200e3, false},
+        {"clllc", 400.0, 48.0, 480.0, 200e3, false},          {"isolated_buck", 48.0, 5.0, 2.5, 200e3, true},
+        {"isolated_buck_boost", 24.0, 12.0, 12.0, 100e3, true}, {"weinberg", 50.0, 150.0, 1500.0, 50e3, false},
+    };
+    for (const auto& p : points) {
+        const std::string out = Kirchhoff::api::design_tas(p.topo, orientation_spec(p.vin, p.vout, p.pout, p.fs,
+                                                                                     p.secondRail).dump());
+        INFO(p.topo << ": " << out.substr(0, 300));
+        REQUIRE(out.rfind("Exception", 0) != 0);
+        const nlohmann::json tas = nlohmann::json::parse(out);
+        for (const auto& mag : Kirchhoff::topology_waveforms(tas)) {
+            const MAS::OperatingPoint a = Kirchhoff::extract_operating_point(tas, Kirchhoff::ExtractEngine::ANALYTICAL, mag.name);
+            if (a.get_excitations_per_winding().size() < 2) continue;
+            const MAS::OperatingPoint s = Kirchhoff::extract_operating_point(tas, Kirchhoff::ExtractEngine::NGSPICE, mag.name);
+            REQUIRE(a.get_excitations_per_winding().size() == s.get_excitations_per_winding().size());
+            for (size_t w = 0; w < a.get_excitations_per_winding().size(); ++w) {
+                const auto& ea = a.get_excitations_per_winding()[w];
+                const auto& es = s.get_excitations_per_winding()[w];
+                const double T = 1.0 / ea.get_frequency();
+                const double cv = correlation(sample(*ea.get_voltage()->get_waveform(), T), sample(*es.get_voltage()->get_waveform(), T));
+                const double ci = correlation(sample(*ea.get_current()->get_waveform(), T), sample(*es.get_current()->get_waveform(), T));
+                std::printf("[orientation] %-20s %-4s w%zu  corr(v) %6.3f  corr(i) %6.3f\n", p.topo, mag.name.c_str(), w, cv, ci);
+                if (const char* dump = std::getenv("KH_ORIENT_DUMP"); dump && std::string(p.topo) == dump) {
+                    const auto ia = sample(*ea.get_current()->get_waveform(), T), is = sample(*es.get_current()->get_waveform(), T);
+                    for (int j = 0; j < kSamples; j += kSamples / 32) std::printf("   j=%5d i a/s %8.3f %8.3f\n", j, ia[j], is[j]);
+                }
+                INFO(p.topo << " " << mag.name << " winding " << w << ": corr(v) = " << cv << ", corr(i) = " << ci);
+                CHECK(cv > 0.3);
+                CHECK(ci > 0.3);
+            }
+        }
+    }
 }

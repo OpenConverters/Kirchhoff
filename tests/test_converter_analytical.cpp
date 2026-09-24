@@ -215,10 +215,15 @@ TEST_CASE("analytical_weinberg boost regime: 6 windings, input-current magnitude
     const double M = vout / vin;                              // 3
     const double D = 1.0 - 1.0 / (2.0 * n * M);               // 0.8333
     const double inputCurrent = iout * M;                     // 6  (Iin = Iout*M, power balance)
-    // All four primary-side windings are half-period PULSES of peak ~Iin, avg magnitude Iin/2.
+    // All four primary-side windings carry iL/2 during the overlaps and the whole iL during their own single
+    // conduction: avg magnitude Iin/2, peak = Iin + ΔI/2 with the L1 ripple ΔI = Vin·tOv/L1 (tOv = (2D−1)·T/2)
+    // — 6.8 A here. (Before 2026-09-24 the pulses ramped from 0 across each overlap and this pinned a peak of
+    // ~Iin; that shape broke the T1 ampere-turn balance, see test_winding_convention [convention].)
+    const double tOv = (2.0 * D - 1.0) / (2.0 * fsw);
+    const double peak = inputCurrent + vin * tOv / L1 / 2.0;
     for (size_t w = 0; w < 4; ++w) {
         CHECK(std::abs(*processed_current(op, w).get_average()) == Catch::Approx(inputCurrent / 2.0).margin(0.6));
-        CHECK(*processed_current(op, w).get_peak() == Catch::Approx(inputCurrent).margin(0.6));
+        CHECK(*processed_current(op, w).get_peak() == Catch::Approx(peak).margin(0.1));
     }
     // L1's two windings share sense (both +Iin/2); the T1 push-pull halves are opposite-wound, so their
     // DC offsets take OPPOSITE sign — net transformer DC-MMF ~0 (both primary halves AND both secondary
@@ -573,7 +578,9 @@ TEST_CASE("analytical_asymmetric_half_bridge FULL_BRIDGE: one DC-biased secondar
                                                               SrcRectifier::FULL_BRIDGE);
     REQUIRE(op.get_excitations_per_winding().size() == 2);            // Primary + one Secondary
     CHECK(*processed_current(op, 0).get_average() == Catch::Approx(0.0).margin(0.3));   // primary zero-mean
-    CHECK(*processed_current(op, 1).get_average() == Catch::Approx(-1.0).margin(0.4));  // Io*(2D-1) DC bias
+    // |Io*(2D-1)| DC bias; +1.0 A since 2026-09-24: the winding is emitted in the TAS pin (dot) orientation,
+    // which the [convention][orientation] cross-check confirms against the deck (the sign was inverted before).
+    CHECK(*processed_current(op, 1).get_average() == Catch::Approx(1.0).margin(0.4));
     CHECK(*processed_current(op, 1).get_rms() > 4.0);                 // full-period conduction ~ Io
     CHECK(*processed_current(op, 1).get_rms() < 6.0);
 }
