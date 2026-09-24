@@ -535,9 +535,10 @@ MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vecto
     // came back with the opposite sign — flipping DC offsets, so MKF saw a DC magnetizing current that is
     // not there and rejected every core at saturation. Express each simulated signal in the analytical
     // convention: the sign of its correlation with the analytical waveform over the same cycle. A signal
-    // too uncorrelated to tell is an error. (The analytical models do not share one convention — the
-    // flybuck's secondary VOLTAGE is reversed against the deck, the AHB's secondary CURRENT is — so no
-    // reference-free rule could replace the correlation.)
+    // too uncorrelated to tell is an error. The analytical models emit the MAS excitation convention
+    // (voltages in the dot reference, primary-side currents passive, others source; guarded by
+    // [convention]), so the oriented simulation is in that convention too, whichever way round a builder
+    // wired a winding.
     const std::vector<MAS::OperatingPointExcitation> analyticalExcs = excs;
     auto oriented = [&](const MAS::Waveform& sim, const std::optional<MAS::SignalDescriptor>& ref,
                         size_t w, const char* what) -> MAS::Waveform {

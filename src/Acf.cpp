@@ -152,9 +152,9 @@ json build_acf_tas(const AcfDesign& d) {
     // the magnetizing reset current (clamp-switch rating) also stays inline. Worst-case corner (Vin_min)
     // drives the main-switch rating; the declared nominal OP is what the TAS embeds.
     const MAS::OperatingPoint aopWorst = AN::analytical_active_clamp_forward(d.inputVoltageMin, Vouts, iouts,
-                                            turnsRatios, fsw, Lm, d.outputs[0].outputInductance, ripple, Dn, d.outputs[0].diodeDrop);
+                                            turnsRatios, fsw, Lm, d.outputs[0].outputInductance, ripple, d.outputs[0].diodeDrop);
     const MAS::OperatingPoint aopNom   = AN::analytical_active_clamp_forward(Vin, Vouts, iouts,
-                                            turnsRatios, fsw, Lm, d.outputs[0].outputInductance, ripple, Dn, d.outputs[0].diodeDrop);
+                                            turnsRatios, fsw, Lm, d.outputs[0].outputInductance, ripple, d.outputs[0].diodeDrop);
     const double IpkPri  = AN::winding_current(aopWorst, 0, "peak");   // primary peak (main-switch rating)
     const double IrmsPri = AN::winding_current(aopWorst, 0, "rms");    // primary rms (main-switch RdsOn conduction)
     const double ImagPk  = Vin * Dn * T / Lm;                          // magnetizing reset peak (clamp-switch rating)

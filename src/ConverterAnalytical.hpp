@@ -55,6 +55,12 @@ void clear_captured_operating_points();
 void restamp_captured_ambient(double ambientTemperature);
 const std::vector<std::pair<std::string, nlohmann::json>>& captured_operating_points();
 
+// The same excitation with its current negated (waveform, harmonics and processed data recomputed). Used where
+// a solver's winding roles are swapped onto the physical windings (reverse power flow) and the MAS current
+// convention — primary-side windings PASSIVE, all others SOURCE — therefore flips. Throws when the excitation
+// has no current or voltage waveform.
+MAS::OperatingPointExcitation with_negated_current(const MAS::OperatingPointExcitation& excitation);
+
 // Read a processed current/voltage stress of winding `w` from an operating point (for component ratings).
 // `field` ∈ {peak,rms,offset,peakToPeak,dutyCycle}. Throws if the field is absent (no silent 0).
 double winding_current(const MAS::OperatingPoint& op, std::size_t w, const std::string& field);
@@ -282,8 +288,10 @@ MAS::OperatingPoint analytical_isolated_buck_boost(double inputVoltage, double p
 // Active-clamp forward (CCM + DCM). `turnsRatios` is [sec0, sec1, …] (no separate demag winding — the
 // active clamp resets the core during 1−D, so the primary sees +Vin during t1 and −Vclamp during t2,
 // Vclamp = D/(1−D)·Vin → volt-second balanced). `inductance` is the magnetizing inductance,
-// `mainOutputInductance` the main output-filter L (DCM boundary), `dutyCycle` the forward-switch
-// max/operating duty (MKF get_maximum_duty_cycle, default 0.45) that shapes the secondary waveforms.
+// `mainOutputInductance` the main output-filter L (DCM boundary). The duty is the one the operating point
+// itself sets, D = t1/T (t1 from the main output's volt-seconds): the secondary conducts over exactly the
+// primary's t1 (a separately supplied duty used to shape the secondaries, which disagreed with t1 away from
+// the nominal input and broke the ampere-turn balance, was removed 2026-09-24).
 // Pushes "Primary" + one Secondary i per output. Ported from MKF ActiveClampForward.cpp:41. Throws
 // if t1 > T/2 or the clamp voltage is undefined (duty == 1).
 MAS::OperatingPoint analytical_active_clamp_forward(double inputVoltage,
@@ -292,7 +300,7 @@ MAS::OperatingPoint analytical_active_clamp_forward(double inputVoltage,
                                                     const std::vector<double>& turnsRatios,
                                                     double switchingFrequency, double inductance,
                                                     double mainOutputInductance, double currentRippleRatio,
-                                                    double dutyCycle = 0.45, double diodeVoltageDrop = 0.0);
+                                                    double diodeVoltageDrop = 0.0);
 
 // Secondary rectifier topology shared by the phase-shifted bridge family and the
 // resonant converters: FULL_BRIDGE emits ONE secondary winding per output (bipolar,

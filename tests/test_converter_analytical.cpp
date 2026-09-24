@@ -4,12 +4,14 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "ConverterAnalytical.hpp"
 #include "Buck.hpp"    // design_buck — ABT #95 maximumSwitchCurrent sizing tests
 #include "Boost.hpp"   // design_boost
 #include "Zeta.hpp"    // design_zeta
-#include "Pshb.hpp"    // design_pshb / build_pshb_tas — CURRENT_DOUBLER output-inductor split
+#include "Pshb.hpp"
+#include "PushPull.hpp" // design_push_pull — pinned turns-ratio feasibility    // design_pshb / build_pshb_tas — CURRENT_DOUBLER output-inductor split
 #include "KirchhoffApi.hpp"  // design_tas_full — ABT #102 AHB RMS repro
 
 #include <nlohmann/json.hpp>
@@ -116,8 +118,11 @@ TEST_CASE("analytical_flyback CCM: primary=input current, secondary=load current
     const double D = n * vout / (n * vout + vin);                   // 0.3333
     // Primary winding conducts only during D: <i_pri> = reflected input current = Iout*Vout/Vin.
     CHECK(*processed_current(op, 0).get_average() == Catch::Approx(iout * vout / vin).margin(0.05));   // 0.5 A
-    // Secondary winding integrates to the load current.
-    CHECK(*processed_current(op, 1).get_average() == Catch::Approx(iout).margin(0.1));                 // 2 A
+    // Secondary winding integrates to the load current. MAS excitation convention (2026-09-24): the secondary
+    // current is SOURCE-referenced to the dotted terminal and a flyback rectifier conducts while the dot-
+    // reference secondary voltage is negative, so the delivered current is NEGATIVE (was +2 A before the
+    // convention; the magnitude is unchanged).
+    CHECK(*processed_current(op, 1).get_average() == Catch::Approx(-iout).margin(0.1));                // -2 A
     // Inductor volt-second balance on both windings.
     CHECK(voltage_average(op, 0) == Catch::Approx(0.0).margin(0.5));
     (void)D;
@@ -128,7 +133,8 @@ TEST_CASE("analytical_flyback DCM preserves load current", "[analytical][solver]
     // Small Lp -> DCM (Lp=10 uH < Lcrit).
     MAS::OperatingPoint op = analytical_flyback(48, {12}, {2}, {2}, 100000, 10e-6);
     REQUIRE(op.get_excitations_per_winding().size() == 2);
-    CHECK(*processed_current(op, 1).get_average() == Catch::Approx(2.0).margin(0.15));   // secondary avg = Iout
+    // |secondary avg| = Iout; negative in the MAS source convention (see the CCM case above).
+    CHECK(*processed_current(op, 1).get_average() == Catch::Approx(-2.0).margin(0.15));
 }
 
 TEST_CASE("analytical_flyback rejects mismatched vector sizes", "[analytical][solver][flyback]") {
@@ -354,18 +360,27 @@ TEST_CASE("analytical_isolated_buck: primary avg=Ipri, secondary avg=Isec", "[an
     MAS::OperatingPoint op = analytical_isolated_buck(12, 3.3, 1.0, 5.0, 0.5, 100000, 22e-6, 0.5);
     REQUIRE(op.get_excitations_per_winding().size() == 2);   // Primary + Secondary 0
     CHECK(*processed_current(op, 0).get_average() == Catch::Approx(1.0).margin(0.05));   // Ipri (KCL)
-    CHECK(*processed_current(op, 1).get_average() == Catch::Approx(0.5).margin(0.05));   // Isec
+    // Isec, negative in the MAS source convention (the rectifier conducts while the dot-reference secondary
+    // voltage is negative; was +0.5 before the 2026-09-24 convention).
+    CHECK(*processed_current(op, 1).get_average() == Catch::Approx(-0.5).margin(0.05));
     CHECK(voltage_average(op, 0) == Catch::Approx(0.0).margin(0.3));
 }
 
-TEST_CASE("analytical_isolated_buck_boost: primary avg = (Ipri+Isec/n)/(1-D)", "[analytical][solver][isolatedbuckboost]") {
+TEST_CASE("analytical_isolated_buck_boost: magnetizing avg = (Ipri+Isec/n)/(1-D), shared in the off-time",
+          "[analytical][solver][isolatedbuckboost]") {
     using Kirchhoff::analytical::analytical_isolated_buck_boost;
     // 12 V; primary rail 5 V @ 1 A; isolated secondary 12 V @ 0.5 A; n=0.5, L=22 uH.
     MAS::OperatingPoint op = analytical_isolated_buck_boost(12, 5, 1.0, 12, 0.5, 100000, 22e-6, 0.5);
     REQUIRE(op.get_excitations_per_winding().size() == 2);
     const double D = 5.0 / (12.0 + 5.0);                      // 0.294
-    const double primAvg = (1.0 + 0.5 / 0.5) / (1.0 - D);     // (1+1)/0.706 = 2.833
-    CHECK(*processed_current(op, 0).get_average() == Catch::Approx(primAvg).margin(0.1));
+    const double magAvg = (1.0 + 0.5 / 0.5) / (1.0 - D);      // (1+1)/0.706 = 2.833
+    // The primary WINDING carries the whole magnetizing current during t_on and its (1-S) share (its own
+    // rail's Ipri) during the off-time: <i_p> = D·<i_m> + Ipri = 1.833 A. (Before 2026-09-24 the model
+    // emitted the magnetizing triangle itself as the primary current, 2.833 A, and a secondary that rose
+    // during the off-time — ampere-turns not conserved.)
+    CHECK(*processed_current(op, 0).get_average() == Catch::Approx(D * magAvg + 1.0).margin(0.05));
+    // Secondary average = Isec, negative in the MAS source convention.
+    CHECK(*processed_current(op, 1).get_average() == Catch::Approx(-0.5).margin(0.05));
     CHECK(voltage_average(op, 0) == Catch::Approx(0.0).margin(0.3));
 }
 
@@ -643,8 +658,10 @@ TEST_CASE("analytical_src center-tapped rectifier: 3 windings", "[analytical][so
                                             SrcRectifier::CENTER_TAPPED);
     REQUIRE(op.get_excitations_per_winding().size() == 3);   // Primary + 2 half-windings
     // Each half-winding only conducts its half-cycle => non-negative current.
+    // MAS convention (2026-09-24): both halves in the dot reference, so Half 2 (the negative polarity) carries
+    // a NON-POSITIVE source current (it was emitted non-negative in its own reference before).
     CHECK(*processed_current(op, 1).get_negative_peak() >= -0.05);
-    CHECK(*processed_current(op, 2).get_negative_peak() >= -0.05);
+    CHECK(*processed_current(op, 2).get_positive_peak() <= 0.05);
 }
 
 TEST_CASE("analytical_src rejects below-resonance and bad tank", "[analytical][solver][src]") {
@@ -676,8 +693,10 @@ TEST_CASE("analytical_llc center-tapped: antisymmetric tank current, 3 windings"
     CHECK(rms > 0.0);
     CHECK(std::abs(cur) < 0.15 * rms + 0.05);
     // Each center-tapped half-winding conducts only one polarity -> non-negative current.
+    // MAS convention (2026-09-24): both halves in the dot reference, so Half 2 (the negative polarity) carries
+    // a NON-POSITIVE source current (it was emitted non-negative in its own reference before).
     CHECK(*processed_current(op, 1).get_negative_peak() >= -0.05);
-    CHECK(*processed_current(op, 2).get_negative_peak() >= -0.05);
+    CHECK(*processed_current(op, 2).get_positive_peak() <= 0.05);
 }
 
 TEST_CASE("analytical_llc full-bridge rectifier: 2 windings, bipolar secondary",
@@ -747,8 +766,10 @@ TEST_CASE("analytical_cllc center-tapped rectifier: 3 windings", "[analytical][s
                                              1.0, SrcRectifier::CENTER_TAPPED);
     REQUIRE(op.get_excitations_per_winding().size() == 3);   // Primary + Secondary 0 Half 1/2
     // Each center-tapped half-winding conducts only one polarity → non-negative current.
+    // MAS convention (2026-09-24): both halves in the dot reference, so Half 2 (the negative polarity) carries
+    // a NON-POSITIVE source current (it was emitted non-negative in its own reference before).
     CHECK(*processed_current(op, 1).get_negative_peak() >= -0.05);
-    CHECK(*processed_current(op, 2).get_negative_peak() >= -0.05);
+    CHECK(*processed_current(op, 2).get_positive_peak() <= 0.05);
 }
 
 TEST_CASE("analytical_cllc rejects bad inputs", "[analytical][solver][cllc]") {
@@ -813,8 +834,10 @@ TEST_CASE("analytical_clllc center-tapped rectifier: 3 windings", "[analytical][
                                               1.0, SrcRectifier::CENTER_TAPPED);
     REQUIRE(op.get_excitations_per_winding().size() == 3);   // Primary + Secondary 0 Half 1/2
     // Each center-tapped half-winding conducts only one polarity → non-negative current.
+    // MAS convention (2026-09-24): both halves in the dot reference, so Half 2 (the negative polarity) carries
+    // a NON-POSITIVE source current (it was emitted non-negative in its own reference before).
     CHECK(*processed_current(op, 1).get_negative_peak() >= -0.05);
-    CHECK(*processed_current(op, 2).get_negative_peak() >= -0.05);
+    CHECK(*processed_current(op, 2).get_positive_peak() <= 0.05);
     // Primary tank current is still zero-mean (antisymmetry is independent of the secondary rectifier).
     CHECK(std::abs(*processed_current(op, 0).get_average()) <
           0.15 * (*processed_current(op, 0).get_rms()) + 0.05);
@@ -1359,4 +1382,36 @@ TEST_CASE("analytical_flyback secondary voltage follows the dot/start-end conven
     MAS::OperatingPoint dcm = analytical_flyback(vin, {vout}, {2}, {n}, 100000, 10e-6);
     CHECK(secondary_v_at(dcm, 0.05) == Catch::Approx(vin / n).epsilon(0.1));
     CHECK(secondary_v_at(dcm, 0.35) < 0.0);   // reset phase early in the period for this deep-DCM point
+}
+
+// Push-pull with a PINNED turns ratio (della-Pollock Pass 2): the centre-tapped push-pull needs a per-switch
+// duty N·(Vo+Vd)/(2·Vin_min) <= 0.5. An infeasible pin must fail at design time naming the needed duty and
+// the maximum turns ratio (it used to surface as the solver's "T1 cannot be larger than period/2"); a pinned
+// maxDutyCycle that contradicts the pinned ratio throws too.
+TEST_CASE("design_push_pull: pinned turns ratio feasibility and duty agreement", "[analytical][pushpull]") {
+    nlohmann::json s;
+    s["designRequirements"]["efficiency"] = 0.9;
+    s["designRequirements"]["inputVoltage"] = {{"minimum", 36.0}, {"nominal", 48.0}, {"maximum", 60.0}};
+    s["designRequirements"]["switchingFrequency"]["nominal"] = 100000.0;
+    s["designRequirements"]["outputs"] = nlohmann::json::array({{{"name", "out"}, {"voltage", {{"nominal", 12.0}}}}});
+    s["operatingPoints"] = nlohmann::json::array({{{"inputVoltage", 48.0},
+                                                   {"outputs", nlohmann::json::array({{{"power", 60.0}}})}}});
+    CHECK_NOTHROW(Kirchhoff::design_push_pull(s));
+    // N = 4: needs D = 4·(12+Vd)/72 > 0.5 at Vin_min = 36 V.
+    nlohmann::json bad = s;
+    bad["designRequirements"]["turnsRatios"] = nlohmann::json::array({1.0, 4.0});
+    try {
+        Kirchhoff::design_push_pull(bad);
+        FAIL("an infeasible pinned turns ratio was accepted");
+    } catch (const std::invalid_argument& e) {
+        const std::string m = e.what();
+        CHECK(m.find("per-switch duty") != std::string::npos);
+        CHECK(m.find("maximum turns ratio") != std::string::npos);
+    }
+    // N = 2 needs D ~ 0.35 at 36 V; a pinned maxDutyCycle of 0.45 contradicts it.
+    nlohmann::json clash = s;
+    clash["designRequirements"]["turnsRatios"] = nlohmann::json::array({1.0, 2.0});
+    CHECK_NOTHROW(Kirchhoff::design_push_pull(clash));
+    clash["config"]["maxDutyCycle"] = 0.45;
+    CHECK_THROWS_WITH(Kirchhoff::design_push_pull(clash), Catch::Matchers::ContainsSubstring("disagree"));
 }

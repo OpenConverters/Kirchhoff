@@ -70,8 +70,14 @@ FlybackDesign design_flyback(const json& tasInputs) {
 
     // --- CCM design — faithful port of MKF Flyback::process_design_requirements()
     // (maximumDutyCycle branch, single output, no drain-source-voltage limit; Vd=0). ---
-    const double rippleRatio  = 0.4;   // currentRippleRatio
-    const double maxDutyCycle = 0.5;   // MKF Flyback default maximumDutyCycle
+    // Design knobs, overridable from config like the forward family's (defaults = MKF Flyback's
+    // currentRippleRatio 0.4 / maximumDutyCycle 0.5, so an absent key is byte-identical).
+    const double rippleRatio  = cfg::get(d.config, "inductorRippleRatio", 0.4);
+    const double maxDutyCycle = cfg::get(d.config, "maxDutyCycle", 0.5);
+    if (!(rippleRatio > 0))
+        throw std::invalid_argument("design_flyback: config.inductorRippleRatio must be > 0");
+    if (!(maxDutyCycle > 0 && maxDutyCycle < 1))
+        throw std::invalid_argument("design_flyback: config.maxDutyCycle must be in (0, 1)");
 
     const double Pin = d.outputPower / d.efficiency;
     const double maxEffectiveLoadCurrent = d.outputPower / d.outputVoltage;        // (η=1 numerator)

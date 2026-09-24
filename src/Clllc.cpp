@@ -212,6 +212,12 @@ json build_clllc_tas(const ClllcDesign& d) {
         if (ex.size() >= 2) {
             MAS::OperatingPointExcitation vinW = ex[1];   vinW.set_name(std::string("Primary"));       // Vin = receiver
             MAS::OperatingPointExcitation voutW = ex[0];  voutW.set_name(std::string("Secondary 0"));  // Vout = driver
+            // MAS convention: the primary-side (Vin) winding is PASSIVE and the secondary (Vout) winding SOURCE.
+            // The raw solve modelled the Vout winding as the driven primary (passive) and the Vin winding as
+            // its load (source), so both currents flip sign when the windings return to their physical
+            // sides. Voltages are already in the common dot reference and stay as they are.
+            vinW = Kirchhoff::analytical::with_negated_current(vinW);
+            voutW = Kirchhoff::analytical::with_negated_current(voutW);
             aopT1.get_mutable_excitations_per_winding().push_back(vinW);
             aopT1.get_mutable_excitations_per_winding().push_back(voutW);
         } else {

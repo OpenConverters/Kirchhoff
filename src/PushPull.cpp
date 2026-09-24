@@ -4,6 +4,9 @@
 #include "ComponentRequirements.hpp"
 #include "ConverterAnalytical.hpp"   // single FHA source: analytical_push_pull + excitations_processed/winding_current
 #include <cmath>
+#include <optional>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace Kirchhoff {
@@ -13,6 +16,34 @@ namespace {
 double nominal(const json& j) { return PEAS::resolve_dimensional_values(j); }
 constexpr double kMaxDuty = 0.48;     // MKF PushPull default (D < 0.5 strictly)
 constexpr double kRippleRatio = 0.4;  // output-inductor current ripple
+// Relative tolerance between a pinned maxDutyCycle and the duty a pinned turns ratio implies (absorbs the
+// 2-dp rounding of a derived N and the diode-drop estimate; anything wider is a genuine contradiction).
+constexpr double kDutyAgreement = 0.02;
+
+// The centre-tapped push-pull delivers Vo + Vd = 2·D·Vin/N with a per-switch duty D <= 0.5; at the worst
+// corner (Vin_min) the turns ratio therefore needs D = N·(Vo+Vd)/(2·Vin_min). Throws when that exceeds 0.5,
+// and when a pinned turns ratio and an explicitly pinned config.maxDutyCycle contradict each other.
+void check_push_pull_duty(double N, double voPlusVd, double vinMin, bool nPinned, const json& config,
+                          const std::string& which) {
+    const double neededDuty = N * voPlusVd / (2.0 * vinMin);
+    const double maximumTurnsRatio = vinMin / voPlusVd;   // D = 0.5
+    if (neededDuty > 0.5)
+        throw std::invalid_argument("design_push_pull: " + which + ": turns ratio N = " + std::to_string(N) +
+                                    (nPinned ? " (pinned)" : "") + " needs a per-switch duty N·(Vo+Vd)/(2·Vin_min) = " +
+                                    std::to_string(neededDuty) + " > 0.5 at Vin_min = " + std::to_string(vinMin) +
+                                    " V; the maximum turns ratio is Vin_min/(Vo+Vd) = " +
+                                    std::to_string(maximumTurnsRatio));
+    if (nPinned && config.is_object() && config.contains("maxDutyCycle")) {
+        const double pinnedDuty = config.at("maxDutyCycle").get<double>();
+        if (std::fabs(neededDuty - pinnedDuty) > kDutyAgreement * pinnedDuty)
+            throw std::invalid_argument("design_push_pull: " + which + ": pinned maxDutyCycle = " +
+                                        std::to_string(pinnedDuty) + " and pinned turns ratio N = " +
+                                        std::to_string(N) + " disagree: N needs D = N·(Vo+Vd)/(2·Vin_min) = " +
+                                        std::to_string(neededDuty) + " at Vin_min = " + std::to_string(vinMin) +
+                                        " V (the duty implies N = 2·D·Vin_min/(Vo+Vd) = " +
+                                        std::to_string(2.0 * pinnedDuty * vinMin / voPlusVd) + ")");
+    }
+}
 } // namespace
 
 PushPullDesign design_push_pull(const json& tasInputs) {
@@ -48,8 +79,14 @@ PushPullDesign design_push_pull(const json& tasInputs) {
     // the duty-derived value, so the rest of the stage is sized around the fixed transformer. The
     // primary:secondary step-down ratio is turnsRatios[1] — index 0 is the centre-tapped primary-half
     // ratio (1.0), so read index 1 (matches the order build_push_pull_tas emits to magnetic_inputs).
-    N = req::provided_turns_ratio(dr, 1).value_or(N);
+    const std::optional<double> pinnedN = req::provided_turns_ratio(dr, 1);
+    N = pinnedN.value_or(N);
     d.turnsRatio = N;
+    // Feasibility at the worst corner (Vin_min): the centre-tapped push-pull delivers Vo + Vd = 2·D·Vin/N with
+    // a per-switch duty D <= 0.5, so it needs D = N·(Vo+Vd)/(2·Vin_min) <= 0.5. A turns ratio above
+    // Vin_min/(Vo+Vd) cannot regulate — fail HERE with the numbers instead of the solver's opaque
+    // "T1 cannot be larger than period/2".
+    check_push_pull_duty(N, d.outputVoltage + d.diodeDrop, vinMin, pinnedN.has_value(), d.config, "output 0");
     // Magnetizing inductance per half (MKF): Lm = Vin_min * tOn / Iprimary, tOn = D_max*T,
     // Iprimary = Pout / Vin_min / eff.
     const double tOn = d.maxDutyCycle * T;
@@ -92,7 +129,10 @@ PushPullDesign design_push_pull(const json& tasInputs) {
         } else {
             double ni = d.maxDutyCycle * 2.0 * vinMin / (leg.voltage + leg.diodeDrop);
             ni = std::round(ni * 100.0) / 100.0;
-            leg.turnsRatio = req::provided_turns_ratio(dr, 1 + i).value_or(ni);
+            const std::optional<double> pinnedNi = req::provided_turns_ratio(dr, 1 + i);
+            leg.turnsRatio = pinnedNi.value_or(ni);
+            check_push_pull_duty(leg.turnsRatio, leg.voltage + leg.diodeDrop, vinMin, pinnedNi.has_value(), d.config,
+                                 "output " + std::to_string(i));
             const double tOnSec_i = (T / 2.0) * (leg.voltage + leg.diodeDrop) * leg.turnsRatio / vinMax;
             leg.outputInductance = (vinMax / leg.turnsRatio - leg.voltage) * tOnSec_i / (ripple * iout_i);
             leg.outputCapacitance = d.outputCapacitance;

@@ -208,10 +208,12 @@ TEST_CASE("NRMSE gate: LLC tank current — analytical vs ngspice", "[nrmse][llc
     // Load-aware FHA: the primary tank current tracks SPICE tightly (observed ~0.03). Gate at 0.15 (SRC's
     // level) — a real fidelity gate, not a characterization catch.
     CHECK(nrmse < 0.15);
-    // The secondary winding-pair must deliver the DC output current (sum of the CT half-winding averages).
+    // The secondary winding-pair must deliver the DC output current (sum of the CT half-winding average
+    // MAGNITUDES: in the MAS convention (2026-09-24) both halves are in the dot reference, so Half 2 carries
+    // the negative polarity and its source-convention average is -Iout/2 — the signed sum is ~0).
     double secSum = 0.0;
     for (size_t w = 1; w < op.get_excitations_per_winding().size(); ++w)
-        secSum += *op.get_excitations_per_winding()[w].get_current()->get_processed()->get_average();
+        secSum += std::abs(*op.get_excitations_per_winding()[w].get_current()->get_processed()->get_average());
     CHECK(secSum == Catch::Approx(iout).margin(0.1 * iout));
 }
 

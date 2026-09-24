@@ -277,6 +277,11 @@ target_link_libraries(test_negative_rails PRIVATE kirchhoff Catch2::Catch2WithMa
 add_executable(test_converter_analytical tests/test_converter_analytical.cpp src/KirchhoffApi.cpp)
 target_link_libraries(test_converter_analytical PRIVATE kirchhoff Catch2::Catch2WithMain)
 
+# MAS excitation convention guard (dot-reference voltages, passive primary / source secondary currents,
+# ampere-turn + Faraday consistency) for every multi-winding analytical converter model.
+add_executable(test_winding_convention tests/test_winding_convention.cpp)
+target_link_libraries(test_winding_convention PRIVATE kirchhoff Catch2::Catch2WithMain)
+
 add_executable(test_nrmse_gate tests/test_nrmse_gate.cpp)
 target_link_libraries(test_nrmse_gate PRIVATE kirchhoff Catch2::Catch2WithMain)
 

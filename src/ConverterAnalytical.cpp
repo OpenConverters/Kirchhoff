@@ -18,6 +18,33 @@ namespace analytical {
 // waveform construction, harmonics, and processed stresses come from OpenMagnetics::WaveformProcessor.
 using WP = OpenMagnetics::WaveformProcessor;
 
+// --- MAS excitation convention (2026-09-24) -------------------------------------------------------------
+// Every multi-winding solver below emits its operating point in ONE convention:
+//   * reference winding r = the first "primary" winding (always excitation 0 here);
+//   * VOLTAGES in the common dot reference: v_k(t) = N_k dPhi/dt for one shared core flux, so every winding
+//     voltage is in phase with the reference (positive together while the flux rises);
+//   * CURRENTS: primary-side windings (incl. a demagnetisation/reset winding) PASSIVE (positive INTO the
+//     dotted terminal); every other winding SOURCE (positive OUT of the dotted terminal);
+//   * hence i_m(t) = (sum_primary N_k i_k(t) - sum_other N_k i_k(t)) / N_r and v_r(t) = L_m di_m/dt.
+// A winding modelled in its own "positive while conducting" reference is moved to the dot reference by
+// negating BOTH its voltage and its current; a winding modelled with the wrong current convention by
+// negating its current only. Guarded by tests/test_winding_convention.cpp ([convention]).
+namespace {
+// The waveform with every sample negated. The label becomes CUSTOM: the data no longer has the shape the
+// library label names.
+MAS::Waveform negated_waveform(MAS::Waveform w) {
+    auto data = w.get_data();
+    for (auto& x : data) x = -x;
+    w.set_data(data);
+    w.set_ancillary_label(MAS::WaveformLabel::CUSTOM);
+    return w;
+}
+std::vector<double> negated(std::vector<double> v) {
+    for (auto& x : v) x = -x;
+    return v;
+}
+}  // namespace
+
 // --- build_<topo>_tas bridge helpers (see header) ------------------------------------------------------
 namespace {
 // Emit the schema-valid current/voltage side (processed + waveform) into `dst[side]` from a
@@ -113,6 +140,18 @@ double processed_of(const MAS::SignalDescriptor* sig, const std::string& field, 
     return *v;
 }
 }  // namespace
+
+MAS::OperatingPointExcitation with_negated_current(const MAS::OperatingPointExcitation& excitation) {
+    const auto& current = excitation.get_current();
+    const auto& voltage = excitation.get_voltage();
+    if (!current || !current->get_waveform())
+        throw std::runtime_error("with_negated_current: excitation has no current waveform");
+    if (!voltage || !voltage->get_waveform())
+        throw std::runtime_error("with_negated_current: excitation has no voltage waveform");
+    const std::string name = excitation.get_name() ? *excitation.get_name() : std::string();
+    return WP::complete_excitation(negated_waveform(*current->get_waveform()), *voltage->get_waveform(),
+                                   excitation.get_frequency(), name);
+}
 
 double winding_current(const MAS::OperatingPoint& op, std::size_t w, const std::string& field) {
     const auto& excs = op.get_excitations_per_winding();
@@ -446,6 +485,11 @@ MAS::OperatingPoint analytical_flyback(double inputVoltage,
             const double secondaryDeadTime = std::max(0.0, period - tOn - secondaryConductionTime);
             currentWaveform = WP::create_waveform(Lbl::FLYBACK_SECONDARY_WITH_DEADTIME, secondaryPeakCurrent, switchingFrequency, dutyCycle, 0.0, secondaryDeadTime);
         }
+        // MAS convention (dot-reference voltage, SOURCE current on a secondary): the rectifier conducts while
+        // the dot-reference secondary voltage is NEGATIVE (the flux falls), so the delivered current flows
+        // INTO the dotted terminal — negative in the source convention. The shapes above are the physical
+        // conduction magnitudes; negate them so N_p i_p - N_s i_s is the continuous magnetizing ampere-turns.
+        currentWaveform = negated_waveform(currentWaveform);
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Secondary " + std::to_string(i)));
     }
@@ -474,6 +518,13 @@ MAS::OperatingPoint analytical_forward(double inputVoltage,
     double t1 = period * (mainOutputVoltage + diodeVoltageDrop) / (inputVoltage / mainSecondaryTurnsRatio);
     if (t1 > period / 2)
         throw std::invalid_argument("analytical_forward: T1 cannot be larger than period/2, wrong topology configuration");
+
+    // Demagnetization winding turns ratio n_d = N_p/N_d: during the reset the demag winding clamps Vin, so the
+    // primary sees -n_d·Vin and the reset lasts t_d = t1/n_d (volt-second balance).
+    const double demagTurnsRatio = turnsRatios[0];
+    if (!(demagTurnsRatio > 0))
+        throw std::invalid_argument("analytical_forward: demagnetization turns ratio must be > 0, got " +
+                                    std::to_string(demagTurnsRatio));
 
     double magnetizationCurrent = inputVoltage * t1 / inductance;
     double minimumPrimaryCurrent = -magnetizationCurrent / 2;
@@ -509,6 +560,7 @@ MAS::OperatingPoint analytical_forward(double inputVoltage,
         t1 = std::sqrt(sqrtArg);
         if (t1 > period / 2)
             throw std::invalid_argument("analytical_forward: T1 cannot be larger than period/2, wrong topology configuration");
+        magnetizationCurrent = inputVoltage * t1 / inductance;   // the magnetizing ramp of the DCM on-time
         minimumPrimaryCurrent = 0;
         maximumPrimaryCurrent = magnetizationCurrent;
         for (size_t i = 0; i < outputVoltages.size(); ++i) {
@@ -519,10 +571,26 @@ MAS::OperatingPoint analytical_forward(double inputVoltage,
             minimumPrimaryCurrent += minimumSecondaryCurrents[i] / turnsRatios[turnsRatioSecondaryIndex];
             maximumPrimaryCurrent += maximumSecondaryCurrents[i] / turnsRatios[turnsRatioSecondaryIndex];
         }
+    } else {
+        // CCM: the core is fully reset every cycle (the demag winding returns the magnetizing current to
+        // zero), so the magnetizing current ramps 0 -> Vin·t1/L during t1 — it does NOT start at -m/2. The
+        // symmetric -m/2 offset above is only the CCM/DCM discriminant; the emitted primary current is the
+        // magnetizing ramp plus the reflected secondary current, so the ampere-turns stay continuous into the
+        // demagnetization interval (i_m = m at t1 on both sides).
+        minimumPrimaryCurrent = 0;
+        maximumPrimaryCurrent = magnetizationCurrent;
+        for (size_t i = 0; i < outputVoltages.size(); ++i) {
+            minimumPrimaryCurrent += minimumSecondaryCurrents[i] / turnsRatios[1 + i];
+            maximumPrimaryCurrent += maximumSecondaryCurrents[i] / turnsRatios[1 + i];
+        }
     }
 
-    double td = t1;  // demagnetization time equals on-time for Nt = Np
+    double td = t1 / demagTurnsRatio;  // reset time: Vin·t1 = n_d·Vin·t_d
     double deadTime = period - t1 - td;
+    if (deadTime < 0)
+        throw std::invalid_argument("analytical_forward: the demagnetization interval t1/n_d (n_d = " +
+                                    std::to_string(demagTurnsRatio) + ") does not fit in the off-time; the core "
+                                    "cannot reset — lower the duty or the demag turns ratio");
     double actualDutyCycle = t1 / period;
 
     MAS::OperatingPoint operatingPoint;
@@ -532,21 +600,26 @@ MAS::OperatingPoint analytical_forward(double inputVoltage,
         MAS::Waveform currentWaveform = WP::create_waveform(Lbl::FLYBACK_PRIMARY, primaryCurrentPeakToPeak,
                                                             switchingFrequency, actualDutyCycle, minimumPrimaryCurrent, deadTime);
         MAS::Waveform voltageWaveform;
-        voltageWaveform.set_data(std::vector<double>{0, inputVoltage, inputVoltage, -inputVoltage, -inputVoltage, 0, 0});
+        voltageWaveform.set_data(std::vector<double>{0, inputVoltage, inputVoltage, -demagTurnsRatio * inputVoltage,
+                                                     -demagTurnsRatio * inputVoltage, 0, 0});
         voltageWaveform.set_time(std::vector<double>{0, 0, t1, t1, t1 + td, t1 + td, period});
         voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Primary"));
     }
-    // Demagnetization winding — inverted voltage polarity. Its current is the UNIPOLAR magnetizing-reset
-    // pulse (0 during the on-time, then magnetizationCurrent ramping back to 0 during the reset interval),
-    // so its baseline offset is 0 — NOT minimumPrimaryCurrent, which folds in the reflected secondary LOAD
-    // current that flows only in the primary/secondaries, never in the diode-clamped demag winding.
+    // Demagnetization winding, in the DOT reference (MAS convention): +Vin/n_d while the flux rises (on-time),
+    // -Vin while it clamps the reset. Its current is the UNIPOLAR magnetizing-reset pulse (0 during the
+    // on-time, then n_d·magnetizationCurrent ramping back to 0 during the reset interval) — PASSIVE and
+    // positive (it flows into the dotted terminal; the winding returns the energy to Vin, v·i < 0). Its
+    // baseline offset is 0 — NOT minimumPrimaryCurrent, which folds in the reflected secondary LOAD current
+    // that flows only in the primary/secondaries, never in the diode-clamped demag winding.
     {
-        MAS::Waveform currentWaveform = WP::create_waveform(Lbl::FLYBACK_SECONDARY_WITH_DEADTIME, magnetizationCurrent,
+        MAS::Waveform currentWaveform = WP::create_waveform(Lbl::FLYBACK_SECONDARY_WITH_DEADTIME,
+                                                            demagTurnsRatio * magnetizationCurrent,
                                                             switchingFrequency, actualDutyCycle, 0.0, deadTime);
         MAS::Waveform voltageWaveform;
-        voltageWaveform.set_data(std::vector<double>{0, -inputVoltage, -inputVoltage, inputVoltage, inputVoltage, 0, 0});
+        voltageWaveform.set_data(std::vector<double>{0, inputVoltage / demagTurnsRatio, inputVoltage / demagTurnsRatio,
+                                                     -inputVoltage, -inputVoltage, 0, 0});
         voltageWaveform.set_time(std::vector<double>{0, 0, t1, t1, t1 + td, t1 + td, period});
         voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
         operatingPoint.get_mutable_excitations_per_winding().push_back(
@@ -556,15 +629,20 @@ MAS::OperatingPoint analytical_forward(double inputVoltage,
     for (size_t i = 0; i < outputVoltages.size(); ++i) {
         double secondaryCurrentPeakToPeak = maximumSecondaryCurrents[i] - minimumSecondaryCurrents[i];
         size_t turnsRatioSecondaryIndex = 1 + i;
-        double minimumSecondaryVoltage = -(inputVoltage + diodeVoltageDrop) / turnsRatios[turnsRatioSecondaryIndex];
-        double maximumSecondaryVoltage = inputVoltage / turnsRatios[turnsRatioSecondaryIndex];
-        double secondaryVoltagePeakToPeak = maximumSecondaryVoltage - minimumSecondaryVoltage;
-        double secondaryVoltageOffset = maximumSecondaryVoltage + minimumSecondaryVoltage;
+        // Dot-reference secondary voltage = the primary voltage reflected by N_s/N_p at every instant:
+        // +Vin/n during t1, -n_d·Vin/n during the reset, 0 in the dead time. (The RECTANGULAR_WITH_DEADTIME
+        // builder rebalanced these levels over the period — 14 V instead of Vin/n = 12 V at 48 V / n = 4 — so
+        // the delivered power no longer matched the load.)
+        const double n_s = turnsRatios[turnsRatioSecondaryIndex];
 
         MAS::Waveform currentWaveform = WP::create_waveform(Lbl::FLYBACK_PRIMARY, secondaryCurrentPeakToPeak,
                                                             switchingFrequency, actualDutyCycle, minimumSecondaryCurrents[i], 0);
-        MAS::Waveform voltageWaveform = WP::create_waveform(Lbl::RECTANGULAR_WITH_DEADTIME, secondaryVoltagePeakToPeak,
-                                                            switchingFrequency, actualDutyCycle, secondaryVoltageOffset, deadTime);
+        MAS::Waveform voltageWaveform;
+        voltageWaveform.set_data(std::vector<double>{0, inputVoltage / n_s, inputVoltage / n_s,
+                                                     -demagTurnsRatio * inputVoltage / n_s,
+                                                     -demagTurnsRatio * inputVoltage / n_s, 0, 0});
+        voltageWaveform.set_time(std::vector<double>{0, 0, t1, t1, t1 + td, t1 + td, period});
+        voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Secondary " + std::to_string(i)));
     }
@@ -617,6 +695,7 @@ MAS::OperatingPoint analytical_two_switch_forward(double inputVoltage,
         t1 = std::sqrt(sqrtArg);
         if (t1 > period / 2)
             throw std::invalid_argument("analytical_two_switch_forward: T1 cannot be larger than period/2, wrong topology configuration");
+        magnetizationCurrent = inputVoltage * t1 / inductance;   // the magnetizing ramp of the DCM on-time
         minimumPrimaryCurrent = 0;
         maximumPrimaryCurrent = magnetizationCurrent;
         for (size_t i = 0; i < outputVoltages.size(); ++i) {
@@ -627,25 +706,38 @@ MAS::OperatingPoint analytical_two_switch_forward(double inputVoltage,
             maximumPrimaryCurrent += maximumSecondaryCurrents[i] / turnsRatios[i];
         }
     }
+    if (minimumPrimaryCurrent > 0) {   // CCM (the discriminant above, unchanged)
+        // CCM: the two clamp diodes reset the core to zero every cycle, so the magnetizing current ramps
+        // 0 -> Vin·t1/L during t1 (not -m/2 -> +m/2; the symmetric offset is only the CCM/DCM discriminant).
+        // The primary current = magnetizing ramp + reflected secondary current, continuous in ampere-turns
+        // into the reset interval, where the primary carries the magnetizing current back to zero.
+        minimumPrimaryCurrent = 0;
+        maximumPrimaryCurrent = magnetizationCurrent;
+        for (size_t i = 0; i < outputVoltages.size(); ++i) {
+            minimumPrimaryCurrent += minimumSecondaryCurrents[i] / turnsRatios[i];
+            maximumPrimaryCurrent += maximumSecondaryCurrents[i] / turnsRatios[i];
+        }
+    }
 
     double minimumPrimarySideTransformerVoltage = -inputVoltage - 2 * diodeVoltageDrop;
     double maximumPrimarySideTransformerVoltage = inputVoltage;
-    double td = t1;
-    double deadTime = period - t1 - td;
+    // Reset time from volt-second balance against the diode-clamped reset voltage (Vin + 2 Vd).
+    double td = t1 * inputVoltage / (inputVoltage + 2 * diodeVoltageDrop);
+    if (t1 + td > period)
+        throw std::invalid_argument("analytical_two_switch_forward: the reset interval does not fit in the off-time");
 
     MAS::OperatingPoint operatingPoint;
     // Primary (single combined winding)
     {
         MAS::Waveform currentWaveform, voltageWaveform;
-        if (minimumPrimaryCurrent > 0) {  // CCM
-            currentWaveform.set_data(std::vector<double>{0, minimumPrimaryCurrent, maximumPrimaryCurrent, magnetizationCurrent, 0, 0, 0});
-            currentWaveform.set_time(std::vector<double>{0, 0, t1, t1, t1 + td, period, period});
-            currentWaveform.set_ancillary_label(Lbl::CUSTOM);
-        } else {  // DCM
-            currentWaveform.set_data(std::vector<double>{minimumPrimaryCurrent, maximumPrimaryCurrent, 0, 0});
-            currentWaveform.set_time(std::vector<double>{0, t1, t1, period});
-            currentWaveform.set_ancillary_label(Lbl::CUSTOM);
-        }
+        // Both modes: magnetizing + reflected load during t1, then the magnetizing current alone returning to
+        // zero through the clamp diodes during the reset (the DCM branch used to drop the reset ramp, which
+        // broke the magnetizing ampere-turns at t1).
+        // The leading (0, 0) point makes the t = 0 edge read "before the step", exactly as the secondary's
+        // FLYBACK_PRIMARY shape does — so the resampled winding currents stay ampere-turn consistent there.
+        currentWaveform.set_data(std::vector<double>{0, minimumPrimaryCurrent, maximumPrimaryCurrent, magnetizationCurrent, 0, 0});
+        currentWaveform.set_time(std::vector<double>{0, 0, t1, t1, t1 + td, period});
+        currentWaveform.set_ancillary_label(Lbl::CUSTOM);
         voltageWaveform.set_data(std::vector<double>{0, maximumPrimarySideTransformerVoltage, maximumPrimarySideTransformerVoltage,
                                                      minimumPrimarySideTransformerVoltage, minimumPrimarySideTransformerVoltage, 0, 0});
         voltageWaveform.set_time(std::vector<double>{0, 0, t1, t1, t1 + td, t1 + td, period});
@@ -656,15 +748,19 @@ MAS::OperatingPoint analytical_two_switch_forward(double inputVoltage,
     double actualDutyCycle = t1 / period;
     for (size_t i = 0; i < outputVoltages.size(); ++i) {
         double secondaryCurrentPeakToPeak = maximumSecondaryCurrents[i] - minimumSecondaryCurrents[i];
-        double minimumSecondaryVoltage = -(inputVoltage + 2 * diodeVoltageDrop) / turnsRatios[i];
-        double maximumSecondaryVoltage = inputVoltage / turnsRatios[i];
-        double secondaryVoltagePeakToPeak = maximumSecondaryVoltage - minimumSecondaryVoltage;
-        double secondaryVoltageOffset = maximumSecondaryVoltage + minimumSecondaryVoltage;
+        // Dot-reference secondary voltage = the primary voltage reflected by N_s/N_p at every instant (the
+        // RECTANGULAR_WITH_DEADTIME builder rebalanced the levels over the period, off by ~17 %).
+        const double n_s = turnsRatios[i];
 
         MAS::Waveform currentWaveform = WP::create_waveform(Lbl::FLYBACK_PRIMARY, secondaryCurrentPeakToPeak,
                                                             switchingFrequency, actualDutyCycle, minimumSecondaryCurrents[i], 0);
-        MAS::Waveform voltageWaveform = WP::create_waveform(Lbl::RECTANGULAR_WITH_DEADTIME, secondaryVoltagePeakToPeak,
-                                                            switchingFrequency, actualDutyCycle, secondaryVoltageOffset, deadTime);
+        MAS::Waveform voltageWaveform;
+        voltageWaveform.set_data(std::vector<double>{0, maximumPrimarySideTransformerVoltage / n_s,
+                                                     maximumPrimarySideTransformerVoltage / n_s,
+                                                     minimumPrimarySideTransformerVoltage / n_s,
+                                                     minimumPrimarySideTransformerVoltage / n_s, 0, 0});
+        voltageWaveform.set_time(std::vector<double>{0, 0, t1, t1, t1 + td, t1 + td, period});
+        voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Secondary " + std::to_string(i)));
     }
@@ -694,9 +790,21 @@ MAS::OperatingPoint analytical_push_pull(double inputVoltage,
     const double inductorCurrentRipple = currentRippleRatio * mainOutputCurrent;   // main-rail ΔI (DCM branch)
     const double outputInductance = mainOutputInductance;                          // main-rail Lo (DCM branch)
     const double period = 1.0 / switchingFrequency;
+    if (!(mainSecondaryTurnsRatio > 0))
+        throw std::invalid_argument("analytical_push_pull: turns ratio must be > 0, got " +
+                                    std::to_string(mainSecondaryTurnsRatio));
     double t1 = period / 2 * (mainOutputVoltage + diodeVoltageDrop) / (inputVoltage / mainSecondaryTurnsRatio);
-    if (t1 > period / 2)
-        throw std::invalid_argument("analytical_push_pull: T1 cannot be larger than period/2, wrong topology configuration");
+    if (t1 > period / 2) {
+        // Each switch conducts for t1 per half period; the centre-tapped push-pull delivers
+        // Vo + Vd = 2·D·Vin/N with D = t1/T <= 0.5, so this operating point needs D = N(Vo+Vd)/(2·Vin) > 0.5.
+        const double neededDuty = mainSecondaryTurnsRatio * (mainOutputVoltage + diodeVoltageDrop) / (2.0 * inputVoltage);
+        const double maximumTurnsRatio = inputVoltage / (mainOutputVoltage + diodeVoltageDrop);
+        throw std::invalid_argument("analytical_push_pull: infeasible at Vin = " + std::to_string(inputVoltage) +
+                                    " V: turns ratio N = " + std::to_string(mainSecondaryTurnsRatio) +
+                                    " needs a per-switch duty N(Vo+Vd)/(2 Vin) = " + std::to_string(neededDuty) +
+                                    " > 0.5; the maximum turns ratio at this input is Vin/(Vo+Vd) = " +
+                                    std::to_string(maximumTurnsRatio));
+    }
 
     double magnetizationCurrent = inputVoltage * t1 / inductance;
     // Per-rail secondary current extremes + running total of the reflected primary current. The two
@@ -715,15 +823,21 @@ MAS::OperatingPoint analytical_push_pull(double inputVoltage,
     const double minimumSecondaryCurrent = minSec[0], maximumSecondaryCurrent = maxSec[0];  // DCM branch aliases
 
     MAS::OperatingPoint operatingPoint;
+    // The per-winding shapes below are written in each winding's OWN "positive while conducting" reference.
+    // MAS convention: Primary Half 1 and Secondary Half 2 conduct while the flux rises (first half period)
+    // and are already in the dot reference; Primary Half 2 and Secondary Half 1 conduct while it falls, so
+    // they are emitted with BOTH voltage and current negated (toDotReference). Then every winding voltage
+    // is in phase, the primary halves are PASSIVE and the secondary halves SOURCE, and
+    // i_m = i_P1 + i_P2 - (i_S1 + i_S2)/N is the continuous ±m/2 magnetizing triangle.
     auto pushCustom = [&](const std::vector<double>& iData, const std::vector<double>& iTime,
                           const std::vector<double>& vData, const std::vector<double>& vTime,
-                          const std::string& name) {
+                          const std::string& name, bool toDotReference) {
         MAS::Waveform currentWaveform, voltageWaveform;
         currentWaveform.set_ancillary_label(Lbl::CUSTOM);
-        currentWaveform.set_data(iData);
+        currentWaveform.set_data(toDotReference ? negated(iData) : iData);
         currentWaveform.set_time(iTime);
         voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
-        voltageWaveform.set_data(vData);
+        voltageWaveform.set_data(toDotReference ? negated(vData) : vData);
         voltageWaveform.set_time(vTime);
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, name));
@@ -735,11 +849,11 @@ MAS::OperatingPoint analytical_push_pull(double inputVoltage,
         pushCustom({minPriI, maxPriI, 0, 0}, {0, t1, t1, period},
                    {maxPriV, maxPriV, 0, 0, minPriV, minPriV, 0, 0},
                    {0, t1, t1, period / 2, period / 2, period / 2 + t1, period / 2 + t1, period},
-                   "Primary Half 1");
+                   "Primary Half 1", false);
         pushCustom({0, 0, minPriI, maxPriI, 0, 0}, {0, period / 2, period / 2, period / 2 + t1, period / 2 + t1, period},
                    {minPriV, minPriV, 0, 0, maxPriV, maxPriV, 0, 0},
                    {0, t1, t1, period / 2, period / 2, period / 2 + t1, period / 2 + t1, period},
-                   "Primary Half 2");
+                   "Primary Half 2", true);
         // Per-rail center-tapped secondary pair. Each half anchors its freewheel share to that rail's
         // MAXIMUM secondary current (the shared magnetizing splits equally across both halves), with the
         // decay term using that rail's OWN inductor ripple. Generalizes the historical Secondary 0 pair.
@@ -757,12 +871,12 @@ MAS::OperatingPoint analytical_push_pull(double inputVoltage,
                        {0, t1, t1, period / 2, period / 2, period / 2 + t1, period / 2 + t1, period},
                        {minSecV, minSecV, 0, 0, maxSecV, maxSecV, 0, 0},
                        {0, t1, t1, period / 2, period / 2, period / 2 + t1, period / 2 + t1, period},
-                       tag + " Half 1");
+                       tag + " Half 1", true);
             pushCustom({minSecT1OfFET, maxSecT1OfFET, maxSecT2OfFET, minSecT2OfFET, 0, 0, maxSecT2Other, minSecT2Other},
                        {0, t1, t1, period / 2, period / 2, period / 2 + t1, period / 2 + t1, period},
                        {maxSecV, maxSecV, 0, 0, minSecV, minSecV, 0, 0},
                        {0, t1, t1, period / 2, period / 2, period / 2 + t1, period / 2 + t1, period},
-                       tag + " Half 2");
+                       tag + " Half 2", false);
         }
     } else {  // DCM
         if (outputVoltages.size() > 1)
@@ -798,21 +912,21 @@ MAS::OperatingPoint analytical_push_pull(double inputVoltage,
         pushCustom({minPriI, maxPriI, 0, 0}, {0, t1, t1, period},
                    {maxPriV, maxPriV, 0, 0, minPriVT3, minPriVT3, minPriV, minPriV, 0, 0, maxPriVT3, maxPriVT3},
                    {0, t1, t1, t1 + t2, t1 + t2, period / 2, period / 2, period / 2 + t1, period / 2 + t1, period / 2 + t1 + t2, period / 2 + t1 + t2, period},
-                   "Primary Half 1");
+                   "Primary Half 1", false);
         pushCustom({0, minPriI, maxPriI, 0, 0}, {0, period / 2, period / 2 + t1, period / 2 + t1, period},
                    {minPriV, minPriV, 0, 0, maxPriVT3, maxPriVT3, maxPriV, maxPriV, 0, 0, minPriVT3, minPriVT3},
                    {0, t1, t1, t1 + t2, t1 + t2, period / 2, period / 2, period / 2 + t1, period / 2 + t1, period / 2 + t1 + t2, period / 2 + t1 + t2, period},
-                   "Primary Half 2");
+                   "Primary Half 2", true);
         pushCustom({0, 0, maxSecT2Other, minSecT2Other, maxSecT3, 0, maxSecT1OfFET, maxSecT2OfFET, minSecT2OfFET, 0},
                    {0, t1, t1, t1 + t2, t1 + t2, period / 2, period / 2 + t1, period / 2 + t1, period / 2 + t1 + t2, period},
                    {minSecV, minSecV, 0, 0, maxSecVT3, maxSecVT3, maxSecV, maxSecV, 0, 0, minSecVT3, minSecVT3},
                    {0, t1, t1, t1 + t2, t1 + t2, period / 2, period / 2, period / 2 + t1, period / 2 + t1, period / 2 + t1 + t2, period / 2 + t1 + t2, period},
-                   "Secondary 0 Half 1");
+                   "Secondary 0 Half 1", true);
         pushCustom({0, maxSecT1OfFET, maxSecT2OfFET, minSecT2OfFET, 0, maxSecT2Other, minSecT2Other, maxSecT3, 0},
                    {0, t1, t1, t1 + t2, period / 2 + t1, period / 2 + t1, period / 2 + t1 + t2, period / 2 + t1 + t2, period},
                    {maxSecV, maxSecV, 0, 0, minSecVT3, minSecVT3, minSecV, minSecV, 0, 0, maxSecVT3, maxSecVT3},
                    {0, t1, t1, t1 + t2, t1 + t2, period / 2, period / 2, period / 2 + t1, period / 2 + t1, period / 2 + t1 + t2, period / 2 + t1 + t2, period},
-                   "Secondary 0 Half 2");
+                   "Secondary 0 Half 2", false);
     }
     return operatingPoint;
 }
@@ -1159,12 +1273,9 @@ MAS::OperatingPoint analytical_isolated_buck(double inputVoltage, double primary
     const double period = 1.0 / switchingFrequency;
     double tOn = dutyCycle * period;
 
-    // Σ Iout_sec_k / N_k reflected into the primary (average) and the OFF-window step (Cout charge balance).
-    double totalReflectedSecondaryCurrent = 0.0, reflectedSecondaryOffsetOff = 0.0;
-    for (size_t k = 0; k < nSec; ++k) {
-        totalReflectedSecondaryCurrent += secondaryOutputCurrents[k] / turnsRatios[k];
-        reflectedSecondaryOffsetOff += (secondaryOutputCurrents[k] / (1.0 - dutyCycle)) / turnsRatios[k];
-    }
+    // Σ Iout_sec_k / N_k reflected into the primary (average).
+    double totalReflectedSecondaryCurrent = 0.0;
+    for (size_t k = 0; k < nSec; ++k) totalReflectedSecondaryCurrent += secondaryOutputCurrents[k] / turnsRatios[k];
     double magnetizingCurrentRipple = (inputVoltage - primaryOutputVoltage) * tOn / inductance;
     double magnetizingCurrentAverage = primaryOutputCurrent + totalReflectedSecondaryCurrent;
     double magnetizingCurrentMax = magnetizingCurrentAverage + magnetizingCurrentRipple / 2;
@@ -1174,36 +1285,49 @@ MAS::OperatingPoint analytical_isolated_buck(double inputVoltage, double primary
     double primaryVoltageMinimum = -primaryOutputVoltage;
     double primaryVoltagePeaktoPeak = primaryVoltageMaximum - primaryVoltageMinimum;  // = Vin
 
+    // Secondary k conduction magnitude during the off-time: rising from Iout_k at t_on to
+    // (1+D)/(1-D)·Iout_k at T (off-window average Iout_k/(1-D), full-period average Iout_k).
+    std::vector<double> secondaryOffStart(nSec), secondaryOffEnd(nSec);
+    double reflectedOffStart = 0.0, reflectedOffEnd = 0.0;
+    for (size_t k = 0; k < nSec; ++k) {
+        const double Iout = secondaryOutputCurrents[k];
+        secondaryOffStart[k] = Iout;
+        secondaryOffEnd[k] = (1 + dutyCycle) / (1 - dutyCycle) * Iout;
+        reflectedOffStart += secondaryOffStart[k] / turnsRatios[k];
+        reflectedOffEnd += secondaryOffEnd[k] / turnsRatios[k];
+    }
+
     MAS::OperatingPoint operatingPoint;
-    // Primary — piecewise (winding currents step at switch events while the magnetizing flux stays continuous).
+    // Primary (= the buck inductor winding, PASSIVE): the magnetizing current during t_on (the secondaries
+    // block), then the magnetizing current MINUS the ACTUAL reflected secondary current at each instant of
+    // the off-time, so i_m = i_p + Σ|i_s,k|/N_k is the continuous triangle ImMin -> ImMax -> ImMin (the old
+    // constant off-time shift broke the flux continuity at t_on and T). Its average is the primary load.
     {
-        double iPriOnStart = magnetizingCurrentMin;
-        double iPriOnEnd = magnetizingCurrentMax;
-        double iPriOffStart = magnetizingCurrentMax - reflectedSecondaryOffsetOff;
-        double iPriOffEnd = magnetizingCurrentMin - reflectedSecondaryOffsetOff;
         MAS::Waveform currentWaveform;
-        currentWaveform.set_data(std::vector<double>{iPriOnStart, iPriOnEnd, iPriOffStart, iPriOffEnd});
+        currentWaveform.set_data(std::vector<double>{magnetizingCurrentMin, magnetizingCurrentMax,
+                                                     magnetizingCurrentMax - reflectedOffStart,
+                                                     magnetizingCurrentMin - reflectedOffEnd});
         currentWaveform.set_time(std::vector<double>{0.0, tOn, tOn, period});
         currentWaveform.set_ancillary_label(Lbl::CUSTOM);
         MAS::Waveform voltageWaveform = WP::create_waveform(Lbl::RECTANGULAR, primaryVoltagePeaktoPeak, switchingFrequency, dutyCycle, 0, 0);
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Primary"));
     }
-    // Secondaries (one coupled flyback winding per isolated output).
+    // Secondaries (one coupled flyback winding per isolated output), in the MAS convention: DOT-reference
+    // voltage (+(Vin-Vpri)/N_k while the flux rises during t_on, -(Vpri/N_k - Vd) while the rectifier
+    // conducts) and SOURCE current — the rectifier conducts while that voltage is negative, so the
+    // delivered current is NEGATIVE (it flows into the dotted terminal).
     for (size_t k = 0; k < nSec; ++k) {
-        const double secondaryOutputCurrent = secondaryOutputCurrents[k];
         const double turnsRatio = turnsRatios[k];
-        double secondaryCurrentMaximum = (1 + dutyCycle) / (1 - dutyCycle) * secondaryOutputCurrent - secondaryOutputCurrent;
-        double secondaryCurrentMinimum = 0;
-        double secondaryVoltageMinimum = -(inputVoltage - primaryOutputVoltage) / turnsRatio;
-        double secondaryVoltageMaximum = primaryOutputVoltage / turnsRatio - diodeVoltageDrop;
+        double secondaryVoltageOn = (inputVoltage - primaryOutputVoltage) / turnsRatio;
+        double secondaryVoltageOff = -(primaryOutputVoltage / turnsRatio - diodeVoltageDrop);
 
         MAS::Waveform currentWaveform;
-        currentWaveform.set_data(std::vector<double>{0, 0, secondaryOutputCurrent + secondaryCurrentMinimum, secondaryOutputCurrent + secondaryCurrentMaximum});
+        currentWaveform.set_data(std::vector<double>{0, 0, -secondaryOffStart[k], -secondaryOffEnd[k]});
         currentWaveform.set_time(std::vector<double>{0, tOn, tOn, period});
         currentWaveform.set_ancillary_label(Lbl::CUSTOM);
         MAS::Waveform voltageWaveform;
-        voltageWaveform.set_data(std::vector<double>{secondaryVoltageMinimum, secondaryVoltageMinimum, secondaryVoltageMaximum, secondaryVoltageMaximum});
+        voltageWaveform.set_data(std::vector<double>{secondaryVoltageOn, secondaryVoltageOn, secondaryVoltageOff, secondaryVoltageOff});
         voltageWaveform.set_time(std::vector<double>{0, tOn, tOn, period});
         voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
         operatingPoint.get_mutable_excitations_per_winding().push_back(
@@ -1246,36 +1370,77 @@ MAS::OperatingPoint analytical_isolated_buck_boost(double inputVoltage, double p
     if (dutyCycle >= 1) throw std::invalid_argument("analytical_isolated_buck_boost: duty cycle must be smaller than 1");
     double tOn = dutyCycle / switchingFrequency;
 
+    const double period = 1.0 / switchingFrequency;
+
+    // One magnetizing triangle ImMin -> ImMax (t_on, +Vin across the primary) -> ImMin (off-time). Its
+    // average follows from charge balance: during the off-time the magnetizing current is shared between
+    // the primary (feeding its own inverting output through Dpri) and each isolated secondary, so
+    // <i_m>·(1-D) = Ipri + Σ Isec_k/N_k.
     double totalReflectedSecondaryCurrent = 0.0;
-    for (size_t i = 0; i < turnsRatios.size(); ++i)
+    for (size_t i = 0; i < turnsRatios.size(); ++i) {
+        if (!(turnsRatios[i] > 0))
+            throw std::invalid_argument("analytical_isolated_buck_boost: turns ratio of secondary " +
+                                        std::to_string(i) + " must be > 0");
         totalReflectedSecondaryCurrent += secondaryOutputCurrents[i] / turnsRatios[i];
-    double primaryCurrentPeakToPeak = (inputVoltage * primaryOutputVoltage) / (inputVoltage + primaryOutputVoltage) /
-                                      (switchingFrequency * inductance);
-    double primaryCurrentAverage = (primaryOutputCurrent + totalReflectedSecondaryCurrent) / (1.0 - dutyCycle);
-    double primaryVoltaveMaximum = inputVoltage;
-    double primaryVoltaveMinimum = -(primaryOutputVoltage + diodeVoltageDrop);
-    double primaryVoltavePeaktoPeak = primaryVoltaveMaximum - primaryVoltaveMinimum;
+    }
+    const double totalReflectedLoad = primaryOutputCurrent + totalReflectedSecondaryCurrent;
+    if (!(totalReflectedLoad > 0))
+        throw std::invalid_argument("analytical_isolated_buck_boost: total load current must be > 0");
+    const double magnetizingRipple = inputVoltage * tOn / inductance;   // dIm = Vin·t_on/L
+    const double magnetizingAverage = totalReflectedLoad / (1.0 - dutyCycle);
+    const double magnetizingMax = magnetizingAverage + magnetizingRipple / 2;
+    const double magnetizingMin = magnetizingAverage - magnetizingRipple / 2;
+
+    // Off-time sharing: output k takes the fraction share_k = (Isec_k/N_k) / (Ipri + Σ Isec/N) of the
+    // magnetizing ampere-turns, the primary keeps (1 - S), S = Σ share_k. Then at EVERY instant
+    // i_p + Σ i_s,k/N_k = i_m (exact ampere-turn identity), and the averages are exact:
+    //   <i_s,k> = share_k·N_k·<i_m>·(1-D) = Isec_k,   off-time primary average = (1-S)·<i_m>·(1-D) = Ipri.
+    std::vector<double> share(turnsRatios.size());
+    double S = 0.0;
+    for (size_t i = 0; i < turnsRatios.size(); ++i) {
+        share[i] = (secondaryOutputCurrents[i] / turnsRatios[i]) / totalReflectedLoad;
+        S += share[i];
+    }
+
+    double primaryVoltageMaximum = inputVoltage;
+    double primaryVoltageMinimum = -(primaryOutputVoltage + diodeVoltageDrop);
 
     MAS::OperatingPoint operatingPoint;
-    // Primary
+    // Primary (PASSIVE): the switch current (= the magnetizing current) during t_on, then its (1-S) share
+    // through the primary rectifier during the off-time. Voltage +Vin / -(Vpri + Vd).
     {
-        MAS::Waveform currentWaveform = WP::create_waveform(Lbl::TRIANGULAR, primaryCurrentPeakToPeak, switchingFrequency, dutyCycle, primaryCurrentAverage, 0);
-        MAS::Waveform voltageWaveform = WP::create_waveform(Lbl::RECTANGULAR, primaryVoltavePeaktoPeak, switchingFrequency, dutyCycle, 0, 0);
+        MAS::Waveform currentWaveform;
+        currentWaveform.set_data(std::vector<double>{magnetizingMin, magnetizingMax, (1.0 - S) * magnetizingMax,
+                                                     (1.0 - S) * magnetizingMin});
+        currentWaveform.set_time(std::vector<double>{0.0, tOn, tOn, period});
+        currentWaveform.set_ancillary_label(Lbl::CUSTOM);
+        MAS::Waveform voltageWaveform;
+        voltageWaveform.set_data(std::vector<double>{primaryVoltageMaximum, primaryVoltageMaximum,
+                                                     primaryVoltageMinimum, primaryVoltageMinimum});
+        voltageWaveform.set_time(std::vector<double>{0.0, tOn, tOn, period});
+        voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Primary"));
     }
-    // Secondaries (one isolated flyback rail per output)
+    // Secondaries (one isolated flyback rail per output), MAS convention: DOT-reference voltage (+Vin/N_k
+    // during t_on, -((Vpri + Vd)/N_k - Vd) while the rectifier conducts) and SOURCE current — the rectifier
+    // conducts while that voltage is negative, so the delivered current share_k·N_k·i_m is NEGATIVE. It FALLS
+    // in magnitude with the magnetizing current during the off-time (the old shape rose).
     for (size_t i = 0; i < turnsRatios.size(); ++i) {
-        double secondaryOutputCurrent = secondaryOutputCurrents[i];
-        double turnsRatio = turnsRatios[i];
-        double secondaryCurrentMaximum = (1 + dutyCycle) / (1 - dutyCycle) * secondaryOutputCurrent - secondaryOutputCurrent;
-        double secondaryCurrentPeakToPeak = secondaryCurrentMaximum - 0;
-        double secondaryVoltaveMaximum = (primaryOutputVoltage + diodeVoltageDrop) / turnsRatio - diodeVoltageDrop;
-        double secondaryVoltaveMinimum = -inputVoltage / turnsRatio;
-        double secondaryVoltavePeaktoPeak = secondaryVoltaveMaximum - secondaryVoltaveMinimum;
+        const double turnsRatio = turnsRatios[i];
+        const double scale = share[i] * turnsRatio;
+        double secondaryVoltageOn = inputVoltage / turnsRatio;
+        double secondaryVoltageOff = -((primaryOutputVoltage + diodeVoltageDrop) / turnsRatio - diodeVoltageDrop);
 
-        MAS::Waveform currentWaveform = WP::create_waveform(Lbl::FLYBACK_PRIMARY, secondaryCurrentPeakToPeak, switchingFrequency, 1.0 - dutyCycle, secondaryOutputCurrent, 0, tOn);
-        MAS::Waveform voltageWaveform = WP::create_waveform(Lbl::RECTANGULAR, secondaryVoltavePeaktoPeak, switchingFrequency, 1.0 - dutyCycle, 0, 0, tOn);
+        MAS::Waveform currentWaveform;
+        currentWaveform.set_data(std::vector<double>{0.0, 0.0, -scale * magnetizingMax, -scale * magnetizingMin});
+        currentWaveform.set_time(std::vector<double>{0.0, tOn, tOn, period});
+        currentWaveform.set_ancillary_label(Lbl::CUSTOM);
+        MAS::Waveform voltageWaveform;
+        voltageWaveform.set_data(std::vector<double>{secondaryVoltageOn, secondaryVoltageOn, secondaryVoltageOff,
+                                                     secondaryVoltageOff});
+        voltageWaveform.set_time(std::vector<double>{0.0, tOn, tOn, period});
+        voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Secondary " + std::to_string(i)));
     }
@@ -1304,7 +1469,7 @@ MAS::OperatingPoint analytical_active_clamp_forward(double inputVoltage,
                                                     const std::vector<double>& turnsRatios,
                                                     double switchingFrequency, double inductance,
                                                     double mainOutputInductance, double currentRippleRatio,
-                                                    double dutyCycle, double diodeVoltageDrop) {
+                                                    double diodeVoltageDrop) {
     using Lbl = MAS::WaveformLabel;
     if (outputVoltages.empty() || outputVoltages.size() != outputCurrents.size() ||
         turnsRatios.size() != outputVoltages.size())
@@ -1318,10 +1483,8 @@ MAS::OperatingPoint analytical_active_clamp_forward(double inputVoltage,
     double t1 = period * (mainOutputVoltage + diodeVoltageDrop) / (inputVoltage / mainSecondaryTurnsRatio);
     if (t1 > period / 2)
         throw std::invalid_argument("analytical_active_clamp_forward: T1 cannot be larger than period/2, wrong topology configuration");
-    double t2 = period - t1;
-    double deadTime = 0;
 
-    const double magnetizationCurrent = inputVoltage * t1 / inductance;
+    double magnetizationCurrent = inputVoltage * t1 / inductance;
     double minimumPrimaryCurrent = -magnetizationCurrent / 2;
     double maximumPrimaryCurrent = magnetizationCurrent / 2;
 
@@ -1345,10 +1508,12 @@ MAS::OperatingPoint analytical_active_clamp_forward(double inputVoltage,
         t1 = std::sqrt(sqrtArg);
         if (t1 > period / 2)
             throw std::invalid_argument("analytical_active_clamp_forward: T1 cannot be larger than period/2, wrong topology configuration");
-        t2 = t1 * inputVoltage / mainSecondaryTurnsRatio / (mainOutputVoltage + diodeVoltageDrop) - t1;
-        deadTime = period - t1 - t2;
-        minimumPrimaryCurrent = 0;
-        maximumPrimaryCurrent = magnetizationCurrent;
+        // DCM of the OUTPUT inductor only: the active clamp still resets the core with -Vclamp over the whole
+        // off-time (Vclamp = D/(1-D)·Vin holds the magnetizing volt-seconds), so the magnetizing current stays
+        // the symmetric ±m/2 triangle of the DCM on-time; the secondary current rises 0 -> ripple during t1.
+        magnetizationCurrent = inputVoltage * t1 / inductance;
+        minimumPrimaryCurrent = -magnetizationCurrent / 2;
+        maximumPrimaryCurrent = magnetizationCurrent / 2;
         for (size_t i = 0; i < outputVoltages.size(); ++i) {
             double outputCurrentRipple = currentRippleRatio * outputCurrents[i];
             minimumSecondaryCurrents[i] = 0;
@@ -1363,6 +1528,7 @@ MAS::OperatingPoint analytical_active_clamp_forward(double inputVoltage,
         throw std::invalid_argument("analytical_active_clamp_forward: clamp voltage undefined when duty cycle equals 1");
     const double clampVoltage = t1 * switchingFrequency / denom * inputVoltage;
 
+    const double actualDutyCycle = t1 * switchingFrequency;
     const double maxPriV = inputVoltage;
     const double minPriV = -clampVoltage;
     const double minPriIT2 = -magnetizationCurrent / 2;
@@ -1373,31 +1539,32 @@ MAS::OperatingPoint analytical_active_clamp_forward(double inputVoltage,
     {
         MAS::Waveform currentWaveform, voltageWaveform;
         currentWaveform.set_ancillary_label(Lbl::CUSTOM);
-        currentWaveform.set_data(std::vector<double>{minimumPrimaryCurrent, maximumPrimaryCurrent, maxPriIT2, minPriIT2});
-        currentWaveform.set_time(std::vector<double>{0, t1, t1, period});
-        if (minimumPrimaryCurrent > 0) {  // CCM
-            voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
-            voltageWaveform.set_data(std::vector<double>{maxPriV, maxPriV, minPriV, minPriV, maxPriV});
-            voltageWaveform.set_time(std::vector<double>{0, t1, t1, period, period});
-        } else {  // DCM
-            voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
-            voltageWaveform.set_data(std::vector<double>{maxPriV, maxPriV, minPriV, minPriV, 0, 0, maxPriV});
-            voltageWaveform.set_time(std::vector<double>{0, t1, t1, t1 + t2, t1 + t2, period, period});
-        }
+        // The leading (0, minPriIT2) point makes the t = 0 edge read "before the step" (end of the reset), as
+        // the secondary's FLYBACK_PRIMARY shape does (0 before it starts conducting) — so the resampled winding
+        // currents stay ampere-turn consistent at t = 0.
+        currentWaveform.set_data(std::vector<double>{minPriIT2, minimumPrimaryCurrent, maximumPrimaryCurrent, maxPriIT2, minPriIT2});
+        currentWaveform.set_time(std::vector<double>{0, 0, t1, t1, period});
+        voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
+        voltageWaveform.set_data(std::vector<double>{maxPriV, maxPriV, minPriV, minPriV, maxPriV});
+        voltageWaveform.set_time(std::vector<double>{0, t1, t1, period, period});
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Primary"));
     }
     // Secondaries
     for (size_t i = 0; i < outputVoltages.size(); ++i) {
         double secondaryCurrentPeakToPeak = maximumSecondaryCurrents[i] - minimumSecondaryCurrents[i];
-        double minimumSecondaryVoltage = -clampVoltage / turnsRatios[i];
-        double maximumSecondaryVoltage = inputVoltage / turnsRatios[i];
-        double secondaryVoltagePeakToPeak = maximumSecondaryVoltage - minimumSecondaryVoltage;
-        double secondaryVoltageOffset = maximumSecondaryVoltage + minimumSecondaryVoltage;
+        // The secondary conducts over exactly the primary's t1 (D = t1/T), so N_p i_p - N_s i_s stays the
+        // magnetizing triangle at every instant. Its dot-reference voltage is the primary's reflected by
+        // N_s/N_p: +Vin/n during t1, -Vclamp/n for the rest (the RECTANGULAR_WITH_DEADTIME builder, fed a
+        // separately supplied duty, did not reproduce these levels or edges).
+        const double n_s = turnsRatios[i];
         MAS::Waveform currentWaveform = WP::create_waveform(Lbl::FLYBACK_PRIMARY, secondaryCurrentPeakToPeak,
-                                                            switchingFrequency, dutyCycle, minimumSecondaryCurrents[i], 0);
-        MAS::Waveform voltageWaveform = WP::create_waveform(Lbl::RECTANGULAR_WITH_DEADTIME, secondaryVoltagePeakToPeak,
-                                                            switchingFrequency, dutyCycle, secondaryVoltageOffset, deadTime);
+                                                            switchingFrequency, actualDutyCycle, minimumSecondaryCurrents[i], 0);
+        MAS::Waveform voltageWaveform;
+        voltageWaveform.set_data(std::vector<double>{maxPriV / n_s, maxPriV / n_s, minPriV / n_s, minPriV / n_s,
+                                                     maxPriV / n_s});
+        voltageWaveform.set_time(std::vector<double>{0, t1, t1, period, period});
+        voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Secondary " + std::to_string(i)));
     }
@@ -1436,7 +1603,13 @@ static MAS::OperatingPoint pwm_bridge_phase_shifted_core(
     if (D_cmd <= 0) throw std::invalid_argument(std::string(who) + ": effective duty cycle is non-positive; provide a "
                                                 "positive phase shift (no default duty substituted)");
 
+    // One output only: the kernel models ONE output inductor (Vo, Io of output 0); emitting further
+    // secondaries from the same inductor current would add ampere-turns the primary does not carry.
+    if (turnsRatios.size() != 1)
+        throw std::invalid_argument(std::string(who) + ": the phase-shifted bridge model supports exactly one "
+                                    "output (got " + std::to_string(turnsRatios.size()) + ")");
     const double n = turnsRatios[0];
+    if (!(n > 0)) throw std::invalid_argument(std::string(who) + ": turns ratio must be > 0");
 
     // Sabate 1990 duty-cycle loss + effective duty (kernel calls — same as MKF).
     double dcl_duty = PBS::compute_duty_cycle_loss(Vbus, Lr, Io, n, Fs);
@@ -1451,7 +1624,11 @@ static MAS::OperatingPoint pwm_bridge_phase_shifted_core(
 
     // Output-inductor ripple ΔILo = Vo·(1−Deff)/(Fs·Lo) (Deff = active fraction the
     // secondary sees). Lo ≤ 0 ⇒ zero ripple (matches MKF's (Lo>0)?…:0 guard).
-    double dILo = (Lo > 0) ? Vo * (1.0 - Deff) / (Fs * Lo) : 0.0;
+    // The output inductor is fed at TWICE the switching frequency (both half cycles), so it falls for
+    // (1−Deff)·Thalf per half cycle: ΔILo = Vo·(1−Deff)/(2·Fs·Lo). (The former Vo·(1−Deff)/(Fs·Lo) doubled
+    // the ripple and made the ILo sawtooth discontinuous — the active-interval ramp only reached halfway to
+    // ILo_max — so the winding current, and the power the secondary delivers, came out ~7 % low.)
+    double dILo = (Lo > 0) ? Vo * (1.0 - Deff) / (2.0 * Fs * Lo) : 0.0;
     // CURRENT_DOUBLER: the load current splits between the TWO output inductors, so the
     // (per-inductor / reflected-secondary) current is centered at Io/2, not Io (MKF
     // Io_in_inductor = Io/2). Every other rectifier feeds the whole Io through one inductor.
@@ -1557,56 +1734,38 @@ static MAS::OperatingPoint pwm_bridge_phase_shifted_core(
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(currentWaveform, voltageWaveform, Fs, "Primary"));
     }
-    // ---- Secondary winding(s), one set per output, per the rectifier topology ----
-    // FULL_BRIDGE: ONE winding conducting on BOTH half-cycles — the diode bridge full-wave
-    //   rectifies, so the winding carries the (reflected) output-inductor current with its
-    //   direction reversing each half-cycle (bipolar ±ILo) at the full bipolar ±Vsec square.
-    // CENTER_TAPPED: two half-windings, each conducting ILo on alternate half-cycles and
-    //   reverse-blocking (zero current, −Vsec) on the other.
-    // CURRENT_DOUBLER: same ONE-bipolar-winding shape as FULL_BRIDGE, but ILo is centered at
-    //   Io/2 (set above via Io_in_inductor) — the load splits across the two output inductors.
-    for (size_t secIdx = 0; secIdx < turnsRatios.size(); ++secIdx) {
-        double ni = turnsRatios[secIdx];
-        if (ni <= 0) continue;
-        double VsecPk = Vbus / ni;
-        if (rectifier == SrcRectifier::FULL_BRIDGE || rectifier == SrcRectifier::CURRENT_DOUBLER) {
-            std::vector<double> v(totalSamples), i(totalSamples);
-            for (int k = 0; k < totalSamples; ++k) {
-                double vpri = Vpri_full[k];
-                double iLo_k = ILo_full[k];
-                v[k] = (vpri > 0) ? VsecPk : (vpri < 0 ? -VsecPk : 0.0);
-                i[k] = (vpri > 0) ? iLo_k  : (vpri < 0 ? -iLo_k  : 0.0);
-            }
-            MAS::Waveform iWfm; iWfm.set_ancillary_label(Lbl::CUSTOM); iWfm.set_data(i); iWfm.set_time(time_full);
-            MAS::Waveform vWfm; vWfm.set_ancillary_label(Lbl::CUSTOM); vWfm.set_data(v); vWfm.set_time(time_full);
-            operatingPoint.get_mutable_excitations_per_winding().push_back(
-                WP::complete_excitation(iWfm, vWfm, Fs, "Secondary " + std::to_string(secIdx)));
-            continue;
-        }
-        std::vector<double> v1(totalSamples), i1(totalSamples), v2(totalSamples), i2(totalSamples);
-        for (int k = 0; k < totalSamples; ++k) {
-            bool positive_half = (k <= N_samples);
-            double vpri = Vpri_full[k];
-            double iLo_k = ILo_full[k];
-            if (positive_half) {
-                v1[k] = (vpri > 0) ? VsecPk : (vpri < 0 ? -VsecPk : 0.0);
-                i1[k] = (vpri > 0) ? iLo_k : 0.0;
-                v2[k] = -v1[k]; i2[k] = 0.0;
-            } else {
-                v2[k] = (vpri < 0) ? VsecPk : (vpri > 0 ? -VsecPk : 0.0);
-                i2[k] = (vpri < 0) ? iLo_k : 0.0;
-                v1[k] = -v2[k]; i1[k] = 0.0;
-            }
-        }
-        MAS::Waveform i1Wfm; i1Wfm.set_ancillary_label(Lbl::CUSTOM); i1Wfm.set_data(i1); i1Wfm.set_time(time_full);
-        MAS::Waveform v1Wfm; v1Wfm.set_ancillary_label(Lbl::CUSTOM); v1Wfm.set_data(v1); v1Wfm.set_time(time_full);
-        operatingPoint.get_mutable_excitations_per_winding().push_back(
-            WP::complete_excitation(i1Wfm, v1Wfm, Fs, "Secondary " + std::to_string(secIdx) + "a"));
-        MAS::Waveform i2Wfm; i2Wfm.set_ancillary_label(Lbl::CUSTOM); i2Wfm.set_data(i2); i2Wfm.set_time(time_full);
-        MAS::Waveform v2Wfm; v2Wfm.set_ancillary_label(Lbl::CUSTOM); v2Wfm.set_data(v2); v2Wfm.set_time(time_full);
-        operatingPoint.get_mutable_excitations_per_winding().push_back(
-            WP::complete_excitation(i2Wfm, v2Wfm, Fs, "Secondary " + std::to_string(secIdx) + "b"));
+    // ---- Secondary winding(s), per the rectifier topology, in the MAS convention ----
+    // The secondary ampere-turns are exactly what the primary current carries beyond the magnetizing current,
+    // i_sec,net = n·(Ipri − Im) (dot reference, SOURCE), so i_m = Ipri − i_sec,net/n holds at every instant —
+    // including the commutation (duty-cycle-loss) and freewheel intervals, where the rectifier diodes share
+    // the output-inductor current and the old gated ±ILo shapes broke the ampere-turn balance.
+    // FULL_BRIDGE / CURRENT_DOUBLER: ONE bipolar winding carrying i_sec,net at the ±Vsec square.
+    // CENTER_TAPPED: two half-windings, both in the dot reference. Half a conducts the positive polarity,
+    //   half b the negative one (b's current is NEGATIVE in the dot reference); the diodes share the inductor
+    //   current, i_a − i_b = ILo, while their sum carries the net ampere-turns, i_a + i_b = i_sec,net:
+    //   i_a = (ILo + i_sec,net)/2, i_b = (i_sec,net − ILo)/2. During the active interval this is (ILo, 0) /
+    //   (0, −ILo); during the freewheel/commutation both halves conduct.
+    std::vector<double> netSecondary(totalSamples), vSec(totalSamples);
+    for (int k = 0; k < totalSamples; ++k) {
+        netSecondary[k] = n * (Ipri_full[k] - Im_full[k]);
+        vSec[k] = Vpri_full[k] / n;
     }
+    auto wfm = [&](const std::vector<double>& d) {
+        MAS::Waveform w; w.set_ancillary_label(Lbl::CUSTOM); w.set_data(d); w.set_time(time_full); return w; };
+    if (rectifier == SrcRectifier::FULL_BRIDGE || rectifier == SrcRectifier::CURRENT_DOUBLER) {
+        operatingPoint.get_mutable_excitations_per_winding().push_back(
+            WP::complete_excitation(wfm(netSecondary), wfm(vSec), Fs, "Secondary 0"));
+        return operatingPoint;
+    }
+    std::vector<double> iA(totalSamples), iB(totalSamples);
+    for (int k = 0; k < totalSamples; ++k) {
+        iA[k] = 0.5 * (ILo_full[k] + netSecondary[k]);
+        iB[k] = 0.5 * (netSecondary[k] - ILo_full[k]);
+    }
+    operatingPoint.get_mutable_excitations_per_winding().push_back(
+        WP::complete_excitation(wfm(iA), wfm(vSec), Fs, "Secondary 0a"));
+    operatingPoint.get_mutable_excitations_per_winding().push_back(
+        WP::complete_excitation(wfm(iB), wfm(vSec), Fs, "Secondary 0b"));
     return operatingPoint;
 }
 
@@ -1747,14 +1906,15 @@ MAS::OperatingPoint analytical_asymmetric_half_bridge(double inputVoltage,
     const double ILo1_max = Io_per_inductor + dILo1_pp / 2.0;
 
     const int N = 128;
-    std::vector<double> time, vPri, iPri, vSec_a, iSec_a, vSec_b, iSec_b;
+    std::vector<double> time, vPri, iPri, iLm, vSec_a, iSec_a, vSec_b, iSec_b;
     const size_t cap = 2 * N + 1;
-    for (auto* v : {&time, &vPri, &iPri, &vSec_a, &iSec_a, &vSec_b, &iSec_b}) v->reserve(cap);
+    for (auto* v : {&time, &vPri, &iPri, &iLm, &vSec_a, &iSec_a, &vSec_b, &iSec_b}) v->reserve(cap);
 
     // emit one sample to the primary + center-tapped half-winding arrays.
     auto emit = [&](double t, double v_pri_k, double i_lm_k, double i_lo1_k) {
         time.push_back(t);
         vPri.push_back(v_pri_k);
+        iLm.push_back(i_lm_k);
         const bool inA = (v_pri_k > 0.0);
         const bool inC = (v_pri_k < 0.0);
         iPri.push_back(inA ? (i_lo1_k / n + i_lm_k) : (inC ? (-i_lo1_k / n + i_lm_k) : i_lm_k));
@@ -1815,8 +1975,10 @@ MAS::OperatingPoint analytical_asymmetric_half_bridge(double inputVoltage,
             if (n_k <= 0.0) continue;
             const double share = (Vo_k * Io_k) / totalPower;
             std::vector<double> iSec_k(iPri.size()), vSec_k(vPri.size());
+            // The secondary carries only the LOAD part of the primary current (iPri - iLm): putting the
+            // magnetizing current on the secondaries too cancelled it out of the ampere-turns.
             for (size_t i = 0; i < iPri.size(); ++i) {
-                iSec_k[i] = share * n_k * iPri[i];
+                iSec_k[i] = share * n_k * (iPri[i] - iLm[i]);
                 vSec_k[i] = (vPri[i] > 0.0) ? +Vo_k : -Vo_k;
             }
             operatingPoint.get_mutable_excitations_per_winding().push_back(
@@ -1836,11 +1998,13 @@ MAS::OperatingPoint analytical_asymmetric_half_bridge(double inputVoltage,
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(wfm(iSecFB, time), wfm(vSecFB, time), fsw, "Secondary 0"));
     } else {
-        // Center-tapped rectifier: two polarity-split half-windings.
+        // Center-tapped rectifier: two polarity-split half-windings. Half b is built in its own "positive
+        // while conducting" reference; the MAS convention emits it in the dot reference (voltage in phase
+        // with the primary), which negates both its voltage and its (SOURCE) current.
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(wfm(iSec_a, time), wfm(vSec_a, time), fsw, "Secondary 0a"));
         operatingPoint.get_mutable_excitations_per_winding().push_back(
-            WP::complete_excitation(wfm(iSec_b, time), wfm(vSec_b, time), fsw, "Secondary 0b"));
+            WP::complete_excitation(wfm(negated(iSec_b), time), wfm(negated(vSec_b), time), fsw, "Secondary 0b"));
     }
     return operatingPoint;
 }
@@ -1908,7 +2072,7 @@ void dab_initial_conditions(const std::vector<DabSubInterval>& segs, double N, d
         if (dtheta <= 0) continue;
         double vL = s.Vab - N * s.Vcd;
         sum_iL += vL * inv_iL * dtheta;
-        sum_Im += s.Vab * inv_Im * dtheta;
+        sum_Im += N * s.Vcd * inv_Im * dtheta;   // Lm sits across the transformer primary = N·Vcd
     }
     iL0 = -0.5 * sum_iL;
     Im0 = -0.5 * sum_Im;
@@ -1926,7 +2090,7 @@ void dab_propagate_period(const std::vector<DabSubInterval>& segs, double N, dou
         double dtheta = s.theta_end - s.theta_start;
         double vL = s.Vab - N * s.Vcd;
         iL += vL * inv_iL * dtheta;
-        Im += s.Vab * inv_Im * dtheta;
+        Im += N * s.Vcd * inv_Im * dtheta;
         bt.push_back(s.theta_end); bi.push_back(iL); bm.push_back(Im);
     }
 }
@@ -2022,35 +2186,38 @@ MAS::OperatingPoint analytical_dab(double inputVoltage,
     const double dt = Thalf / N_samples;
     const double angle_per_time = 2.0 * M_PI * Fs;
 
+    // Circuit: bridge A -> series Lr -> transformer primary (Lm across it) -> ideal N:1 -> bridge B. The
+    // transformer's primary TERMINAL voltage is therefore N·Vcd (the secondary is clamped by its bridge), not
+    // the bridge voltage Vab (that includes the Lr drop, and put the primary 30+ deg out of phase with the
+    // secondary at a typical outer phase shift). Lr carries the whole primary current iL (vLr = Vab − N·Vcd),
+    // Lm integrates N·Vcd, and the ideal transformer passes the rest, iL − Im, to the secondaries.
     std::vector<double> time_full(totalSamples), iL_full(totalSamples),
-        Vab_full(totalSamples), Im_full(totalSamples);
+        Vpri_full(totalSamples), Im_full(totalSamples);
     for (int k = 0; k < totalSamples; ++k) {
         double t = k * dt;
         double theta = std::fmod(t * angle_per_time, 2.0 * M_PI);
         if (theta < 0) theta += 2.0 * M_PI;
         time_full[k] = t;
-        Vab_full[k] = dab_Vab_at(theta, V1, D1_rad);
+        Vpri_full[k] = N_main * dab_Vcd_at(theta, V2_main, D2_rad, D3_rad);
         iL_full[k]  = dab_sample(theta, bnd_theta, bnd_iL);
         Im_full[k]  = dab_sample(theta, bnd_theta, bnd_Im);
     }
 
     MAS::OperatingPoint operatingPoint;
-    // Primary: total current = tank iL + magnetizing Im; voltage = Vab (primary bridge square wave).
+    // Primary (PASSIVE): the series-inductor current iL (load + magnetizing); voltage N·Vcd (dot reference).
     {
-        std::vector<double> I_primary(totalSamples);
-        for (int k = 0; k < totalSamples; ++k) I_primary[k] = iL_full[k] + Im_full[k];
         MAS::Waveform currentWaveform;
         currentWaveform.set_ancillary_label(Lbl::CUSTOM);
-        currentWaveform.set_data(I_primary);
+        currentWaveform.set_data(iL_full);
         currentWaveform.set_time(time_full);
         MAS::Waveform voltageWaveform;
         voltageWaveform.set_ancillary_label(Lbl::BIPOLAR_RECTANGULAR);
-        voltageWaveform.set_data(Vab_full);
+        voltageWaveform.set_data(Vpri_full);
         voltageWaveform.set_time(time_full);
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(currentWaveform, voltageWaveform, Fs, "Primary"));
     }
-    // Secondaries: load-share projection of the tank current onto each output (matches MKF).
+    // Secondaries (SOURCE): load-share projection of the transformer's LOAD current iL − Im onto each output.
     double total_g = 0.0;
     for (size_t i = 0; i < turnsRatios.size(); ++i)
         if (outputVoltages[i] > 0 && outputCurrents[i] > 0) total_g += outputCurrents[i] / outputVoltages[i];
@@ -2063,7 +2230,7 @@ MAS::OperatingPoint analytical_dab(double inputVoltage,
         double share = (V2_i > 0 && Io_i > 0) ? (Io_i / V2_i) / total_g : (secIdx == 0 ? 1.0 : 0.0);
         std::vector<double> iSecData(totalSamples), vSecData(totalSamples);
         for (int k = 0; k < totalSamples; ++k) {
-            iSecData[k] = n_i * iL_full[k] * share;
+            iSecData[k] = n_i * (iL_full[k] - Im_full[k]) * share;
             double theta = time_full[k] * angle_per_time;   // Vcd_at wraps internally (matches MKF)
             vSecData[k] = dab_Vcd_at(theta, V2_i, D2_rad, D3_rad);
         }
@@ -2128,7 +2295,6 @@ MAS::OperatingPoint analytical_src(double inputVoltage,
     const double Vbridge_pk_fund = (4.0 / M_PI) * k_bridge * inputVoltage;
     const double ILr_pk = Vbridge_pk_fund / Zin;
     const double phi = std::atan2(X, Rac);
-    const double Vbridge_lvl = k_bridge * inputVoltage;
 
     const int N = 256;
     const int totalSamples = N + 1;              // closed period (last == first)
@@ -2140,13 +2306,15 @@ MAS::OperatingPoint analytical_src(double inputVoltage,
         double theta = w * t;
         time_full[k] = t;
         ILr_full[k] = ILr_pk * std::sin(theta - phi);
-        double thetaMod = std::fmod(theta, 2.0 * M_PI);
-        if (thetaMod < 0) thetaMod += 2.0 * M_PI;
-        Vpri_full[k] = (thetaMod < M_PI) ? +Vbridge_lvl : -Vbridge_lvl;
+        // The transformer primary TERMINAL voltage (dot reference): the rectifier clamps every secondary at
+        // ±Vout in phase with the tank current, so the ideal transformer's primary sees ±n·Vout with the SAME
+        // phase. The bridge square ±k·Vin is not the winding voltage — it includes the Lr/Cr tank drop and
+        // leads the winding voltage by the tank angle phi.
+        Vpri_full[k] = (ILr_full[k] >= 0.0) ? +n_main * outputVoltages[0] : -n_main * outputVoltages[0];
     }
 
     MAS::OperatingPoint operatingPoint;
-    // Primary: sinusoidal tank current, square bridge voltage.
+    // Primary: sinusoidal tank current, ±n·Vout transformer voltage in phase with it.
     {
         MAS::Waveform iW; iW.set_ancillary_label(Lbl::CUSTOM); iW.set_data(ILr_full); iW.set_time(time_full);
         MAS::Waveform vW; vW.set_ancillary_label(Lbl::CUSTOM); vW.set_data(Vpri_full); vW.set_time(time_full);
@@ -2173,9 +2341,10 @@ MAS::OperatingPoint analytical_src(double inputVoltage,
                 for (int k = 0; k < totalSamples; ++k) {
                     double iPri = ILr_full[k];
                     double i_share = iPri * n_i * share;
-                    double i_half = (halfIdx == 0) ? std::max(0.0, +i_share) : std::max(0.0, -i_share);
-                    double v_half = (halfIdx == 0) ? ((iPri >= 0.0) ? +Vout_i : -Vout_i)
-                                                   : ((iPri >= 0.0) ? -Vout_i : +Vout_i);
+                    // MAS convention: both halves in the dot reference (voltage in phase with the primary);
+                    // half 2 conducts the negative polarity, so its SOURCE current is negative.
+                    double i_half = (halfIdx == 0) ? std::max(0.0, i_share) : std::min(0.0, i_share);
+                    double v_half = (iPri >= 0.0) ? +Vout_i : -Vout_i;
                     iSecData[k] = i_half;
                     vSecData[k] = v_half;
                 }
@@ -2319,10 +2488,11 @@ MAS::OperatingPoint analytical_llc(double inputVoltage,
                 std::vector<double> iSecData(totalSamples, 0.0), vSecData(totalSamples, 0.0);
                 for (int k = 0; k < totalSamples; ++k) {
                     const double Id = (ILs_full[k] - ILm_full[k]) * share;
-                    const double Id_half = (halfIdx == 0) ? std::max(0.0, Id) : std::max(0.0, -Id);
+                    // MAS convention: both halves in the dot reference (voltage in phase with the primary);
+                    // half 2 conducts the negative polarity, so its SOURCE current is negative.
+                    const double Id_half = (halfIdx == 0) ? std::max(0.0, Id) : std::min(0.0, Id);
                     iSecData[k] = Id_half * n_i * secScale;
-                    vSecData[k] = (halfIdx == 0) ? (Vpri_full[k] >= 0 ? +Vout_i : -Vout_i)
-                                                 : (Vpri_full[k] >= 0 ? -Vout_i : +Vout_i);
+                    vSecData[k] = (Vpri_full[k] >= 0 ? +Vout_i : -Vout_i);
                 }
                 MAS::Waveform iW; iW.set_ancillary_label(Lbl::CUSTOM); iW.set_data(iSecData); iW.set_time(time_full);
                 MAS::Waveform vW; vW.set_ancillary_label(Lbl::CUSTOM); vW.set_data(vSecData); vW.set_time(time_full);
@@ -2446,10 +2616,11 @@ MAS::OperatingPoint analytical_cllc(double inputVoltage,
             std::vector<double> iSecData(totalSamples, 0.0), vSecData(totalSamples, 0.0);
             for (int k = 0; k < totalSamples; ++k) {
                 const double Id = ILr1_full[k] - ILm_full[k];
-                const double Id_half = (halfIdx == 0) ? std::max(0.0, Id) : std::max(0.0, -Id);
+                // MAS convention: both halves in the dot reference (voltage in phase with the primary);
+                // half 2 conducts the negative polarity, so its SOURCE current is negative.
+                const double Id_half = (halfIdx == 0) ? std::max(0.0, Id) : std::min(0.0, Id);
                 iSecData[k] = Id_half * n * secScale;
-                vSecData[k] = (halfIdx == 0) ? (Vpri_full[k] >= 0 ? +Vout0 : -Vout0)
-                                             : (Vpri_full[k] >= 0 ? -Vout0 : +Vout0);
+                vSecData[k] = (Vpri_full[k] >= 0 ? +Vout0 : -Vout0);
             }
             MAS::Waveform iW; iW.set_ancillary_label(Lbl::CUSTOM); iW.set_data(iSecData); iW.set_time(time_full);
             MAS::Waveform vW; vW.set_ancillary_label(Lbl::CUSTOM); vW.set_data(vSecData); vW.set_time(time_full);
@@ -2568,10 +2739,11 @@ MAS::OperatingPoint analytical_clllc(double inputVoltage,
             std::vector<double> iSecData(totalSamples, 0.0), vSecData(totalSamples, 0.0);
             for (int k = 0; k < totalSamples; ++k) {
                 const double Id = ILr1_full[k] - ILm_full[k];
-                const double Id_half = (halfIdx == 0) ? std::max(0.0, Id) : std::max(0.0, -Id);
+                // MAS convention: both halves in the dot reference (voltage in phase with the primary);
+                // half 2 conducts the negative polarity, so its SOURCE current is negative.
+                const double Id_half = (halfIdx == 0) ? std::max(0.0, Id) : std::min(0.0, Id);
                 iSecData[k] = Id_half * n * secScale;
-                vSecData[k] = (halfIdx == 0) ? (Vpri_full[k] >= 0 ? +Vout0 : -Vout0)
-                                             : (Vpri_full[k] >= 0 ? -Vout0 : +Vout0);
+                vSecData[k] = (Vpri_full[k] >= 0 ? +Vout0 : -Vout0);
             }
             MAS::Waveform iW; iW.set_ancillary_label(Lbl::CUSTOM); iW.set_data(iSecData); iW.set_time(time_full);
             MAS::Waveform vW; vW.set_ancillary_label(Lbl::CUSTOM); vW.set_data(vSecData); vW.set_time(time_full);
