@@ -7,6 +7,31 @@
 #include <algorithm>
 #include <vector>
 
+
+namespace Kirchhoff {
+namespace {
+// The initial current of every winding of the coupled inductor T1 at t = 0 — the instant the switching
+// cycle starts (QS1 turns on at phase 0) — read from the analytical steady-state operating point. With
+// the rails precharged too, the deck starts on its steady state instead of a start-up transient: its
+// output LC (Q ~ 300 at the web defaults) otherwise rings for ~0.3 s, far beyond any bounded run.
+nlohmann::json winding_initial_currents(const MAS::OperatingPoint& op, const std::string& stage) {
+    nlohmann::json out = nlohmann::json::array();
+    const auto& excs = op.get_excitations_per_winding();
+    for (size_t w = 0; w < excs.size(); ++w) {
+        const auto& cur = excs[w].get_current();
+        if (!cur || !cur->get_waveform() || cur->get_waveform()->get_data().empty())
+            throw std::runtime_error("isolated_buck: analytical winding " + std::to_string(w)
+                                     + " has no current waveform to start the deck from");
+        nlohmann::json ic;
+        ic["stage"] = stage; ic["component"] = "T1"; ic["winding"] = static_cast<int>(w);
+        ic["current"] = cur->get_waveform()->get_data().front();
+        out.push_back(ic);
+    }
+    return out;
+}
+}  // namespace
+}  // namespace Kirchhoff
+
 namespace Kirchhoff {
 using nlohmann::json;
 
@@ -255,6 +280,7 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
           for (size_t k = 0; k < nSec; ++k) {
               json ick; ick["node"] = "Vout" + std::to_string(k + 2); ick["voltage"] = d.secondaries[k].voltage;
               ics.push_back(ick); }
+          for (const auto& ic : winding_initial_currents(aopNom, "flybuckCell")) ics.push_back(ic);
           tas["simulation"]["initialConditions"] = ics; }
         req::finalize_control_seeds(tas, Topology::ISOLATED_BUCK_CONVERTER);
         return tas;
@@ -386,7 +412,9 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
     // ms to drain them, and meanwhile the secondary diode never conducts.
     { json icPri; icPri["node"] = "Vout"; icPri["voltage"] = d.primaryVoltage;
       json icSec; icSec["node"] = "flybuckCell.vout_sec"; icSec["voltage"] = d.secondaryVoltage;
-      tas["simulation"]["initialConditions"] = json::array({icPri, icSec}); }
+      json ics = json::array({icPri, icSec});
+      for (const auto& ic : winding_initial_currents(aopNom, "flybuckCell")) ics.push_back(ic);
+      tas["simulation"]["initialConditions"] = ics; }
     req::finalize_control_seeds(tas, Topology::ISOLATED_BUCK_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }

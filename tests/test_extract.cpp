@@ -428,6 +428,33 @@ double primary_peak(const std::string& topo, const std::string& spec, const std:
     const json& op = j.contains("operatingPoint") ? j.at("operatingPoint") : j.at("inputs").at("operatingPoints").at(0);
     return peak_abs(op.at("excitationsPerWinding").at(0).at("current"));
 }
+// rms / mean of one winding's current or voltage over the extracted period.
+double rms_of(const json& signal) {
+    const auto d = signal.at("waveform").at("data").get<std::vector<double>>();
+    double a = 0.0; for (double v : d) a += v * v;
+    return std::sqrt(a / d.size());
+}
+double mean_of(const json& signal) {
+    const auto d = signal.at("waveform").at("data").get<std::vector<double>>();
+    double a = 0.0; for (double v : d) a += v;
+    return a / d.size();
+}
+// Correlation of two one-period signals sampled on their own grids (the analytical one is resampled onto the
+// simulated one's time points).
+double correlation(const json& sim, const json& ref) {
+    const auto sd = sim.at("waveform").at("data").get<std::vector<double>>();
+    const auto st = sim.at("waveform").at("time").get<std::vector<double>>();
+    const auto rd = ref.at("waveform").at("data").get<std::vector<double>>();
+    const auto rt = ref.at("waveform").at("time").get<std::vector<double>>();
+    double dot = 0.0, ns = 0.0, nr = 0.0;
+    for (size_t k = 0; k < sd.size(); ++k) {
+        const size_t j = static_cast<size_t>(std::upper_bound(rt.begin(), rt.end(), st[k]) - rt.begin());
+        const double rv = (j == 0) ? rd.front() : (j >= rt.size()) ? rd.back()
+                        : rd[j - 1] + (st[k] - rt[j - 1]) / (rt[j] - rt[j - 1]) * (rd[j] - rd[j - 1]);
+        dot += sd[k] * rv; ns += sd[k] * sd[k]; nr += rv * rv;
+    }
+    return dot / std::sqrt(ns * nr);
+}
 }  // namespace
 
 TEST_CASE("extract(NGSPICE): a run that ends inside start-up is extended to steady state",
@@ -454,11 +481,122 @@ TEST_CASE("extract(NGSPICE): a deck that never settles is an error, not an opera
         WARN("libngspice not linked — steady-state extract skipped");
         return;
     }
-    // The web isolated-buck default: its output LC (240 uH, 100 uF, Q ~ 300) rings for ~0.3 s after
-    // start-up — far beyond any bounded run. It used to come back as 3.1 A primary peak against 0.14 A.
-    const std::string out = Kirchhoff::api::process_converter("isolated_buck",
-        R"KH({"designRequirements":{"inputType":"dc","inputVoltage":{"minimum":36,"maximum":72},"switchingFrequency":{"nominal":750000},"outputs":[{"name":"out","voltage":{"nominal":10},"regulation":"voltage"},{"name":"out2","voltage":{"nominal":10},"regulation":"voltage"}],"efficiency":0.9},"operatingPoints":[{"name":"full_load","inputVoltage":54,"ambientTemperature":25,"outputs":[{"name":"out","power":0.2},{"name":"out2","power":1}]}],"config":{"rippleRatio":0.4,"tranStopTime":0.00006933333333333333}})KH", "ngspice");
+    // The web isolated-buck default WITHOUT its initial conditions: its output LC (240 uH, 100 uF,
+    // Q ~ 300) rings for ~0.3 s from a cold start, far beyond any bounded run. It used to come back as a
+    // 3.1 A primary peak against 0.14 A analytical; it must be refused.
+    json tas = json::parse(Kirchhoff::api::design_tas("isolated_buck", R"KH({"designRequirements":{"inputType":"dc","inputVoltage":{"minimum":36,"maximum":72},"switchingFrequency":{"nominal":750000},"outputs":[{"name":"out","voltage":{"nominal":10},"regulation":"voltage"},{"name":"out2","voltage":{"nominal":10},"regulation":"voltage"}],"efficiency":0.9},"operatingPoints":[{"name":"full_load","inputVoltage":54,"ambientTemperature":25,"outputs":[{"name":"out","power":0.2},{"name":"out2","power":1}]}],"config":{"rippleRatio":0.4,"tranStopTime":0.00006933333333333333}})KH"));
+    REQUIRE(tas.at("simulation").contains("initialConditions"));
+    tas["simulation"].erase("initialConditions");
+    const std::string out = Kirchhoff::api::extract_operating_point(tas.dump(), "ngspice", "");
     INFO(out.substr(0, 300));
     REQUIRE(out.rfind("Exception:", 0) == 0);
     CHECK(out.find("did not reach steady state") != std::string::npos);
+}
+
+TEST_CASE("extract(NGSPICE): the isolated buck reaches its own periodic steady state", "[extract][steady-state]") {
+    if (!Kirchhoff::ngspice_in_process_available()) {
+        WARN("libngspice not linked — steady-state extract skipped");
+        return;
+    }
+    // The web isolated-buck default. Its output LC (240 uH, 100 uF, Q ~ 300) rings for ~0.3 s from any
+    // start that is not the deck's exact equilibrium, and the lossless deck, driven at the loss-compensated
+    // duty D = Vpri/(Vin*eta), settles at ~11.15 V rather than the 10 V design point. The extractor must
+    // solve for the deck's periodic steady state (shooting on the declared initial conditions) and extract
+    // that period: the secondary then carries exactly the isolated rail's load current on average (charge
+    // balance holds only in steady state), and each winding correlates with its analytical current.
+    const std::string spec = R"KH({"designRequirements":{"inputType":"dc","inputVoltage":{"minimum":36,"maximum":72},"switchingFrequency":{"nominal":750000},"outputs":[{"name":"out","voltage":{"nominal":10},"regulation":"voltage"},{"name":"out2","voltage":{"nominal":10},"regulation":"voltage"}],"efficiency":0.9},"operatingPoints":[{"name":"full_load","inputVoltage":54,"ambientTemperature":25,"outputs":[{"name":"out","power":0.2},{"name":"out2","power":1}]}],"config":{"rippleRatio":0.4,"tranStopTime":0.00006933333333333333}})KH";
+    const std::string a1 = Kirchhoff::api::process_converter("isolated_buck", spec, "ngspice");
+    INFO(a1.substr(0, 300));
+    REQUIRE(a1.rfind("Exception:", 0) != 0);
+    const json op = json::parse(a1).at("operatingPoint");
+    const auto& excs = op.at("excitationsPerWinding");
+    REQUIRE(excs.size() == 2);
+    const double pk0 = peak_abs(excs.at(0).at("current")), pk1 = peak_abs(excs.at(1).at("current"));
+    INFO("primary peak=" << pk0 << " secondary peak=" << pk1);
+    // The start-up transient came back as a 3.1 A primary peak; the settled deck carries tenths of an amp.
+    CHECK(pk0 < 0.3);
+    CHECK(pk1 < 0.3);
+    CHECK(pk1 > 0.05);   // the isolated rail is loaded (1 W at ~10 V)
+    // Charge balance on the isolated rail: the diode's average current is the load's, V/R with R = 100 ohm.
+    const json j = json::parse(a1);
+    const double iSecMean = mean_of(excs.at(1).at("current"));
+    INFO("secondary mean current=" << iSecMean);
+    CHECK(iSecMean > 0.095);
+    CHECK(iSecMean < 0.115);   // 1 W on a rail that the lossless deck puts at ~10.4 V: ~0.104 A
+    const json& ana = j.at("analyticalWaveforms").at("T1").at("excitationsPerWinding");
+    CHECK(correlation(excs.at(0).at("current"), ana.at(0).at("current")) > 0.8);
+    CHECK(correlation(excs.at(1).at("current"), ana.at(1).at("current")) > 0.8);
+}
+
+
+TEST_CASE("extract(NGSPICE): the DAB reaches its own periodic steady state", "[extract][steady-state]") {
+    if (!Kirchhoff::ngspice_in_process_available()) {
+        WARN("libngspice not linked — steady-state extract skipped");
+        return;
+    }
+    // The web DAB default. A DAB is a current source into its output capacitor (tau = R*C = 16 ms here) and
+    // its magnetizing / Lr DC offsets decay over tens of ms; from a cold start the web's 52-period window
+    // extracted a primary current of ~10 A at the cycle start. Precharged and refined, it settles on the
+    // deck's own equilibrium (~393 V; the snubbers and dead times make it ~20 % below the lossless
+    // analytical 4 A peak, reported separately), and a second extraction agrees with the first.
+    const std::string spec = R"KH({"designRequirements":{"inputType":"dc","inputVoltage":{"nominal":400,"tolerance":0.1},"switchingFrequency":{"nominal":100000},"outputs":[{"name":"out","voltage":{"nominal":400},"regulation":"voltage"}],"efficiency":0.97,"magnetizingInductance":{"nominal":0.001},"turnsRatios":[{"nominal":1}]},"operatingPoints":[{"name":"full_load","inputVoltage":400,"ambientTemperature":25,"outputs":[{"name":"out","power":1000}]}],"config":{"dabPhaseShiftDeg":30,"tranStopTime":0.00052}})KH";
+    const double analytical = primary_peak("dab", spec, "analytical");
+    const double s1 = primary_peak("dab", spec, "ngspice");
+    INFO("analytical peak=" << analytical << " simulated peak=" << s1);
+    CHECK(s1 > 0.6 * analytical);
+    CHECK(s1 < 1.2 * analytical);
+}
+
+
+
+TEST_CASE("extract(NGSPICE): the AHB's simulated transformer matches its analytical one, winding by winding", "[extract][steady-state][ahb]") {
+    if (!Kirchhoff::ngspice_in_process_available()) {
+        WARN("libngspice not linked — AHB extract skipped");
+        return;
+    }
+    // 400 V -> 12 V, 200 W, both forward rectifiers. Three defects made the simulated T1 disagree with the
+    // analytical one: the deck wired T1's primary the other way round (+(Vin−Vcb) while Q1 conducts is the
+    // analytical orientation; the deck gave −Vcb), the full-bridge variant needed a steady-state solve that
+    // started the blocking cap from −V(cb_mid) because the uic deck never stated V(Vin), and a switching
+    // commutation spike sampled onto one grid point read as a 41–100 A peak. Every winding's rms and peak
+    // must now agree with the analytical transformer, and every simulated signal must correlate positively
+    // with its analytical counterpart.
+    for (const std::string rect : {"centerTapped", "fullBridge"}) {
+        const std::string spec = R"KH({"designRequirements":{"inputType":"dc","inputVoltage":{"nominal":400,"tolerance":0.1},"switchingFrequency":{"nominal":100000},"outputs":[{"name":"out","voltage":{"nominal":12},"regulation":"voltage"}],"efficiency":0.95},"operatingPoints":[{"name":"full_load","inputVoltage":400,"ambientTemperature":25,"outputs":[{"name":"out","power":200}]}],"config":{"rectifierType":")KH" + rect + R"KH("}})KH";
+        const std::string out = Kirchhoff::api::process_converter("ahb", spec, "ngspice");
+        INFO("rectifier=" << rect << " out=" << out.substr(0, 300));
+        REQUIRE(out.rfind("Exception:", 0) != 0);
+        const json j = json::parse(out);
+        const json& sim = j.at("operatingPoint").at("excitationsPerWinding");
+        const json& ana = j.at("analyticalWaveforms").at("T1").at("excitationsPerWinding");
+        REQUIRE(sim.size() == ana.size());
+        REQUIRE(sim.size() == (rect == "centerTapped" ? 3u : 2u));
+        for (size_t w = 0; w < sim.size(); ++w) {
+            for (const char* q : {"current", "voltage"}) {
+                const double rs = rms_of(sim[w].at(q)), ra = rms_of(ana[w].at(q));
+                const double ps = peak_abs(sim[w].at(q)), pa = peak_abs(ana[w].at(q));
+                const double c = correlation(sim[w].at(q), ana[w].at(q));
+                INFO("winding " << w << " " << q << ": rms sim=" << rs << " ana=" << ra << " peak sim=" << ps
+                     << " ana=" << pa << " corr=" << c);
+                CHECK(std::abs(rs - ra) <= 0.10 * ra);
+                CHECK(std::abs(ps - pa) <= 0.10 * pa);
+                CHECK(c > 0.9);
+            }
+        }
+    }
+}
+
+TEST_CASE("TasAssembler: a uic deck states its DC source levels in .ic", "[initial-conditions]") {
+    // Under uic ngspice computes no operating point and starts every capacitor from the .ic values of its two
+    // nodes, counting an unstated node as 0 V — a DC source node included. The AHB's blocking cap runs from
+    // Vin to cb_mid; without v(Vin) it started at −V(cb_mid) and the steady-state solve converged on a
+    // spurious state.
+    const std::string spec = R"KH({"designRequirements":{"inputType":"dc","inputVoltage":{"nominal":400,"tolerance":0.1},"switchingFrequency":{"nominal":100000},"outputs":[{"name":"out","voltage":{"nominal":12},"regulation":"voltage"}],"efficiency":0.95},"operatingPoints":[{"name":"full_load","inputVoltage":400,"ambientTemperature":25,"outputs":[{"name":"out","power":200}]}],"config":{"rectifierType":"fullBridge"}})KH";
+    const json tas = json::parse(Kirchhoff::api::process_converter("ahb", spec, "analytical")).at("tas");
+    REQUIRE(tas.at("simulation").contains("initialConditions"));
+    const std::string deck = Kirchhoff::tas_to_ngspice(tas, PEAS::Fidelity(PEAS::Fidelity::Origin::REQUIREMENTS));
+    INFO(deck.substr(deck.find(".ic"), 300));
+    CHECK(deck.find(".ic v(Vin)=400") != std::string::npos);
+    CHECK(deck.find(".ic v(XahbCell.cb_mid)=") != std::string::npos);
+    CHECK(deck.find(" uic") != std::string::npos);
 }

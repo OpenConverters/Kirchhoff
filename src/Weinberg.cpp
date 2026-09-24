@@ -210,7 +210,13 @@ json build_weinberg_tas(const WeinbergDesign& d) {
         {"primary", "primary", "secondary", "secondary"}, std::nullopt, 25.0, wT1,
         // n = 1/(2·M·(1−D_target)) is the boost-regime duty-derived ratio -> emit the two secondary ratios
         // as {maximum}; the 1.0 second-primary half is a structural 1:1 and stays {nominal}. (abt #49)
-        /*turnsRatioIsCeiling=*/{false, true, true});
+        /*turnsRatioIsCeiling=*/{false, true, true},
+        // T1 is a push-pull TRANSFORMER: the Weinberg stores its energy in L1, and T1's magnetizing
+        // inductance only has to be large enough to keep the magnetizing current small. Requiring it
+        // within +-10% of L1 (the legacy "Lpri mirrors L1") forced every ferrite core to a gap far
+        // beyond the fringing limit, so no core could be advised and the adviser's relaxed retries ran
+        // away (WASM std::bad_alloc). L1's value is the floor.
+        /*lmIsMinimum=*/true);
 
     json cout; cout["capacitor"] = json::object();
     cout["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;

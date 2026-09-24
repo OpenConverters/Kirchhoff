@@ -229,6 +229,8 @@ bool stage_has_analog_control_law(const json& stage) {
 
 } // namespace
 
+static std::string to_lower(std::string s) { for (char& ch : s) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch))); return s; }
+
 static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fidelity,
                                 CIAS::SpiceDialect dialect) {
     const bool lt = (dialect == CIAS::SpiceDialect::Ltspice);
@@ -490,7 +492,43 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
             if (!c.at("endpoints").empty()) sub["connections"].push_back(c);
         }
 
-        subckts << conv.to_subckt(CIAS::CiasCircuit::from_json(sub)) << "\n";
+        std::string subcktText = conv.to_subckt(CIAS::CiasCircuit::from_json(sub));
+        // Initial winding currents (TAS initialBranchCurrent): IC=<A> on that winding's inductor line in
+        // this stage's subcircuit; the transient then runs with UIC (see the .tran below). The CIAS
+        // serializer names a magnetic's windings L<comp>_pri, L<comp>_sec1, ... — a winding without such
+        // a line (e.g. a real-fidelity magnetic rendered as an MKF subcircuit) cannot take an initial
+        // current here, and that is an error, not something to skip.
+        if (tasDoc.contains("simulation") && tasDoc.at("simulation").contains("initialConditions")) {
+            for (const auto& ic : tasDoc.at("simulation").at("initialConditions")) {
+                if (!ic.contains("current")) continue;
+                if (ic.at("stage").get<std::string>() != sname) continue;
+                const std::string comp = ic.at("component").get<std::string>();
+                const int winding = ic.value("winding", 0);
+                const std::string suffix = winding == 0 ? std::string("pri") : "sec" + std::to_string(winding);
+                const std::string want = to_lower("L" + comp + "_" + suffix);
+                std::istringstream in(subcktText);
+                std::ostringstream out;
+                std::string line;
+                bool found = false;
+                while (std::getline(in, line)) {
+                    const std::string first = to_lower(line.substr(0, line.find(' ')));
+                    if (!found && first == want) {
+                        std::ostringstream v;
+                        v.precision(17);   // a restart state: every digit counts (the default 6 truncated it)
+                        v << line << " IC=" << ic.at("current").get<double>();
+                        line = v.str();
+                        found = true;
+                    }
+                    out << line << "\n";
+                }
+                if (!found)
+                    throw std::runtime_error("TasAssembler: initial current for winding " + std::to_string(winding)
+                                             + " of " + sname + "." + comp + " — no inductor line '" + want
+                                             + "' in the stage's subcircuit");
+                subcktText = out.str();
+            }
+        }
+        subckts << subcktText << "\n";
 
         // instance: X<stage> <node per port, in declaration order> <subcktName>
         instances << "X" << sanitize(sname);
@@ -512,6 +550,7 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
     const json& dreq = tasDoc.at("inputs").at("designRequirements");
     const std::string inputType = dreq.value("inputType", "dc");
     std::string outputNode;
+    std::vector<std::string> dcSourceNodes;   // their level must be stated in .ic under uic (below)
     std::vector<std::string> acInputNodes;   // collected for a single floating AC source (acSinglePhase)
     size_t outputIdx = 0;                     // enumerates output external ports -> outputs[] index
     const size_t nOutputs = dreq.at("outputs").size();
@@ -522,7 +561,7 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
         if (groupDir[g] == "input") {
             if (inputType == "acSinglePhase" || inputType == "acThreePhase")
                 acInputNodes.push_back(node);   // emit AC source(s) below
-            else os << "V" << g << " " << node << " 0 DC " << vin << "\n";
+            else { os << "V" << g << " " << node << " 0 DC " << vin << "\n"; dcSourceNodes.push_back(node); }
         }
         if (groupDir[g] == "output") {
             // One load per output external port, each sized from its OWN outputs[] condition and given a
@@ -649,12 +688,25 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
     // stage's subcircuit (e.g. an isolated rail that has no external port): the stage is instantiated as
     // X<stage>, and ngspice addresses its internal node as X<stage>.<net>.
     for (const auto& ic : initialConditions) {
+        if (ic.contains("current")) {
+            if (!ic.contains("stage") || !ic.contains("component"))
+                throw std::runtime_error("TasAssembler: an initial current needs stage and component: " + ic.dump());
+            continue;   // emitted as IC= on the winding's inductor line in its stage subcircuit (above)
+        }
+        if (!ic.contains("node") || !ic.contains("voltage"))
+            throw std::runtime_error("TasAssembler: an initial condition is neither a node voltage nor a winding current: " + ic.dump());
         const std::string node = ic.at("node").get<std::string>();
         const auto dot = node.find('.');
         const std::string deckNode = (dot == std::string::npos) ? group_node(node)
                                                                 : "X" + sanitize(node.substr(0, dot)) + "." + node.substr(dot + 1);
         os << ".ic v(" << deckNode << ")=" << ic.at("voltage").get<double>() << "\n";
     }
+    // Under uic ngspice computes no operating point: every capacitor starts at the difference of the .ic
+    // values of its two nodes, and a node without one counts as 0 V — a DC SOURCE node included. A cap from
+    // the input rail (the AHB's blocking cap Cb, Vin to cb_mid) then started at −V(cb_mid) instead of
+    // Vin − V(cb_mid). State every DC source's level, as the ngspice manual prescribes for uic.
+    if (useIc)
+        for (const auto& n : dcSourceNodes) os << ".ic v(" << n << ")=" << vin << "\n";
 
     // Gear integration + tight tolerances tame the stiff ideal diodes; both ngspice and LTspice accept these
     // option names + the Gear method. For a REAL deck only, append cshunt (cfg::node_shunt_cap, overridable):

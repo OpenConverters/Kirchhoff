@@ -529,6 +529,38 @@ json build_dab_tas(const DabDesign& d) {
     std::vector<json> stimuli{stim("QA", p1), stim("QB", 180.0 + p1), stim("QC", 180.0), stim("QD", 0.0)};
     for (auto& s : secStim) stimuli.push_back(std::move(s));
     tas["simulation"]["stimulus"] = stimuli;
+    // Start on the steady state. A DAB is a current source into its output capacitor: from 0 V the rail
+    // charges with tau = R*C (16 ms at the web defaults) and the transformer's magnetizing / Lr DC offsets
+    // decay with L/R over tens of ms — the web's short settle window extracted a start-up transient. Each
+    // rail is precharged to its design voltage (the lossless phase-shift equilibrium), and Lr and every T1
+    // winding start at the analytical current at t = 0; the extractor refines these if the deck disagrees.
+    {
+        json ics = json::array();
+        for (size_t i = 0; i < nOut; ++i) {
+            json ic; ic["node"] = (i == 0) ? std::string("Vout") : "Vout" + std::to_string(i + 1);
+            ic["voltage"] = d.outputs[i].voltage;
+            ics.push_back(ic);
+        }
+        const auto& excs = aopT1.get_excitations_per_winding();
+        for (size_t w = 0; w < excs.size(); ++w) {
+            const auto& cur = excs[w].get_current();
+            if (!cur || !cur->get_waveform() || cur->get_waveform()->get_data().empty())
+                throw std::runtime_error("dab: analytical winding " + std::to_string(w) + " has no current waveform");
+            // analytical_dab reports a secondary's current positive OUT of its dotted terminal (the current
+            // it delivers); the TAS initial current (and the deck's branch) is positive INTO the dot. With
+            // the wrong sign the two windings start with a magnetizing offset of ~7 A that decays over tens
+            // of ms (1 mH against milliohms).
+            const double i0 = (w == 0 ? 1.0 : -1.0) * cur->get_waveform()->get_data().front();
+            json ic; ic["stage"] = "dabCell"; ic["component"] = "T1"; ic["winding"] = static_cast<int>(w);
+            ic["current"] = i0;
+            ics.push_back(ic);
+            if (w == 0 && !d.useLeakageInductance) {   // the discrete Lr carries the primary current
+                json icr; icr["stage"] = "dabCell"; icr["component"] = "Lr"; icr["winding"] = 0; icr["current"] = i0;
+                ics.push_back(icr);
+            }
+        }
+        tas["simulation"]["initialConditions"] = ics;
+    }
     req::finalize_control_seeds(tas, Topology::DUAL_ACTIVE_BRIDGE_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }

@@ -299,6 +299,9 @@ json build_ahb_tas(const AhbDesign& d) {
     cell["ports"] = json::array({port("vin"), port("gnd"), port("sgnd"), port("vout"), port("gate1"), port("gate2")});
 
     // Half bridge + DC-blocking cap + transformer primary — identical for every rectifier variant.
+    // T1's dotted primary terminal sits on the switch node, so the winding sees +(Vin − Vcb) while Q1
+    // conducts and −Vcb while Q2 does: the orientation analytical_ahb's waveforms assume. Wired the
+    // other way round, every simulated winding came out sign-inverted and the centre-tapped halves swapped.
     std::vector<json> comps{
         comp("Q1", mosfetReq), comp("Q2", mosfetReq), comp("D1", diode()), comp("D2", diode()),
         comp("Cb", cb), comp("T1", xfmr), comp("Csw", snub()), comp("Rdmp", dampR()), comp("Cdmp", dampC())};
@@ -306,8 +309,8 @@ json build_ahb_tas(const AhbDesign& d) {
         conn("vin_net",  {pin("Q1", "drain"), pin("D1", "cathode"), pin("Cb", "1"), prt("vin")}),
         conn("sw_net",   {pin("Q1", "source"), pin("Q2", "drain"),
                           pin("D1", "anode"), pin("D2", "cathode"),
-                          pin("T1", "primary_end"), pin("Csw", "1"), pin("Cdmp", "2")}),
-        conn("cb_mid",   {pin("Cb", "2"), pin("T1", "primary_start"), pin("Rdmp", "1")}),
+                          pin("T1", "primary_start"), pin("Csw", "1"), pin("Cdmp", "2")}),
+        conn("cb_mid",   {pin("Cb", "2"), pin("T1", "primary_end"), pin("Rdmp", "1")}),
         conn("dmp_mid",  {pin("Rdmp", "2"), pin("Cdmp", "1")})};
     std::vector<json> gndEps{pin("Q2", "source"), pin("D2", "anode"), pin("Csw", "2")};
     // Primary return and secondary return are DIFFERENT nodes (ABT #778). Every rectifier branch
@@ -320,9 +323,9 @@ json build_ahb_tas(const AhbDesign& d) {
         // inductor. During Q1-off the transformer delivers its stored energy through Dr1 to the output. A
         // small dV/dt snubber tames the diode-node ring. (ABT #87.)
         comps.insert(comps.end(), {comp("Dr1", diodeReq), comp("CsnSA", snub())});
-        conns.push_back(conn("sec_a", {pin("T1", "secondary1_start"), pin("Dr1", "anode"), pin("CsnSA", "1")}));
+        conns.push_back(conn("sec_a", {pin("T1", "secondary1_end"), pin("Dr1", "anode"), pin("CsnSA", "1")}));
         conns.push_back(conn("vout_net", {pin("Dr1", "cathode"), prt("vout")}));
-        sgndEps.insert(sgndEps.end(), {pin("T1", "secondary1_end"), pin("CsnSA", "2"), prt("sgnd")});
+        sgndEps.insert(sgndEps.end(), {pin("T1", "secondary1_start"), pin("CsnSA", "2"), prt("sgnd")});
         gndEps.push_back(prt("gnd"));
         conns.push_back(conn("gnd_net", gndEps));
         conns.push_back(conn("sgnd_net", sgndEps));
@@ -425,6 +428,26 @@ json build_ahb_tas(const AhbDesign& d) {
     tas["simulation"]["stimulus"] = json::array({
         stim("Q1", D, 0.0),
         stim("Q2", (1.0 - D) - 2.0 * dt, (D + dt) * 360.0)});
+    // Start near the operating point: the output rail at its design voltage and the blocking cap at its
+    // average V_Cb = (1-D)·Vin (Cb sits between Vin and cb_mid, so cb_mid = D·Vin). From 0 V the Cb–Lm
+    // loop and the output filter ring for thousands of periods; the extractor refines these values from
+    // the deck's own settle (the design duty is loss-compensated, the deck is not, so they are a guess).
+    { json ics = json::array();
+      json vo; vo["node"] = "Vout"; vo["voltage"] = d.outputVoltage; ics.push_back(vo);
+      json cb; cb["node"] = "ahbCell.cb_mid"; cb["voltage"] = D * d.inputVoltage; ics.push_back(cb);
+      if (!d.ahbFlyback && (d.rectifierType == RectifierType::CenterTapped || d.rectifierType == RectifierType::FullBridge)) {
+          json lo; lo["stage"] = "ahbCell"; lo["component"] = "Lout"; lo["winding"] = 0;
+          lo["current"] = d.outputPower / d.outputVoltage; ics.push_back(lo);
+      }
+      // T1's winding currents too (0 A is what the run starts from anyway): declared, they are states the
+      // extractor re-estimates between runs. Left out, every restart re-excited the Cb–Lm–Lout mode, which
+      // is undamped in this lossless deck and never decays on its own.
+      const int nT1 = (!d.ahbFlyback && d.rectifierType == RectifierType::CenterTapped) ? 3 : 2;
+      for (int w = 0; w < nT1; ++w) {
+          json it; it["stage"] = "ahbCell"; it["component"] = "T1"; it["winding"] = w; it["current"] = 0.0;
+          ics.push_back(it);
+      }
+      tas["simulation"]["initialConditions"] = ics; }
     req::finalize_control_seeds(tas, Topology::ASYMMETRIC_HALF_BRIDGE_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }
