@@ -708,10 +708,10 @@ provide('kh', {
       <div class="kh-sheet">
         <div class="kh-brand">
           <svg width="52" height="52" viewBox="0 0 64 64" aria-hidden="true">
-            <g stroke="var(--amber)" stroke-width="3.5" stroke-linecap="round" fill="none">
+            <g stroke="var(--kh-amber)" stroke-width="3.5" stroke-linecap="round" fill="none">
               <path d="M10 32h20" /><path d="M32 34v18" /><path d="M34 30 52 14" />
             </g>
-            <circle cx="32" cy="32" r="5" fill="var(--amber)" />
+            <circle cx="32" cy="32" r="5" fill="var(--kh-amber)" />
           </svg>
           <div>
             <div class="kh-title">KIRCHHOFF</div>

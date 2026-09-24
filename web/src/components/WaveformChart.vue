@@ -12,7 +12,7 @@ const props = defineProps({
 const W = 760
 const PAD = { l: 62, r: 62, t: 14, b: 30 }
 
-const COLORS = { A: 'var(--amber)', V: 'var(--cyan)' }
+const COLORS = { A: 'var(--kh-amber)', V: 'var(--kh-cyan)' }
 
 const layout = computed(() => {
   const traces = props.traces.filter((t) => t?.data?.length > 1)
@@ -47,7 +47,7 @@ const layout = computed(() => {
     for (let i = 0; i < t.data.length; ++i) {
       d += `${i ? 'L' : 'M'} ${sx(t.time[i]).toFixed(2)} ${sy(t.data[i], ax).toFixed(2)} `
     }
-    return { d, color: COLORS[t.unit] ?? 'var(--ink)', label: t.label, unit: t.unit }
+    return { d, color: COLORS[t.unit] ?? 'var(--kh-ink)', label: t.label, unit: t.unit }
   })
 
   const gridY = []
@@ -82,12 +82,12 @@ const layout = computed(() => {
       <line
         v-for="(y, i) in layout.gridY" :key="'g' + i"
         :x1="PAD.l" :x2="W - PAD.r" :y1="y" :y2="y"
-        stroke="var(--grat-strong)" stroke-width="1"
+        stroke="var(--kh-grat-strong)" stroke-width="1"
       />
       <line
         v-for="(t, i) in layout.xTicks" :key="'x' + i"
         :x1="t.x" :x2="t.x" :y1="PAD.t" :y2="layout.h - PAD.b"
-        stroke="var(--grat)" stroke-width="1"
+        stroke="var(--kh-grat)" stroke-width="1"
       />
       <line
         v-for="(z, i) in layout.zeros" :key="'z' + i"
@@ -103,17 +103,17 @@ const layout = computed(() => {
       <text
         v-for="(t, i) in layout.leftTicks" :key="'l' + i"
         :x="PAD.l - 7" :y="t.y + 3.5" text-anchor="end"
-        fill="var(--amber)" font-size="10" font-family="var(--mono)"
+        fill="var(--kh-amber)" font-size="10" font-family="var(--kh-mono)"
       >{{ t.label }}</text>
       <text
         v-for="(t, i) in layout.rightTicks" :key="'r' + i"
         :x="W - PAD.r + 7" :y="t.y + 3.5" text-anchor="start"
-        fill="var(--cyan)" font-size="10" font-family="var(--mono)"
+        fill="var(--kh-cyan)" font-size="10" font-family="var(--kh-mono)"
       >{{ t.label }}</text>
       <text
         v-for="(t, i) in layout.xTicks" :key="'xt' + i"
         :x="t.x" :y="layout.h - 10" text-anchor="middle"
-        fill="var(--ink-dim)" font-size="10" font-family="var(--mono)"
+        fill="var(--kh-ink-dim)" font-size="10" font-family="var(--kh-mono)"
       >{{ t.label }}</text>
     </svg>
   </div>

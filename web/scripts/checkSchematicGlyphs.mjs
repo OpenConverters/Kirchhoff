@@ -30,18 +30,18 @@ for (const m of mainJs.matchAll(/import\s+'(@fontsource\/[^']+)'/g))
   sheets.push(read(path.join('../node_modules', m[1])))
 
 // Only the families the schematic TEXT can actually use count. Every .sch-* text rule is font-family:
-// var(--mono), so coverage means the faces in that stack — not any face the app happens to load. Ω, for
+// var(--kh-mono), so coverage means the faces in that stack — not any face the app happens to load. Ω, for
 // instance, IS shipped in IBM Plex Sans's greek subset, which the drawing never uses: counting it would
 // have declared this whole bug fixed while the schematic still rendered a fallback.
 const styleCss = sheets[0]
-const monoStack = styleCss.match(/--mono:\s*([^;]+);/)?.[1]
-if (!monoStack) throw new Error('checkSchematicGlyphs: no --mono stack in src/style.css')
+const monoStack = styleCss.match(/--kh-mono:\s*([^;]+);/)?.[1]
+if (!monoStack) throw new Error('checkSchematicGlyphs: no --kh-mono stack in src/style.css')
 const families = [...monoStack.matchAll(/'([^']+)'/g)].map((m) => m[1])
-if (!families.length) throw new Error(`checkSchematicGlyphs: no named family in --mono (${monoStack})`)
+if (!families.length) throw new Error(`checkSchematicGlyphs: no named family in --kh-mono (${monoStack})`)
 for (const sel of ['.sch-ref', '.sch-val', '.sch-port', '.sch-sig', '.sch-blk']) {
   const rule = styleCss.match(new RegExp(`\\${sel}\\s*(,[^{}]*)?\\{([^}]*)\\}`))?.[2] ?? ''
-  if (!/font-family:\s*var\(--mono\)/.test(rule))
-    throw new Error(`checkSchematicGlyphs: ${sel} no longer uses var(--mono) — this gate is checking the wrong stack`)
+  if (!/font-family:\s*var\(--kh-mono\)/.test(rule))
+    throw new Error(`checkSchematicGlyphs: ${sel} no longer uses var(--kh-mono) — this gate is checking the wrong stack`)
 }
 
 // A face with no unicode-range covers everything; fontsource always declares one.

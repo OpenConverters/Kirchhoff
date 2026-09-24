@@ -74,27 +74,27 @@ const advance = (step) => {
 
 <style scoped>
 .dial { text-align: center; outline: none; }
-.dial:focus-visible { outline: 2px solid var(--amber); outline-offset: 3px; border-radius: 8px; }
+.dial:focus-visible { outline: 2px solid var(--kh-amber); outline-offset: 3px; border-radius: 8px; }
 .dial svg { width: 100%; max-width: 230px; height: auto; }
-.dial-face { fill: #100c07; stroke: var(--line); stroke-width: 1; }
-.dial-ring { fill: none; stroke: var(--line-soft); stroke-width: 1; }
-.detent line { stroke: var(--line); stroke-width: 2; }
+.dial-face { fill: var(--kh-dial-face); stroke: var(--kh-line); stroke-width: 1; }
+.dial-ring { fill: none; stroke: var(--kh-line-soft); stroke-width: 1; }
+.detent line { stroke: var(--kh-line); stroke-width: 2; }
 .detent text {
-  font-family: var(--mono); font-size: 8.4px; fill: var(--ink-dim);
+  font-family: var(--kh-mono); font-size: 8.4px; fill: var(--kh-ink-dim);
   text-anchor: middle; letter-spacing: 0.02em;
 }
 .detent { cursor: pointer; }
-.detent:hover text { fill: var(--amber-hi); }
-.detent.on line { stroke: var(--amber); }
-.detent.on text { fill: var(--amber); }
+.detent:hover text { fill: var(--kh-amber-hi); }
+.detent.on line { stroke: var(--kh-amber); }
+.detent.on text { fill: var(--kh-amber); }
 .knob { cursor: pointer; }
-.ptr { stroke: var(--amber); stroke-width: 2.5; stroke-linecap: round; filter: drop-shadow(0 0 3px var(--amber)); }
-.knob-body { fill: #1b140b; stroke: var(--amber-deep); stroke-width: 1.5; }
-.knob-grip { fill: none; stroke: var(--amber-deep); stroke-width: 1; stroke-dasharray: 2 3; }
-.knob:hover .knob-body { stroke: var(--amber); }
+.ptr { stroke: var(--kh-amber); stroke-width: 2.5; stroke-linecap: round; filter: drop-shadow(0 0 3px var(--kh-amber)); }
+.knob-body { fill: var(--kh-knob-body); stroke: var(--kh-amber-deep); stroke-width: 1.5; }
+.knob-grip { fill: none; stroke: var(--kh-amber-deep); stroke-width: 1; stroke-dasharray: 2 3; }
+.knob:hover .knob-body { stroke: var(--kh-amber); }
 .dial-readout {
-  font-family: var(--disp); font-size: 0.74rem; letter-spacing: 0.1em; text-transform: uppercase;
-  color: var(--amber); margin-top: 0.15rem; min-height: 1.1em;
+  font-family: var(--kh-disp); font-size: 0.74rem; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--kh-amber); margin-top: 0.15rem; min-height: 1.1em;
 }
 @media (prefers-reduced-motion: reduce) { .ptr { filter: none; } }
 </style>

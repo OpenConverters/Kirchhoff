@@ -130,7 +130,7 @@ const hasSelectionWaves = computed(() =>
           <tbody>
             <tr v-for="r in bomRows" :key="r.ref" class="clickable"
                 :class="{ selected: selectedPart?.ref === r.ref }" @click="openPart(r.ref)">
-              <td style="color: var(--amber-hi)">{{ r.ref }}</td>
+              <td style="color: var(--kh-amber-hi)">{{ r.ref }}</td>
               <td>{{ r.kind }}</td>
               <td class="dim">{{ r.stage }}</td>
               <td>{{ r.value }}</td>
@@ -242,7 +242,7 @@ const hasSelectionWaves = computed(() =>
             <th class="num">I/P</th><th class="num">rated</th><th class="num">mgn</th><th></th></tr></thead>
           <tbody>
             <tr v-for="s in componentStress" :key="s.ref" class="clickable" @click="openPart(s.ref)">
-              <td style="color: var(--amber-hi)">{{ s.ref }}</td>
+              <td style="color: var(--kh-amber-hi)">{{ s.ref }}</td>
               <td class="dim">{{ s.kind }}</td>
               <td class="num">{{ s.v ? si(s.v.stress, 'V') : '—' }}</td>
               <td class="num dim">{{ s.v?.rated ? si(s.v.rated, 'V') : '—' }}</td>
@@ -264,7 +264,7 @@ const hasSelectionWaves = computed(() =>
           <thead><tr><th>Name</th><th>Wnd</th><th>Lm</th><th>n</th><th></th></tr></thead>
           <tbody>
             <tr v-for="m in diag.magnetics" :key="m.name" class="clickable" @click="openPart(m.name)">
-              <td style="color: var(--amber-hi)">{{ m.name }}</td><td>{{ m.windings }}</td>
+              <td style="color: var(--kh-amber-hi)">{{ m.name }}</td><td>{{ m.windings }}</td>
               <td>{{ si(m.magnetizingInductance, 'H') }}</td>
               <td class="dim">{{ m.turnsRatios?.map((r) => r.toPrecision(4)).join(' / ') || '—' }}</td>
               <td><span v-if="m.isMain" class="chip amber">main</span></td>
@@ -350,17 +350,17 @@ const hasSelectionWaves = computed(() =>
 .pane {
   display: flex; flex-direction: column; min-width: 0;
   height: 100%; min-height: 0;
-  border: 1px solid var(--line); border-radius: 6px;
-  background: linear-gradient(180deg, var(--panel-hi), var(--panel));
+  border: 1px solid var(--kh-line); border-radius: 6px;
+  background: linear-gradient(180deg, var(--kh-panel-hi), var(--kh-panel));
 }
 .pane-head {
   display: flex; align-items: center; gap: 0.5rem;
-  padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--line-soft);
+  padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--kh-line-soft);
 }
 .pane-select {
-  font-family: var(--disp); font-size: 0.8rem; letter-spacing: 0.14em; text-transform: uppercase;
-  color: var(--amber); background: rgba(255, 179, 71, 0.06);
-  border: 1px solid var(--amber-deep); border-radius: 4px; padding: 0.25rem 0.6rem; cursor: pointer;
+  font-family: var(--kh-disp); font-size: 0.8rem; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--kh-amber); background: rgba(var(--kh-amber-rgb), 0.06);
+  border: 1px solid var(--kh-amber-deep); border-radius: 4px; padding: 0.25rem 0.6rem; cursor: pointer;
 }
 .pane-body { padding: 0.7rem; overflow: auto; flex: 1; min-height: 0; }
 /* The visual view must NOT be height:100% of the (fixed-height) pane-body, or the resizable card gets
@@ -368,52 +368,52 @@ const hasSelectionWaves = computed(() =>
    scrolls if the card is taller than the pane. */
 .visual-view { display: flex; flex-direction: column; }
 .viz-toolbar { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; }
-.viz-scope-label { font-family: var(--disp); font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--amber-deep); }
+.viz-scope-label { font-family: var(--kh-disp); font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--kh-amber-deep); }
 .viz-scope-sel { width: auto; }
 /* Resizable panel (height driven by JS via the grip below — the iframe covers the native resize grip).
    flex-shrink:0 keeps the set height authoritative within the flex column. */
 .falstad-wrap {
   position: relative;
   width: 100%; flex-shrink: 0; overflow: hidden;
-  border: 1px solid var(--line-soft); border-radius: 4px 4px 0 0;
+  border: 1px solid var(--kh-line-soft); border-radius: 4px 4px 0 0;
 }
 /* Maximize button floating over the top-right of the sim. */
 .viz-max-btn {
   position: absolute; top: 6px; right: 6px; z-index: 5;
-  font-family: var(--disp); font-size: 0.72rem; letter-spacing: 0.08em;
-  color: var(--amber); background: rgba(12, 12, 12, 0.82);
-  border: 1px solid var(--amber-deep); border-radius: 4px; padding: 0.2rem 0.5rem; cursor: pointer;
+  font-family: var(--kh-disp); font-size: 0.72rem; letter-spacing: 0.08em;
+  color: var(--kh-amber); background: var(--kh-sim-button-bg);
+  border: 1px solid var(--kh-amber-deep); border-radius: 4px; padding: 0.2rem 0.5rem; cursor: pointer;
 }
-.viz-max-btn:hover { background: rgba(255, 179, 71, 0.18); }
+.viz-max-btn:hover { background: rgba(var(--kh-amber-rgb), 0.18); }
 /* Full-viewport maximized overlay. */
 .viz-overlay {
   position: fixed; inset: 0; z-index: 10000;
   display: flex; flex-direction: column; gap: 0.5rem;
-  padding: 1.4vh 1.4vw; background: rgba(6, 6, 6, 0.94);
+  padding: 1.4vh 1.4vw; background: var(--kh-sim-overlay);
 }
 .viz-overlay-bar { display: flex; align-items: center; justify-content: space-between; }
-.viz-overlay-title { font-family: var(--disp); letter-spacing: 0.1em; color: var(--amber); text-transform: uppercase; font-size: 0.85rem; }
-.viz-overlay-title b { color: var(--amber-hi); }
+.viz-overlay-title { font-family: var(--kh-disp); letter-spacing: 0.1em; color: var(--kh-amber); text-transform: uppercase; font-size: 0.85rem; }
+.viz-overlay-title b { color: var(--kh-amber-hi); }
 .viz-close-btn {
-  font-family: var(--disp); font-size: 0.78rem; letter-spacing: 0.08em;
-  color: var(--amber); background: rgba(255, 179, 71, 0.06);
-  border: 1px solid var(--amber-deep); border-radius: 4px; padding: 0.3rem 0.7rem; cursor: pointer;
+  font-family: var(--kh-disp); font-size: 0.78rem; letter-spacing: 0.08em;
+  color: var(--kh-amber); background: rgba(var(--kh-amber-rgb), 0.06);
+  border: 1px solid var(--kh-amber-deep); border-radius: 4px; padding: 0.3rem 0.7rem; cursor: pointer;
 }
-.viz-close-btn:hover { background: rgba(255, 179, 71, 0.18); }
-.viz-overlay-frame { flex: 1; width: 100%; border: 1px solid var(--line); border-radius: 4px; background: #0c0c0c; }
-.falstad-frame { width: 100%; height: 100%; border: 0; display: block; background: #0c0c0c; }
+.viz-close-btn:hover { background: rgba(var(--kh-amber-rgb), 0.18); }
+.viz-overlay-frame { flex: 1; width: 100%; border: 1px solid var(--kh-line); border-radius: 4px; background: var(--kh-sim-bg); }
+.falstad-frame { width: 100%; height: 100%; border: 0; display: block; background: var(--kh-sim-bg); }
 /* Drag handle bar under the sim — the whole bar resizes (not just a tiny corner). */
 .falstad-grip {
   flex-shrink: 0; height: 18px; display: flex; align-items: center; justify-content: center;
   cursor: ns-resize; user-select: none; touch-action: none;
-  border: 1px solid var(--line-soft); border-top: 0; border-radius: 0 0 4px 4px;
-  background: linear-gradient(180deg, var(--panel-hi), var(--panel));
-  color: var(--amber-deep);
+  border: 1px solid var(--kh-line-soft); border-top: 0; border-radius: 0 0 4px 4px;
+  background: linear-gradient(180deg, var(--kh-panel-hi), var(--kh-panel));
+  color: var(--kh-amber-deep);
 }
-.falstad-grip:hover, .falstad-grip.dragging { color: var(--amber); background: rgba(255, 179, 71, 0.12); }
+.falstad-grip:hover, .falstad-grip.dragging { color: var(--kh-amber); background: rgba(var(--kh-amber-rgb), 0.12); }
 .grip-dots { font-size: 9px; letter-spacing: 2px; line-height: 1; }
 /* --err is defined nowhere in the app: this was the only rule reaching for it, so the banner has always
    painted itself with the hard-coded fallback instead of the palette's fault colour. */
-.sch-error { color: var(--fault); white-space: pre-wrap; }
-.wave-name { font-size: 0.72rem; color: var(--amber-hi); margin-bottom: 0.3rem; }
+.sch-error { color: var(--kh-fault); white-space: pre-wrap; }
+.wave-name { font-size: 0.72rem; color: var(--kh-amber-hi); margin-bottom: 0.3rem; }
 </style>

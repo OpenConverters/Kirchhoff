@@ -1,0 +1,32 @@
+
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; padding: 0; }
+
+/* ── scrollbars: thin amber-on-carbon, in keeping with the instrument theme ── */
+* { scrollbar-width: thin; scrollbar-color: var(--kh-amber-deep) transparent; }
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: rgba(var(--kh-shadow-rgb), 0.25); }
+::-webkit-scrollbar-thumb {
+  background: linear-gradient(var(--kh-amber-deep), var(--kh-scroll-thumb-end));
+  border: 2px solid var(--kh-bg);
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--kh-amber); }
+::-webkit-scrollbar-corner { background: transparent; }
+
+body {
+  font-family: var(--kh-body);
+  color: var(--kh-ink);
+  /* drafting-grid background: fine graticule + a warm phosphor pool top-right */
+  background:
+    linear-gradient(var(--kh-grat) 1px, transparent 1px) 0 0 / 28px 28px,
+    linear-gradient(90deg, var(--kh-grat) 1px, transparent 1px) 0 0 / 28px 28px,
+    radial-gradient(900px 420px at 92% -10%, rgba(var(--kh-amber-rgb), 0.10), transparent 62%),
+    radial-gradient(640px 380px at -6% 4%, rgba(var(--kh-amber-rgb), 0.05), transparent 55%),
+    var(--kh-bg);
+  background-attachment: fixed;
+  font-size: 15px;
+  line-height: 1.5;
+}

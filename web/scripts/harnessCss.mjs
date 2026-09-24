@@ -17,7 +17,10 @@ import { fileURLToPath } from 'node:url'
 const here = path.dirname(fileURLToPath(import.meta.url))
 // Comments are dropped first: a /* … */ sitting above a rule contains no braces, so it would
 // otherwise be swallowed into that rule's selector and kill it.
+// The app scopes every rule under its wrapper as `:where(.kh-root) …` (zero specificity); the harness
+// page has no wrapper, so the scope is peeled off here — the declarations are what they are in the app.
 const appCss = fs.readFileSync(path.join(here, '../src/style.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/:where\(\.kh-root\)\s+(?=[^\s{])/g, '')
 const font = fs.readFileSync(
   path.join(here, '../node_modules/@fontsource/ibm-plex-mono/files/ibm-plex-mono-latin-400-normal.woff2'),
 ).toString('base64')
@@ -27,8 +30,9 @@ const font = fs.readFileSync(
 // test machine happens to fall back to, which is not what the product renders.
 const symbols = fs.readFileSync(path.join(here, '../src/assets/kh-mono-symbols.woff2')).toString('base64')
 
-// `:root` holds the colour + --mono custom properties every .sch- rule dereferences.
-const root = appCss.match(/:root\s*\{[^}]*\}/)
+// The `.kh-root` token block holds the colour + --kh-mono custom properties every .sch- rule
+// dereferences; the harness page declares them on :root, which is where the app's used to live.
+const root = appCss.match(/\.kh-root\s*\{[^}]*\}/)
 // Each top-level rule whose selector mentions .sch- (the schematic block, hover states and all).
 // @media blocks are dropped first: the harness renders for SCREEN, and a print override lifted out of
 // its media query would silently repaint every measurement.
@@ -37,7 +41,7 @@ const rules = [...screenCss.matchAll(/([^{}]*\.sch-[^{}]*)\{([^}]*)\}/g)].map((m
 
 // A silently-empty slice would give us back exactly the 16 px-default bug this module exists to kill,
 // so prove the extraction worked instead of trusting the regex.
-if (!root) throw new Error('harnessCss: no :root block in src/style.css')
+if (!root) throw new Error('harnessCss: no .kh-root token block in src/style.css')
 const need = ['.sch-ref', '.sch-val', '.sch-port', '.sch-sig', '.sch-blk']
 for (const sel of need) {
   const rule = rules.find((r) => r.split('{')[0].split(',').some((s) => s.trim() === sel))
@@ -49,7 +53,7 @@ export const HARNESS_CSS = [
   `@font-face{font-family:'IBM Plex Mono';src:url(data:font/woff2;base64,${font}) format('woff2');font-weight:400;font-display:block}`,
   `@font-face{font-family:'KH Mono Symbols';src:url(data:font/woff2;base64,${symbols}) format('woff2');font-weight:400;font-display:block;` +
     `unicode-range:U+00B1,U+0394,U+0398,U+039B,U+03A3,U+03A6,U+03A9,U+03B1-03B5,U+03B7-03B8,U+03BB-03BC,U+03C0-03C1,U+03C3-03C4,U+03C6,U+03C9,U+2126,U+2202,U+2206,U+2211,U+221A,U+221E,U+222B,U+2248,U+2260,U+2264-2265}`,
-  root[0],
+  root[0].replace(/^\.kh-root/, ':root'),
   'body{margin:0;background:#0b0906}',
   'svg{display:block}',
   ...rules,

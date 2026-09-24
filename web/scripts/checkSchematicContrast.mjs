@@ -43,7 +43,7 @@ const ratio = (a, b) => {
   return (l1 + 0.05) / (l2 + 0.05)
 }
 
-// resolve `var(--token)` against the :root block the stylesheet declares
+// resolve `var(--token)` against the token block the stylesheet declares
 const vars = new Map([...HARNESS_CSS.matchAll(/--([\w-]+):\s*([^;]+);/g)].map((m) => [m[1], m[2].trim()]))
 const resolve = (value) => {
   const v = value.trim()
@@ -73,8 +73,9 @@ const ruleFor = (sel) => {
 // on white is amber at 1.8:1. src/style.css carries an @media print override; measure it against paper.
 const rawCss = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/style.css'), 'utf8')
   .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/:where\(\.kh-root\)\s+(?=[^\s{])/g, '')   // the app's zero-specificity scope, as in harnessCss.mjs
 const printBlock = rawCss.match(/@media\s+print\s*\{((?:[^{}]*\{[^{}]*\})*)[^{}]*\}/)?.[1] ?? ''
-const PAPER = printBlock.match(/\.schematic-frame\s*\{[^}]*background:\s*([^;]+)/)?.[1]?.trim() ?? '#ffffff'
+const PAPER = resolve(printBlock.match(/\.schematic-frame\s*\{[^}]*background:\s*([^;]+)/)?.[1]?.trim() ?? '#ffffff')
 
 let worst = Infinity, failed = 0
 console.log('SCREEN — against the frame background ' + FRAME_BG)

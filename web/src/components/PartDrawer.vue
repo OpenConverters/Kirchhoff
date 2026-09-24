@@ -233,7 +233,7 @@ function fmtx(v) { return v == null ? '—' : `×${v >= 100 ? Math.round(v) : v.
       <div class="drawer-mask" @click="emit('close')"></div>
       <aside class="drawer" role="dialog" :aria-label="`Component ${part.ref}`">
         <button class="close" @click="emit('close')">ESC</button>
-        <div class="mono" style="font-size: 0.66rem; letter-spacing: 0.12em; color: var(--ink-dim)">
+        <div class="mono" style="font-size: 0.66rem; letter-spacing: 0.12em; color: var(--kh-ink-dim)">
           {{ part.kind.toUpperCase() }} · STAGE {{ part.stage }}
         </div>
         <h3>{{ part.ref }}</h3>
@@ -254,7 +254,7 @@ function fmtx(v) { return v == null ? '—' : `×${v >= 100 ? Math.round(v) : v.
         <template v-if="part.windings?.length">
           <div class="section-label" style="margin-top: 1.2rem">Winding waveforms</div>
           <div v-for="(exc, i) in part.windings" :key="i" style="margin-bottom: 1rem">
-            <div class="mono" style="font-size: 0.7rem; color: var(--amber-hi); margin-bottom: 0.3rem">
+            <div class="mono" style="font-size: 0.7rem; color: var(--kh-amber-hi); margin-bottom: 0.3rem">
               {{ exc.name ?? `winding ${i}` }}
             </div>
             <WavePane :excitation="exc" />
@@ -484,36 +484,36 @@ function fmtx(v) { return v == null ? '—' : `×${v >= 100 ? Math.round(v) : v.
 <style scoped>
 .find-parts {
   width: 100%; margin-top: 0.5rem; padding: 0.6rem; cursor: pointer;
-  background: var(--amber-dim, #3a2f10); color: var(--amber-hi, #ffcf6b);
-  border: 1px solid var(--amber-hi, #ffcf6b); border-radius: 4px; font: inherit;
+  background: var(--kh-accent-soft); color: var(--kh-amber-hi);
+  border: 1px solid var(--kh-amber-hi); border-radius: 4px; font: inherit;
 }
-.find-parts:hover { background: var(--amber-hi, #ffcf6b); color: #000; }
-.suggest-box.err { color: #ff8a8a; }
+.find-parts:hover { background: var(--kh-amber-hi); color: var(--kh-on-accent); }
+.suggest-box.err { color: var(--kh-error-text); }
 table.cand { width: 100%; margin-top: 0.5rem; border-collapse: collapse; font-size: 0.72rem; }
-table.cand th { text-align: left; color: var(--ink-dim); font-weight: normal; padding: 0.2rem 0.3rem; border-bottom: 1px solid var(--rule, #333); }
-table.cand td { padding: 0.25rem 0.3rem; border-bottom: 1px solid var(--rule-dim, #222); vertical-align: top; }
-table.cand tr.top { background: rgba(255, 207, 107, 0.08); }
-table.cand tr.bound { background: rgba(127, 208, 138, 0.12); }
-table.cand .mpn { color: var(--amber-hi, #ffcf6b); }
+table.cand th { text-align: left; color: var(--kh-ink-dim); font-weight: normal; padding: 0.2rem 0.3rem; border-bottom: 1px solid var(--kh-rule); }
+table.cand td { padding: 0.25rem 0.3rem; border-bottom: 1px solid var(--kh-rule-dim); vertical-align: top; }
+table.cand tr.top { background: var(--kh-row-top); }
+table.cand tr.bound { background: var(--kh-good-bg); }
+table.cand .mpn { color: var(--kh-amber-hi); }
 .use-cell { white-space: nowrap; text-align: right; }
 .use-btn {
   padding: 0.1rem 0.5rem; cursor: pointer; font: inherit; font-size: 0.68rem;
-  background: transparent; color: var(--amber-hi, #ffcf6b);
-  border: 1px solid var(--amber-hi, #ffcf6b); border-radius: 3px;
+  background: transparent; color: var(--kh-amber-hi);
+  border: 1px solid var(--kh-amber-hi); border-radius: 3px;
 }
-.use-btn:hover:not(:disabled) { background: var(--amber-hi, #ffcf6b); color: #000; }
+.use-btn:hover:not(:disabled) { background: var(--kh-amber-hi); color: var(--kh-on-accent); }
 .use-btn:disabled { opacity: 0.4; cursor: default; }
-.bound-tag { color: #7fd08a; font-size: 0.68rem; white-space: nowrap; }
-table.cand .mfr { color: var(--ink-dim); font-size: 0.68rem; }
+.bound-tag { color: var(--kh-good); font-size: 0.68rem; white-space: nowrap; }
+table.cand .mfr { color: var(--kh-ink-dim); font-size: 0.68rem; }
 table.cand .margins span { margin-right: 0.4rem; white-space: nowrap; }
 .badge { display: inline-block; padding: 0 0.25rem; border-radius: 3px; font-size: 0.7rem; }
-.badge.ok { color: #7fd08a; } .badge.warn { color: #ffb454; }
+.badge.ok { color: var(--kh-good); } .badge.warn { color: var(--kh-warn); }
 .mfr-restrict { margin-top: 0.4rem; display: flex; align-items: center; gap: 0.5rem; }
-.mfr-label { color: var(--ink-dim); font-size: 0.7rem; white-space: nowrap; }
+.mfr-label { color: var(--kh-ink-dim); font-size: 0.7rem; white-space: nowrap; }
 .mfr-select {
   flex: 1; padding: 0.35rem 0.5rem; font: inherit; font-size: 0.72rem; cursor: pointer;
-  background: var(--panel, #1a1a1a); color: var(--ink, #ddd);
-  border: 1px solid var(--rule, #333); border-radius: 3px;
+  background: var(--kh-panel); color: var(--kh-ink);
+  border: 1px solid var(--kh-rule); border-radius: 3px;
 }
-.mfr-select:focus { outline: none; border-color: var(--amber-hi, #ffcf6b); }
+.mfr-select:focus { outline: none; border-color: var(--kh-amber-hi); }
 </style>

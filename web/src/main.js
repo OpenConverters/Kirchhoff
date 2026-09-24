@@ -11,7 +11,10 @@ import '@fontsource/ibm-plex-mono/400.css'
 import '@fontsource/ibm-plex-mono/500.css'
 import '@fontsource/ibm-plex-mono/600.css'
 import '@fontsource/ibm-plex-mono/700.css'
+// The package stylesheet (every rule scoped under .kh-root — index.html puts that class on <html>, so
+// the whole page is the bench) and the app's own page-level rules (body background, scrollbars).
 import './style.css'
+import './app.css'
 import { initTelemetry, trackEvent } from './telemetry.js'
 
 // Interaction telemetry (production-only; no-ops on localhost / the dev server).

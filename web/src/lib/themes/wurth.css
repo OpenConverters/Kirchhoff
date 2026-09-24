@@ -1,0 +1,63 @@
+/* A light theme: Würth red (#e3000b) on white. Opt in by adding the class next to .kh-root:
+     <div class="kh-root kh-theme-wurth"> … </div>
+   It only re-assigns --kh-* tokens (the default dark set is in ../../style.css); any single token can be
+   overridden the same way from a host stylesheet:
+     .kh-root.my-brand { --kh-amber: #0055a4; --kh-amber-rgb: 0, 85, 164; }
+   Keep each hex token and its *-rgb twin in step — the washes and glows are built from the channels. */
+.kh-root.kh-theme-wurth {
+  --kh-bg:          #ffffff;
+  --kh-bg-deep:     #f4f4f5;
+  --kh-panel:       #ffffff;
+  --kh-panel-hi:    #f7f7f8;
+  --kh-line:        #d4d4d8;
+  --kh-line-soft:   #e4e4e7;
+  --kh-ink:         #1f1f23;
+  --kh-ink-dim:     #5f6068;
+  --kh-amber:       #e3000b;      /* Würth red: primary accent, current traces, active */
+  --kh-amber-hi:    #b30009;      /* emphasis: darker on white, where the dark theme goes lighter */
+  --kh-amber-deep:  #f08a8f;
+  --kh-cyan:        #0b6fa4;      /* voltage traces */
+  --kh-fault:       #b42318;
+  --kh-ok:          #2f7d32;
+
+  --kh-amber-rgb:      227, 0, 11;
+  --kh-amber-deep-rgb: 240, 138, 143;
+  --kh-cyan-rgb:       11, 111, 164;
+  --kh-fault-rgb:      180, 35, 24;
+  --kh-ok-rgb:         47, 125, 50;
+  --kh-shadow-rgb:     150, 150, 160;   /* the dark theme's black scrims and inset shadows, as a soft grey */
+
+  --kh-grat:        rgba(var(--kh-amber-rgb), 0.035);
+  --kh-grat-strong: rgba(var(--kh-amber-rgb), 0.08);
+
+  --kh-sheet-top:        #ffffff;
+  --kh-sheet-bottom:     #f7f7f8;
+  --kh-field-bg:         #ffffff;
+  --kh-option-bg:        #ffffff;
+  --kh-on-amber:         #ffffff;
+  --kh-frame-bg:         #ffffff;
+  --kh-deck-bg:          #fafafa;
+  --kh-mask:             rgba(24, 24, 27, 0.35);
+  --kh-scroll-thumb-end: #c9c9cf;
+  --kh-color-scheme:     light;
+
+  --kh-sch-glow:     rgba(var(--kh-amber-rgb), 0.55);
+  --kh-sch-hot-ref:  #000000;
+
+  --kh-dial-face:    #fafafa;
+  --kh-knob-body:    #ffffff;
+
+  --kh-sim-bg:        #0c0c0c;      /* CircuitJS1 paints its own dark canvas; keep the frame around it dark */
+  --kh-sim-overlay:   rgba(24, 24, 27, 0.92);
+  --kh-sim-button-bg: rgba(255, 255, 255, 0.9);
+
+  --kh-accent-soft:   #fde7e8;
+  --kh-on-accent:     #ffffff;
+  --kh-error-text:    #b42318;
+  --kh-rule:          #d4d4d8;
+  --kh-rule-dim:      #e4e4e7;
+  --kh-row-top:       rgba(227, 0, 11, 0.06);
+  --kh-good:          #2f7d32;
+  --kh-good-bg:       rgba(47, 125, 50, 0.1);
+  --kh-warn:          #b45309;
+}

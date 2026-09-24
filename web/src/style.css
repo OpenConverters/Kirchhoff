@@ -25,152 +25,206 @@
    on warm carbon, engineering-drawing frames, mono readouts.
    ────────────────────────────────────────────────────────────────────────── */
 
-:root {
+/* ── Design tokens ─────────────────────────────────────────────────────────
+   Every colour and font the bench paints with is a --kh-* custom property declared on the .kh-root
+   wrapper, so a host page can restyle the components by overriding tokens on its own .kh-root (see
+   src/lib/themes/wurth.css for a complete light theme). Nothing here reaches outside .kh-root: every
+   rule below is written `:where(.kh-root) …`, which scopes it without adding specificity, so the
+   cascade between these rules is exactly what it was before they were scoped.
+   The default set is the Kirchhoff app's own dark theme. */
+.kh-root {
   /* palette — amber phosphor EDA terminal */
-  --bg:          #0e0b07;
-  --bg-deep:     #090705;
-  --panel:       #16110a;
-  --panel-hi:    #1d1710;
-  --line:        #3a2e1b;      /* panel borders */
-  --line-soft:   #271f12;
-  --ink:         #e9dfc9;      /* warm paper white */
-  --ink-dim:     #8f7f60;
-  --amber:       #ffb347;      /* primary phosphor: current traces, active, brand */
-  --amber-hi:    #ffce85;
-  --amber-deep:  #b87a1e;
-  --cyan:        #3ce0c8;      /* voltage traces — the family tie to Heaviside CH1 */
-  --fault:       #ff5d55;
-  --ok:          #86d97e;
-  --grat:        rgba(255, 179, 71, 0.045);
-  --grat-strong: rgba(255, 179, 71, 0.11);
+  --kh-bg:          #0e0b07;
+  --kh-bg-deep:     #090705;
+  --kh-panel:       #16110a;
+  --kh-panel-hi:    #1d1710;
+  --kh-line:        #3a2e1b;      /* panel borders */
+  --kh-line-soft:   #271f12;
+  --kh-ink:         #e9dfc9;      /* warm paper white */
+  --kh-ink-dim:     #8f7f60;
+  --kh-amber:       #ffb347;      /* primary phosphor: current traces, active, brand */
+  --kh-amber-hi:    #ffce85;
+  --kh-amber-deep:  #b87a1e;
+  --kh-cyan:        #3ce0c8;      /* voltage traces — the family tie to Heaviside CH1 */
+  --kh-fault:       #ff5d55;
+  --kh-ok:          #86d97e;
 
-  --mono: 'IBM Plex Mono', 'KH Mono Symbols', ui-monospace, SFMono-Regular, Menlo, monospace;
-  --disp: 'Share Tech Mono', 'IBM Plex Mono', monospace;
-  --body: 'IBM Plex Sans', system-ui, sans-serif;
+  /* the same hues as bare r, g, b channels, for the translucent washes and glows
+     (rgba(var(--kh-amber-rgb), 0.07)); keep them in step with the hex tokens above */
+  --kh-amber-rgb:      255, 179, 71;
+  --kh-amber-deep-rgb: 184, 122, 30;
+  --kh-cyan-rgb:       60, 224, 200;
+  --kh-fault-rgb:      255, 93, 85;
+  --kh-ok-rgb:         134, 217, 126;
+  --kh-shadow-rgb:     0, 0, 0;         /* inset shadows and dark scrims */
+
+  --kh-grat:        rgba(var(--kh-amber-rgb), 0.045);
+  --kh-grat-strong: rgba(var(--kh-amber-rgb), 0.11);
+
+  /* surfaces */
+  --kh-sheet-top:        #14100a;       /* header title-block gradient */
+  --kh-sheet-bottom:     #0f0c07;
+  --kh-field-bg:         #0b0805;       /* inputs, selects, optgroup rows */
+  --kh-option-bg:        #0f0b06;       /* native <option> rows */
+  --kh-on-amber:         #120c04;       /* text on an amber-filled row */
+  --kh-frame-bg:         #0b0906;       /* schematic + waveform frames */
+  --kh-deck-bg:          #0a0806;       /* netlist <pre> */
+  --kh-mask:             rgba(5, 3, 1, 0.55);  /* drawer backdrop */
+  --kh-scroll-thumb-end: #7a5216;
+  --kh-color-scheme:     dark;          /* native control chrome (select popups) */
+
+  /* schematic interaction */
+  --kh-sch-glow:     rgba(var(--kh-amber-rgb), 0.9);  /* hover / selected part glow */
+  --kh-sch-hot-ref:  #fff;              /* refdes of the hovered / focused part */
+
+  /* family dial */
+  --kh-dial-face:    #100c07;
+  --kh-knob-body:    #1b140b;
+
+  /* visual simulation (CircuitJS1 embed) */
+  --kh-sim-bg:        #0c0c0c;
+  --kh-sim-overlay:   rgba(6, 6, 6, 0.94);
+  --kh-sim-button-bg: rgba(12, 12, 12, 0.82);
+
+  /* part drawer (sourcing tables) */
+  --kh-accent-soft:   #3a2f10;          /* "find parts" button fill */
+  --kh-on-accent:     #000;             /* text on an amber-hi fill */
+  --kh-error-text:    #ff8a8a;
+  --kh-rule:          #333;
+  --kh-rule-dim:      #222;
+  --kh-row-top:       rgba(255, 207, 107, 0.08);
+  --kh-good:          #7fd08a;
+  --kh-good-bg:       rgba(127, 208, 138, 0.12);
+  --kh-warn:          #ffb454;
+
+  /* print (Ctrl+P of a schematic lands on white paper whatever the screen theme) */
+  --kh-print-paper:      #fff;
+  --kh-print-frame-line: #999;
+  --kh-print-ink:        #111827;
+  --kh-print-ref:        #000000;
+  --kh-print-val:        #44403c;
+  --kh-print-port:       #0f5c57;
+  --kh-print-selected:   #9ca3af;
+
+  --kh-mono: 'IBM Plex Mono', 'KH Mono Symbols', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --kh-disp: 'Share Tech Mono', 'IBM Plex Mono', monospace;
+  --kh-body: 'IBM Plex Sans', system-ui, sans-serif;
 }
 
-* { box-sizing: border-box; }
-
-html, body { margin: 0; padding: 0; }
-
-/* ── scrollbars: thin amber-on-carbon, in keeping with the instrument theme ── */
-* { scrollbar-width: thin; scrollbar-color: var(--amber-deep) transparent; }
-::-webkit-scrollbar { width: 9px; height: 9px; }
-::-webkit-scrollbar-track { background: rgba(0, 0, 0, 0.25); }
-::-webkit-scrollbar-thumb {
-  background: linear-gradient(var(--amber-deep), #7a5216);
-  border: 2px solid var(--bg);
-  border-radius: 6px;
-}
-::-webkit-scrollbar-thumb:hover { background: var(--amber); }
-::-webkit-scrollbar-corner { background: transparent; }
-
-body {
-  font-family: var(--body);
-  color: var(--ink);
-  /* drafting-grid background: fine graticule + a warm phosphor pool top-right */
-  background:
-    linear-gradient(var(--grat) 1px, transparent 1px) 0 0 / 28px 28px,
-    linear-gradient(90deg, var(--grat) 1px, transparent 1px) 0 0 / 28px 28px,
-    radial-gradient(900px 420px at 92% -10%, rgba(255, 179, 71, 0.10), transparent 62%),
-    radial-gradient(640px 380px at -6% 4%, rgba(255, 179, 71, 0.05), transparent 55%),
-    var(--bg);
-  background-attachment: fixed;
-  font-size: 15px;
+/* Base typography for a host's .kh-root wrapper. Zero specificity (:where) so the host can override it,
+   and no font-size: rem-sized components follow the host's root size. Not applied when .kh-root is the
+   document element — that is the Kirchhoff app itself, whose app.css sets the page's body typography. */
+:where(.kh-root:not(:root)) {
+  font-family: var(--kh-body);
+  color: var(--kh-ink);
   line-height: 1.5;
 }
+
+:where(.kh-root) * { box-sizing: border-box; }
+
+
+:where(.kh-root) * { scrollbar-width: thin; scrollbar-color: var(--kh-amber-deep) transparent; }
+:where(.kh-root) ::-webkit-scrollbar { width: 9px; height: 9px; }
+:where(.kh-root) ::-webkit-scrollbar-track { background: rgba(var(--kh-shadow-rgb), 0.25); }
+:where(.kh-root) ::-webkit-scrollbar-thumb {
+  background: linear-gradient(var(--kh-amber-deep), var(--kh-scroll-thumb-end));
+  border: 2px solid var(--kh-bg);
+  border-radius: 6px;
+}
+:where(.kh-root) ::-webkit-scrollbar-thumb:hover { background: var(--kh-amber); }
+:where(.kh-root) ::-webkit-scrollbar-corner { background: transparent; }
 
 /* The whole bench is a viewport-tall column: header + footnote take their natural height, the
    workbench fills the rest. Nothing overflows the page, so there is no global scrollbar — the left
    card and each pane scroll inside themselves instead. */
-.wrap {
+:where(.kh-root) .wrap {
   max-width: 1680px; margin: 0 auto; padding: 0 1.1rem 0.6rem;
   height: 100vh; display: flex; flex-direction: column; min-height: 0;
 }
 
 /* ── workbench: controls sidebar + two output panes, filling the page height ──────────── */
-.workbench { flex: 1; display: flex; gap: 1rem; align-items: stretch; min-height: 0; }
-.controls.panel {
+:where(.kh-root) .workbench { flex: 1; display: flex; gap: 1rem; align-items: stretch; min-height: 0; }
+:where(.kh-root) .controls.panel {
   width: 366px; flex: 0 0 366px;
   max-height: 100%; overflow-y: auto;
   padding: 0 1rem 1rem; margin-bottom: 0;
 }
-.controls .section-label { margin-bottom: 0.55rem; }
-.workspace { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+:where(.kh-root) .controls .section-label { margin-bottom: 0.55rem; }
+:where(.kh-root) .workspace { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 
 /* the topology header is pinned to the top of the (scrolling) controls card: the family dial and the
    Solve button ride along so an action is always one click away no matter how far the form is scrolled */
-.topo-head {
+:where(.kh-root) .topo-head {
   position: sticky; top: 0; z-index: 5;
   margin: 0 -1rem; padding: 0.7rem 1rem 0.6rem;
-  background: linear-gradient(180deg, var(--panel-hi) 60%, var(--panel));
-  border-bottom: 1px solid var(--line-soft); border-radius: 6px 6px 0 0;
+  background: linear-gradient(180deg, var(--kh-panel-hi) 60%, var(--kh-panel));
+  border-bottom: 1px solid var(--kh-line-soft); border-radius: 6px 6px 0 0;
 }
-.dial-solve { display: flex; align-items: center; gap: 0.5rem; }
-.dial-solve .dial { flex: 1; min-width: 0; }
-.solve-col { flex: 0 0 96px; display: flex; flex-direction: column; align-items: stretch; gap: 0.45rem; }
-.solve-col .solve-btn { width: 100%; padding: 0.55rem 0.4rem; font-size: 0.82rem; }
-.solve-col .boot, .solve-col .chip, .solve-col .hint { align-self: center; text-align: center; }
+:where(.kh-root) .dial-solve { display: flex; align-items: center; gap: 0.5rem; }
+:where(.kh-root) .dial-solve .dial { flex: 1; min-width: 0; }
+:where(.kh-root) .solve-col { flex: 0 0 96px; display: flex; flex-direction: column; align-items: stretch; gap: 0.45rem; }
+:where(.kh-root) .solve-col .solve-btn { width: 100%; padding: 0.55rem 0.4rem; font-size: 0.82rem; }
+:where(.kh-root) .solve-col .boot, :where(.kh-root) .solve-col .chip, :where(.kh-root) .solve-col .hint { align-self: center; text-align: center; }
 
 /* the vertical list of a family's converters (replaces the full grid) */
-.topo-list { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.6rem; }
-.topo-list .topo-card { width: 100%; }
+:where(.kh-root) .topo-list { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.6rem; }
+:where(.kh-root) .topo-list .topo-card { width: 100%; }
 
 /* ── three-stage terminal fold (Topology ▸ Variant ▸ Spec) ─────────────────────
    A CRT/terminal accordion: one stage open at a time, headers always re-open their
    stage. The body height tweens via grid-template-rows 0fr→1fr (no fixed max-height),
    and opening runs a short Fallout-style boot flicker + scanline sweep on the panel. */
-.acc { display: flex; flex-direction: column; gap: 0.5rem; padding-top: 0.7rem; }
-.acc-stage { border-radius: 5px; }
+:where(.kh-root) .acc { display: flex; flex-direction: column; gap: 0.5rem; padding-top: 0.7rem; }
+:where(.kh-root) .acc-stage { border-radius: 5px; }
 
-.acc-head {
+:where(.kh-root) .acc-head {
   width: 100%; display: flex; align-items: center; gap: 0.55rem;
   padding: 0.55rem 0.6rem; margin: 0;
-  background: linear-gradient(180deg, var(--panel-hi), var(--panel));
-  border: 1px solid var(--line-soft); border-radius: 5px;
-  color: var(--ink-dim); font-family: var(--disp); font-size: 0.8rem;
+  background: linear-gradient(180deg, var(--kh-panel-hi), var(--kh-panel));
+  border: 1px solid var(--kh-line-soft); border-radius: 5px;
+  color: var(--kh-ink-dim); font-family: var(--kh-disp); font-size: 0.8rem;
   letter-spacing: 0.16em; text-transform: uppercase; cursor: pointer;
   transition: color 0.2s, border-color 0.2s, box-shadow 0.25s;
 }
-.acc-head:hover { color: var(--amber-hi); border-color: var(--amber-deep); }
-.acc-stage.open > .acc-head {
-  color: var(--amber); border-color: var(--amber-deep);
+:where(.kh-root) .acc-head:hover { color: var(--kh-amber-hi); border-color: var(--kh-amber-deep); }
+:where(.kh-root) .acc-stage.open > .acc-head {
+  color: var(--kh-amber); border-color: var(--kh-amber-deep);
   border-radius: 5px 5px 0 0;
-  box-shadow: inset 0 0 0 1px rgba(184, 122, 30, 0.5), 0 0 16px -5px var(--amber);
+  box-shadow: inset 0 0 0 1px rgba(var(--kh-amber-deep-rgb), 0.5), 0 0 16px -5px var(--kh-amber);
 }
-.acc-head .idx {
-  border: 1px solid var(--amber-deep); color: var(--amber-hi);
+:where(.kh-root) .acc-head .idx {
+  border: 1px solid var(--kh-amber-deep); color: var(--kh-amber-hi);
   padding: 0 0.35rem; font-size: 0.7rem; letter-spacing: 0;
-  background: rgba(255, 179, 71, 0.07);
+  background: rgba(var(--kh-amber-rgb), 0.07);
 }
-.acc-title { flex: 0 0 auto; }
-.acc-pick {
-  margin-left: auto; color: var(--cyan);
-  font-family: var(--mono); font-size: 0.74rem; letter-spacing: 0; text-transform: none;
+:where(.kh-root) .acc-title { flex: 0 0 auto; }
+:where(.kh-root) .acc-pick {
+  margin-left: auto; color: var(--kh-cyan);
+  font-family: var(--kh-mono); font-size: 0.74rem; letter-spacing: 0; text-transform: none;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 44%;
 }
-.acc-chev {
-  flex: 0 0 auto; color: var(--amber-deep); font-size: 0.8rem;
+:where(.kh-root) .acc-chev {
+  flex: 0 0 auto; color: var(--kh-amber-deep); font-size: 0.8rem;
   transition: transform 0.3s, color 0.2s;
 }
-.acc-stage.open .acc-chev { transform: rotate(90deg); color: var(--amber); }
+:where(.kh-root) .acc-stage.open .acc-chev { transform: rotate(90deg); color: var(--kh-amber); }
 
-.acc-fold {
+:where(.kh-root) .acc-fold {
   display: grid; grid-template-rows: 0fr;
   transition: grid-template-rows 0.34s cubic-bezier(0.22, 0.61, 0.36, 1);
   border: 1px solid transparent; border-top: 0;
 }
-.acc-stage.open .acc-fold {
+:where(.kh-root) .acc-stage.open .acc-fold {
   grid-template-rows: 1fr;
-  border-color: var(--line-soft); border-radius: 0 0 5px 5px;
+  border-color: var(--kh-line-soft); border-radius: 0 0 5px 5px;
 }
-.acc-inner { overflow: hidden; min-height: 0; }
-.acc-pad { position: relative; padding: 0.7rem 0.55rem 0.85rem; }
-.acc-stage.open .acc-pad { animation: fallout-boot 0.5s steps(1, end); }
+:where(.kh-root) .acc-inner { overflow: hidden; min-height: 0; }
+:where(.kh-root) .acc-pad { position: relative; padding: 0.7rem 0.55rem 0.85rem; }
+:where(.kh-root) .acc-stage.open .acc-pad { animation: fallout-boot 0.5s steps(1, end); }
 /* scanline sweep: a single amber line sweeps down the panel as it opens */
-.acc-stage.open .acc-pad::before {
+:where(.kh-root) .acc-stage.open .acc-pad::before {
   content: ''; position: absolute; left: 0; right: 0; top: 0; height: 2px;
-  background: linear-gradient(90deg, transparent, var(--amber), transparent);
+  background: linear-gradient(90deg, transparent, var(--kh-amber), transparent);
   opacity: 0.7; animation: fallout-scan 0.5s ease-out 1 forwards; pointer-events: none;
 }
 @keyframes fallout-boot {
@@ -182,95 +236,95 @@ body {
   0% { top: 0; opacity: 0.75; } 90% { opacity: 0.5; } 100% { top: 100%; opacity: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .acc-fold { transition: none; }
-  .acc-stage.open .acc-pad, .acc-stage.open .acc-pad::before { animation: none; }
-  .acc-stage.open .acc-pad::before { display: none; }
+  :where(.kh-root) .acc-fold { transition: none; }
+  :where(.kh-root) .acc-stage.open .acc-pad, :where(.kh-root) .acc-stage.open .acc-pad::before { animation: none; }
+  :where(.kh-root) .acc-stage.open .acc-pad::before { display: none; }
 }
 
-.acc-note { font-family: var(--mono); font-size: 0.72rem; color: var(--ink-dim); margin: 0 0 0.6rem; line-height: 1.5; }
-.variant-list { display: flex; flex-direction: column; gap: 0.4rem; }
-.variant-list .variant-card { width: 100%; }
-.topo-card .t-tag.t-default {
-  color: var(--cyan); border-color: rgba(60, 224, 200, 0.45); background: rgba(60, 224, 200, 0.08);
+:where(.kh-root) .acc-note { font-family: var(--kh-mono); font-size: 0.72rem; color: var(--kh-ink-dim); margin: 0 0 0.6rem; line-height: 1.5; }
+:where(.kh-root) .variant-list { display: flex; flex-direction: column; gap: 0.4rem; }
+:where(.kh-root) .variant-list .variant-card { width: 100%; }
+:where(.kh-root) .topo-card .t-tag.t-default {
+  color: var(--kh-cyan); border-color: rgba(var(--kh-cyan-rgb), 0.45); background: rgba(var(--kh-cyan-rgb), 0.08);
 }
-.solve-row { display: flex; align-items: center; gap: 0.6rem; margin-top: 1rem; }
-.solve-row .solve-btn { flex: 1; }
-.solve-row .boot, .solve-row .chip, .solve-row .hint { flex: 0 0 auto; }
+:where(.kh-root) .solve-row { display: flex; align-items: center; gap: 0.6rem; margin-top: 1rem; }
+:where(.kh-root) .solve-row .solve-btn { flex: 1; }
+:where(.kh-root) .solve-row .boot, :where(.kh-root) .solve-row .chip, :where(.kh-root) .solve-row .hint { flex: 0 0 auto; }
 
-.results-strip {
-  font-family: var(--mono); font-size: 0.72rem; color: var(--ink-dim);
+:where(.kh-root) .results-strip {
+  font-family: var(--kh-mono); font-size: 0.72rem; color: var(--kh-ink-dim);
   padding: 0.1rem 0.2rem 0.55rem;
 }
 
 /* fit-to-pane: the schematic and the waveform scale to their pane's height (contain,
    no distortion, no crop). A view flexes as a column; the drawing/chart takes the
    spare height and its SVG fills that slot; captions/stats stay compact. */
-.view-fill { height: 100%; display: flex; flex-direction: column; min-height: 0; }
-.view-fill .schematic-frame.fit {
+:where(.kh-root) .view-fill { height: 100%; display: flex; flex-direction: column; min-height: 0; }
+:where(.kh-root) .view-fill .schematic-frame.fit {
   flex: 1; min-height: 0; overflow: hidden;
   display: flex; align-items: center; justify-content: center;
 }
-.view-fill .schematic-frame.fit svg { width: 100%; height: 100%; }
-.view-fill .wave-toolbar, .view-fill .wave-name, .view-fill .wave-readout { flex: 0 0 auto; }
-.view-fill .wavepane-fill { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.view-fill .wavepane-fill .chart-fill { flex: 1; min-height: 130px; display: flex; }
-.view-fill .wavepane-fill .chart-fill svg { width: 100%; height: 100%; }
+:where(.kh-root) .view-fill .schematic-frame.fit svg { width: 100%; height: 100%; }
+:where(.kh-root) .view-fill .wave-toolbar, :where(.kh-root) .view-fill .wave-name, :where(.kh-root) .view-fill .wave-readout { flex: 0 0 auto; }
+:where(.kh-root) .view-fill .wavepane-fill { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+:where(.kh-root) .view-fill .wavepane-fill .chart-fill { flex: 1; min-height: 130px; display: flex; }
+:where(.kh-root) .view-fill .wavepane-fill .chart-fill svg { width: 100%; height: 100%; }
 /* compact stats: a single horizontal strip so the chart keeps most of the pane height */
-.view-fill .wavepane-fill .stat-row.compact {
+:where(.kh-root) .view-fill .wavepane-fill .stat-row.compact {
   flex: 0 0 auto; margin-top: 0.4rem;
   display: flex; flex-wrap: nowrap; gap: 0.4rem; overflow-x: auto;
 }
-.view-fill .wavepane-fill .stat-row.compact .stat { padding: 0.28rem 0.5rem; flex: 0 0 auto; }
-.view-fill .wavepane-fill .stat-row.compact .stat .k { font-size: 0.56rem; }
-.view-fill .wavepane-fill .stat-row.compact .stat .n { font-size: 0.82rem; }
+:where(.kh-root) .view-fill .wavepane-fill .stat-row.compact .stat { padding: 0.28rem 0.5rem; flex: 0 0 auto; }
+:where(.kh-root) .view-fill .wavepane-fill .stat-row.compact .stat .k { font-size: 0.56rem; }
+:where(.kh-root) .view-fill .wavepane-fill .stat-row.compact .stat .n { font-size: 0.82rem; }
 /* the two output panes fill the workspace: a compact status strip on top, the panes below */
-.panes { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+:where(.kh-root) .panes { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 /* two panes stacked top/bottom — each full-width (landscape), which fits a schematic
    and a waveform far better than two narrow columns */
-.pane-grid {
+:where(.kh-root) .pane-grid {
   flex: 1; min-height: 0;
   display: grid; grid-template-rows: 1fr 1fr; gap: 1rem;
 }
-.workspace-empty {
+:where(.kh-root) .workspace-empty {
   flex: 1; display: flex; align-items: center; justify-content: center;
-  border: 1px dashed var(--line); border-radius: 6px; text-align: center;
-  background: rgba(0, 0, 0, 0.15);
+  border: 1px dashed var(--kh-line); border-radius: 6px; text-align: center;
+  background: rgba(var(--kh-shadow-rgb), 0.15);
 }
-.ws-title { font-family: var(--disp); font-size: 1.6rem; letter-spacing: 0.12em; color: var(--amber); }
-.ws-sub { font-family: var(--mono); font-size: 0.8rem; color: var(--ink-dim); margin-top: 0.4rem; }
-.ws-hint { font-size: 0.82rem; color: var(--ink-dim); max-width: 460px; margin: 1rem auto 0; line-height: 1.6; }
+:where(.kh-root) .ws-title { font-family: var(--kh-disp); font-size: 1.6rem; letter-spacing: 0.12em; color: var(--kh-amber); }
+:where(.kh-root) .ws-sub { font-family: var(--kh-mono); font-size: 0.8rem; color: var(--kh-ink-dim); margin-top: 0.4rem; }
+:where(.kh-root) .ws-hint { font-size: 0.82rem; color: var(--kh-ink-dim); max-width: 460px; margin: 1rem auto 0; line-height: 1.6; }
 
 /* desktop: each grid cell may shrink below its content — the pane scrolls/fits inside */
-.pane-grid > * { min-height: 0; }
+:where(.kh-root) .pane-grid > * { min-height: 0; }
 
 @media (max-width: 1100px) {
   /* narrow: give up the single-screen fit and let the page scroll normally */
-  .wrap { height: auto; min-height: 100vh; }
-  .workbench { flex-direction: column; flex: none; }
-  .controls.panel { width: 100%; flex: none; max-height: none; overflow-y: visible; }
-  .pane-grid { grid-template-rows: none; }
-  .pane-grid > * { min-height: 420px; }
-  .workspace-empty { min-height: 300px; }
+  :where(.kh-root) .wrap { height: auto; min-height: 100vh; }
+  :where(.kh-root) .workbench { flex-direction: column; flex: none; }
+  :where(.kh-root) .controls.panel { width: 100%; flex: none; max-height: none; overflow-y: visible; }
+  :where(.kh-root) .pane-grid { grid-template-rows: none; }
+  :where(.kh-root) .pane-grid > * { min-height: 420px; }
+  :where(.kh-root) .workspace-empty { min-height: 300px; }
 }
 
-.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+:where(.kh-root) .mono { font-family: var(--kh-mono); font-variant-numeric: tabular-nums; }
 
-a { color: var(--amber); }
+:where(.kh-root) a { color: var(--kh-amber); }
 
 /* ── header: drawing-sheet title block ──────────────────────────────────── */
 
-header.kh {
+:where(.kh-root) header.kh {
   margin: 1.1rem 0 1.4rem;
 }
-.kh-sheet {
+:where(.kh-root) .kh-sheet {
   position: relative;
-  border: 1px solid var(--line);
+  border: 1px solid var(--kh-line);
   border-radius: 6px;
   background:
-    linear-gradient(var(--grat-strong) 1px, transparent 1px) 0 0 / 56px 56px,
-    linear-gradient(90deg, var(--grat-strong) 1px, transparent 1px) 0 0 / 56px 56px,
-    linear-gradient(180deg, #14100a, #0f0c07);
-  box-shadow: inset 0 0 70px rgba(0, 0, 0, 0.65);
+    linear-gradient(var(--kh-grat-strong) 1px, transparent 1px) 0 0 / 56px 56px,
+    linear-gradient(90deg, var(--kh-grat-strong) 1px, transparent 1px) 0 0 / 56px 56px,
+    linear-gradient(180deg, var(--kh-sheet-top), var(--kh-sheet-bottom));
+  box-shadow: inset 0 0 70px rgba(var(--kh-shadow-rgb), 0.65);
   padding: 1.3rem 1.5rem 1.15rem;
   display: flex;
   align-items: flex-end;
@@ -279,289 +333,289 @@ header.kh {
   overflow: hidden;
 }
 /* sheet corner index ticks, like a drawing frame */
-.kh-sheet::before, .kh-sheet::after {
+:where(.kh-root) .kh-sheet::before, :where(.kh-root) .kh-sheet::after {
   content: '';
   position: absolute;
   width: 18px; height: 18px;
-  border: 1px solid rgba(255, 179, 71, 0.4);
+  border: 1px solid rgba(var(--kh-amber-rgb), 0.4);
 }
-.kh-sheet::before { top: 8px; left: 8px; border-right: none; border-bottom: none; }
-.kh-sheet::after  { bottom: 8px; right: 8px; border-left: none; border-top: none; }
+:where(.kh-root) .kh-sheet::before { top: 8px; left: 8px; border-right: none; border-bottom: none; }
+:where(.kh-root) .kh-sheet::after  { bottom: 8px; right: 8px; border-left: none; border-top: none; }
 
-.kh-brand { display: flex; align-items: center; gap: 0.9rem; }
-.kh-brand svg { display: block; }
-.kh-title {
-  font-family: var(--disp);
+:where(.kh-root) .kh-brand { display: flex; align-items: center; gap: 0.9rem; }
+:where(.kh-root) .kh-brand svg { display: block; }
+:where(.kh-root) .kh-title {
+  font-family: var(--kh-disp);
   font-size: 2rem;
   letter-spacing: 0.16em;
-  color: var(--amber);
-  text-shadow: 0 0 18px rgba(255, 179, 71, 0.45);
+  color: var(--kh-amber);
+  text-shadow: 0 0 18px rgba(var(--kh-amber-rgb), 0.45);
   line-height: 1;
 }
-.kh-sub {
-  font-family: var(--mono);
+:where(.kh-root) .kh-sub {
+  font-family: var(--kh-mono);
   font-size: 0.72rem;
   letter-spacing: 0.08em;
-  color: var(--ink-dim);
+  color: var(--kh-ink-dim);
   margin-top: 0.45rem;
 }
-.kh-sub b { color: var(--amber-hi); font-weight: 600; }
+:where(.kh-root) .kh-sub b { color: var(--kh-amber-hi); font-weight: 600; }
 
 /* title block table — the EDA drawing-frame signature */
-.kh-titleblock {
-  font-family: var(--mono);
+:where(.kh-root) .kh-titleblock {
+  font-family: var(--kh-mono);
   font-size: 0.68rem;
-  border: 1px solid var(--line);
+  border: 1px solid var(--kh-line);
   border-collapse: collapse;
-  color: var(--ink-dim);
-  background: rgba(0, 0, 0, 0.25);
+  color: var(--kh-ink-dim);
+  background: rgba(var(--kh-shadow-rgb), 0.25);
   white-space: nowrap;
 }
-.kh-titleblock td {
-  border: 1px solid var(--line-soft);
+:where(.kh-root) .kh-titleblock td {
+  border: 1px solid var(--kh-line-soft);
   padding: 0.16rem 0.55rem;
 }
-.kh-titleblock td.v { color: var(--ink); }
-.kh-titleblock td.v .led {
+:where(.kh-root) .kh-titleblock td.v { color: var(--kh-ink); }
+:where(.kh-root) .kh-titleblock td.v .led {
   display: inline-block; width: 7px; height: 7px; border-radius: 50%;
   margin-right: 0.35rem; vertical-align: 1px;
-  background: var(--ink-dim);
+  background: var(--kh-ink-dim);
 }
-.kh-titleblock td.v .led.on {
-  background: var(--ok);
-  box-shadow: 0 0 7px var(--ok);
+:where(.kh-root) .kh-titleblock td.v .led.on {
+  background: var(--kh-ok);
+  box-shadow: 0 0 7px var(--kh-ok);
   animation: kh-pulse 2.2s infinite;
 }
-.kh-titleblock td.v .led.err { background: var(--fault); box-shadow: 0 0 7px var(--fault); }
+:where(.kh-root) .kh-titleblock td.v .led.err { background: var(--kh-fault); box-shadow: 0 0 7px var(--kh-fault); }
 @keyframes kh-pulse { 50% { opacity: 0.55; } }
 
 /* ── panels ─────────────────────────────────────────────────────────────── */
 
-.panel {
+:where(.kh-root) .panel {
   position: relative;
-  border: 1px solid var(--line);
+  border: 1px solid var(--kh-line);
   border-radius: 6px;
-  background: linear-gradient(180deg, var(--panel-hi), var(--panel));
-  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
+  background: linear-gradient(180deg, var(--kh-panel-hi), var(--kh-panel));
+  box-shadow: 0 10px 26px rgba(var(--kh-shadow-rgb), 0.45);
   padding: 1.05rem 1.2rem 1.2rem;
   margin-bottom: 1.1rem;
 }
-.panel::before {
+:where(.kh-root) .panel::before {
   content: '';
   position: absolute;
   top: 0; left: 10px; right: 10px; height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(255, 179, 71, 0.55), transparent);
+  background: linear-gradient(90deg, transparent, rgba(var(--kh-amber-rgb), 0.55), transparent);
 }
 
-.section-label {
-  font-family: var(--disp);
+:where(.kh-root) .section-label {
+  font-family: var(--kh-disp);
   font-size: 0.82rem;
   letter-spacing: 0.22em;
-  color: var(--amber);
+  color: var(--kh-amber);
   text-transform: uppercase;
   display: flex;
   align-items: center;
   gap: 0.6rem;
   margin: 0 0 0.85rem;
 }
-.section-label .idx {
-  border: 1px solid var(--amber-deep);
-  color: var(--amber-hi);
+:where(.kh-root) .section-label .idx {
+  border: 1px solid var(--kh-amber-deep);
+  color: var(--kh-amber-hi);
   padding: 0 0.35rem;
   font-size: 0.72rem;
-  background: rgba(255, 179, 71, 0.07);
+  background: rgba(var(--kh-amber-rgb), 0.07);
 }
-.section-label::after {
+:where(.kh-root) .section-label::after {
   content: '';
   flex: 1;
   height: 1px;
-  background: linear-gradient(90deg, rgba(255, 179, 71, 0.35), transparent);
+  background: linear-gradient(90deg, rgba(var(--kh-amber-rgb), 0.35), transparent);
 }
-.section-label .hint {
-  font-family: var(--mono);
+:where(.kh-root) .section-label .hint {
+  font-family: var(--kh-mono);
   font-size: 0.66rem;
   letter-spacing: 0.04em;
   text-transform: none;
-  color: var(--ink-dim);
+  color: var(--kh-ink-dim);
 }
 
 /* ── topology picker ────────────────────────────────────────────────────── */
 
-.topo-family {
-  font-family: var(--mono);
+:where(.kh-root) .topo-family {
+  font-family: var(--kh-mono);
   font-size: 0.68rem;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: var(--ink-dim);
+  color: var(--kh-ink-dim);
   margin: 0.9rem 0 0.4rem;
 }
-.topo-family:first-of-type { margin-top: 0; }
+:where(.kh-root) .topo-family:first-of-type { margin-top: 0; }
 
-.topo-grid {
+:where(.kh-root) .topo-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(158px, 1fr));
   gap: 0.5rem;
 }
-.topo-card {
+:where(.kh-root) .topo-card {
   text-align: left;
-  font-family: var(--body);
-  border: 1px solid var(--line-soft);
+  font-family: var(--kh-body);
+  border: 1px solid var(--kh-line-soft);
   border-radius: 5px;
-  background: rgba(0, 0, 0, 0.22);
-  color: var(--ink);
+  background: rgba(var(--kh-shadow-rgb), 0.22);
+  color: var(--kh-ink);
   padding: 0.5rem 0.6rem;
   cursor: pointer;
   transition: border-color 120ms, box-shadow 120ms, background 120ms;
 }
-.topo-card:hover { border-color: var(--amber-deep); }
-.topo-card:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
-.topo-card.active {
-  border-color: var(--amber);
-  background: rgba(255, 179, 71, 0.07);
-  box-shadow: inset 0 0 16px rgba(255, 179, 71, 0.10), 0 0 12px -6px var(--amber);
+:where(.kh-root) .topo-card:hover { border-color: var(--kh-amber-deep); }
+:where(.kh-root) .topo-card:focus-visible { outline: 2px solid var(--kh-amber); outline-offset: 2px; }
+:where(.kh-root) .topo-card.active {
+  border-color: var(--kh-amber);
+  background: rgba(var(--kh-amber-rgb), 0.07);
+  box-shadow: inset 0 0 16px rgba(var(--kh-amber-rgb), 0.10), 0 0 12px -6px var(--kh-amber);
 }
-.topo-card.planned {
+:where(.kh-root) .topo-card.planned {
   opacity: 0.42;
   cursor: not-allowed;
 }
-.topo-card .t-name {
-  font-family: var(--mono);
+:where(.kh-root) .topo-card .t-name {
+  font-family: var(--kh-mono);
   font-weight: 600;
   font-size: 0.8rem;
-  color: var(--amber-hi);
+  color: var(--kh-amber-hi);
   display: flex;
   justify-content: space-between;
   align-items: baseline;
   gap: 0.4rem;
 }
-.topo-card.planned .t-name { color: var(--ink-dim); }
-.topo-card .t-tag {
+:where(.kh-root) .topo-card.planned .t-name { color: var(--kh-ink-dim); }
+:where(.kh-root) .topo-card .t-tag {
   font-size: 0.6rem;
   font-weight: 400;
-  color: var(--ink-dim);
+  color: var(--kh-ink-dim);
   letter-spacing: 0.05em;
 }
-.topo-card .t-desc {
+:where(.kh-root) .topo-card .t-desc {
   font-size: 0.68rem;
-  color: var(--ink-dim);
+  color: var(--kh-ink-dim);
   margin-top: 0.15rem;
   line-height: 1.35;
 }
 
 /* ── forms ──────────────────────────────────────────────────────────────── */
 
-.grid2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.7rem 0.9rem; }
-.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.7rem 0.9rem; }
-.grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.7rem 0.9rem; }
+:where(.kh-root) .grid2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.7rem 0.9rem; }
+:where(.kh-root) .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.7rem 0.9rem; }
+:where(.kh-root) .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.7rem 0.9rem; }
 @media (max-width: 900px) {
-  .grid3, .grid4 { grid-template-columns: repeat(2, 1fr); }
+  :where(.kh-root) .grid3, :where(.kh-root) .grid4 { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 560px) {
-  .grid2, .grid3, .grid4 { grid-template-columns: 1fr; }
+  :where(.kh-root) .grid2, :where(.kh-root) .grid3, :where(.kh-root) .grid4 { grid-template-columns: 1fr; }
 }
 
-.fld { display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; }
-.fld-label {
-  font-family: var(--mono);
+:where(.kh-root) .fld { display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; }
+:where(.kh-root) .fld-label {
+  font-family: var(--kh-mono);
   font-size: 0.66rem;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--ink-dim);
+  color: var(--kh-ink-dim);
 }
-.fld-label .u { color: var(--amber-deep); text-transform: none; }
-input.fld-in, select.fld-in {
-  font-family: var(--mono);
+:where(.kh-root) .fld-label .u { color: var(--kh-amber-deep); text-transform: none; }
+:where(.kh-root) input.fld-in, :where(.kh-root) select.fld-in {
+  font-family: var(--kh-mono);
   font-size: 0.88rem;
-  color: var(--ink);
-  background: #0b0805;
-  border: 1px solid var(--line);
+  color: var(--kh-ink);
+  background: var(--kh-field-bg);
+  border: 1px solid var(--kh-line);
   border-radius: 4px;
   padding: 0.42rem 0.55rem;
   width: 100%;
 }
-input.fld-in:focus, select.fld-in:focus {
+:where(.kh-root) input.fld-in:focus, :where(.kh-root) select.fld-in:focus {
   outline: none;
-  border-color: var(--amber);
-  box-shadow: 0 0 0 1px rgba(255, 179, 71, 0.35);
+  border-color: var(--kh-amber);
+  box-shadow: 0 0 0 1px rgba(var(--kh-amber-rgb), 0.35);
 }
-input.fld-in.bad { border-color: var(--fault); }
+:where(.kh-root) input.fld-in.bad { border-color: var(--kh-fault); }
 
 /* Native <select> popups: force the whole control (closed field AND the dropped option list) onto the
    amber-on-carbon theme. `color-scheme: dark` themes the popup chrome + selected-row highlight; the
    per-option colours cover the list rows. */
-select { color-scheme: dark; accent-color: var(--amber); }
-select option {
-  background: #0f0b06; color: var(--ink);
-  font-family: var(--mono);
+:where(.kh-root) select { color-scheme: var(--kh-color-scheme); accent-color: var(--kh-amber); }
+:where(.kh-root) select option {
+  background: var(--kh-option-bg); color: var(--kh-ink);
+  font-family: var(--kh-mono);
 }
-select option:checked, select option:hover {
-  background: var(--amber-deep); color: #120c04;
+:where(.kh-root) select option:checked, :where(.kh-root) select option:hover {
+  background: var(--kh-amber-deep); color: var(--kh-on-amber);
 }
-select optgroup {
-  background: #0b0805; color: var(--amber);
-  font-family: var(--disp); font-style: normal; letter-spacing: 0.06em;
+:where(.kh-root) select optgroup {
+  background: var(--kh-field-bg); color: var(--kh-amber);
+  font-family: var(--kh-disp); font-style: normal; letter-spacing: 0.06em;
 }
 
-.chk {
+:where(.kh-root) .chk {
   display: inline-flex; align-items: center; gap: 0.45rem;
-  font-family: var(--mono); font-size: 0.75rem; color: var(--ink-dim);
+  font-family: var(--kh-mono); font-size: 0.75rem; color: var(--kh-ink-dim);
   cursor: pointer;
 }
-.chk input { accent-color: var(--amber); }
+:where(.kh-root) .chk input { accent-color: var(--kh-amber); }
 
 /* outputs / OP row tables */
-.row-table { width: 100%; border-collapse: collapse; }
-.row-table th {
-  font-family: var(--mono);
+:where(.kh-root) .row-table { width: 100%; border-collapse: collapse; }
+:where(.kh-root) .row-table th {
+  font-family: var(--kh-mono);
   font-size: 0.64rem;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--ink-dim);
+  color: var(--kh-ink-dim);
   font-weight: 500;
   text-align: left;
   padding: 0.2rem 0.45rem;
 }
-.row-table td { padding: 0.18rem 0.45rem; }
-.row-btn {
-  font-family: var(--mono);
+:where(.kh-root) .row-table td { padding: 0.18rem 0.45rem; }
+:where(.kh-root) .row-btn {
+  font-family: var(--kh-mono);
   font-size: 0.72rem;
-  color: var(--ink-dim);
-  border: 1px solid var(--line-soft);
+  color: var(--kh-ink-dim);
+  border: 1px solid var(--kh-line-soft);
   background: transparent;
   border-radius: 4px;
   padding: 0.2rem 0.5rem;
   cursor: pointer;
 }
-.row-btn:hover { color: var(--amber); border-color: var(--amber-deep); }
+:where(.kh-root) .row-btn:hover { color: var(--kh-amber); border-color: var(--kh-amber-deep); }
 
-details.adv { margin-top: 0.9rem; border-top: 1px dashed var(--line-soft); padding-top: 0.7rem; }
-details.adv summary {
+:where(.kh-root) details.adv { margin-top: 0.9rem; border-top: 1px dashed var(--kh-line-soft); padding-top: 0.7rem; }
+:where(.kh-root) details.adv summary {
   cursor: pointer;
-  font-family: var(--mono);
+  font-family: var(--kh-mono);
   font-size: 0.7rem;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: var(--ink-dim);
+  color: var(--kh-ink-dim);
 }
-details.adv summary:hover { color: var(--amber); }
-details.adv .adv-body { margin-top: 0.75rem; }
+:where(.kh-root) details.adv summary:hover { color: var(--kh-amber); }
+:where(.kh-root) details.adv .adv-body { margin-top: 0.75rem; }
 
 /* ── advanced per-topology knobs ─────────────────────────────────────────────── */
-.knob-group { margin-bottom: 0.9rem; }
-.knob-row {
+:where(.kh-root) .knob-group { margin-bottom: 0.9rem; }
+:where(.kh-root) .knob-row {
   display: grid;
   grid-template-columns: 1fr 8.5rem;
   align-items: center;
   gap: 0.5rem;
   padding: 0.22rem 0;
-  border-bottom: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--kh-line-soft);
 }
-.knob-toggle { display: flex; align-items: baseline; gap: 0.4rem; cursor: pointer; font-size: 0.72rem; }
+:where(.kh-root) .knob-toggle { display: flex; align-items: baseline; gap: 0.4rem; cursor: pointer; font-size: 0.72rem; }
 /* KH-themed checkbox: a dark phosphor box that fills amber with a check when on — replaces the stark
    white default control so it reads like the rest of the bench. Shared by the knob override toggles
    and the boolean knobs. */
-.knob-toggle input[type='checkbox'],
-.knob-bool input[type='checkbox'] {
+:where(.kh-root) .knob-toggle input[type='checkbox'],
+:where(.kh-root) .knob-bool input[type='checkbox'] {
   appearance: none;
   -webkit-appearance: none;
   width: 0.82rem;
@@ -570,190 +624,190 @@ details.adv .adv-body { margin-top: 0.75rem; }
   flex: none;
   position: relative;
   top: 0.08rem;
-  border: 1px solid var(--line);
+  border: 1px solid var(--kh-line);
   border-radius: 3px;
-  background: var(--bg-deep);
+  background: var(--kh-bg-deep);
   cursor: pointer;
   transition: border-color 0.12s ease, background 0.12s ease;
 }
-.knob-toggle input[type='checkbox']:hover,
-.knob-bool input[type='checkbox']:hover { border-color: var(--amber-deep); }
-.knob-toggle input[type='checkbox']:focus-visible,
-.knob-bool input[type='checkbox']:focus-visible { outline: 1px solid var(--amber); outline-offset: 1px; }
-.knob-toggle input[type='checkbox']:checked,
-.knob-bool input[type='checkbox']:checked { background: var(--amber); border-color: var(--amber); }
-.knob-toggle input[type='checkbox']:checked::after,
-.knob-bool input[type='checkbox']:checked::after {
+:where(.kh-root) .knob-toggle input[type='checkbox']:hover,
+:where(.kh-root) .knob-bool input[type='checkbox']:hover { border-color: var(--kh-amber-deep); }
+:where(.kh-root) .knob-toggle input[type='checkbox']:focus-visible,
+:where(.kh-root) .knob-bool input[type='checkbox']:focus-visible { outline: 1px solid var(--kh-amber); outline-offset: 1px; }
+:where(.kh-root) .knob-toggle input[type='checkbox']:checked,
+:where(.kh-root) .knob-bool input[type='checkbox']:checked { background: var(--kh-amber); border-color: var(--kh-amber); }
+:where(.kh-root) .knob-toggle input[type='checkbox']:checked::after,
+:where(.kh-root) .knob-bool input[type='checkbox']:checked::after {
   content: '';
   position: absolute;
   left: 0.27rem;
   top: 0.08rem;
   width: 0.2rem;
   height: 0.4rem;
-  border: solid var(--bg-deep);
+  border: solid var(--kh-bg-deep);
   border-width: 0 2px 2px 0;
   transform: rotate(43deg);
 }
-.knob-name { color: var(--ink); }
-.knob-sym { font-family: var(--mono); font-size: 0.62rem; color: var(--ink-dim); }
-.knob-ctl { display: flex; justify-content: flex-end; }
-.knob-ctl .fld-in { width: 100%; }
-.knob-auto {
-  font-family: var(--mono);
+:where(.kh-root) .knob-name { color: var(--kh-ink); }
+:where(.kh-root) .knob-sym { font-family: var(--kh-mono); font-size: 0.62rem; color: var(--kh-ink-dim); }
+:where(.kh-root) .knob-ctl { display: flex; justify-content: flex-end; }
+:where(.kh-root) .knob-ctl .fld-in { width: 100%; }
+:where(.kh-root) .knob-auto {
+  font-family: var(--kh-mono);
   font-size: 0.64rem;
-  color: var(--ink-dim);
+  color: var(--kh-ink-dim);
   opacity: 0.72;
   font-style: italic;
 }
-.knob-bool { display: flex; align-items: center; gap: 0.35rem; font-size: 0.68rem; color: var(--ink-dim); }
+:where(.kh-root) .knob-bool { display: flex; align-items: center; gap: 0.35rem; font-size: 0.68rem; color: var(--kh-ink-dim); }
 
 /* ── buttons ────────────────────────────────────────────────────────────── */
 
-.btn {
-  font-family: var(--disp);
+:where(.kh-root) .btn {
+  font-family: var(--kh-disp);
   font-size: 0.95rem;
   letter-spacing: 0.18em;
   text-transform: uppercase;
-  color: var(--bg);
-  background: linear-gradient(180deg, var(--amber-hi), var(--amber));
-  border: 1px solid var(--amber);
+  color: var(--kh-bg);
+  background: linear-gradient(180deg, var(--kh-amber-hi), var(--kh-amber));
+  border: 1px solid var(--kh-amber);
   border-radius: 5px;
   padding: 0.55rem 1.6rem;
   cursor: pointer;
-  box-shadow: 0 0 18px -6px var(--amber);
+  box-shadow: 0 0 18px -6px var(--kh-amber);
   transition: filter 120ms;
 }
-.btn:hover { filter: brightness(1.08); }
-.btn:disabled { filter: grayscale(0.7) brightness(0.7); cursor: wait; }
-.btn.ghost {
-  color: var(--amber);
+:where(.kh-root) .btn:hover { filter: brightness(1.08); }
+:where(.kh-root) .btn:disabled { filter: grayscale(0.7) brightness(0.7); cursor: wait; }
+:where(.kh-root) .btn.ghost {
+  color: var(--kh-amber);
   background: transparent;
-  border: 1px solid var(--amber-deep);
+  border: 1px solid var(--kh-amber-deep);
   box-shadow: none;
   font-size: 0.78rem;
 }
-.btn.ghost:hover { border-color: var(--amber); background: rgba(255, 179, 71, 0.06); }
+:where(.kh-root) .btn.ghost:hover { border-color: var(--kh-amber); background: rgba(var(--kh-amber-rgb), 0.06); }
 
 /* ── result tabs ────────────────────────────────────────────────────────── */
 
-.tabs { display: flex; gap: 0.35rem; flex-wrap: wrap; margin-bottom: 0.9rem; }
-.tabs button {
-  font-family: var(--disp);
+:where(.kh-root) .tabs { display: flex; gap: 0.35rem; flex-wrap: wrap; margin-bottom: 0.9rem; }
+:where(.kh-root) .tabs button {
+  font-family: var(--kh-disp);
   font-size: 0.78rem;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: var(--ink-dim);
-  background: rgba(0, 0, 0, 0.25);
-  border: 1px solid var(--line-soft);
+  color: var(--kh-ink-dim);
+  background: rgba(var(--kh-shadow-rgb), 0.25);
+  border: 1px solid var(--kh-line-soft);
   border-radius: 4px;
   padding: 0.4rem 0.95rem;
   cursor: pointer;
 }
-.tabs button:hover { color: var(--amber-hi); }
-.tabs button.active {
-  color: var(--amber);
-  border-color: var(--amber-deep);
-  background: rgba(255, 179, 71, 0.07);
-  box-shadow: inset 0 0 14px rgba(255, 179, 71, 0.08), 0 0 10px -5px var(--amber);
+:where(.kh-root) .tabs button:hover { color: var(--kh-amber-hi); }
+:where(.kh-root) .tabs button.active {
+  color: var(--kh-amber);
+  border-color: var(--kh-amber-deep);
+  background: rgba(var(--kh-amber-rgb), 0.07);
+  box-shadow: inset 0 0 14px rgba(var(--kh-amber-rgb), 0.08), 0 0 10px -5px var(--kh-amber);
 }
 
 /* ── data tables ────────────────────────────────────────────────────────── */
 
-.data-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
-.data-table th {
-  font-family: var(--mono);
+:where(.kh-root) .data-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+:where(.kh-root) .data-table th {
+  font-family: var(--kh-mono);
   font-size: 0.64rem;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--ink-dim);
+  color: var(--kh-ink-dim);
   font-weight: 500;
   text-align: left;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--kh-line);
   padding: 0.35rem 0.6rem;
 }
-.data-table td {
-  font-family: var(--mono);
+:where(.kh-root) .data-table td {
+  font-family: var(--kh-mono);
   font-variant-numeric: tabular-nums;
   padding: 0.34rem 0.6rem;
-  border-bottom: 1px solid var(--line-soft);
-  color: var(--ink);
+  border-bottom: 1px solid var(--kh-line-soft);
+  color: var(--kh-ink);
 }
-.data-table tbody tr { cursor: default; }
-.data-table tbody tr.clickable { cursor: pointer; }
-.data-table tbody tr.clickable:hover td { background: rgba(255, 179, 71, 0.05); }
-.data-table tbody tr.selected td { background: rgba(255, 179, 71, 0.09); }
-.data-table td.dim { color: var(--ink-dim); }
-.data-table td.num { text-align: right; }
-.data-table th.num { text-align: right; }
+:where(.kh-root) .data-table tbody tr { cursor: default; }
+:where(.kh-root) .data-table tbody tr.clickable { cursor: pointer; }
+:where(.kh-root) .data-table tbody tr.clickable:hover td { background: rgba(var(--kh-amber-rgb), 0.05); }
+:where(.kh-root) .data-table tbody tr.selected td { background: rgba(var(--kh-amber-rgb), 0.09); }
+:where(.kh-root) .data-table td.dim { color: var(--kh-ink-dim); }
+:where(.kh-root) .data-table td.num { text-align: right; }
+:where(.kh-root) .data-table th.num { text-align: right; }
 
 /* chips */
-.chip {
+:where(.kh-root) .chip {
   display: inline-block;
-  font-family: var(--mono);
+  font-family: var(--kh-mono);
   font-size: 0.64rem;
   letter-spacing: 0.08em;
   padding: 0.1rem 0.5rem;
   border-radius: 3px;
-  border: 1px solid var(--line);
-  color: var(--ink-dim);
-  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--kh-line);
+  color: var(--kh-ink-dim);
+  background: rgba(var(--kh-shadow-rgb), 0.25);
 }
-.chip.amber { color: var(--amber); border-color: var(--amber-deep); background: rgba(255, 179, 71, 0.07); }
-.chip.cyan  { color: var(--cyan); border-color: rgba(60, 224, 200, 0.4); background: rgba(60, 224, 200, 0.06); }
-.chip.ok    { color: var(--ok); border-color: rgba(134, 217, 126, 0.4); background: rgba(134, 217, 126, 0.06); }
-.chip.warn  { color: var(--amber-hi); border-color: var(--amber-deep); background: rgba(255, 179, 71, 0.09); }
-.chip.bad   { color: var(--fault); border-color: rgba(255, 93, 85, 0.45); background: rgba(255, 93, 85, 0.07); }
+:where(.kh-root) .chip.amber { color: var(--kh-amber); border-color: var(--kh-amber-deep); background: rgba(var(--kh-amber-rgb), 0.07); }
+:where(.kh-root) .chip.cyan  { color: var(--kh-cyan); border-color: rgba(var(--kh-cyan-rgb), 0.4); background: rgba(var(--kh-cyan-rgb), 0.06); }
+:where(.kh-root) .chip.ok    { color: var(--kh-ok); border-color: rgba(var(--kh-ok-rgb), 0.4); background: rgba(var(--kh-ok-rgb), 0.06); }
+:where(.kh-root) .chip.warn  { color: var(--kh-amber-hi); border-color: var(--kh-amber-deep); background: rgba(var(--kh-amber-rgb), 0.09); }
+:where(.kh-root) .chip.bad   { color: var(--kh-fault); border-color: rgba(var(--kh-fault-rgb), 0.45); background: rgba(var(--kh-fault-rgb), 0.07); }
 
 /* ── schematic sheet ────────────────────────────────────────────────────── */
 
-.schematic-frame, .plot-frame {
+:where(.kh-root) .schematic-frame, :where(.kh-root) .plot-frame {
   position: relative;
-  border: 1px solid var(--line);
+  border: 1px solid var(--kh-line);
   border-radius: 4px;
   background:
-    linear-gradient(var(--grat) 1px, transparent 1px) 0 0 / 24px 24px,
-    linear-gradient(90deg, var(--grat) 1px, transparent 1px) 0 0 / 24px 24px,
-    #0b0906;
-  box-shadow: inset 0 0 60px rgba(0, 0, 0, 0.6);
+    linear-gradient(var(--kh-grat) 1px, transparent 1px) 0 0 / 24px 24px,
+    linear-gradient(90deg, var(--kh-grat) 1px, transparent 1px) 0 0 / 24px 24px,
+    var(--kh-frame-bg);
+  box-shadow: inset 0 0 60px rgba(var(--kh-shadow-rgb), 0.6);
   overflow: hidden;
 }
-.schematic-frame svg, .plot-frame svg { display: block; width: 100%; height: auto; }
+:where(.kh-root) .schematic-frame svg, :where(.kh-root) .plot-frame svg { display: block; width: 100%; height: auto; }
 
-.sch-sym { stroke: var(--amber); stroke-width: 1.6; fill: none; stroke-linecap: round; }
-.sch-wire { stroke: var(--amber-deep); stroke-width: 1.3; fill: none; }
-.sch-fill { fill: var(--amber); stroke: none; }
-.sch-node { fill: var(--amber); }
-.sch-ref {
-  font-family: var(--mono); font-size: 11px; fill: var(--amber-hi);
+:where(.kh-root) .sch-sym { stroke: var(--kh-amber); stroke-width: 1.6; fill: none; stroke-linecap: round; }
+:where(.kh-root) .sch-wire { stroke: var(--kh-amber-deep); stroke-width: 1.3; fill: none; }
+:where(.kh-root) .sch-fill { fill: var(--kh-amber); stroke: none; }
+:where(.kh-root) .sch-node { fill: var(--kh-amber); }
+:where(.kh-root) .sch-ref {
+  font-family: var(--kh-mono); font-size: 11px; fill: var(--kh-amber-hi);
   letter-spacing: 0.03em;
 }
-.sch-val { font-family: var(--mono); font-size: 10px; fill: var(--ink-dim); }
-.sch-port { font-family: var(--mono); font-size: 11px; fill: var(--cyan); letter-spacing: 0.05em; }
+:where(.kh-root) .sch-val { font-family: var(--kh-mono); font-size: 10px; fill: var(--kh-ink-dim); }
+:where(.kh-root) .sch-port { font-family: var(--kh-mono); font-size: 11px; fill: var(--kh-cyan); letter-spacing: 0.05em; }
 
 /* Control-plane drawing: dashed signal wires, signal net-label flags, control block/IC symbols.
    Two flags carrying the same label are the same control net (standard schematic net-label practice). */
-.sch-ctl { stroke: var(--cyan); stroke-width: 1.1; fill: none; stroke-dasharray: 4 3; opacity: 0.75; }
-.sch-sig { font-family: var(--mono); font-size: 9.5px; fill: var(--cyan); letter-spacing: 0.03em; }
-.sch-blk { font-family: var(--mono); font-size: 10px; fill: var(--ink-dim); letter-spacing: 0.04em; text-transform: uppercase; }
+:where(.kh-root) .sch-ctl { stroke: var(--kh-cyan); stroke-width: 1.1; fill: none; stroke-dasharray: 4 3; opacity: 0.75; }
+:where(.kh-root) .sch-sig { font-family: var(--kh-mono); font-size: 9.5px; fill: var(--kh-cyan); letter-spacing: 0.03em; }
+:where(.kh-root) .sch-blk { font-family: var(--kh-mono); font-size: 10px; fill: var(--kh-ink-dim); letter-spacing: 0.04em; text-transform: uppercase; }
 
 /* A hotspot PROMISES a drawer: pointer cursor, hover glow, white refdes. Anything drawn that has no BOM
    row cannot keep that promise — a FET's intrinsic body diode is a real TAS component but not an
    orderable part, so App.openPart() finds nothing and the click silently does nothing. It carries
    .sch-ann and is inert: no cursor, no hover, no selection ring. */
-.sch-hot:not(.sch-ann) { cursor: pointer; }
-.sch-hot .sch-hitbox { fill: transparent; stroke: none; }
-.sch-hot:not(.sch-ann):hover .sch-sym, .sch-hot.selected .sch-sym { stroke: var(--amber-hi); filter: drop-shadow(0 0 5px rgba(255, 179, 71, 0.9)); }
-.sch-hot:not(.sch-ann):hover .sch-fill, .sch-hot.selected .sch-fill { fill: var(--amber-hi); filter: drop-shadow(0 0 5px rgba(255, 179, 71, 0.9)); }
-.sch-hot:not(.sch-ann):hover .sch-ref, .sch-hot.selected .sch-ref { fill: #fff; }
-.sch-hot.selected .sch-hitbox { stroke: var(--amber-deep); stroke-dasharray: 4 3; }
+:where(.kh-root) .sch-hot:not(.sch-ann) { cursor: pointer; }
+:where(.kh-root) .sch-hot .sch-hitbox { fill: transparent; stroke: none; }
+:where(.kh-root) .sch-hot:not(.sch-ann):hover .sch-sym, :where(.kh-root) .sch-hot.selected .sch-sym { stroke: var(--kh-amber-hi); filter: drop-shadow(0 0 5px var(--kh-sch-glow)); }
+:where(.kh-root) .sch-hot:not(.sch-ann):hover .sch-fill, :where(.kh-root) .sch-hot.selected .sch-fill { fill: var(--kh-amber-hi); filter: drop-shadow(0 0 5px var(--kh-sch-glow)); }
+:where(.kh-root) .sch-hot:not(.sch-ann):hover .sch-ref, :where(.kh-root) .sch-hot.selected .sch-ref { fill: var(--kh-sch-hot-ref); }
+:where(.kh-root) .sch-hot.selected .sch-hitbox { stroke: var(--kh-amber-deep); stroke-dasharray: 4 3; }
 /* KEYBOARD FOCUS (ABT #693). Each part is a real tab stop now, so it needs a focus indicator that is
    visible against the dark frame and distinct from both hover (glow) and selection (dashed ring): a
    solid amber box around the hitbox, at 2 px so it survives the pane's fit-scaling. WCAG 2.4.7. */
-.sch-hot:focus { outline: none; }
-.sch-hot:focus-visible .sch-hitbox { stroke: var(--amber-hi); stroke-width: 2; stroke-dasharray: none; }
-.sch-hot:focus-visible .sch-sym { stroke: var(--amber-hi); }
-.sch-hot:focus-visible .sch-fill { fill: var(--amber-hi); }
-.sch-hot:focus-visible .sch-ref { fill: #fff; }
+:where(.kh-root) .sch-hot:focus { outline: none; }
+:where(.kh-root) .sch-hot:focus-visible .sch-hitbox { stroke: var(--kh-amber-hi); stroke-width: 2; stroke-dasharray: none; }
+:where(.kh-root) .sch-hot:focus-visible .sch-sym { stroke: var(--kh-amber-hi); }
+:where(.kh-root) .sch-hot:focus-visible .sch-fill { fill: var(--kh-amber-hi); }
+:where(.kh-root) .sch-hot:focus-visible .sch-ref { fill: var(--kh-sch-hot-ref); }
 
 /* PRINT. The bench is a dark-phosphor instrument, but a schematic is the one thing people take OUT of
    it, and there is no export — Ctrl+P is the only route to paper or PDF. Printed as-is the drawing is
@@ -761,16 +815,16 @@ details.adv .adv-body { margin-top: 0.75rem; }
    dark, the frame turns white, and the control plane keeps a distinguishable (darker) teal.
    checkSchematicContrast measures THIS palette against white as well. */
 @media print {
-  .schematic-frame { background: #fff; box-shadow: none; border-color: #999; }
-  .schematic-frame .sch-sym { stroke: #111827; }
-  .schematic-frame .sch-wire { stroke: #111827; }
-  .schematic-frame .sch-fill, .schematic-frame .sch-node { fill: #111827; }
-  .schematic-frame .sch-ref { fill: #000000; }
-  .schematic-frame .sch-val { fill: #44403c; }
-  .schematic-frame .sch-blk { fill: #44403c; }
-  .schematic-frame .sch-port, .schematic-frame .sch-sig { fill: #0f5c57; }
-  .schematic-frame .sch-ctl { stroke: #0f5c57; opacity: 1; }
-  .sch-caption { color: #44403c; }
+  :where(.kh-root) .schematic-frame { background: var(--kh-print-paper); box-shadow: none; border-color: var(--kh-print-frame-line); }
+  :where(.kh-root) .schematic-frame .sch-sym { stroke: var(--kh-print-ink); }
+  :where(.kh-root) .schematic-frame .sch-wire { stroke: var(--kh-print-ink); }
+  :where(.kh-root) .schematic-frame .sch-fill, :where(.kh-root) .schematic-frame .sch-node { fill: var(--kh-print-ink); }
+  :where(.kh-root) .schematic-frame .sch-ref { fill: var(--kh-print-ref); }
+  :where(.kh-root) .schematic-frame .sch-val { fill: var(--kh-print-val); }
+  :where(.kh-root) .schematic-frame .sch-blk { fill: var(--kh-print-val); }
+  :where(.kh-root) .schematic-frame .sch-port, :where(.kh-root) .schematic-frame .sch-sig { fill: var(--kh-print-port); }
+  :where(.kh-root) .schematic-frame .sch-ctl { stroke: var(--kh-print-port); opacity: 1; }
+  :where(.kh-root) .sch-caption { color: var(--kh-print-val); }
 
   /* INTERACTION STATE IS NOT PART OF THE DRAWING. Printing happens after the reader has been using the
      app — clicking the part they care about and then hitting Ctrl+P is the ordinary path — and that left
@@ -778,127 +832,127 @@ details.adv .adv-body { margin-top: 0.75rem; }
      the selected component drawn in amber (#ffce85 on white is 1.4:1) with a glow round it. The base
      print palette above fixed the ink and said nothing about state; making the selection ring actually
      work is what brought it to paper. */
-  .drawer, .drawer-mask { display: none !important; }
-  .schematic-frame .sch-hot.selected .sch-sym,
-  .schematic-frame .sch-hot:focus-visible .sch-sym { stroke: #111827; filter: none; }
-  .schematic-frame .sch-hot.selected .sch-fill,
-  .schematic-frame .sch-hot:focus-visible .sch-fill { fill: #111827; filter: none; }
-  .schematic-frame .sch-hot.selected .sch-ref,
-  .schematic-frame .sch-hot:focus-visible .sch-ref { fill: #000000; }
+  :where(.kh-root) .drawer, :where(.kh-root) .drawer-mask { display: none !important; }
+  :where(.kh-root) .schematic-frame .sch-hot.selected .sch-sym,
+  :where(.kh-root) .schematic-frame .sch-hot:focus-visible .sch-sym { stroke: var(--kh-print-ink); filter: none; }
+  :where(.kh-root) .schematic-frame .sch-hot.selected .sch-fill,
+  :where(.kh-root) .schematic-frame .sch-hot:focus-visible .sch-fill { fill: var(--kh-print-ink); filter: none; }
+  :where(.kh-root) .schematic-frame .sch-hot.selected .sch-ref,
+  :where(.kh-root) .schematic-frame .sch-hot:focus-visible .sch-ref { fill: var(--kh-print-ref); }
   /* the selected part keeps a mark on paper, but as a thin grey outline rather than an amber ring */
-  .schematic-frame .sch-hot.selected .sch-hitbox { stroke: #9ca3af; stroke-dasharray: 3 2; }
-  .schematic-frame .sch-hot:focus-visible .sch-hitbox { stroke: none; }
+  :where(.kh-root) .schematic-frame .sch-hot.selected .sch-hitbox { stroke: var(--kh-print-selected); stroke-dasharray: 3 2; }
+  :where(.kh-root) .schematic-frame .sch-hot:focus-visible .sch-hitbox { stroke: none; }
 }
 
-.sch-caption {
-  font-family: var(--mono);
+:where(.kh-root) .sch-caption {
+  font-family: var(--kh-mono);
   font-size: 0.68rem;
-  color: var(--ink-dim);
+  color: var(--kh-ink-dim);
   margin-top: 0.5rem;
 }
 
 /* ── waveform viewer ────────────────────────────────────────────────────── */
 
-.wave-toolbar { display: flex; flex-wrap: wrap; gap: 0.45rem; align-items: center; margin-bottom: 0.7rem; }
-.wave-toolbar .sep { flex: 1; }
+:where(.kh-root) .wave-toolbar { display: flex; flex-wrap: wrap; gap: 0.45rem; align-items: center; margin-bottom: 0.7rem; }
+:where(.kh-root) .wave-toolbar .sep { flex: 1; }
 
-.wave-readout {
+:where(.kh-root) .wave-readout {
   display: flex; flex-wrap: wrap; gap: 1.1rem;
-  font-family: var(--mono); font-size: 0.72rem; color: var(--ink-dim);
+  font-family: var(--kh-mono); font-size: 0.72rem; color: var(--kh-ink-dim);
   margin-top: 0.35rem;
 }
-.wave-readout b { font-weight: 600; }
-.wave-readout .i b { color: var(--amber); }
-.wave-readout .v b { color: var(--cyan); }
+:where(.kh-root) .wave-readout b { font-weight: 600; }
+:where(.kh-root) .wave-readout .i b { color: var(--kh-amber); }
+:where(.kh-root) .wave-readout .v b { color: var(--kh-cyan); }
 
-.wave-empty {
-  border: 1px dashed var(--line);
+:where(.kh-root) .wave-empty {
+  border: 1px dashed var(--kh-line);
   border-radius: 4px;
-  color: var(--ink-dim);
+  color: var(--kh-ink-dim);
   font-size: 0.8rem;
   padding: 1rem 1.1rem;
-  background: rgba(0, 0, 0, 0.2);
+  background: rgba(var(--kh-shadow-rgb), 0.2);
 }
-.wave-empty code { color: var(--amber-hi); font-size: 0.75rem; }
+:where(.kh-root) .wave-empty code { color: var(--kh-amber-hi); font-size: 0.75rem; }
 
 /* stat tiles for processed-only signals */
-.stat-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 0.5rem; margin-top: 0.7rem; }
-.stat {
-  border: 1px solid var(--line-soft);
+:where(.kh-root) .stat-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 0.5rem; margin-top: 0.7rem; }
+:where(.kh-root) .stat {
+  border: 1px solid var(--kh-line-soft);
   border-radius: 4px;
-  background: rgba(0, 0, 0, 0.22);
+  background: rgba(var(--kh-shadow-rgb), 0.22);
   padding: 0.45rem 0.6rem;
 }
-.stat .k {
-  font-family: var(--mono); font-size: 0.6rem; letter-spacing: 0.1em;
-  text-transform: uppercase; color: var(--ink-dim);
+:where(.kh-root) .stat .k {
+  font-family: var(--kh-mono); font-size: 0.6rem; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--kh-ink-dim);
 }
-.stat .n { font-family: var(--mono); font-size: 0.95rem; color: var(--ink); margin-top: 0.1rem; }
-.stat.i .n { color: var(--amber); }
-.stat.v .n { color: var(--cyan); }
+:where(.kh-root) .stat .n { font-family: var(--kh-mono); font-size: 0.95rem; color: var(--kh-ink); margin-top: 0.1rem; }
+:where(.kh-root) .stat.i .n { color: var(--kh-amber); }
+:where(.kh-root) .stat.v .n { color: var(--kh-cyan); }
 
 /* ── drawer (part detail) ───────────────────────────────────────────────── */
 
-.drawer-mask {
+:where(.kh-root) .drawer-mask {
   position: fixed; inset: 0;
-  background: rgba(5, 3, 1, 0.55);
+  background: var(--kh-mask);
   backdrop-filter: blur(2px);
   z-index: 40;
 }
-.drawer {
+:where(.kh-root) .drawer {
   position: fixed; top: 0; right: 0; bottom: 0;
   width: min(560px, 94vw);
-  background: linear-gradient(180deg, var(--panel-hi), var(--panel));
-  border-left: 1px solid var(--line);
-  box-shadow: -18px 0 50px rgba(0, 0, 0, 0.6);
+  background: linear-gradient(180deg, var(--kh-panel-hi), var(--kh-panel));
+  border-left: 1px solid var(--kh-line);
+  box-shadow: -18px 0 50px rgba(var(--kh-shadow-rgb), 0.6);
   z-index: 41;
   overflow-y: auto;
   padding: 1.1rem 1.3rem 2rem;
 }
-.drawer h3 {
-  font-family: var(--disp);
+:where(.kh-root) .drawer h3 {
+  font-family: var(--kh-disp);
   letter-spacing: 0.14em;
-  color: var(--amber);
+  color: var(--kh-amber);
   font-size: 1.05rem;
   margin: 0.2rem 0 0.2rem;
 }
-.drawer .close {
+:where(.kh-root) .drawer .close {
   position: absolute; top: 0.7rem; right: 0.8rem;
-  font-family: var(--mono);
-  background: none; border: 1px solid var(--line);
-  color: var(--ink-dim); border-radius: 4px;
+  font-family: var(--kh-mono);
+  background: none; border: 1px solid var(--kh-line);
+  color: var(--kh-ink-dim); border-radius: 4px;
   padding: 0.15rem 0.55rem; cursor: pointer;
 }
-.drawer .close:hover { color: var(--amber); border-color: var(--amber-deep); }
+:where(.kh-root) .drawer .close:hover { color: var(--kh-amber); border-color: var(--kh-amber-deep); }
 
-.kv { width: 100%; border-collapse: collapse; margin-top: 0.6rem; }
-.kv td {
-  font-family: var(--mono); font-size: 0.76rem;
-  border-bottom: 1px solid var(--line-soft);
+:where(.kh-root) .kv { width: 100%; border-collapse: collapse; margin-top: 0.6rem; }
+:where(.kh-root) .kv td {
+  font-family: var(--kh-mono); font-size: 0.76rem;
+  border-bottom: 1px solid var(--kh-line-soft);
   padding: 0.28rem 0.4rem;
 }
-.kv td.k { color: var(--ink-dim); width: 52%; }
+:where(.kh-root) .kv td.k { color: var(--kh-ink-dim); width: 52%; }
 
-.suggest-box {
+:where(.kh-root) .suggest-box {
   margin-top: 1rem;
-  border: 1px dashed var(--amber-deep);
+  border: 1px dashed var(--kh-amber-deep);
   border-radius: 4px;
   padding: 0.7rem 0.85rem;
   font-size: 0.78rem;
-  color: var(--ink-dim);
-  background: rgba(255, 179, 71, 0.04);
+  color: var(--kh-ink-dim);
+  background: rgba(var(--kh-amber-rgb), 0.04);
 }
-.suggest-box b { color: var(--amber); font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.1em; }
+:where(.kh-root) .suggest-box b { color: var(--kh-amber); font-family: var(--kh-mono); font-size: 0.72rem; letter-spacing: 0.1em; }
 
 /* ── netlist view ───────────────────────────────────────────────────────── */
 
-pre.deck {
-  font-family: var(--mono);
+:where(.kh-root) pre.deck {
+  font-family: var(--kh-mono);
   font-size: 0.72rem;
   line-height: 1.45;
-  color: var(--ink);
-  background: #0a0806;
-  border: 1px solid var(--line);
+  color: var(--kh-ink);
+  background: var(--kh-deck-bg);
+  border: 1px solid var(--kh-line);
   border-radius: 4px;
   padding: 0.9rem 1rem;
   overflow: auto;
@@ -908,46 +962,46 @@ pre.deck {
 
 /* ── error banner ───────────────────────────────────────────────────────── */
 
-.err-banner {
-  border: 1px solid rgba(255, 93, 85, 0.5);
-  border-left: 3px solid var(--fault);
-  background: rgba(255, 93, 85, 0.06);
-  color: var(--ink);
+:where(.kh-root) .err-banner {
+  border: 1px solid rgba(var(--kh-fault-rgb), 0.5);
+  border-left: 3px solid var(--kh-fault);
+  background: rgba(var(--kh-fault-rgb), 0.06);
+  color: var(--kh-ink);
   border-radius: 4px;
   padding: 0.7rem 0.95rem;
-  font-family: var(--mono);
+  font-family: var(--kh-mono);
   font-size: 0.78rem;
   margin: 0.8rem 0;
   white-space: pre-wrap;
   word-break: break-word;
 }
-.err-banner b { color: var(--fault); letter-spacing: 0.08em; }
+:where(.kh-root) .err-banner b { color: var(--kh-fault); letter-spacing: 0.08em; }
 
 /* loading overlay for the WASM engine */
-.boot {
+:where(.kh-root) .boot {
   display: flex; align-items: center; gap: 0.7rem;
-  font-family: var(--mono); font-size: 0.78rem; color: var(--ink-dim);
+  font-family: var(--kh-mono); font-size: 0.78rem; color: var(--kh-ink-dim);
   padding: 0.4rem 0;
 }
-.boot .spin {
+:where(.kh-root) .boot .spin {
   width: 12px; height: 12px;
-  border: 2px solid var(--amber-deep);
-  border-top-color: var(--amber);
+  border: 2px solid var(--kh-amber-deep);
+  border-top-color: var(--kh-amber);
   border-radius: 50%;
   animation: kh-rot 0.8s linear infinite;
 }
 @keyframes kh-rot { to { transform: rotate(360deg); } }
 
-.footnote {
-  font-family: var(--mono);
+:where(.kh-root) .footnote {
+  font-family: var(--kh-mono);
   font-size: 0.66rem;
-  color: var(--ink-dim);
+  color: var(--kh-ink-dim);
   margin-top: 1.6rem;
   text-align: center;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .kh-titleblock td.v .led.on { animation: none; }
-  .boot .spin { animation-duration: 2s; }
-  * { transition: none !important; }
+  :where(.kh-root) .kh-titleblock td.v .led.on { animation: none; }
+  :where(.kh-root) .boot .spin { animation-duration: 2s; }
+  :where(.kh-root) * { transition: none !important; }
 }
