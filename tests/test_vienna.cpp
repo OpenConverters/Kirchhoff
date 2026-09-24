@@ -20,6 +20,8 @@
 #include "TasAssembler.hpp"
 #include "Fidelity.hpp"
 #include "ConverterAnalytical.hpp"
+#include "Kirchhoff.hpp"
+#include "KirchhoffApi.hpp"
 
 #include <nlohmann/json.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -347,4 +349,46 @@ TEST_CASE("vienna: analytical waveforms are captured under La — ABT #150", "[v
         CHECK(exc0.at("voltage").at("waveform").at("data").size() > 8);
     }
     CHECK(foundLa);
+}
+
+TEST_CASE("vienna peakOfLineOnly: the SIMULATED inductor window sits on the line peak, not the zero crossing",
+          "[vienna][ngspice][sampling]") {
+    // The web Vienna wizard asks for samplingStrategy peakOfLineOnly (inductor modelled AT the line peak).
+    // extract_operating_point(NGSPICE) reads the LAST switching period of the transient; the deck used to
+    // stop at a fixed 40 ms = two 50 Hz cycles, i.e. on phase A's zero crossing, so the simulated phase-A
+    // inductor current came back in microamps (peak 2.6e-6 A) against ~23 A analytical. The stop time now
+    // ends half a switching period after a phase-A peak.
+    REQUIRE(Kirchhoff::ngspice_in_process_available());
+    namespace AN = Kirchhoff::analytical;
+    json di;
+    di["designRequirements"]["efficiency"] = 0.97;
+    di["designRequirements"]["inputType"] = "acThreePhase";
+    di["designRequirements"]["inputVoltage"]["nominal"] = 400.0 / std::sqrt(3.0);   // 400 V line-to-line
+    di["designRequirements"]["lineFrequency"]["nominal"] = 50.0;
+    di["designRequirements"]["switchingFrequency"]["nominal"] = 20e3;
+    { json o; o["name"]="out"; o["voltage"]["nominal"]=800.0; di["designRequirements"]["outputs"]=json::array({o}); }
+    { json op; op["inputVoltage"]=400.0 / std::sqrt(3.0); json o; o["power"]=10000.0; op["outputs"]=json::array({o});
+      di["operatingPoints"]=json::array({op}); }
+    di["config"]["samplingStrategy"] = "peakOfLineOnly";
+    di["config"]["phaseCount"] = 1;
+
+    const json tas = Kirchhoff::build_vienna_tas(Kirchhoff::design_vienna(di));
+    const double stop = tas.at("simulation").at("analyses").at(0).at("stopTime").get<double>();
+    // Last switching period centred on phase A's third peak: 2.25 line cycles + half a switching period.
+    CHECK(stop == Catch::Approx(2.25 / 50.0 + 0.5 / 20e3).epsilon(1e-9));
+
+    auto peak_of = [](const MAS::OperatingPoint& op) {
+        const auto& exc = op.get_excitations_per_winding().at(0);
+        double pk = 0.0;
+        for (double x : exc.get_current()->get_waveform()->get_data()) pk = std::max(pk, std::abs(x));
+        return pk;
+    };
+    const double analyticalPeak = peak_of(Kirchhoff::extract_operating_point(tas, Kirchhoff::ExtractEngine::ANALYTICAL));
+    const double simulatedPeak  = peak_of(Kirchhoff::extract_operating_point(tas, Kirchhoff::ExtractEngine::NGSPICE));
+    INFO("analytical peak " << analyticalPeak << " A, simulated peak " << simulatedPeak << " A");
+    REQUIRE(analyticalPeak > 1.0);
+    // Same operating point: the simulated window must see the line-peak current (hysteretic band + finite
+    // switching make it differ by a few percent, never by orders of magnitude).
+    CHECK(simulatedPeak / analyticalPeak > 0.8);
+    CHECK(simulatedPeak / analyticalPeak < 1.25);
 }

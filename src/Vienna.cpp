@@ -337,7 +337,18 @@ json build_vienna_tas(const ViennaDesign& d) {
     }
     tas["topology"]["interStageConnections"] = interStage;
 
-    json an; an["type"]="transient"; an["stopTime"]=cfg::tran_stop_time(d.config, 0.04); an["maximumTimeStep"]=cfg::tran_max_timestep(d.config, 5e-7);
+    // Stop time. extract_operating_point(NGSPICE) reads the LAST period of the magnetic's excitation
+    // frequency. fullLineCycle stamps that frequency at f_line, so the last period is the whole last line
+    // cycle — any stop after the settle works. The peak-of-line modes stamp it at f_sw and model the
+    // inductor AT THE LINE PEAK, so the last switching period must sit on phase A's peak: phase A is
+    // SIN(0 Vpk f_line) with peaks at (k + 1/4)/f_line. The old fixed 40 ms (two 50 Hz cycles) ended on
+    // phase A's ZERO crossing, so the "simulated" peak-of-line inductor current came back in microamps
+    // against ~23 A analytical. Two line cycles of settling, then half a switching period past the peak
+    // so the window [tEnd − 1/f_sw, tEnd] is centred on it.
+    const double viennaStopDefault = viennaFullLine
+        ? 2.0 / d.lineFrequency
+        : (2.0 + 0.25) / d.lineFrequency + 0.5 / d.switchingFrequency;
+    json an; an["type"]="transient"; an["stopTime"]=cfg::tran_stop_time(d.config, viennaStopDefault); an["maximumTimeStep"]=cfg::tran_max_timestep(d.config, 5e-7);
     tas["simulation"]["analyses"] = json::array({an});
     // Closed loop — the control stage drives the switches (no open-loop stimulus). Precharge each
     // half-bus to ±Vdc/2 about the grounded midpoint.
