@@ -59,7 +59,8 @@ ZetaDesign design_zeta(const json& tasInputs) {
         throw std::invalid_argument("design_zeta: couplingCoefficient must be in (0,1), got "
                                     + std::to_string(d.couplingCoefficient));
     // Sync MOSFET has no forward drop → size duty with Vd=0 so the open-loop deck lands on target.
-    d.diodeDrop = d.synchronousRectifier ? 0.0 : req::dideal_diode_drop(d.outputPower / d.outputVoltage);
+    d.diodeDrop = req::fixed_diode_drop(d.config) ? *req::fixed_diode_drop(d.config)
+                                         : (d.synchronousRectifier ? 0.0 : req::dideal_diode_drop(d.outputPower / d.outputVoltage));
     d.dutyCycle = duty(d.inputVoltage, d.outputVoltage, d.diodeDrop, d.efficiency);
 
     // L1 sized at the worst corner (max Vin) for its current-ripple target (MKF).
@@ -68,8 +69,9 @@ ZetaDesign design_zeta(const json& tasInputs) {
     // Ripple-ratio rule by default; config "maximumSwitchCurrent" instead sizes L1 so the peak primary
     // inductor current (iL1avg + ΔIL1/2) lands exactly on the cap (ABT #95).
     const double dIL1 = cfg::max_current_ripple(d.config, cfg::get(d.config, "l1RippleRatio", kRippleRatioL1),
-                                                iL1avg, iL1avg, "design_zeta");
-    d.inductanceL1 = vinMax * dMax / (dIL1 * fsw);
+                                                iL1avg, iL1avg, "design_zeta", d.config.contains("l1RippleRatio"));
+    // A pinned magnetizing inductance (the chosen L1 — design around the magnetic) overrides the sizing.
+    d.inductanceL1 = req::provided_inductance(dr).value_or(vinMax * dMax / (dIL1 * fsw));
     // L2, Cc, Cout at the operating point (both inductors see Vin·D during ON).
     const double dIL2 = cfg::get(d.config, "l2RippleRatio", kL2RipplePct) * iout;
     d.inductanceL2 = d.inputVoltage * d.dutyCycle / (dIL2 * fsw);

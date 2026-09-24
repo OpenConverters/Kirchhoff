@@ -4,6 +4,7 @@
 #include "ComponentRequirements.hpp"
 #include "ConverterAnalytical.hpp"
 #include <cmath>
+#include <limits>
 #include <algorithm>
 #include <vector>
 #include <stdexcept>
@@ -43,6 +44,9 @@ SrcDesign design_src(const json& tasInputs) {
     const double vinMin = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::MINIMUM);
     d.inputVoltageMin = vinMin;
     d.inputVoltageMax = vinMax;
+    // Stated efficiency: the transformer must deliver (Vo+Vd)/η, so the conversion ratio is compensated.
+    const double etaConv = req::conversion_efficiency(dr);
+
 
     const double Vin = d.inputVoltage, Vo = d.outputVoltage;
     const double Iout = d.outputPower / Vo;
@@ -59,8 +63,11 @@ SrcDesign design_src(const json& tasInputs) {
     // Primary bridge topology (MKF SrcBridgeType HALF_BRIDGE | FULL_BRIDGE; the FULL_BRIDGE_PHASE_SHIFT
     // variant is a P2 nuance not modelled here). Half-bridge (default, matching the MKF Src fixture) drives
     // the tank at ±Vin/2 (bridge factor 0.5); full-bridge at ±Vin (1.0), so n doubles to hold spec (ABT #91).
+    if (cfg::get_str(d.config, "bridgeType", "halfBridge") == "fullBridgePhaseShift")
+        throw std::invalid_argument("design_src: bridgeType 'fullBridgePhaseShift' (phase-shift regulated full bridge) "
+                                    "is not modelled; Kirchhoff's SRC runs a half or full bridge at 50 % duty");
     d.fullBridge = cfg::full_bridge_selected(d.config);
-    const double Vd = req::dideal_diode_drop(Iout);
+    const double Vd = req::rectifier_drop(d.config, Iout);
     // Gain headroom: the SRC tank peaks at M=1 at fr and can only step DOWN. Sizing n for the fr peak to
     // deliver gainHeadroom·(Vo+Vd) lets the regulator hit Vo just ABOVE fr (efficient, monotonic) instead of
     // pinning the nominal point at the M=1 peak where any loss sags Vout below target (abt #62). Per variant:
@@ -71,10 +78,10 @@ SrcDesign design_src(const json& tasInputs) {
     const double Ghr = cfg::get(d.config, "gainHeadroom", kGainHeadroom);
     double n;
     switch (d.rectifierType) {
-        case RectifierType::CenterTapped:   n = Vbridge / (Ghr * (Vo + Vd));       break;
-        case RectifierType::FullBridge:     n = Vbridge / (Ghr * (Vo + 2.0 * Vd)); break;
+        case RectifierType::CenterTapped:   n = etaConv * Vbridge / (Ghr * (Vo + Vd));       break;
+        case RectifierType::FullBridge:     n = etaConv * Vbridge / (Ghr * (Vo + 2.0 * Vd)); break;
         case RectifierType::CurrentDoubler:
-            n = cfg::get(d.config, "cdOutputFactor", 0.465) * Vbridge / (Ghr * (Vo + Vd)); break;
+            n = cfg::get(d.config, "cdOutputFactor", 0.465) * etaConv * Vbridge / (Ghr * (Vo + Vd)); break;
         case RectifierType::VoltageDoubler:
             throw std::runtime_error("Kirchhoff SRC: voltageDoubler rectifier not supported "
                                      "(SRC variants: centerTapped, fullBridge, currentDoubler)");
@@ -91,6 +98,45 @@ SrcDesign design_src(const json& tasInputs) {
     d.resonantFrequency = fr;
     d.resonantInductance = Zr / (2.0 * M_PI * fr);
     d.resonantCapacitance = 1.0 / (2.0 * M_PI * fr * Zr);
+    // MAS seriesResonant: Kirchhoff designs and operates the series tank AT resonance, fr = the operating
+    // switching frequency, with an isolation transformer and a diode rectifier. Spec fields are checked against
+    // that model and refused with the reason when they ask for something else.
+    if (d.config.contains("minSwitchingFrequency") || d.config.contains("maxSwitchingFrequency")) {
+        const double fmin = cfg::get(d.config, "minSwitchingFrequency", 0.0);
+        const double fmax = cfg::get(d.config, "maxSwitchingFrequency", std::numeric_limits<double>::infinity());
+        if (!(fr >= fmin && fr <= fmax))
+            throw std::invalid_argument("design_src: the operating/resonant frequency " + std::to_string(fr) +
+                                        " Hz lies outside the switching-frequency band [" + std::to_string(fmin) +
+                                        ", " + std::to_string(fmax) + "] Hz");
+    }
+    if (d.config.contains("resonantFrequency") && std::abs(cfg::get(d.config, "resonantFrequency", fr) - fr) > 1e-3 * fr)
+        throw std::invalid_argument("design_src: resonantFrequency " +
+                                    std::to_string(cfg::get(d.config, "resonantFrequency", fr)) +
+                                    " Hz differs from the operating switching frequency " + std::to_string(fr) +
+                                    " Hz; Kirchhoff designs the series tank at resonance");
+    if (!cfg::get_bool(d.config, "isolated", true))
+        throw std::invalid_argument("design_src: isolated=false (tank driving the rectifier directly) is not modelled; "
+                                    "Kirchhoff's SRC has an isolation transformer");
+    if (cfg::get_bool(d.config, "useSynchronousRectifier", false))
+        throw std::invalid_argument("design_src: useSynchronousRectifier=true is not modelled; Kirchhoff's SRC "
+                                    "rectifier is diode-based");
+    // Explicit Lr / Cr (MAS seriesInductance / resonantCapacitance, as designRequirements pins): one given → the
+    // other follows from fr; both given must resonate at the operating frequency.
+    {
+        const auto pinnedLr = req::provided_resonant_inductance(dr);
+        const auto pinnedCr = req::provided_resonant_capacitance(dr);
+        const double wr = 2.0 * M_PI * fr;
+        if (pinnedLr) d.resonantInductance = *pinnedLr;
+        if (pinnedCr) d.resonantCapacitance = *pinnedCr;
+        if (pinnedLr && !pinnedCr) d.resonantCapacitance = 1.0 / (wr * wr * d.resonantInductance);
+        if (pinnedCr && !pinnedLr) d.resonantInductance = 1.0 / (wr * wr * d.resonantCapacitance);
+        if (pinnedLr && pinnedCr) {
+            const double ftank = 1.0 / (2.0 * M_PI * std::sqrt(d.resonantInductance * d.resonantCapacitance));
+            if (std::abs(ftank - fr) > 0.01 * fr)
+                throw std::invalid_argument("design_src: the pinned Lr/Cr resonate at " + std::to_string(ftank) +
+                                            " Hz, not at the operating switching frequency " + std::to_string(fr) + " Hz");
+        }
+    }
     d.magnetizingInductance = req::provided_inductance(dr).value_or(
         cfg::get(d.config, "inductanceRatio", kLmRatio) * d.resonantInductance);
 
@@ -110,10 +156,10 @@ SrcDesign design_src(const json& tasInputs) {
     // outputs[0] reproduces the scalars above byte-for-byte.
     auto nForRail = [&](double Vo_i, double Vd_i) -> double {
         switch (d.rectifierType) {
-            case RectifierType::CenterTapped:   return Vbridge / (Ghr * (Vo_i + Vd_i));
-            case RectifierType::FullBridge:     return Vbridge / (Ghr * (Vo_i + 2.0 * Vd_i));
+            case RectifierType::CenterTapped:   return etaConv * Vbridge / (Ghr * (Vo_i + Vd_i));
+            case RectifierType::FullBridge:     return etaConv * Vbridge / (Ghr * (Vo_i + 2.0 * Vd_i));
             case RectifierType::CurrentDoubler:
-                return cfg::get(d.config, "cdOutputFactor", 0.465) * Vbridge / (Ghr * (Vo_i + Vd_i));
+                return cfg::get(d.config, "cdOutputFactor", 0.465) * etaConv * Vbridge / (Ghr * (Vo_i + Vd_i));
             case RectifierType::VoltageDoubler:
                 throw std::runtime_error("Kirchhoff SRC: voltageDoubler rectifier not supported");
         }
@@ -131,7 +177,7 @@ SrcDesign design_src(const json& tasInputs) {
         else
             leg.power = nominal(dr.at("outputs").at(i).at("power"));
         const double iout_i = leg.power / leg.voltage;
-        leg.diodeDrop = req::dideal_diode_drop(iout_i);
+        leg.diodeDrop = req::rectifier_drop(d.config, iout_i);
         if (i == 0) {
             leg.turnsRatio = d.turnsRatio;               // preserve the main rail's exact scalar
             leg.outputCapacitance = d.outputCapacitance;

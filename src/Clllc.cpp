@@ -4,6 +4,7 @@
 #include "ComponentRequirements.hpp"
 #include "ConverterAnalytical.hpp"
 #include <cmath>
+#include <limits>
 #include <algorithm>
 #include <vector>
 
@@ -46,7 +47,7 @@ ClllcDesign design_clllc(const json& tasInputs) {
     d.inputVoltageMin = vinMin; d.inputVoltageMax = vinMax;
 
     const double Vin = d.inputVoltage, Vo = d.outputVoltage;
-    double n = Vin / Vo;
+    double n = req::conversion_efficiency(dr) * Vin / Vo;   // stated efficiency compensated
     // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
     // the duty-derived value so the rest of the stage is sized around the fixed transformer.
     d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(n);
@@ -57,6 +58,61 @@ ClllcDesign design_clllc(const json& tasInputs) {
     const double wr = 2.0 * M_PI * fr;
     d.primaryResonantCapacitance = 1.0 / (2.0 * M_PI * cfg::get(d.config, "qualityFactor", kQualityFactor) * fr * Ro);
     d.primaryResonantInductance = 1.0 / (wr * wr * d.primaryResonantCapacitance);
+    // MAS clllcResonant: the operating model is the symmetric full-bridge/full-bridge tank run at its resonance
+    // fr = the operating switching frequency (FHA, no inter-bridge phase shift). Fields that ask for anything
+    // else are checked here and refused with the reason, never silently re-interpreted.
+    if (d.config.contains("minSwitchingFrequency") || d.config.contains("maxSwitchingFrequency")) {
+        const double fmin = cfg::get(d.config, "minSwitchingFrequency", 0.0);
+        const double fmax = cfg::get(d.config, "maxSwitchingFrequency", std::numeric_limits<double>::infinity());
+        if (!(fr >= fmin && fr <= fmax))
+            throw std::invalid_argument("design_clllc: the operating/resonant frequency " + std::to_string(fr) +
+                                        " Hz lies outside the switching-frequency band [" + std::to_string(fmin) +
+                                        ", " + std::to_string(fmax) + "] Hz");
+    }
+    if (d.config.contains("primaryResonantFrequency") &&
+        std::abs(cfg::get(d.config, "primaryResonantFrequency", fr) - fr) > 1e-3 * fr)
+        throw std::invalid_argument("design_clllc: primaryResonantFrequency " +
+                                    std::to_string(cfg::get(d.config, "primaryResonantFrequency", fr)) +
+                                    " Hz differs from the operating switching frequency " + std::to_string(fr) +
+                                    " Hz; Kirchhoff designs and operates the CLLLC tank at its resonance");
+    if (std::abs(cfg::get(d.config, "tankSymmetryRatio", 1.0) - 1.0) > 1e-9)
+        throw std::invalid_argument("design_clllc: tankSymmetryRatio " +
+                                    std::to_string(cfg::get(d.config, "tankSymmetryRatio", 1.0)) +
+                                    " is not modelled; Kirchhoff's CLLLC tank is symmetric (ratio 1)");
+    for (const char* key : {"bridgeTypePrimary", "bridgeTypeSecondary"})
+        if (cfg::get_str(d.config, key, "fullBridge") != "fullBridge")
+            throw std::invalid_argument(std::string("design_clllc: ") + key + " '" + cfg::get_str(d.config, key, "") +
+                                        "' is not modelled; Kirchhoff's CLLLC is full-bridge on both sides");
+    {
+        const std::string strategy = cfg::get_str(d.config, "controlStrategy", "hybridPfmPsm");
+        if (strategy != "pfm" && strategy != "hybridPfmPsm")
+            throw std::invalid_argument("design_clllc: controlStrategy '" + strategy + "' regulates by inter-bridge "
+                                        "phase shift, which the FHA model does not represent (pfm / hybridPfmPsm "
+                                        "at resonance only)");
+        if (std::abs(cfg::get(d.config, "phaseShiftDegrees", 0.0)) > 0.0)
+            throw std::invalid_argument("design_clllc: an inter-bridge phaseShiftDegrees of " +
+                                        std::to_string(cfg::get(d.config, "phaseShiftDegrees", 0.0)) +
+                                        " deg is not modelled (the FHA operating point has no phase shift)");
+    }
+    // MAS clllcResonant.primarySeriesInductance / primaryResonantCapacitance: explicit Lr1 / Cr1 override the
+    // Q/K derivation. The tank still has to resonate at the operating frequency (one given → the other follows).
+    {
+        const bool hasL = d.config.contains("primarySeriesInductance");
+        const bool hasC = d.config.contains("primaryResonantCapacitance");
+        if (hasL) d.primaryResonantInductance = cfg::get(d.config, "primarySeriesInductance", 0.0);
+        if (hasC) d.primaryResonantCapacitance = cfg::get(d.config, "primaryResonantCapacitance", 0.0);
+        if ((hasL && !(d.primaryResonantInductance > 0)) || (hasC && !(d.primaryResonantCapacitance > 0)))
+            throw std::invalid_argument("design_clllc: primarySeriesInductance / primaryResonantCapacitance must be > 0");
+        if (hasL && !hasC) d.primaryResonantCapacitance = 1.0 / (wr * wr * d.primaryResonantInductance);
+        if (hasC && !hasL) d.primaryResonantInductance = 1.0 / (wr * wr * d.primaryResonantCapacitance);
+        if (hasL && hasC) {
+            const double ftank = 1.0 / (2.0 * M_PI * std::sqrt(d.primaryResonantInductance * d.primaryResonantCapacitance));
+            if (std::abs(ftank - fr) > 0.01 * fr)
+                throw std::invalid_argument("design_clllc: primarySeriesInductance and primaryResonantCapacitance "
+                                            "resonate at " + std::to_string(ftank) + " Hz, not at the operating "
+                                            "switching frequency " + std::to_string(fr) + " Hz");
+        }
+    }
     const auto pinnedLm = req::provided_inductance(dr);
     d.magnetizingInductance = pinnedLm.value_or(
         cfg::get(d.config, "inductanceRatio", kInductanceRatio) * d.primaryResonantInductance);
@@ -69,7 +125,7 @@ ClllcDesign design_clllc(const json& tasInputs) {
     // (Lr2·Cr2 = Lr1·Cr1 → same fr). Lr1/Lr2 are their own freshly-designed magnetics and Cr1/Cr2
     // near-nominal (role="resonant") sourced caps, so all track the new values; only the pinned transformer
     // is fixed. (No pin → original Q·Ro sizing stands; the mkf_equivalence ideal deck never pins Lm.)
-    if (pinnedLm) {
+    if (pinnedLm && !d.config.contains("primarySeriesInductance") && !d.config.contains("primaryResonantCapacitance")) {
         const double k = cfg::get(d.config, "inductanceRatio", kInductanceRatio);
         d.primaryResonantInductance = *pinnedLm / k;
         d.primaryResonantCapacitance = 1.0 / (wr * wr * d.primaryResonantInductance);
@@ -227,6 +283,12 @@ json build_clllc_tas(const ClllcDesign& d) {
     json t1; t1["magnetic"] = json::object();
     t1["inputs"] = req::magnetic_inputs(d.magnetizingInductance, 0.1, {n}, isoSides,
         std::nullopt, 25.0, AN::excitations_processed(aopT1, "T1"));
+    // MAS clllcResonant.integratedResonantInductors (default true): Lr1 and Lr2 realised as the transformer's
+    // leakage on each side; the transformer must REALISE Lr1 + n²·Lr2 (primary-referred); the discrete
+    // equivalents are folded out of the cell below.
+    if (cfg::get_bool(d.config, "integratedResonantInductors", false))
+        req::set_leakage_requirement(t1["inputs"], {d.primaryResonantInductance + n * n * d.secondaryResonantInductance},
+                                     "nominal");
 
     // ───────────────────────── POWER stage ─────────────────────────
     // A small in-line sense resistor in the secondary tank exposes the tank-current sign (senseP/senseM)
@@ -285,6 +347,12 @@ json build_clllc_tas(const ClllcDesign& d) {
         // FLOATING and the converter delivered 0 V; abt #60.)
         conn("g1_net", {pin("Q1","gate"), pin("Q4","gate"), pin("QE","gate"), pin("QH","gate"), prt("g1")}),
         conn("g2_net", {pin("Q2","gate"), pin("Q3","gate"), pin("QF","gate"), pin("QG","gate"), prt("g2")})});
+    // MAS clllcResonant.integratedResonantInductors: Lr1/Lr2 realised as T1's leakage (requirement set on T1
+    // above) — fold the discrete equivalents out of the cell.
+    if (cfg::get_bool(d.config, "integratedResonantInductors", false)) {
+        req::fold_series_inductor(pcell, "Lr1");
+        req::fold_series_inductor(pcell, "Lr2");
+    }
 
     // ──────────────────── CONTROL stage (swappable) ────────────────────
     // ONE CTAS `controller` component — a current-sensed full-bridge synchronous-rectifier controller —

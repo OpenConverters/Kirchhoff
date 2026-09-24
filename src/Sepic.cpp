@@ -61,7 +61,8 @@ SepicDesign design_sepic(const json& tasInputs) {
                                     + std::to_string(d.couplingCoefficient));
     // A synchronous MOSFET rectifier has no forward drop, so the duty (and hence Vout) must be sized with
     // Vd=0 — otherwise the open-loop deck over-delivers by ~Vd/Vout (Buck does the same).
-    d.diodeDrop = d.synchronousRectifier ? 0.0 : req::dideal_diode_drop(d.outputPower / d.outputVoltage);
+    d.diodeDrop = req::fixed_diode_drop(d.config) ? *req::fixed_diode_drop(d.config)
+                                         : (d.synchronousRectifier ? 0.0 : req::dideal_diode_drop(d.outputPower / d.outputVoltage));
     // Operating duty (deck/stimulus) at the nominal input.
     d.dutyCycle = duty(d.inputVoltage, d.outputVoltage, d.diodeDrop, d.efficiency);
 
@@ -69,7 +70,8 @@ SepicDesign design_sepic(const json& tasInputs) {
     const double dMax = duty(vinMax, d.outputVoltage, d.diodeDrop, d.efficiency);
     const double iL1avg = iout * dMax / (1.0 - dMax);
     const double dIL1 = cfg::get(d.config, "l1RippleRatio", kRippleRatioL1) * iL1avg;
-    d.inductanceL1 = vinMax * dMax / (dIL1 * fsw);
+    // A pinned magnetizing inductance (the chosen L1 — design around the magnetic) overrides the sizing.
+    d.inductanceL1 = req::provided_inductance(dr).value_or(vinMax * dMax / (dIL1 * fsw));
     // L2, Cs, Cout sized at the operating point (MKF generate_ngspice_circuit).
     const double dIL2 = cfg::get(d.config, "l2RippleRatio", kL2RipplePct) * iout;
     d.inductanceL2 = d.inputVoltage * d.dutyCycle / (dIL2 * fsw);
@@ -114,6 +116,8 @@ json build_sepic_tas(const SepicDesign& d) {
     const MAS::OperatingPoint aopNom   = AN::analytical_sepic(d.inputVoltage,    d.outputVoltage, iout, fsw,
                                                              d.inductanceL1, d.diodeDrop, d.efficiency, maxDuty);
     const double IL1avg = AN::winding_current(aopWorst, 0, "offset");   // L1 average (input current) at the worst corner
+    // The switch carries i_L1 + i_L2 while on: its peak is L1's worst-corner peak plus L2's (Iout + ΔI_L2/2).
+    cfg::check_maximum_switch_current(d.config, AN::winding_current(aopWorst, 0, "peak") + iout + dIL2 / 2.0, "build_sepic_tas");
 
     // L2 (secondary coupled inductor) — inline single-winding excitation (not one of the solver's windings).
     auto inductor = [&](double L, double iAvg, double iPkPk) {

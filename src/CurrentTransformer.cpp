@@ -24,7 +24,13 @@ MAS::Inputs design_current_transformer(const json& spec) {
     const double burdenResistor = spec.at("burdenResistor").get<double>();
     const double ambientTemperature = spec.at("ambientTemperature").get<double>();
     const double secondaryDcResistance = spec.value("secondaryDcResistance", 0.0);
-    const double dutyCycle = spec.value("dutyCycle", 0.5);
+    // MAS currentTransformer.maximumDutyCycle: the duty of the (unipolar) sensed current waveform. The legacy
+    // "dutyCycle" key is still read; both given must agree.
+    if (spec.contains("maximumDutyCycle") && spec.contains("dutyCycle") &&
+        spec.at("maximumDutyCycle").get<double>() != spec.at("dutyCycle").get<double>())
+        throw std::invalid_argument("design_current_transformer: maximumDutyCycle and dutyCycle disagree");
+    const double dutyCycle = spec.contains("maximumDutyCycle") ? spec.at("maximumDutyCycle").get<double>()
+                                                              : spec.value("dutyCycle", 0.5);
     const double diodeVoltageDrop = spec.value("diodeVoltageDrop", 0.0);
 
     if (turnsRatio <= 0)

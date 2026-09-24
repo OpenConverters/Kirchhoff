@@ -222,17 +222,44 @@ inline double ripple_ratio(const json& in, double dflt) { return get(in, "ripple
 //     peak inductor current (Iavg + ΔI_L/2) EXACTLY on maximumSwitchCurrent at the topology's sizing corner.
 // THROWS (no silent fallback, per the no-defaults rule) if the cap is <= the average inductor current — the DC
 // current alone already exceeds the requested peak, so no finite L can satisfy it.
+//   - If the spec states BOTH the cap and its ripple ratio (`rippleRatioExplicit`), both are honoured: the smaller
+//     ripple wins (the larger inductance), so the ripple ratio holds AND the peak stays under the cap.
 inline double max_current_ripple(const json& in, double rippleRatio, double rippleReferenceCurrent,
-                                 double averageInductorCurrent, const char* who) {
+                                 double averageInductorCurrent, const char* who, bool rippleRatioExplicit = false) {
     if (in.is_object() && in.contains("maximumSwitchCurrent") && in.at("maximumSwitchCurrent").is_number()) {
         const double cap = in.at("maximumSwitchCurrent").get<double>();
         if (cap <= averageInductorCurrent)
             throw std::invalid_argument(std::string(who) + ": maximumSwitchCurrent (" + std::to_string(cap)
                 + " A) <= average inductor current (" + std::to_string(averageInductorCurrent)
                 + " A) — no finite inductance can cap the peak that low");
-        return 2.0 * (cap - averageInductorCurrent);
+        const double capRipple = 2.0 * (cap - averageInductorCurrent);
+        return rippleRatioExplicit ? std::min(capRipple, rippleRatio * rippleReferenceCurrent) : capRipple;
     }
     return rippleRatio * rippleReferenceCurrent;
+}
+
+// Switch-stress LIMITS from the spec (MAS topology schemas: maximumSwitchCurrent / maximumDrainSourceVoltage).
+// Topologies whose inductor sizing can absorb the current cap use max_current_ripple above; every other design
+// checks its resulting stress here and THROWS, naming the stress and the limit, when the design exceeds it.
+inline void check_maximum_switch_current(const json& in, double peakSwitchCurrent, const char* who) {
+    if (!in.is_object() || !in.contains("maximumSwitchCurrent")) return;
+    if (!in.at("maximumSwitchCurrent").is_number())
+        throw std::invalid_argument(std::string(who) + ": maximumSwitchCurrent must be a number (A)");
+    const double cap = in.at("maximumSwitchCurrent").get<double>();
+    if (peakSwitchCurrent > cap)
+        throw std::invalid_argument(std::string(who) + ": the design's peak switch current " +
+                                    std::to_string(peakSwitchCurrent) + " A exceeds maximumSwitchCurrent " +
+                                    std::to_string(cap) + " A");
+}
+inline void check_maximum_drain_source_voltage(const json& in, double drainSourceStress, const char* who) {
+    if (!in.is_object() || !in.contains("maximumDrainSourceVoltage")) return;
+    if (!in.at("maximumDrainSourceVoltage").is_number())
+        throw std::invalid_argument(std::string(who) + ": maximumDrainSourceVoltage must be a number (V)");
+    const double cap = in.at("maximumDrainSourceVoltage").get<double>();
+    if (drainSourceStress > cap)
+        throw std::invalid_argument(std::string(who) + ": the switch drain-source stress " +
+                                    std::to_string(drainSourceStress) + " V exceeds maximumDrainSourceVoltage " +
+                                    std::to_string(cap) + " V");
 }
 
 // Output-voltage ripple as a fraction of Vout (sizes the output capacitor). config "outputRippleFraction".

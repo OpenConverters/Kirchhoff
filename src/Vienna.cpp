@@ -39,13 +39,30 @@ ViennaDesign design_vienna(const json& tasInputs) {
 
     const double pin   = d.outputPower / std::max(d.efficiency, 1e-6);
     const double vpeak = d.inputVoltageRms * std::sqrt(2.0);
-    const double iPeak = pin * std::sqrt(2.0) / (3.0 * d.inputVoltageRms);  // per-phase peak (3φ, unity PF)
-    const double dIL   = 0.3 * std::max(iPeak, 1e-3);
+    // MAS vienna.powerFactor (target input PF, default unity here) and currentRippleRatio (boost-inductor
+    // ripple as a fraction of the per-phase peak, default 0.3).
+    const double powerFactor = cfg::get(d.config, "powerFactor", 1.0);
+    if (!(powerFactor > 0.0 && powerFactor <= 1.0))
+        throw std::invalid_argument("design_vienna: powerFactor must be in (0, 1]");
+    const double iPeak = pin * std::sqrt(2.0) / (3.0 * d.inputVoltageRms * powerFactor);  // per-phase peak (3φ)
+    const double dIL   = cfg::get(d.config, "inductorRippleRatio", 0.3) * std::max(iPeak, 1e-3);
+    // MAS vienna.viennaVariant / switchType / synchronousRectifier: realisations of the per-leg bidirectional
+    // switch and the rectifier. The boost-inductor excitation does not depend on them, but the deck models the
+    // classic Vienna I with T-type switches and diode rectifiers only — other realisations are refused.
+    if (cfg::get_str(d.config, "viennaVariant", "viennaI") != "viennaI")
+        throw std::invalid_argument("design_vienna: viennaVariant '" + cfg::get_str(d.config, "viennaVariant", "") +
+                                    "' is not modelled (Vienna I only)");
+    if (cfg::get_str(d.config, "switchType", "tType") != "tType")
+        throw std::invalid_argument("design_vienna: switchType '" + cfg::get_str(d.config, "switchType", "") +
+                                    "' is not modelled (T-type only)");
+    if (cfg::get_bool(d.config, "synchronousRectifier", false))
+        throw std::invalid_argument("design_vienna: synchronousRectifier=true is not modelled (diode rectifier only)");
     d.senseResistance = cfg::get(d.config, "senseResistance", kSenseResistance);
     // i_ref voltage = kref·V(phase) must equal iL·Rsense for iL = V(phase)/rEmul; per phase Pin/3 into
     // rEmul = (Vrms²)/(Pin/3): kref = Rsense·Pin/(3·Vrms²).
     d.referenceGain = d.senseResistance * pin / (3.0 * d.inputVoltageRms * d.inputVoltageRms);
-    d.boostInductance = (d.outputVoltage * 0.5) / (4.0 * d.switchingFrequency * dIL);
+    d.boostInductance = req::provided_inductance(dr).value_or(
+        (d.outputVoltage * 0.5) / (4.0 * d.switchingFrequency * dIL));   // pinned L (design around the magnetic) wins
     // Hysteresis on m = V(phase)·(iref − iL·Rsense): a ±dIL/2 band at the line peak (m-band ∝ |v|).
     d.currentHysteresis = 0.5 * dIL * d.senseResistance * vpeak;
     d.busCapacitance = cfg::get(d.config, "busCapacitance", kBusCapacitance);
@@ -127,12 +144,15 @@ json build_vienna_tas(const ViennaDesign& d) {
     const int viennaChannels = static_cast<int>(
         cfg::get(d.config, "numberOfChannels", cfg::get(d.config, "phaseCount", 1.0)));
     const std::string viennaSampling = cfg::get_str(d.config, "samplingStrategy", "fullLineCycle");
+    if (viennaSampling != "fullLineCycle" && viennaSampling != "peakOfLineOnly" && viennaSampling != "peakOfLinePlusSectors")
+        throw std::invalid_argument("build_vienna_tas: unknown samplingStrategy '" + viennaSampling + "'");
     const bool viennaFullLine    = (viennaSampling == "fullLineCycle");
     const bool viennaPlusSectors = (viennaSampling == "peakOfLinePlusSectors");
     const MAS::OperatingPoint aopVienna = AN::analytical_vienna(d.inputVoltageRms, d.outputVoltage,
                                                                d.outputPower, d.lineFrequency,
                                                                d.switchingFrequency, d.boostInductance,
-                                                               d.efficiency, 1.0, viennaFullLine,
+                                                               d.efficiency, cfg::get(d.config, "powerFactor", 1.0),
+                                                               viennaFullLine,
                                                                viennaChannels, viennaPlusSectors);
     const double IpkLV  = AN::winding_current(aopVienna, 0, "peak");
     const double IrmsLV = AN::winding_current(aopVienna, 0, "rms");

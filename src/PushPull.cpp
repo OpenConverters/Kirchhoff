@@ -72,7 +72,7 @@ PushPullDesign design_push_pull(const json& tasInputs) {
 
     const double iout = d.outputPower / d.outputVoltage, fsw = d.switchingFrequency, T = 1.0 / fsw;
     // Turns ratio (MKF): N = D_max * 2 * Vin_min / (Vout + Vd). Rounded to 2 dp.
-    d.diodeDrop = req::dideal_diode_drop(d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
+    d.diodeDrop = req::rectifier_drop(d.config, d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
     double N = d.maxDutyCycle * 2.0 * vinMin / (d.outputVoltage + d.diodeDrop);
     N = std::round(N * 100.0) / 100.0;
     // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
@@ -120,7 +120,7 @@ PushPullDesign design_push_pull(const json& tasInputs) {
         else
             leg.power = nominal(dr.at("outputs").at(i).at("power"));
         const double iout_i = leg.power / leg.voltage;
-        leg.diodeDrop = req::dideal_diode_drop(iout_i);
+        leg.diodeDrop = req::rectifier_drop(d.config, iout_i);
         if (i == 0) {
             leg.turnsRatio = d.turnsRatio;
             leg.diodeDrop = d.diodeDrop;      // preserve the main rail's exact scalar value
@@ -190,6 +190,7 @@ json build_push_pull_tas(const PushPullDesign& d) {
                                             Lm, d.outputInductance, rippleRatio, d.diodeDrop);
     // Primary-half switch conduction (winding 0 = "Primary Half 1") from the worst-case corner.
     const double IpkPri  = AN::winding_current(aopWorst, 0, "peak");
+    cfg::check_maximum_switch_current(d.config, IpkPri, "build_push_pull_tas");
     const double IrmsPri = AN::winding_current(aopWorst, 0, "rms");
     // Per-switch operating duty is shared across rails (common primary); the output-inductor volt-seconds
     // (below, per rail) use it directly.
@@ -201,6 +202,7 @@ json build_push_pull_tas(const PushPullDesign& d) {
     // Worst case at the max input corner: ratedVds = 2*Vin_max / V_DERATE. RdsOn budget spans the TOTAL
     // rail power (all outputs flow through the one primary pair).
     const double VdsStress = 2.0 * d.inputVoltageMax;
+    cfg::check_maximum_drain_source_voltage(d.config, VdsStress, "build_push_pull_tas");
     const double ratedVds  = VdsStress / cfg::v_derate_mosfet(d.config);
     const double maxRdsOn  = (IrmsPri > 0.0)
         ? cfg::rds_on_loss_fraction(d.config) * totalOutputPower / (IrmsPri * IrmsPri)

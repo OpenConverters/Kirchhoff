@@ -51,6 +51,19 @@ DabDesign design_dab(const json& tasInputs) {
     std::string modType = config.value("dabModulationType", std::string{});
     for (char& ch : modType) ch = (char)std::toupper((unsigned char)ch);
     const double d2deg = cfg::get(config, "dabInnerPhaseShift2Deg", modType == "DPS" ? d1deg : 0.0);
+    // The modulation label must describe the inner shifts it comes with (Huang 2018): SPS D1 = D2 = 0; EPS
+    // D1 > 0, D2 = 0; DPS D1 = D2 > 0; TPS any.
+    if (!modType.empty()) {
+        const bool ok = (modType == "SPS") ? (d1deg == 0.0 && d2deg == 0.0)
+                      : (modType == "EPS") ? (d1deg > 0.0 && d2deg == 0.0)
+                      : (modType == "DPS") ? (d1deg > 0.0 && d1deg == d2deg)
+                      : (modType == "TPS");
+        if (modType != "SPS" && modType != "EPS" && modType != "DPS" && modType != "TPS")
+            throw std::invalid_argument("design_dab: unknown dabModulationType '" + modType + "'");
+        if (!ok)
+            throw std::invalid_argument("design_dab: modulationType " + modType + " does not match the inner phase "
+                                        "shifts D1 = " + std::to_string(d1deg) + ", D2 = " + std::to_string(d2deg) + " deg");
+    }
     if (!(d1deg >= 0.0 && d1deg < 90.0))
         throw std::invalid_argument("design_dab: dabInnerPhaseShift1Deg (D1) must be in [0, 90) degrees; got "
                                     + std::to_string(d1deg));
@@ -81,7 +94,8 @@ DabDesign design_dab(const json& tasInputs) {
     d.inputVoltageMax = vinMax;
 
     const double Vin = d.inputVoltage, Vo = d.outputVoltage, Fs = d.switchingFrequency;
-    const double P = d.outputPower;
+    // Stated efficiency: the tank carries the INPUT power Pout/η (sizes Lr and Lm).
+    const double P = d.outputPower / req::conversion_efficiency(dr);
     const double D3 = d3deg * M_PI / 180.0;
 
     // 1. Turns ratio N = V1_nom / V2_nom (MKF rounds to 2 decimals).
@@ -288,6 +302,23 @@ json build_dab_tas(const DabDesign& d) {
     // Llc/Cuk). With this the coupling itself provides the tank inductance and NO discrete Lr is emitted.
     if (d.useLeakageInductance)
         xfmr["inputs"]["designRequirements"]["leakageInductance"] = json::array({ json{{"nominal", Lr_H}} });
+    // MAS dualActiveBridge.perSecondaryLeakage: the leakage each secondary must present (one per output) — the
+    // transformer's leakage requirement. With the leakage folded in as the tank (useLeakageInductance) a single
+    // output's value IS the series inductance, so it must agree with it.
+    // (An empty list states no leakage requirement.)
+    if (d.config.contains("perSecondaryLeakage") && !d.config.at("perSecondaryLeakage").empty()) {
+        const json& psl = d.config.at("perSecondaryLeakage");
+        if (!psl.is_array() || psl.size() != d.outputs.size())
+            throw std::invalid_argument("build_dab_tas: perSecondaryLeakage needs one value per output (" +
+                                        std::to_string(d.outputs.size()) + ")");
+        std::vector<double> leak;
+        for (const auto& v : psl) leak.push_back(v.get<double>());
+        if (d.useLeakageInductance && leak.size() == 1 && std::abs(leak[0] - Lr_H) > 0.01 * Lr_H)
+            throw std::invalid_argument("build_dab_tas: perSecondaryLeakage " + std::to_string(leak[0]) +
+                                        " H disagrees with the series inductance " + std::to_string(Lr_H) +
+                                        " H the leakage is to provide (useLeakageInductance)");
+        req::set_leakage_requirement(xfmr["inputs"], leak, "nominal");
+    }
 
     // Per-switch R∥C across every switch's two power terminals (8 switches) — but the R and C play DIFFERENT
     // roles, so they're named (and handled) differently:

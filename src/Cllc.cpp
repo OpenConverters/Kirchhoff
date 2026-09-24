@@ -4,6 +4,7 @@
 #include "ComponentRequirements.hpp"
 #include "ConverterAnalytical.hpp"
 #include <cmath>
+#include <limits>
 #include <algorithm>
 #include <vector>
 
@@ -54,12 +55,26 @@ CllcDesign design_cllc(const json& tasInputs) {
     // high circulating current, ~50% efficiency (abt #62). Sizing ~8% gain headroom puts the nominal point
     // just ABOVE fr on the efficient monotonic edge: the regulator trims frequency DOWN toward fr to cover
     // losses while staying near resonance. The realized headroom n flows into the pinned turnsRatio below.
-    double n = Vin / (cfg::get(d.config, "gainHeadroom", kGainHeadroom) * Vo);
+    double n = req::conversion_efficiency(dr) * Vin / (cfg::get(d.config, "gainHeadroom", kGainHeadroom) * Vo);
     // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
     // the duty-derived value so the rest of the stage is sized around the fixed transformer.
     d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(n);
     const double fr = d.switchingFrequency;
     d.resonantFrequency = fr;
+    // MAS cllcResonant.min/maxSwitchingFrequency: the regulation band. Kirchhoff designs and operates the tank
+    // at fr = the operating switching frequency, which must therefore lie inside the band.
+    if (d.config.contains("minSwitchingFrequency") || d.config.contains("maxSwitchingFrequency")) {
+        const double fmin = cfg::get(d.config, "minSwitchingFrequency", 0.0);
+        const double fmax = cfg::get(d.config, "maxSwitchingFrequency", std::numeric_limits<double>::infinity());
+        if (!(fr >= fmin && fr <= fmax))
+            throw std::invalid_argument("design_cllc: the operating/resonant frequency " + std::to_string(fr) +
+                                        " Hz lies outside the switching-frequency band [" + std::to_string(fmin) +
+                                        ", " + std::to_string(fmax) + "] Hz");
+    }
+    // MAS cllcResonant.bridgeType: Kirchhoff's CLLC is a full bridge on both sides (bridge-voltage factor 1).
+    if (cfg::get_str(d.config, "bridgeType", "fullBridge") != "fullBridge")
+        throw std::invalid_argument("design_cllc: bridgeType '" + cfg::get_str(d.config, "bridgeType", "") +
+                                    "' is not modelled; Kirchhoff's CLLC has a full-bridge primary");
 
     // Infineon FHA: Ro = 8n²/π²·Rload, Cr1 = 1/(2π·Q·fr·Ro), Lr1 = 1/((2π·fr)²·Cr1), Lm = k·Lr1.
     // Symmetric tank (a=b=1): Lr2 = Lr1/n², Cr2 = n²·Cr1.  (MKF Cllc::calculate_resonant_parameters)
@@ -86,8 +101,22 @@ CllcDesign design_cllc(const json& tasInputs) {
         d.primaryResonantInductance = *pinnedLm / k;
         d.primaryResonantCapacitance = 1.0 / (wr * wr * d.primaryResonantInductance);
     }
-    d.secondaryResonantInductance = d.primaryResonantInductance / (n * n);
-    d.secondaryResonantCapacitance = n * n * d.primaryResonantCapacitance;
+    // Tank asymmetry (MAS cllcResonant.resonantInductorRatio a = n²·Lr2/Lr1, resonantCapacitorRatio
+    // b = Cr2/(n²·Cr1); symmetric a = b = 1). symmetricDesign (deprecated) must agree with the ratios.
+    const double a = cfg::get(d.config, "resonantInductorRatio", 1.0);
+    const double b = cfg::get(d.config, "resonantCapacitorRatio", 1.0);
+    if (!(a > 0) || !(b > 0))
+        throw std::invalid_argument("design_cllc: resonantInductorRatio and resonantCapacitorRatio must be > 0");
+    if (d.config.contains("symmetricDesign")) {
+        const bool symmetric = cfg::get_bool(d.config, "symmetricDesign", true);
+        const bool ratiosSymmetric = (a == 1.0 && b == 1.0);
+        if (symmetric != ratiosSymmetric)
+            throw std::invalid_argument(std::string("design_cllc: symmetricDesign=") + (symmetric ? "true" : "false") +
+                                        " contradicts resonantInductorRatio=" + std::to_string(a) +
+                                        ", resonantCapacitorRatio=" + std::to_string(b));
+    }
+    d.secondaryResonantInductance = a * d.primaryResonantInductance / (n * n);
+    d.secondaryResonantCapacitance = b * n * n * d.primaryResonantCapacitance;
 
     d.switchDuty = cfg::get(d.config, "switchDutyFraction", kSwitchDuty);
     d.loadResistance = Rload;
@@ -98,6 +127,10 @@ CllcDesign design_cllc(const json& tasInputs) {
     if (dir != "forward" && dir != "reverse")
         throw std::invalid_argument("design_cllc: config.powerFlowDirection must be 'forward' or 'reverse', got '" + dir + "'");
     d.reverse = (dir == "reverse");
+    // MAS cllcResonant.bidirectional (default true): false means a diode secondary rectifier, which cannot
+    // carry reverse power. The forward operating point's winding waveforms are the same either way.
+    if (d.reverse && !cfg::get_bool(d.config, "bidirectional", true))
+        throw std::invalid_argument("design_cllc: a reverse power-flow operating point needs bidirectional=true");
     return d;
 }
 
@@ -240,6 +273,19 @@ json build_cllc_tas(const CllcDesign& d) {
     json t1; t1["magnetic"] = json::object();
     t1["inputs"] = req::magnetic_inputs(d.magnetizingInductance, 0.1, {n}, isoSides,
         std::nullopt, 25.0, AN::excitations_processed(aopT1, "T1"));
+    // MAS cllcResonant.integratedResonantInductor1/2 (default true): the resonant inductor realised as the
+    // transformer's own leakage. The transformer must then REALISE that leakage, primary-referred:
+    // Lr1 (primary side) + n²·Lr2 (secondary side); the discrete Lr1/Lr2 are folded out of the cell below.
+    {
+        const bool int1 = cfg::get_bool(d.config, "integratedResonantInductor1", false);
+        const bool int2 = cfg::get_bool(d.config, "integratedResonantInductor2", false);
+        if (int1 || int2) {
+            double leakage = 0.0;
+            if (int1) leakage += d.primaryResonantInductance;
+            if (int2) leakage += n * n * d.secondaryResonantInductance;
+            req::set_leakage_requirement(t1["inputs"], {leakage}, "nominal");
+        }
+    }
 
     json cell; cell["name"] = "cllc-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("sgnd"), port("vout"),
@@ -292,6 +338,10 @@ json build_cllc_tas(const CllcDesign& d) {
                           pin("DSb", "anode"), pin("DSd", "anode"), pin("Cout", "2"), prt("sgnd")}),
         conn("g1_net", {pin("Q1", "gate"), pin("Q4", "gate"), pin("Qa", "gate"), pin("Qd", "gate"), prt("g1")}),
         conn("g2_net", {pin("Q2", "gate"), pin("Q3", "gate"), pin("Qb", "gate"), pin("Qc", "gate"), prt("g2")})});
+    // Integrated resonant inductors (MAS cllcResonant.integratedResonantInductor1/2) are realised as T1's
+    // leakage (requirement set on T1 above): fold the discrete equivalents out of the cell.
+    if (cfg::get_bool(d.config, "integratedResonantInductor1", false)) req::fold_series_inductor(cell, "Lr1");
+    if (cfg::get_bool(d.config, "integratedResonantInductor2", false)) req::fold_series_inductor(cell, "Lr2");
 
     // The TAS inputs describe the SOURCE and DELIVERED rails. Forward: source = Vin, deliver = Vout. Reverse
     // (ABT #85): source = Vout (LV), deliver = Vin (HV). The assembler drives a DC source on the "input"

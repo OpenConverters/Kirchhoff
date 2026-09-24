@@ -38,13 +38,18 @@ AcfDesign design_acf(const json& tasInputs) {
     const double vinMax = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::MAXIMUM);
     const double vinMin = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::MINIMUM);
     d.inputVoltageMin = vinMin;
+    // Stated efficiency: the transformer must deliver (Vo+Vd)/η, so the conversion ratio is compensated.
+    const double etaConv = req::conversion_efficiency(dr);
+
     d.inputVoltageMax = vinMax;
 
     const double Vo = d.outputVoltage, Fs = d.switchingFrequency, Io = d.outputPower / Vo;
     // Output rectifier is a SYNCHRONOUS rectifier (gated MOSFETs SRfwd/SRfw), so its forward drop is the
     // small ohmic Iout*Rds of the conducting SR — NOT a ~0.9 V diode Vf. Sizing n/duty against a diode Vf
     // would over-deliver Vout by ~Vf (fatal on a low-Vout rail: a 3.3 V/30 A design overshot to 3.9 V).
-    d.diodeDrop = Io * kIdealSwRon;  // SR conduction drop = rectifier forward drop used for n/duty/Lo sizing
+    // SR conduction drop = rectifier forward drop used for n/duty/Lo sizing; a spec that states its rectifier
+    // drop (config.diodeVoltageDrop) is sized around exactly that.
+    d.diodeDrop = req::fixed_diode_drop(d.config).value_or(Io * kIdealSwRon);
     const double Dmax = cfg::get(d.config, "operatingDutyCycle", kDuty);   // MAX forward duty, occurs at Vin_min
     d.deadFraction = cfg::get(d.config, "deadTimeFraction", kDeadFrac);
 
@@ -53,7 +58,7 @@ AcfDesign design_acf(const json& tasInputs) {
     // Dmax < 0.5 — i.e. the analytical embed's worst corner (Vin_min) stays inside the reset limit. (Sizing at
     // NOMINAL Vin, as before, put t1 at exactly Dmax·Vin_nom/Vin_min·period = period/2 for a ±10% range, which
     // the turns-ratio rounding then tipped over the guard.)
-    double n = vinMin * Dmax / (Vo + d.diodeDrop);
+    double n = etaConv * vinMin * Dmax / (Vo + d.diodeDrop);
     // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
     // the duty-derived value so the rest of the stage is sized around the fixed transformer.
     d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(std::round(n * 100.0) / 100.0);
@@ -96,8 +101,8 @@ AcfDesign design_acf(const json& tasInputs) {
             leg.outputInductance = d.outputInductance;
             leg.outputCapacitance = d.outputCapacitance;
         } else {
-            leg.diodeDrop = iout_i * kIdealSwRon;   // synchronous-rectifier conduction drop (like the main rail)
-            double ni = vinMin * Dmax / (leg.voltage + leg.diodeDrop);
+            leg.diodeDrop = req::fixed_diode_drop(d.config).value_or(iout_i * kIdealSwRon);   // SR drop unless stated
+            double ni = etaConv * vinMin * Dmax / (leg.voltage + leg.diodeDrop);
             ni = std::round(ni * 100.0) / 100.0;
             leg.turnsRatio = req::provided_turns_ratio(dr, i).value_or(ni);
             leg.outputInductance = (vinMax / leg.turnsRatio - leg.diodeDrop - leg.voltage) * tOn / ripple;
@@ -156,6 +161,7 @@ json build_acf_tas(const AcfDesign& d) {
     const MAS::OperatingPoint aopNom   = AN::analytical_active_clamp_forward(Vin, Vouts, iouts,
                                             turnsRatios, fsw, Lm, d.outputs[0].outputInductance, ripple, d.outputs[0].diodeDrop);
     const double IpkPri  = AN::winding_current(aopWorst, 0, "peak");   // primary peak (main-switch rating)
+    cfg::check_maximum_switch_current(d.config, IpkPri, "build_acf_tas");
     const double IrmsPri = AN::winding_current(aopWorst, 0, "rms");    // primary rms (main-switch RdsOn conduction)
     const double ImagPk  = Vin * Dn * T / Lm;                          // magnetizing reset peak (clamp-switch rating)
     // Clamp switch conducts during the RESET interval (1-Dn)*T, carrying the magnetizing triangle from

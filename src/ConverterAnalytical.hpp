@@ -686,5 +686,9 @@ MAS::OperatingPoint analytical_common_mode_choke(double magnetizingInductance,
                                                  double dvdtVPerNs = 0.0,
                                                  double ambientTemperature = 25.0);
 
+// The line-frequency (differential-mode) operating point of a common-mode choke (see the .cpp).
+MAS::OperatingPoint analytical_common_mode_choke_line(double operatingCurrent, double lineFrequency,
+                                                      int numberOfWindings, double ambientTemperature);
+
 } // namespace analytical
 } // namespace Kirchhoff

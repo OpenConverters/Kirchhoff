@@ -87,6 +87,11 @@ PfcDesign design_pfc(const json& tasInputs) {
     d.mode            = normalize_pfc_mode(cfg::get_str(d.config, "mode", "ccm"));
     d.topologyVariant = normalize_pfc_variant(cfg::get_str(d.config, "topologyVariant", "boost"));
     d.bipolar         = (d.topologyVariant == "totemPole");
+    // MAS powerFactorCorrection.wideBandgapSwitch: a CCM totem-pole needs wide-bandgap switches (Si body-diode
+    // reverse recovery on the slow leg is prohibitive), so the combination is refused.
+    if (d.config.contains("wideBandgapSwitch") && !cfg::get_bool(d.config, "wideBandgapSwitch", false) &&
+        d.topologyVariant == "totemPole" && d.mode == "ccm")
+        throw std::invalid_argument("design_pfc: a CCM totem-pole PFC requires wideBandgapSwitch=true");
     // Supported-variant gate (mirrors MKF PowerFactorCorrection::validate_topology_variant :46). An
     // unsupported variant THROWS here — never a silent boost fallback.
     if (d.topologyVariant == "interleaved") {
@@ -95,6 +100,11 @@ PfcDesign design_pfc(const json& tasInputs) {
             throw std::invalid_argument("design_pfc: interleaved topologyVariant requires numberOfPhases "
                                         "in {2,3}, got " + std::to_string(d.numberOfPhases));
     } else {
+        if (d.config.contains("numberOfPhases") && std::llround(cfg::get(d.config, "numberOfPhases", 1.0)) != 1)
+            throw std::invalid_argument("design_pfc: numberOfPhases " +
+                                        std::to_string(cfg::get(d.config, "numberOfPhases", 1.0)) +
+                                        " needs topologyVariant interleavedBoost; the '" + d.topologyVariant +
+                                        "' variant is single-phase");
         d.numberOfPhases = 1;
         // totemPole (bipolar true-sine, bridgeless) and sepic/cuk (buck-boost class) each have their own
         // deck builder below; boost is the default. The buck-boost front ends are sized in continuous
@@ -262,8 +272,10 @@ json build_pfc_tas(const PfcDesign& d) {
     namespace AN = Kirchhoff::analytical;
     const MAS::OperatingPoint aopPfc = AN::analytical_pfc(d.inputVoltageRms, d.outputVoltage, d.outputPower,
                                                           d.lineFrequency, d.switchingFrequency,
-                                                          d.boostInductance, d.efficiency);
+                                                          d.boostInductance, d.efficiency,
+                                                          req::analytical_rectifier_drop(d.config));
     const double IpkL  = AN::winding_current(aopPfc, 0, "peak");
+    cfg::check_maximum_switch_current(d.config, IpkL, "build_pfc_tas");
     const double IrmsL = AN::winding_current(aopPfc, 0, "rms");
     const double IavgL = AN::winding_current(aopPfc, 0, "offset");
     const json indExc = AN::excitations_processed(aopPfc, "L").at(0);
@@ -443,9 +455,10 @@ static json build_pfc_totempole_tas(const PfcDesign& d) {
     const MAS::OperatingPoint aopPfc = AN::analytical_pfc(d.inputVoltageRms, d.outputVoltage, d.outputPower,
                                                           d.lineFrequency, d.switchingFrequency,
                                                           d.boostInductance, d.efficiency,
-                                                          /*diodeVoltageDrop*/ 0.0, /*numberOfPeriods*/ 2,
+                                                          req::analytical_rectifier_drop(d.config), /*numberOfPeriods*/ 2,
                                                           /*bipolar*/ true);
     const double IpkL  = AN::winding_current(aopPfc, 0, "peak");
+    cfg::check_maximum_switch_current(d.config, IpkL, "build_pfc_tas");
     const double IrmsL = AN::winding_current(aopPfc, 0, "rms");
     const double IavgL = AN::winding_current(aopPfc, 0, "offset");   // ~0 for a true bipolar sine
     const json indExc = AN::excitations_processed(aopPfc, "L").at(0);
@@ -643,8 +656,10 @@ static json build_pfc_interleaved_tas(const PfcDesign& d) {
     const double poutPhase = d.outputPower / N;
     const MAS::OperatingPoint aopPfc = AN::analytical_pfc(d.inputVoltageRms, d.outputVoltage, poutPhase,
                                                           d.lineFrequency, d.switchingFrequency,
-                                                          d.boostInductance, d.efficiency);
+                                                          d.boostInductance, d.efficiency,
+                                                          req::analytical_rectifier_drop(d.config));
     const double IpkL  = AN::winding_current(aopPfc, 0, "peak");
+    cfg::check_maximum_switch_current(d.config, IpkL, "build_pfc_tas");
     const double IrmsL = AN::winding_current(aopPfc, 0, "rms");
     const double IavgL = AN::winding_current(aopPfc, 0, "offset");
     const json indExc = AN::excitations_processed(aopPfc, "L").at(0);
@@ -840,8 +855,10 @@ static json build_pfc_buckboost_tas(const PfcDesign& d) {
     namespace AN = Kirchhoff::analytical;
     const MAS::OperatingPoint aopPfc = AN::analytical_pfc(d.inputVoltageRms, d.outputVoltage, d.outputPower,
                                                           d.lineFrequency, d.switchingFrequency,
-                                                          d.boostInductance, d.efficiency);
+                                                          d.boostInductance, d.efficiency,
+                                                          req::analytical_rectifier_drop(d.config));
     const double IpkL  = AN::winding_current(aopPfc, 0, "peak");
+    cfg::check_maximum_switch_current(d.config, IpkL, "build_pfc_tas");
     const double IrmsL = AN::winding_current(aopPfc, 0, "rms");
     const double IavgL = AN::winding_current(aopPfc, 0, "offset");
     const json indExc = AN::excitations_processed(aopPfc, "L").at(0);

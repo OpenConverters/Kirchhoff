@@ -518,11 +518,14 @@ TEST_CASE("extract(NGSPICE): the isolated buck reaches its own periodic steady s
     CHECK(pk1 < 0.3);
     CHECK(pk1 > 0.05);   // the isolated rail is loaded (1 W at ~10 V)
     // Charge balance on the isolated rail: the diode's average current is the load's, V/R with R = 100 ohm.
+    // MAS excitation convention: the secondary's voltage is in the dot reference and it delivers its power
+    // in the off-time, while that voltage is NEGATIVE, so in the source convention its average current is
+    // -I_out (as the analytical isolated buck's, [convention]).
     const json j = json::parse(a1);
     const double iSecMean = mean_of(excs.at(1).at("current"));
     INFO("secondary mean current=" << iSecMean);
-    CHECK(iSecMean > 0.095);
-    CHECK(iSecMean < 0.115);   // 1 W on a rail that the lossless deck puts at ~10.4 V: ~0.104 A
+    CHECK(iSecMean < -0.095);
+    CHECK(iSecMean > -0.115);   // 1 W on a rail that the lossless deck puts at ~10.4 V: ~0.104 A
     const json& ana = j.at("analyticalWaveforms").at("T1").at("excitationsPerWinding");
     CHECK(correlation(excs.at(0).at("current"), ana.at(0).at("current")) > 0.8);
     CHECK(correlation(excs.at(1).at("current"), ana.at(1).at("current")) > 0.8);

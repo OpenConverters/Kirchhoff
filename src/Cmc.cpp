@@ -65,11 +65,19 @@ CmcDesign design_cmc(const json& spec) {
     if (d.lineFrequency <= 0)
         throw std::invalid_argument("design_cmc: lineFrequency must be > 0");
 
+    if (spec.contains("maximumDcResistance"))
+        throw std::invalid_argument("design_cmc: maximumDcResistance"
+                                    " cannot be honoured: MAS designRequirements has no field for it (a MAS schema gap — the limit belongs to the "
+                                    "magnetic design, and the MAS Inputs this call returns cannot carry it)");
+    if (spec.contains("maximumLeakageInductance")) {
+        d.maximumLeakageInductance = spec.at("maximumLeakageInductance").get<double>();
+        if (!(*d.maximumLeakageInductance > 0))
+            throw std::invalid_argument("design_cmc: maximumLeakageInductance must be > 0 H");
+    }
     // Mode 1 — direct impedance points.
     if (spec.contains("minimumImpedance"))
         for (const auto& item : spec.at("minimumImpedance"))
-            d.impedancePoints.push_back(
-                impedance_point(item.at("frequency").get<double>(), item.at("impedance").get<double>()));
+            d.impedancePoints.push_back(impedance_point_from_spec(item, "design_cmc"));
 
     // Mode 2 — insertion-loss targets, converted through the LISN line impedance.
     if (spec.contains("targetInsertionLoss"))
@@ -158,6 +166,18 @@ MAS::Inputs build_cmc_inputs(const CmcDesign& d) {
         "commonModeNoiseFiltering", std::nullopt,
         d.numberOfWindings, lmSpec, d.impedancePoints);
 
+    // MAS commonModeChoke.maximumLeakageInductance (tight coupling): an upper bound on the leakage of every
+    // winding pair, carried as the MAS leakageInductance requirement.
+    if (d.maximumLeakageInductance) {
+        std::vector<MAS::DimensionWithTolerance> leakage;
+        for (int i = 1; i < d.numberOfWindings; ++i) {
+            MAS::DimensionWithTolerance l;
+            l.set_maximum(*d.maximumLeakageInductance);
+            leakage.push_back(l);
+        }
+        dr.set_leakage_inductance(leakage);
+    }
+
     // The excitation frequency: the shared cmc_excitation_frequency rule (Cmc.hpp) — the ngspice
     // ideal sim uses the SAME rule, so simulated and analytical operating points always agree.
     const double excitationFrequency = cmc_excitation_frequency(d);
@@ -166,7 +186,12 @@ MAS::Inputs build_cmc_inputs(const CmcDesign& d) {
         lm, d.operatingCurrent, d.operatingVoltage, excitationFrequency, d.numberOfWindings,
         d.parasiticCapPf, d.dvdtVPerNs, d.ambientTemperature);
 
-    return make_inputs(std::move(dr), std::move(op));
+    // MAS commonModeChoke.lineFrequency: the line (differential-mode) current at the line frequency — a second
+    // operating point carrying the copper stress (its flux cancels in the choke).
+    MAS::Inputs inputs = make_inputs(std::move(dr), std::move(op));
+    inputs.get_mutable_operating_points().push_back(analytical::analytical_common_mode_choke_line(
+        d.operatingCurrent, d.lineFrequency, d.numberOfWindings, d.ambientTemperature));
+    return inputs;
 }
 
 } // namespace Kirchhoff

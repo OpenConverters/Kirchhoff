@@ -52,11 +52,18 @@ AhbDesign design_ahb(const json& tasInputs) {
     const double vinMin = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::MINIMUM);
     d.inputVoltageMin = vinMin;
     d.inputVoltageMax = vinMax;
+    // Stated efficiency: the transformer must deliver (Vo+Vd)/η, so the conversion ratio is compensated.
+    const double etaConv = req::conversion_efficiency(dr);
+
 
     const double Vo = d.outputVoltage, Fs = d.switchingFrequency, Tsw = 1.0 / Fs;
     const double Io = d.outputPower / Vo;
     const double D = cfg::get(d.config, "operatingDutyCycle", kDuty);
     d.dutyCycle = D;
+    // MAS asymmetricHalfBridge.maximumDutyCycle: the commanded Q1 duty must not exceed it.
+    if (d.config.contains("maximumDutyCycle") && D > cfg::get(d.config, "maximumDutyCycle", 0.5))
+        throw std::invalid_argument("design_ahb: operating duty " + std::to_string(D) + " exceeds maximumDutyCycle " +
+                                    std::to_string(cfg::get(d.config, "maximumDutyCycle", 0.5)));
     d.deadFraction = cfg::get(d.config, "deadTimeFraction", kDeadFrac);
     // Rectifier variant (FB default). AHB's 4th MAS variant, AHB_FLYBACK, is an ACTIVE-CLAMP FLYBACK — not
     // one of the shared forward-rectifier enum values (ABT #87), so it is detected here as an AHB-local flag
@@ -80,13 +87,13 @@ AhbDesign design_ahb(const json& tasInputs) {
         // (±(1-D)Vin / D·Vin about the Cb clamp), so the single-diode energy-transfer output follows
         // Vo·n = Vin·D (verified against ngspice across turns ratios — NOT the textbook flyback D/(1-D)).
         // KH turnsRatio is Np/Ns, so n = Vin·D/(Vo+Vd), one rectifier diode in the path.
-        const double Vd = req::dideal_diode_drop(Io);
-        n = d.inputVoltage * D / (Vo + Vd);
+        const double Vd = req::rectifier_drop(d.config, Io);
+        n = etaConv * d.inputVoltage * D / (Vo + Vd);
     } else {
         // Path diodes set the drop compensation: FB stacks two (Vo+2Vd); CT/CD conduct through one (Vo+Vd).
-        const double Vdtot = rectifier_path_diodes(d.rectifierType) * req::dideal_diode_drop(Io);
+        const double Vdtot = rectifier_path_diodes(d.rectifierType) * req::rectifier_drop(d.config, Io);
         // Turns ratio at NOMINAL Vin so the open-loop deck delivers Vo: Vo + Vdtot = 2*D*(1-D)*Vin_nom/n.
-        n = 2.0 * D * (1.0 - D) * d.inputVoltage / (Vo + Vdtot);
+        n = etaConv * 2.0 * D * (1.0 - D) * d.inputVoltage / (Vo + Vdtot);
         if (d.rectifierType == RectifierType::CurrentDoubler)
             n *= cfg::get(d.config, "cdOutputFactor", 0.5);   // CD delivers ~half the reflected voltage
     }
@@ -112,7 +119,15 @@ AhbDesign design_ahb(const json& tasInputs) {
             (1.0 - D) * vinMax * D * Tsw / (2.0 * ImTarget));
         // Output inductor (CCM): Lo = Vo*(1 - 2*D*(1-D))/(ripple*Io*Fs).
         d.outputInductance = Vo * (1.0 - 2.0 * D * (1.0 - D)) / (cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Io * Fs);
+        // MAS asymmetricHalfBridge.outputInductance: an explicit output filter inductance is used as given.
+        if (d.config.contains("outputInductance")) {
+            d.outputInductance = cfg::get(d.config, "outputInductance", 0.0);
+            if (!(d.outputInductance > 0)) throw std::invalid_argument("design_ahb: outputInductance must be > 0 H");
+        }
     }
+    if (d.ahbFlyback && d.config.contains("outputInductance"))
+        throw std::invalid_argument("design_ahb: the ahbFlyback rectifier feeds Cout directly — it has no output "
+                                    "inductor, so outputInductance cannot be honoured");
 
     // DC-blocking cap sized for <=5% ripple of V_Cb=(1-D)*Vin (Cb = Ipri_pk*D/(Fs*dVCb)).
     const double dILm = (1.0 - D) * vinMax * D * Tsw / d.magnetizingInductance;
@@ -120,6 +135,11 @@ AhbDesign design_ahb(const json& tasInputs) {
     const double VCb = (1.0 - D) * d.inputVoltage;
     const double dVCb = std::max(0.05 * VCb, 1e-3);
     d.dcBlockingCapacitance = IpriPk * D / (Fs * dVCb);
+    // MAS asymmetricHalfBridge.dcBlockingCapacitance: an explicit Cb is used as given.
+    if (d.config.contains("dcBlockingCapacitance")) {
+        d.dcBlockingCapacitance = cfg::get(d.config, "dcBlockingCapacitance", 0.0);
+        if (!(d.dcBlockingCapacitance > 0)) throw std::invalid_argument("design_ahb: dcBlockingCapacitance must be > 0 F");
+    }
 
     d.loadResistance = Vo * Vo / d.outputPower;
     d.outputCapacitance = cfg::get(d.config, "outputCapacitance", 100e-6);
@@ -232,7 +252,7 @@ json build_ahb_tas(const AhbDesign& d) {
                                       ? AN::SrcRectifier::CENTER_TAPPED : AN::SrcRectifier::FULL_BRIDGE;
         const double rippleRatio = dILo / Io;   // makes the solver's compute_lo_min Lo == d.outputInductance
         const MAS::OperatingPoint aopT1 = AN::analytical_asymmetric_half_bridge(
-            d.inputVoltage, {Vo}, {Io}, {N}, fsw, Lm, Dn, rippleRatio, 0.0, rect);
+            d.inputVoltage, {Vo}, {Io}, {N}, fsw, Lm, Dn, rippleRatio, req::analytical_rectifier_drop(d.config), rect);
         xwindings = AN::excitations_processed(aopT1, "T1");
     } else {
         xwindings.push_back(req::winding_excitation("ahbPrimary", fsw, IpriPk, IpriRms, 0.0, dILm, Dn,
@@ -249,6 +269,23 @@ json build_ahb_tas(const AhbDesign& d) {
         // FLYBACK variant the transformer IS the energy store — Lm is a designed, gapped value (the flyback
         // storage inductance), NOT to be maximised — so pass false there. (ABT #87.)
         /*lmIsMinimum=*/!d.ahbFlyback);
+    // MAS asymmetricHalfBridge.leakageInductance / useLeakageInductance: with the leakage used (for ZVS, the
+    // default) the transformer must REALISE the stated primary leakage; without it the leakage is a parasitic
+    // bounded by the stated value.
+    if (d.config.contains("leakageInductance")) {
+        const bool useLeakage = cfg::get_bool(d.config, "useLeakageInductance", true);
+        req::set_leakage_requirement(xfmr["inputs"], {cfg::get(d.config, "leakageInductance", 0.0)},
+                                     useLeakage ? "nominal" : "maximum");
+    }
+    // MAS asymmetricHalfBridge.inputVoltageStepRange: a line step ΔVin adds D·ΔVin·Tsw of volt-seconds before
+    // the loop and Cb re-settle (MKF AHB plan §5.5, (T2)): the worst-case magnetizing peak rises by
+    // D·ΔVin·Tsw/(2·Lm). Emitted as a second T1 operating point so the core is sized for the transient peak.
+    if (d.config.contains("inputVoltageStepRange")) {
+        const double dVin = cfg::get(d.config, "inputVoltageStepRange", 0.0);
+        if (!(dVin >= 0)) throw std::invalid_argument("design_ahb: inputVoltageStepRange must be >= 0 V");
+        req::append_primary_shifted_operating_point(xfmr["inputs"], Dn * dVin * Tsw / (2.0 * Lm),
+                                                    "input voltage step transient");
+    }
 
     // Output inductor Lo (single-winding magnetic, DC-biased at Io).
     json lout; lout["magnetic"] = json::object();

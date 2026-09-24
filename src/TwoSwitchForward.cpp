@@ -36,12 +36,15 @@ TwoSwitchForwardDesign design_two_switch_forward(const json& tasInputs) {
     const double vinMax = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::MAXIMUM);
     const double vinMin = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::MINIMUM);
     d.inputVoltageMin = vinMin;
+    // Stated efficiency: the transformer must deliver (Vo+Vd)/η, so the conversion ratio is compensated.
+    const double etaConv = req::conversion_efficiency(dr);
+
     d.inputVoltageMax = vinMax;
 
     const double iout = d.outputPower / d.outputVoltage;
-    d.diodeDrop = req::dideal_diode_drop(d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
+    d.diodeDrop = req::rectifier_drop(d.config, d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
     const double maxDuty = cfg::get(d.config, "maxDutyCycle", kMaxDuty);
-    double n = vinMin * maxDuty / (d.outputVoltage + d.diodeDrop);
+    double n = etaConv * vinMin * maxDuty / (d.outputVoltage + d.diodeDrop);
     n = std::round(n * 100.0) / 100.0;
     // n is sized off Vin_min but the solver is evaluated at Vin_NOMINAL, where the duty must stay
     // within the reset-limited maximum. With no input headroom (Vin_nom == Vin_min, e.g. a nominal-
@@ -49,7 +52,7 @@ TwoSwitchForwardDesign design_two_switch_forward(const json& tasInputs) {
     // analytical_two_switch_forward rejects it (t1 > T/2). Cap n at the largest 2-dp ratio keeping
     // D_nom <= maxDuty; slack (unchanged) for any spec with real input range, so the golden designs
     // stay byte-identical.
-    n = std::min(n, std::floor((maxDuty * d.inputVoltage / (d.outputVoltage + d.diodeDrop)) * 100.0) / 100.0);
+    n = std::min(n, std::floor((etaConv * maxDuty * d.inputVoltage / (d.outputVoltage + d.diodeDrop)) * 100.0) / 100.0);
     // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
     // the duty-derived value so the rest of the stage is sized around the fixed transformer.
     d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(n);
@@ -82,8 +85,8 @@ TwoSwitchForwardDesign design_two_switch_forward(const json& tasInputs) {
             leg.outputInductance = d.outputInductance;
             leg.outputCapacitance = d.outputCapacitance;
         } else {
-            leg.diodeDrop = req::dideal_diode_drop(iout_i);
-            double ni = vinMin * cfg::get(d.config, "maxDutyCycle", kMaxDuty) / (leg.voltage + leg.diodeDrop);
+            leg.diodeDrop = req::rectifier_drop(d.config, iout_i);
+            double ni = etaConv * vinMin * cfg::get(d.config, "maxDutyCycle", kMaxDuty) / (leg.voltage + leg.diodeDrop);
             ni = std::round(ni * 100.0) / 100.0;
             leg.turnsRatio = req::provided_turns_ratio(dr, i).value_or(ni);
             leg.outputInductance = (vinMax / leg.turnsRatio - leg.diodeDrop - leg.voltage) * tOn / ripple;
@@ -143,6 +146,7 @@ json build_two_switch_forward_tas(const TwoSwitchForwardDesign& d) {
     const MAS::OperatingPoint aopNom = AN::analytical_two_switch_forward(Vin, Vouts, iouts, turnsRatios, fsw, Lm,
                                                              d.outputs[0].outputInductance, ripple, d.outputs[0].diodeDrop);
     const double IpkPri  = AN::winding_current(aopNom, 0, "peak");   // primary peak (switch rating)
+    cfg::check_maximum_switch_current(d.config, IpkPri, "build_two_switch_forward_tas");
     const double IrmsPri = AN::winding_current(aopNom, 0, "rms");    // primary rms (switch RdsOn conduction)
     const double ImagPk  = Vin * Dn * T / Lm;                        // magnetizing reset peak (clamp-diode rating)
 

@@ -281,6 +281,9 @@ target_link_libraries(test_converter_analytical PRIVATE kirchhoff Catch2::Catch2
 # ampere-turn + Faraday consistency) for every multi-winding analytical converter model.
 add_executable(test_winding_convention tests/test_winding_convention.cpp src/KirchhoffApi.cpp)
 target_link_libraries(test_winding_convention PRIVATE kirchhoff Catch2::Catch2WithMain)
+# MAS topology-schema fields Kirchhoff honours natively (fixed diode drop, stress limits, leakage folds, ...).
+add_executable(test_schema_knobs tests/test_schema_knobs.cpp)
+target_link_libraries(test_schema_knobs PRIVATE kirchhoff Catch2::Catch2WithMain)
 
 add_executable(test_nrmse_gate tests/test_nrmse_gate.cpp)
 target_link_libraries(test_nrmse_gate PRIVATE kirchhoff Catch2::Catch2WithMain)

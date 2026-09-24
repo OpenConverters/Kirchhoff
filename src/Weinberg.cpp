@@ -58,7 +58,7 @@ WeinbergDesign design_weinberg(const json& tasInputs) {
 
     // Turns ratio sized at MAX Vin to keep D ≥ 0.55 (boost regime) across the input range:
     //   n = 1 / (2·M·(1−D_target)),  M = Vo/(Vin_max·η).   (MKF process_design_requirements)
-const double Vd = req::dideal_diode_drop(d.outputPower / Vo);  // DIDEAL Vf at the rectifier current
+const double Vd = req::rectifier_drop(d.config, d.outputPower / Vo);  // DIDEAL Vf at the rectifier current
     const double Mmax = (Vo + Vd) / (vinMax * eta);
     double n = 1.0 / (2.0 * Mmax * (1.0 - cfg::get(d.config, "boostDutyTarget", kDTarget)));
     // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
@@ -126,6 +126,7 @@ json build_weinberg_tas(const WeinbergDesign& d) {
     const double IL1avg = Iin / 2.0;
     const double dIL1 = cfg::get(d.config, "l1RippleRatio", kRippleRatio) * IL1avg;
     const double IpkPri  = Iin + dIL1 / 2.0;
+    cfg::check_maximum_switch_current(d.config, IpkPri, "build_weinberg_tas");
     const double IrmsPri = std::sqrt(D) * Iin;
     // BRIDGE (ABT #88): the H-bridge drives the two primary halves in SERIES, so the transformer sees TWICE
     // the primary turns of a single push-pull half → half the volts/turn. To land the shared operating point
@@ -182,7 +183,7 @@ json build_weinberg_tas(const WeinbergDesign& d) {
     // CURRENTS it records match the deck; the bridge's halved primary-referred turns only rescale the
     // reflected VOLTAGE (captured via nXfmr in the transformer ratios + switch rating below).
     const MAS::OperatingPoint wOp = AN::analytical_weinberg(
-        Vin, Vout, Iout, fsw, d.inputInductance, n, 0.0, d.efficiency, bridge,
+        Vin, Vout, Iout, fsw, d.inputInductance, n, req::analytical_rectifier_drop(d.config), d.efficiency, bridge,
         cfg::get(d.config, "maximumDutyCycle", 0.95));   // ABT #95: configurable maxDuty (default matches solver)
     const auto& allExc = wOp.get_excitations_per_winding();
     if (allExc.size() != 6)
@@ -197,7 +198,11 @@ json build_weinberg_tas(const WeinbergDesign& d) {
     json l1; l1["magnetic"] = json::object();
     l1["inputs"] = req::magnetic_inputs(d.inputInductance, 0.2, {1.0}, {"primary", "primary"},
         std::nullopt, 25.0, wL1);
-    { const double kCpl = cfg::get(d.config, "transformerCoupling", 0.999);
+    // MAS weinberg.couplingCoefficientInput: the coupling between the two L1 windings (default: the historical
+    // transformerCoupling knob, 0.999).
+    { const double kCpl = cfg::get(d.config, "couplingCoefficientInput", cfg::get(d.config, "transformerCoupling", 0.999));
+      if (!(kCpl > 0.0 && kCpl <= 1.0))
+          throw std::invalid_argument("build_weinberg_tas: couplingCoefficientInput must be in (0, 1]");
       l1["inputs"]["designRequirements"]["leakageInductance"] =
           json::array({ json{{"nominal", (1.0 - kCpl*kCpl) * d.inputInductance}} }); }
 
@@ -217,6 +222,16 @@ json build_weinberg_tas(const WeinbergDesign& d) {
         // beyond the fringing limit, so no core could be advised and the adviser's relaxed retries ran
         // away (WASM std::bad_alloc). L1's value is the floor.
         /*lmIsMinimum=*/true);
+    // MAS weinberg.couplingCoefficientMain: the main transformer's coupling — its leakage requirement, per
+    // primary-to-winding pair, L_leak = (1 − k²)·Lm (the relation the deck emitter inverts).
+    if (d.config.contains("couplingCoefficientMain")) {
+        const double kMain = cfg::get(d.config, "couplingCoefficientMain", 0.99);
+        if (!(kMain > 0.0 && kMain <= 1.0))
+            throw std::invalid_argument("build_weinberg_tas: couplingCoefficientMain must be in (0, 1]");
+        if (kMain < 1.0)
+            req::set_leakage_requirement(t1["inputs"],
+                                         std::vector<double>(3, (1.0 - kMain * kMain) * d.magnetizingInductance), "nominal");
+    }
 
     json cout; cout["capacitor"] = json::object();
     cout["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;

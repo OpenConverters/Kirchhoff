@@ -45,7 +45,7 @@ IsolatedBuckBoostDesign design_isolated_buck_boost(const json& tasInputs) {
     const size_t nOut = dr.at("outputs").size();
 
     // Flyback duty D = V_pri / (Vin·η + V_pri).  N = V_pri/(V_sec + Vd), ideal Vd=0.
-const double Vd = req::dideal_diode_drop(Ipri);  // DIDEAL Vf at the primary rectifier current
+const double Vd = req::rectifier_drop(d.config, Ipri);  // DIDEAL Vf at the primary rectifier current
     d.dutyCycle  = (Vpri + Vd) / (Vin * d.efficiency + Vpri + Vd);
     double N = Vpri / Vsec;  // measured output is the primary buck rail (no rectifier drop); secondary is internal
     // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
@@ -64,7 +64,7 @@ const double Vd = req::dideal_diode_drop(Ipri);  // DIDEAL Vf at the primary rec
         if (k == 1) {
             Nk = d.turnsRatio;
         } else {
-            const double Vd_k = req::dideal_diode_drop(Isec_k);
+            const double Vd_k = req::rectifier_drop(d.config, Isec_k);
             Nk = req::provided_turns_ratio(dr, k - 1).value_or(
                 std::round((Vpri + Vd) / (Vsec_k + Vd_k) * 100.0) / 100.0);
         }
@@ -135,11 +135,12 @@ json build_isolated_buck_boost_tas(const IsolatedBuckBoostDesign& d) {
     const double IpriLoad = d.primaryPower / d.primaryVoltage;
     const double IsecLoad = d.secondaryPower / d.secondaryVoltage;
     const MAS::OperatingPoint aopWorst = AN::analytical_isolated_buck_boost(d.inputVoltageMin, d.primaryVoltage,
-                                            IpriLoad, d.secondaryVoltage, IsecLoad, fsw, Lm, N, 0.0, d.efficiency);
+                                            IpriLoad, d.secondaryVoltage, IsecLoad, fsw, Lm, N, req::analytical_rectifier_drop(d.config), d.efficiency);
     const MAS::OperatingPoint aopNom   = AN::analytical_isolated_buck_boost(d.inputVoltage,    d.primaryVoltage,
-                                            IpriLoad, d.secondaryVoltage, IsecLoad, fsw, Lm, N, 0.0, d.efficiency);
+                                            IpriLoad, d.secondaryVoltage, IsecLoad, fsw, Lm, N, req::analytical_rectifier_drop(d.config), d.efficiency);
     // Primary winding stresses from the worst-case corner (winding 0).
     const double IpkPri  = AN::winding_current(aopWorst, 0, "peak");
+    cfg::check_maximum_switch_current(d.config, IpkPri, "build_isolated_buck_boost_tas");
     const double IrmsPri = AN::winding_current(aopWorst, 0, "rms");
 
     // --- semiconductor stresses (flyback-class, max-stress corner Vin_max) ---
@@ -277,10 +278,11 @@ static json build_isolated_buck_boost_tas_multi(const IsolatedBuckBoostDesign& d
         Ns.push_back(leg.turnsRatio);
     }
     const MAS::OperatingPoint aopWorst = AN::analytical_isolated_buck_boost(d.inputVoltageMin, d.primaryVoltage,
-                                            IpriLoad, Vsecs, Isecs, fsw, Lm, Ns, 0.0, d.efficiency);
+                                            IpriLoad, Vsecs, Isecs, fsw, Lm, Ns, req::analytical_rectifier_drop(d.config), d.efficiency);
     const MAS::OperatingPoint aopNom   = AN::analytical_isolated_buck_boost(d.inputVoltage,    d.primaryVoltage,
-                                            IpriLoad, Vsecs, Isecs, fsw, Lm, Ns, 0.0, d.efficiency);
+                                            IpriLoad, Vsecs, Isecs, fsw, Lm, Ns, req::analytical_rectifier_drop(d.config), d.efficiency);
     const double IpkPri  = AN::winding_current(aopWorst, 0, "peak");
+    cfg::check_maximum_switch_current(d.config, IpkPri, "build_isolated_buck_boost_tas");
     const double IrmsPri = AN::winding_current(aopWorst, 0, "rms");
 
     // --- semiconductor stresses (flyback-class, max-stress corner Vin_max) ---

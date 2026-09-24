@@ -4,6 +4,7 @@
 #include "ComponentRequirements.hpp"
 #include "ConverterAnalytical.hpp"
 #include <cmath>
+#include <limits>
 #include <algorithm>
 #include <vector>
 #include <stdexcept>
@@ -45,6 +46,9 @@ LlcDesign design_llc(const json& tasInputs) {
     d.inputVoltageMin = vinMin;
     d.inputVoltageMax = vinMax;
 
+    // Stated efficiency: the transformer must deliver (Vo+Vd)/η, so the conversion ratio is compensated.
+    const double etaConv = req::conversion_efficiency(dr);
+
     const double Vin = d.inputVoltage, Vo = d.outputVoltage;
     const double Iout = d.outputPower / Vo;
 
@@ -64,21 +68,21 @@ LlcDesign design_llc(const json& tasInputs) {
     // CT conducts through ONE diode (Vout+Vd); FB stacks TWO (Vout+2Vd); VD's stacked-cap output delivers
     // 2·Vsec_pk so the ratio DOUBLES (n = 2·Vo_fha/(Vout+2Vd)); CD's inductor averaging delivers Vsec_pk/2
     // so the ratio HALVES (n = Vo_fha/(2·(Vout+Vd)) — the dual of VD: double current, half voltage).
-    const double Vd = req::dideal_diode_drop(Iout);
+    const double Vd = req::rectifier_drop(d.config, Iout);
     // Bridge factor: half-bridge tank sees ±Vin/2 (0.5), full-bridge ±Vin (1.0). The full-bridge default
     // (1.0) doubles Vo_fha, so n doubles to hold the same output spec (ABT #91). Still overridable verbatim.
     const double kBridge = d.fullBridge ? 1.0 : kBridgeFactor;
     const double Vbridge = cfg::get(d.config, "bridgeFactor", kBridge) * Vin;   // Vo_fha
     double n;
     switch (d.rectifierType) {
-        case RectifierType::FullBridge:     n = Vbridge / (Vo + 2.0 * Vd);       break;
-        case RectifierType::VoltageDoubler: n = 2.0 * Vbridge / (Vo + 2.0 * Vd); break;
+        case RectifierType::FullBridge:     n = etaConv * Vbridge / (Vo + 2.0 * Vd);       break;
+        case RectifierType::VoltageDoubler: n = 2.0 * etaConv * Vbridge / (Vo + 2.0 * Vd); break;
         case RectifierType::CurrentDoubler:
             // CD delivers ~half the winding peak; the REALIZED factor (≈0.465) sits a bit below the
             // ideal 0.5 from rectifier conduction + sinusoidal averaging at fr. Documented + config-
             // overridable (cdOutputFactor), in the spirit of the KirchhoffConfig numerical constants.
-            n = cfg::get(d.config, "cdOutputFactor", 0.465) * Vbridge / (Vo + Vd); break;
-        case RectifierType::CenterTapped:   n = Vbridge / (Vo + Vd);             break;
+            n = cfg::get(d.config, "cdOutputFactor", 0.465) * etaConv * Vbridge / (Vo + Vd); break;
+        case RectifierType::CenterTapped:   n = etaConv * Vbridge / (Vo + Vd);             break;
     }
     // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
     // the duty-derived value so the rest of the stage is sized around the fixed transformer.
@@ -90,6 +94,16 @@ LlcDesign design_llc(const json& tasInputs) {
     const double fr = std::sqrt(cfg::get(d.config, "resonantBandMin", kFmin) * cfg::get(d.config, "resonantBandMax", kFmax));
     const double Zr = cfg::get(d.config, "qualityFactor", kQualityFactor) * Rac;
     d.resonantFrequency = fr;
+    // Driven at the operating point's switching frequency (MAS operating points state it), that frequency must
+    // lie inside the regulation band [resonantBandMin, resonantBandMax].
+    if (cfg::get_bool(d.config, "driveAtSwitchingFrequency", false) &&
+        (d.config.contains("resonantBandMin") || d.config.contains("resonantBandMax"))) {
+        const double fmin = cfg::get(d.config, "resonantBandMin", kFmin), fmax = cfg::get(d.config, "resonantBandMax", kFmax);
+        if (!(d.switchingFrequency >= fmin && d.switchingFrequency <= fmax))
+            throw std::invalid_argument("design_llc: the operating switching frequency " +
+                                        std::to_string(d.switchingFrequency) + " Hz lies outside the band [" +
+                                        std::to_string(fmin) + ", " + std::to_string(fmax) + "] Hz");
+    }
     d.resonantInductance = Zr / (2.0 * M_PI * fr);
     d.resonantCapacitance = 1.0 / (2.0 * M_PI * fr * Zr);
     const auto pinnedLm = req::provided_inductance(dr);
@@ -133,11 +147,11 @@ LlcDesign design_llc(const json& tasInputs) {
     // work). outputs[0] reproduces the scalars above byte-for-byte.
     auto nForRail = [&](double Vo_i, double Vd_i) -> double {
         switch (d.rectifierType) {
-            case RectifierType::FullBridge:     return Vbridge / (Vo_i + 2.0 * Vd_i);
-            case RectifierType::VoltageDoubler: return 2.0 * Vbridge / (Vo_i + 2.0 * Vd_i);
+            case RectifierType::FullBridge:     return etaConv * Vbridge / (Vo_i + 2.0 * Vd_i);
+            case RectifierType::VoltageDoubler: return 2.0 * etaConv * Vbridge / (Vo_i + 2.0 * Vd_i);
             case RectifierType::CurrentDoubler:
-                return cfg::get(d.config, "cdOutputFactor", 0.465) * Vbridge / (Vo_i + Vd_i);
-            case RectifierType::CenterTapped:   return Vbridge / (Vo_i + Vd_i);
+                return cfg::get(d.config, "cdOutputFactor", 0.465) * etaConv * Vbridge / (Vo_i + Vd_i);
+            case RectifierType::CenterTapped:   return etaConv * Vbridge / (Vo_i + Vd_i);
         }
         throw std::runtime_error("Kirchhoff LLC: unreachable rectifier type");
     };
@@ -153,7 +167,7 @@ LlcDesign design_llc(const json& tasInputs) {
         else
             leg.power = nominal(dr.at("outputs").at(i).at("power"));
         const double iout_i = leg.power / leg.voltage;
-        leg.diodeDrop = req::dideal_diode_drop(iout_i);
+        leg.diodeDrop = req::rectifier_drop(d.config, iout_i);
         if (i == 0) {
             leg.turnsRatio = d.turnsRatio;               // preserve the main rail's exact scalar
             leg.outputCapacitance = d.outputCapacitance;
@@ -326,9 +340,13 @@ json build_llc_tas(const LlcDesign& d) {
       // secondary i+1 and defaults missing entries to near-ideal coupling, so the old single
       // entry gave a center-tapped transformer asymmetric halves (KT1_01=0.999, KT1_02≈1).
       // Symmetric halves are the physical intent; each entry carries the same referred leakage.
+      // MAS llcResonant.integratedResonantInductor: the resonant inductor IS the transformer's leakage — each
+      // secondary pair then carries Ls (primary-referred) and the discrete Lr is folded out of the stage below.
+      const bool integrated = cfg::get_bool(d.config, "integratedResonantInductor", false);
       json leaks = json::array();
       for (size_t w = 0; w < turnsRatios.size(); ++w)
-          leaks.push_back(json{{"nominal", (1.0 - kCpl*kCpl) * d.magnetizingInductance}});
+          leaks.push_back(json{{"nominal", integrated ? d.resonantInductance
+                                                      : (1.0 - kCpl*kCpl) * d.magnetizingInductance}});
       t1["inputs"]["designRequirements"]["leakageInductance"] = leaks; }
 
     // Bus split caps (establish the Vbus/2 midpoint the tank returns to).
@@ -461,6 +479,9 @@ json build_llc_tas(const LlcDesign& d) {
         gndPrimary = {pin("Q2", "source"), pin("Dq2", "anode"), pin("Q4", "source"), pin("Dq4", "anode"),
                       pin("Csw1", "2"), pin("Csw2", "2")};
     }
+
+    if (cfg::get_bool(d.config, "integratedResonantInductor", false))
+        req::fold_series_inductor(comps, conns, "Lr");   // realised as T1's leakage (set above)
 
     // --- secondary rectifier (per variant; see Rectifier.hpp) ---
     // Shared ground-return endpoints: primary side first, then each rail appends its own returns; pushed as

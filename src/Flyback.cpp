@@ -92,7 +92,7 @@ FlybackDesign design_flyback(const json& tasInputs) {
     // Steady-state CCM duty at the nominal operating Vin (the open-loop PWM duty). The secondary must
     // produce Vout+Vd so the output AFTER the rectifier drop is the spec'd Vout:
     //   Vout+Vd = Vin·D / (n·(1-D))  ->  D = n·(Vout+Vd) / (Vin + n·(Vout+Vd)).
-    d.diodeDrop = req::dideal_diode_drop(d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
+    d.diodeDrop = req::rectifier_drop(d.config, d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
     const double Vor = n * (d.outputVoltage + d.diodeDrop);
     d.dutyCycle = Vor / (d.inputVoltage + Vor);
 
@@ -188,7 +188,7 @@ FlybackDesign design_flyback(const json& tasInputs) {
         leg.polarity = (vSigned < 0) ? -1 : 1;
         leg.power   = output_power_i(i);
         const double iout_i = leg.power / leg.voltage;
-        leg.diodeDrop = req::dideal_diode_drop(iout_i);
+        leg.diodeDrop = req::rectifier_drop(d.config, iout_i);
         if (i == 0) {
             leg.turnsRatio = d.turnsRatio;
             leg.diodeDrop  = d.diodeDrop;            // preserve the main rail's exact scalar value
@@ -367,6 +367,7 @@ json build_flyback_tas(const FlybackDesign& d) {
     // the reflected voltage n_i·(Vout_i+Vd_i) is the shared Vor, so the main-rail term sizes the drain.
     const double maxTrr    = 0.05 * T;
     const double VdsStress = d.inputVoltageMax + n * d.outputVoltage;
+    cfg::check_maximum_drain_source_voltage(d.config, VdsStress, "build_flyback_tas");
     const double ratedVds  = VdsStress / cfg::v_derate_mosfet(d.config);
     const double maxRdsOn  = 0.01 * totalOutputPower / (IrmsPri * IrmsPri);   // <=1% of total Pout conduction
     const double IcinRms   = std::sqrt(std::max(0.0, IrmsPri * IrmsPri - IinMin * IinMin));

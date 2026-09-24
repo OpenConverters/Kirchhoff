@@ -50,7 +50,7 @@ BuckDesign design_buck(const json& tasInputs) {
     d.deadFraction = cfg::get(d.config, "deadTimeFraction", 0.01);   // 1% of the period per dead band
 
     // Buck duty (MKF): D = (Vout+Vd) / ((Vin+Vd)*eff). Ideal -> Vout/Vin.
-    d.diodeDrop = req::dideal_diode_drop(d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
+    d.diodeDrop = req::rectifier_drop(d.config, d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
     const double Vo = d.outputVoltage + d.diodeDrop;
     // With a synchronous rectifier the freewheel path is a near-ideal MOSFET (no Vf), so NO diode-drop
     // compensation: D = Vout/(Vin*eff). With a diode, compensate for its forward drop as MKF does.
@@ -65,7 +65,7 @@ BuckDesign design_buck(const json& tasInputs) {
     const double iout = d.outputPower / d.outputVoltage;
     // Ripple-ratio rule by default; config "maximumSwitchCurrent" instead sizes L so the peak inductor/
     // switch current (Iout + ΔIL/2) lands exactly on the cap (ABT #95). The buck inductor average is Iout.
-    const double maxCurrentRipple = cfg::max_current_ripple(d.config, rippleRatio, iout, iout, "design_buck");
+    const double maxCurrentRipple = cfg::max_current_ripple(d.config, rippleRatio, iout, iout, "design_buck", d.config.contains("rippleRatio"));
     d.inductance = req::provided_inductance(dr).value_or(
         d.outputVoltage * (vinMax - d.outputVoltage) / (maxCurrentRipple * d.switchingFrequency * vinMax));
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;

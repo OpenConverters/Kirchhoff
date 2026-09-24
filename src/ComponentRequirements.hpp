@@ -41,6 +41,41 @@ constexpr double ESR_RIPPLE_FRACTION = 0.005;  // ESR ripple-voltage budget = 0.
 // diode; a real sourced diode carries its own datasheet Vf@I — real-rectifier compensation must use that.)
 inline double dideal_diode_drop(double current) { return SAS::ideal_diode_drop(current); }
 
+// The rectifier forward drop a converter design sizes around. A spec that states the drop (config
+// "diodeVoltageDrop", mapped from the MAS topology schemas' diodeVoltageDrop) gets exactly that FIXED drop,
+// independent of current; only a spec that carries none falls back to the DIDEAL model above (the drop the
+// ngspice deck's ideal diode really has at that current). Throws on a malformed or negative value.
+inline std::optional<double> fixed_diode_drop(const json& config) {
+    if (!config.is_object() || !config.contains("diodeVoltageDrop")) return std::nullopt;
+    const json& v = config.at("diodeVoltageDrop");
+    if (!v.is_number())
+        throw std::invalid_argument("config.diodeVoltageDrop must be a number (volts), got " + v.dump());
+    const double vd = v.get<double>();
+    if (!(vd >= 0.0))
+        throw std::invalid_argument("config.diodeVoltageDrop must be >= 0 V, got " + std::to_string(vd));
+    return vd;
+}
+inline double rectifier_drop(const json& config, double current) {
+    if (const auto vd = fixed_diode_drop(config)) return *vd;
+    return dideal_diode_drop(current);
+}
+// The efficiency a design compensates its conversion ratio for (turns ratio / duty / processed power): the
+// spec's stated designRequirements.efficiency, or 1 (the ideal, historical conversion) when it states none.
+inline double conversion_efficiency(const json& designRequirements) {
+    if (!designRequirements.is_object() || !designRequirements.contains("efficiency")) return 1.0;
+    const double eta = designRequirements.at("efficiency").get<double>();
+    if (!(eta > 0.0 && eta <= 1.0))
+        throw std::invalid_argument("designRequirements.efficiency must be in (0, 1], got " + std::to_string(eta));
+    return eta;
+}
+
+// The drop the ANALYTICAL waveform solvers are given where they historically assumed an ideal (0 V)
+// rectifier: the spec's fixed diodeVoltageDrop when it states one, else 0 (unchanged behaviour).
+inline double analytical_rectifier_drop(const json& config) {
+    if (const auto vd = fixed_diode_drop(config)) return *vd;
+    return 0.0;
+}
+
 // The MAS `isolationSide` enum, in ordinal order (utils.json#/$defs/isolationSide). A transformer with N
 // galvanically-distinct secondaries (multi-output isolated converters) tags winding k with ordinal k so
 // the magnetic adviser groups each output on its own ground. Windings that SHARE a ground (a demag/reset
@@ -403,6 +438,85 @@ inline json magnetic_inputs(double Lm, double lmTolerance,
     inputs["designRequirements"] = dr;
     inputs["operatingPoints"] = json::array({op});
     return inputs;
+}
+
+// Leakage-inductance requirement of a magnetic (MAS designRequirements.leakageInductance, one entry per
+// primary-to-secondary pair, primary-referred). `bound` is "nominal" when the spec wants the transformer to
+// REALISE that leakage (an integrated resonant / series inductor), "maximum" when it is a parasitic to keep
+// below the value.
+inline void set_leakage_requirement(json& magneticInputs, const std::vector<double>& leakage, const char* bound) {
+    json arr = json::array();
+    for (double l : leakage) {
+        if (!(l > 0))
+            throw std::invalid_argument("leakage inductance requirement must be > 0 H, got " + std::to_string(l));
+        arr.push_back(json{{bound, l}});
+    }
+    magneticInputs["designRequirements"]["leakageInductance"] = arr;
+}
+
+// Append a second operating point to a magnetic's inputs: the first operating point with the primary (winding 0)
+// current raised by `deltaCurrent` at every sample — a magnetizing-current (flux) excursion the secondaries do
+// not see, so the ampere-turn identity stays consistent. Used for the transient flux a line step drives before
+// the loop and the DC-blocking capacitor re-settle. The processed offset/peak and the sampled waveform move
+// together; the harmonics (DC term only changes) are dropped so a consumer recomputes them from the waveform.
+inline void append_primary_shifted_operating_point(json& magneticInputs, double deltaCurrent, const std::string& name) {
+    json op = magneticInputs.at("operatingPoints").at(0);
+    json& cur = op.at("excitationsPerWinding").at(0).at("current");
+    if (cur.contains("waveform") && cur.at("waveform").contains("data"))
+        for (auto& x : cur.at("waveform").at("data")) x = x.get<double>() + deltaCurrent;
+    if (cur.contains("processed")) {
+        json& p = cur.at("processed");
+        if (!p.contains("offset"))
+            throw std::runtime_error("append_primary_shifted_operating_point: primary current has no processed offset");
+        const double mean = p.contains("average") ? p.at("average").get<double>() : p.at("offset").get<double>();
+        p["offset"] = p.at("offset").get<double>() + deltaCurrent;
+        if (p.contains("average")) p["average"] = p.at("average").get<double>() + deltaCurrent;
+        if (p.contains("peak")) p["peak"] = p.at("peak").get<double>() + std::abs(deltaCurrent);
+        // E[(x+Δ)²] = E[x²] + 2·Δ·E[x] + Δ²
+        if (p.contains("rms")) {
+            const double r = p.at("rms").get<double>();
+            p["rms"] = std::sqrt(std::max(0.0, r * r + 2.0 * deltaCurrent * mean + deltaCurrent * deltaCurrent));
+        }
+    }
+    cur.erase("harmonics");
+    op["name"] = name;
+    magneticInputs.at("operatingPoints").push_back(op);
+}
+
+// Fold a discrete two-terminal series magnetic (a resonant / series inductor `name`, pins primary_start /
+// primary_end) out of a stage: the component is removed and the two nets it bridged are merged into one. Used
+// when the spec realises that inductance as the transformer's leakage (MAS integratedResonantInductor /
+// useLeakageInductance): the caller sets the transformer's leakageInductance requirement to the same value, from
+// which the deck emitter derives the coupling, so the tank keeps its inductance without a discrete part.
+inline void fold_series_inductor(std::vector<json>& comps, std::vector<json>& conns, const std::string& name) {
+    const auto before = comps.size();
+    comps.erase(std::remove_if(comps.begin(), comps.end(),
+                               [&](const json& c) { return c.value("name", std::string()) == name; }),
+                comps.end());
+    if (comps.size() + 1 != before)
+        throw std::runtime_error("fold_series_inductor: stage has no single component '" + name + "'");
+    std::vector<size_t> touching;
+    for (size_t i = 0; i < conns.size(); ++i)
+        for (const auto& ep : conns[i].at("endpoints"))
+            if (ep.value("component", std::string()) == name) { touching.push_back(i); break; }
+    if (touching.size() != 2)
+        throw std::runtime_error("fold_series_inductor: '" + name + "' must bridge exactly two nets, found " +
+                                 std::to_string(touching.size()));
+    json merged = json::array();
+    for (size_t i : touching)
+        for (const auto& ep : conns[i].at("endpoints"))
+            if (ep.value("component", std::string()) != name) merged.push_back(ep);
+    conns[touching[0]]["endpoints"] = merged;
+    conns.erase(conns.begin() + static_cast<std::ptrdiff_t>(touching[1]));
+}
+
+// The same fold on a circuit block whose components/connections are JSON arrays.
+inline void fold_series_inductor(json& circuit, const std::string& name) {
+    std::vector<json> comps(circuit.at("components").begin(), circuit.at("components").end());
+    std::vector<json> conns(circuit.at("connections").begin(), circuit.at("connections").end());
+    fold_series_inductor(comps, conns, name);
+    circuit["components"] = comps;
+    circuit["connections"] = conns;
 }
 
 } // namespace req

@@ -66,6 +66,8 @@ CukDesign design_cuk(const json& tasInputs) {
     // Isolation and the 1:1 coupled-inductor variant are mutually exclusive (the isolated cell already splits
     // the two inductors onto opposite sides of the transformer).
     d.isolated = cfg::get_bool(d.config, "isolated", false);
+    // MAS cuk.couplingCapacitanceSecondary is "used only when isolated=true" (like turnsRatio): a non-isolated
+    // Ćuk has no secondary coupling capacitor, so the field does not apply there.
     // Bidirectional Ćuk (V5, ABT #90): reverse power flow via config.powerFlowDirection (same key as the CLLC
     // bidirectional). Reverse makes the Vout side the source and delivers to Vin; it needs the sync rectifier
     // so the rectifier branch can carry reverse current (a diode blocks it).
@@ -73,6 +75,17 @@ CukDesign design_cuk(const json& tasInputs) {
     if (dir != "forward" && dir != "reverse")
         throw std::invalid_argument("design_cuk: config.powerFlowDirection must be 'forward' or 'reverse', got '" + dir + "'");
     d.reverse = (dir == "reverse");
+    // MAS cuk.bidirectional: both switches active so power can flow either way; it implies (and requires) the
+    // synchronous rectifier, and a reverse operating point requires it. Absent = not stated (reverse still
+    // only needs the synchronous rectifier, as before).
+    if (d.config.contains("bidirectional")) {
+        const bool bidirectional = cfg::get_bool(d.config, "bidirectional", false);
+        if (bidirectional && !d.synchronousRectifier)
+            throw std::invalid_argument("design_cuk: bidirectional=true requires the synchronous rectifier "
+                                        "(synchronous=true / config.rectifier='synchronous')");
+        if (!bidirectional && d.reverse)
+            throw std::invalid_argument("design_cuk: a reverse power-flow operating point needs bidirectional=true");
+    }
     if (d.reverse && !d.synchronousRectifier)
         throw std::invalid_argument("design_cuk: reverse power flow requires a synchronous rectifier "
                                     "(config.rectifier='synchronous') so current can flow both ways");
@@ -86,7 +99,8 @@ CukDesign design_cuk(const json& tasInputs) {
         throw std::invalid_argument("design_cuk: isolated turnsRatio must be > 0");
     const double n = d.isolated ? d.turnsRatio : 1.0;
     // Sync MOSFET has no forward drop → size duty with Vd=0 so the open-loop deck lands on target.
-    d.diodeDrop = d.synchronousRectifier ? 0.0 : req::dideal_diode_drop(iout);
+    d.diodeDrop = req::fixed_diode_drop(d.config) ? *req::fixed_diode_drop(d.config)
+                                         : (d.synchronousRectifier ? 0.0 : req::dideal_diode_drop(iout));
     // Direction-aware D/(1-D) sizing. Forward: Vin drives, delivers the primary-referred output |Vo|·n (the
     // transformer, if isolated, restores |Vo|). Reverse (V5): the |Vo| rail drives and delivers Vin, so the
     // driving/driven voltages swap — sizing the duty here makes the OPEN-LOOP reverse deck land on the Vin
@@ -100,7 +114,8 @@ CukDesign design_cuk(const json& tasInputs) {
     const double dMax = duty(dutyDriveMax, dutyDeliver, d.diodeDrop, d.efficiency);
     const double iL1avg = iout * dMax / (1.0 - dMax);
     const double dIL1 = cfg::get(d.config, "l1RippleRatio", kRippleRatioL1) * iL1avg;
-    d.inductanceL1 = vinMax * dMax / (dIL1 * fsw);
+    // A pinned magnetizing inductance (the chosen L1 — design around the magnetic) overrides the sizing.
+    d.inductanceL1 = req::provided_inductance(dr).value_or(vinMax * dMax / (dIL1 * fsw));
     // L2, C1, Cout at the operating point.
     const double dIL2 = cfg::get(d.config, "l2RippleRatio", kL2RipplePct) * iout;
     d.inductanceL2 = d.outputVoltageMag * (1.0 - d.dutyCycle) / (dIL2 * fsw);
@@ -115,6 +130,13 @@ CukDesign design_cuk(const json& tasInputs) {
         const double VC1b = d.outputVoltageMag / std::max(d.dutyCycle, 1e-3);
         const double dVC1b = cfg::get(d.config, "couplingCapRipple", kC1RipplePct) * VC1b;
         d.secondaryCouplingCapacitance = iout * (1.0 - d.dutyCycle) / (dVC1b * fsw);
+        // An explicit secondary coupling capacitance (MAS cuk.couplingCapacitanceSecondary) is used as given.
+        if (d.config.contains("couplingCapacitanceSecondary")) {
+            const double cb = cfg::get(d.config, "couplingCapacitanceSecondary", 0.0);
+            if (!(cb > 0))
+                throw std::invalid_argument("design_cuk: couplingCapacitanceSecondary must be > 0 F");
+            d.secondaryCouplingCapacitance = cb;
+        }
         // Transformer magnetizing inductance: large enough that the magnetizing current is a small fraction
         // of the reflected load current (the transformer stores no net power — the Ćuk moves energy through
         // the coupling caps). ΔIm = VC1·D·T/Lm ≤ ImagFrac·(iout/n).
@@ -158,6 +180,8 @@ json build_cuk_tas(const CukDesign& d) {
     const MAS::OperatingPoint aopNom   = AN::analytical_cuk(d.inputVoltage,    d.outputVoltageMag, iout, fsw,
                                                            d.inductanceL1, d.diodeDrop, d.efficiency, maxDuty);
     const double IL1avg = AN::winding_current(aopWorst, 0, "offset");   // L1 average (input current) at the worst corner
+    // The switch carries i_L1 + i_L2 while on: its peak is L1's worst-corner peak plus L2's (Iout + ΔI_L2/2).
+    cfg::check_maximum_switch_current(d.config, AN::winding_current(aopWorst, 0, "peak") + iout + dIL2 / 2.0, "build_cuk_tas");
 
     // L2 (secondary coupled inductor) — inline single-winding excitation (not one of the solver's windings).
     auto inductor = [&](double L, double iAvg, double iPkPk) {

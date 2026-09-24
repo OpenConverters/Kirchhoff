@@ -107,6 +107,11 @@ DmcDesign design_dmc(const json& spec) {
     d.numberOfWindings = windings_for(d.configuration);
     if (spec.contains("peakCurrent")) d.peakCurrent = spec.at("peakCurrent").get<double>();
 
+    for (const char* gap : {"maximumDcResistance", "maximumCoreTemperatureRise"})
+        if (spec.contains(gap))
+            throw std::invalid_argument(std::string("design_dmc: ") + gap +
+                                        " cannot be honoured: MAS designRequirements has no field for it (a MAS schema gap — the limit belongs to the "
+                                    "magnetic design, and the MAS Inputs this call returns cannot carry it)");
     if (d.operatingCurrent <= 0)
         throw std::invalid_argument("design_dmc: operatingCurrent must be > 0");
     if (d.lineFrequency <= 0)
@@ -130,9 +135,9 @@ DmcDesign design_dmc(const json& spec) {
         double highestFreq = 0.0;
         double zAtLowest = 0.0;
         for (const auto& item : spec.at("minimumImpedance")) {
-            const double f = item.at("frequency").get<double>();
-            const double z = item.at("impedance").get<double>();
-            d.impedancePoints.push_back(impedance_point(f, z));
+            d.impedancePoints.push_back(impedance_point_from_spec(item, "design_dmc"));
+            const double f = d.impedancePoints.back().get_frequency();
+            const double z = impedance_magnitude(d.impedancePoints.back());
             if (f < lowestFreq) { lowestFreq = f; zAtLowest = z; }
             if (f > highestFreq) highestFreq = f;
         }
@@ -161,6 +166,22 @@ DmcDesign design_dmc(const json& spec) {
         d.computedInductance = chokeOnlyInductance;
     }
 
+    // MAS differentialModeChoke.targetAttenuation: each {frequency, attenuation dB} target sizes the LC filter's
+    // inductance with the given filterCapacitance (the same LC-cutoff law as above); the strictest one wins.
+    if (spec.contains("targetAttenuation")) {
+        if (!d.filterCapacitance)
+            throw std::invalid_argument("design_dmc: targetAttenuation needs filterCapacitance — the LC filter's "
+                                        "cutoff (L with that C) is what delivers the attenuation");
+        bool any = false;
+        for (const auto& item : spec.at("targetAttenuation")) {
+            const double L = dmc_required_inductance(item.at("attenuation").get<double>(),
+                                                     item.at("frequency").get<double>(), *d.filterCapacitance);
+            d.computedInductance = std::max(d.computedInductance, L);
+            any = true;
+        }
+        if (!any) throw std::invalid_argument("design_dmc: targetAttenuation is empty");
+    }
+
     if (spec.contains("minimumInductance")) {
         d.minimumInductance = spec.at("minimumInductance").get<double>();
         if (*d.minimumInductance <= 0)
@@ -169,7 +190,7 @@ DmcDesign design_dmc(const json& spec) {
         d.computedInductance = std::max(d.computedInductance, *d.minimumInductance);
     }
 
-    if (d.impedancePoints.empty() && !d.minimumInductance)
+    if (d.impedancePoints.empty() && !d.minimumInductance && !spec.contains("targetAttenuation"))
         throw std::invalid_argument(
             "design_dmc: needs an inductance target — supply minimumImpedance[] or minimumInductance "
             "(help-mode wizards call propose_dmc_design first, then re-call with the proposed L)");

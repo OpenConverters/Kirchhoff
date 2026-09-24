@@ -4,6 +4,7 @@
 #include "ComponentRequirements.hpp"
 #include "ConverterAnalytical.hpp"
 #include <cmath>
+#include <limits>
 #include <algorithm>
 #include <vector>
 #include <stdexcept>
@@ -40,11 +41,19 @@ PshbDesign design_pshb(const json& tasInputs) {
     const json& iv = dr.at("inputVoltage");
     const double vinMax = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::MAXIMUM);
     const double vinMin = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::MINIMUM);
-    d.inputVoltageMin = vinMin; d.inputVoltageMax = vinMax;
+    d.inputVoltageMin = vinMin;
+    // Stated efficiency: the transformer must deliver (Vo+Vd)/η, so the conversion ratio is compensated.
+    const double etaConv = req::conversion_efficiency(dr);
+ d.inputVoltageMax = vinMax;
 
     const double Vo = d.outputVoltage, Fs = d.switchingFrequency, Io = d.outputPower / Vo;
     const double Vhb = 0.5 * d.inputVoltage;     // split-cap half bus
     const double Dcmd = cfg::get(d.config, "commandedDuty", kCommandedDuty);
+    // MAS maximumPhaseShift (ratio of the half period): the commanded phase shift must not exceed it.
+    if (d.config.contains("maximumPhaseShift") && Dcmd > cfg::get(d.config, "maximumPhaseShift", 1.0))
+        throw std::invalid_argument("design_pshb: the commanded phase shift (duty " + std::to_string(Dcmd) +
+                                    ") exceeds maximumPhaseShift " +
+                                    std::to_string(cfg::get(d.config, "maximumPhaseShift", 1.0)));
     d.commandedDuty = Dcmd;
     // Rectifier variant (FB default). Selected from the config override; no schema change.
     d.rectifierType = parse_rectifier_type(cfg::get_str(d.config, "rectifierType", "fullBridge"),
@@ -52,9 +61,9 @@ PshbDesign design_pshb(const json& tasInputs) {
     if (d.rectifierType == RectifierType::VoltageDoubler)
         throw std::runtime_error("Kirchhoff PSHB: voltageDoubler rectifier not supported "
                                  "(PSHB variants: fullBridge, centerTapped, currentDoubler)");
-    const double Vdtot = rectifier_path_diodes(d.rectifierType) * req::dideal_diode_drop(Io);
+    const double Vdtot = rectifier_path_diodes(d.rectifierType) * req::rectifier_drop(d.config, Io);
 
-    double nSeed = Vhb * Dcmd / (Vo + Vdtot);
+    double nSeed = etaConv * Vhb * Dcmd / (Vo + Vdtot);
     double Lr = std::min(2e-6, (Io > 0) ? 0.02 * std::max(nSeed, 0.1) * Vhb / (4.0 * Io * Fs) : 2e-6);
     Lr = std::max(Lr, 1e-7);
     // Pinned Lr (desiredSeriesInductance / config["seriesInductance"]) overrides the duty-loss-capped
@@ -75,7 +84,7 @@ PshbDesign design_pshb(const json& tasInputs) {
     for (int it = 0; it < 8; ++it) {
         double dcl = 4.0 * Lr * Io * Fs / (n * Vhb);
         Deff = std::max(0.0, Dcmd - dcl);
-        double nNew = (Deff > 1e-3) ? Vhb * Deff / (Vo + Vdtot) : n;
+        double nNew = (Deff > 1e-3) ? etaConv * Vhb * Deff / (Vo + Vdtot) : n;
         if (std::abs(nNew - n) < 1e-3 * std::max(n, 1.0)) { n = nNew; break; }
         n = nNew;
     }
@@ -89,6 +98,11 @@ PshbDesign design_pshb(const json& tasInputs) {
     // 2*Fs: the NPC bridge secondary delivers two power pulses per switching period, so the output filter
     // ripples at 2*Fs — sizing at Fs oversized Lo by 2x for the target ripple ratio.
     d.outputInductance = Vo * (1.0 - Deff) / (2.0 * Fs * cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Io);
+    // MAS outputInductance (0 = let the design size it): an explicit output filter inductance is used as given.
+    if (d.config.contains("outputInductance") && cfg::get(d.config, "outputInductance", 0.0) != 0.0) {
+        d.outputInductance = cfg::get(d.config, "outputInductance", 0.0);
+        if (!(d.outputInductance > 0)) throw std::invalid_argument("design_pshb: outputInductance must be > 0 H");
+    }
     // Magnetizing inductance from a target magnetizing-current FRACTION of the reflected load current.
     // A small fraction maximises Lm — but Lm = N^2*AL ungapped, so a large Lm forces MANY primary turns,
     // and the absolute leakage scales ~N^2: a 10% target gave Lm~940uH / ~110 turns / ~80uH leakage, whose
@@ -207,10 +221,15 @@ json build_pshb_tas(const PshbDesign& d) {
     }
     const MAS::OperatingPoint aopT1 = AN::analytical_pshb(d.inputVoltage, {Vo}, {Io}, {N}, fsw, Lm,
                                                           d.seriesInductance, d.outputInductance,
-                                                          d.phaseDeg, 0.0, rect);
+                                                          d.phaseDeg, req::analytical_rectifier_drop(d.config), rect);
     xwindings = AN::excitations_processed(aopT1, "T1");
     json xfmr; xfmr["magnetic"]=json::object();
     xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, turnsRatios, isoSides, std::nullopt, 25.0, xwindings);
+    // MAS useLeakageInductance: the series (ZVS) inductance is realised as T1's leakage — each secondary pair
+    // then carries Lr (primary-referred) and the discrete Lr is folded out of the stage below.
+    const bool leakageIsSeriesInductor = cfg::get_bool(d.config, "useLeakageInductance", false);
+    if (leakageIsSeriesInductor)
+        req::set_leakage_requirement(xfmr["inputs"], std::vector<double>(turnsRatios.size(), d.seriesInductance), "nominal");
 
     // Output inductor Lo (single-winding magnetic). FULL_BRIDGE / CENTER_TAPPED carry the whole Io;
     // CURRENT_DOUBLER splits the load across TWO inductors, so each is DC-biased at Io/2 (below).
@@ -272,6 +291,7 @@ json build_pshb_tas(const PshbDesign& d) {
                           pin("DC2","anode")}),
         conn("pri_x",    {pin("Lr","primary_end"), pin("T1","primary_start"), pin("Crc_pri","1")}),
         conn("rc_pri_mid", {pin("Crc_pri","2"), pin("Rrc_pri","1")})};
+    if (leakageIsSeriesInductor) req::fold_series_inductor(comps, conns, "Lr");
     std::vector<json> gndEps{pin("CsLo","2"), pin("S4","source"), pin("Db4","anode"), pin("CsnB","2")};
     // Primary return and secondary return are DIFFERENT nodes (ABT #778). Every rectifier branch
     // below used to append its secondary endpoints to gnd_net, which put both sides of T1 on one

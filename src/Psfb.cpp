@@ -4,6 +4,7 @@
 #include "ConverterAnalytical.hpp"
 #include "KirchhoffConfig.hpp"
 #include <cmath>
+#include <limits>
 #include <algorithm>
 #include <vector>
 #include <stdexcept>
@@ -54,11 +55,19 @@ PsfbDesign design_psfb(const json& tasInputs) {
     const double vinMax = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::MAXIMUM);
     const double vinMin = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::MINIMUM);
     d.inputVoltageMin = vinMin;
+    // Stated efficiency: the transformer must deliver (Vo+Vd)/η, so the conversion ratio is compensated.
+    const double etaConv = req::conversion_efficiency(dr);
+
     d.inputVoltageMax = vinMax;
 
     const double Vin = d.inputVoltage, Vo = d.outputVoltage, Fs = d.switchingFrequency;
     const double Io = d.outputPower / Vo;
     const double Dcmd = cfg::get(d.config, "commandedDuty", kCommandedDuty);
+    // MAS maximumPhaseShift (ratio of the half period): the commanded phase shift must not exceed it.
+    if (d.config.contains("maximumPhaseShift") && Dcmd > cfg::get(d.config, "maximumPhaseShift", 1.0))
+        throw std::invalid_argument("design_psfb: the commanded phase shift (duty " + std::to_string(Dcmd) +
+                                    ") exceeds maximumPhaseShift " +
+                                    std::to_string(cfg::get(d.config, "maximumPhaseShift", 1.0)));
     d.commandedDuty = Dcmd;
     // Rectifier variant (FB default — MKF's CT deck is a fake CT; Kirchhoff's CT uses two REAL secondary
     // half-windings so it delivers full Vout). Selected from the config override; no schema change.
@@ -69,11 +78,11 @@ PsfbDesign design_psfb(const json& tasInputs) {
                                  "(PSFB variants: fullBridge, centerTapped, currentDoubler)");
     // Diodes in the conduction path set the turns-ratio drop compensation: FB stacks two (Vo+2Vd); the
     // center-tapped and current-doubler secondaries conduct through one at a time (Vo+Vd).
-    const double Vdtot = rectifier_path_diodes(d.rectifierType) * req::dideal_diode_drop(Io);
+    const double Vdtot = rectifier_path_diodes(d.rectifierType) * req::rectifier_drop(d.config, Io);
 
     // Series (resonant + leakage) inductor Lr: the smaller of a 2 uH default and the value giving
     // <= 2% duty loss at rated load (MKF Psfb::process_design_requirements).
-    double nSeed = Vin * Dcmd / (Vo + Vdtot);
+    double nSeed = etaConv * Vin * Dcmd / (Vo + Vdtot);
     double LrCap = (Io > 0) ? 0.02 * std::max(nSeed, 0.1) * Vin / (4.0 * Io * Fs) : 2e-6;
     double Lr = std::min(2e-6, LrCap);
     Lr = std::max(Lr, 1e-7);
@@ -98,7 +107,7 @@ PsfbDesign design_psfb(const json& tasInputs) {
     for (int it = 0; it < 8; ++it) {
         double dcl = 4.0 * Lr * Io * Fs / (n * Vin);
         Deff = std::max(0.0, Dcmd - dcl);
-        double nNew = (Deff > 1e-3) ? Vin * Deff / (Vo + Vdtot) : n;
+        double nNew = (Deff > 1e-3) ? etaConv * Vin * Deff / (Vo + Vdtot) : n;
         if (std::abs(nNew - n) < 1e-3 * std::max(n, 1.0)) { n = nNew; break; }
         n = nNew;
     }
@@ -115,6 +124,11 @@ PsfbDesign design_psfb(const json& tasInputs) {
     // power pulses per switching period, so the output filter sees ripple at 2*Fs — sizing at Fs oversized
     // Lo by 2x for the target ripple ratio.
     d.outputInductance = Vo * (1.0 - Deff) / (2.0 * Fs * cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * Io);
+    // MAS outputInductance (0 = let the design size it): an explicit output filter inductance is used as given.
+    if (d.config.contains("outputInductance") && cfg::get(d.config, "outputInductance", 0.0) != 0.0) {
+        d.outputInductance = cfg::get(d.config, "outputInductance", 0.0);
+        if (!(d.outputInductance > 0)) throw std::invalid_argument("design_psfb: outputInductance must be > 0 H");
+    }
 
     // Magnetizing inductance: Im_peak target = 10% of reflected load current; Lm = Vin*Deff/(4*Fs*Im).
     double ImTarget = 0.1 * Io / d.turnsRatio;
@@ -223,7 +237,7 @@ json build_psfb_tas(const PsfbDesign& d) {
                                       ? AN::SrcRectifier::CENTER_TAPPED : AN::SrcRectifier::FULL_BRIDGE;
         const MAS::OperatingPoint aopT1 = AN::analytical_psfb(Vin, {Vo}, {Io}, {N}, fsw, Lm,
                                                               d.seriesInductance, d.outputInductance,
-                                                              d.phaseDeg, 0.0, rect);
+                                                              d.phaseDeg, req::analytical_rectifier_drop(d.config), rect);
         xwindings = AN::excitations_processed(aopT1, "T1");
     } else {
         xwindings.push_back(req::winding_excitation("psfbPrimary", fsw, IpriPk, IpriRms, 0.0, dILm, Deff,
@@ -236,6 +250,11 @@ json build_psfb_tas(const PsfbDesign& d) {
     xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, turnsRatios, isoSides, std::nullopt, 25.0, xwindings,
         /*turnsRatioIsCeiling=*/{}, /*lmIsMinimum (PSFB transformer: maximise Lm ungapped -> K~0.999,
           low leakage; PSFB has a SEPARATE series Lr for ZVS so it does NOT tie Lm to Lr like DAB. abt #56)=*/true);
+    // MAS useLeakageInductance: the series (ZVS) inductance is realised as T1's leakage — each secondary pair
+    // then carries Lr (primary-referred) and the discrete Lr is folded out of the stage below.
+    const bool leakageIsSeriesInductor = cfg::get_bool(d.config, "useLeakageInductance", false);
+    if (leakageIsSeriesInductor)
+        req::set_leakage_requirement(xfmr["inputs"], std::vector<double>(turnsRatios.size(), d.seriesInductance), "nominal");
 
     // Output inductor Lo (single-winding magnetic, DC-biased at Io).
     json lout; lout["magnetic"] = json::object();
@@ -318,6 +337,7 @@ json build_psfb_tas(const PsfbDesign& d) {
                           pin("T1", "primary_end"), pin("CsnC", "1"), pin("Rrc_pri", "2")}),
         conn("rc_pri_mid", {pin("Crc_pri", "2"), pin("Rrc_pri", "1")}),
         conn("pri_x",    {pin("Lr", "primary_end"), pin("T1", "primary_start")})};
+    if (leakageIsSeriesInductor) req::fold_series_inductor(comps, conns, "Lr");
     // gnd_net base: low-side switch sources + body-diode anodes + bridge-midpoint snubber returns. Each
     // rectifier variant appends its own secondary returns before the net is emitted.
     std::vector<json> gndEps{pin("QB", "source"), pin("QD", "source"),

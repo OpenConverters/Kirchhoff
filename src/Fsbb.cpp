@@ -60,6 +60,20 @@ FsbbDesign design_fsbb(const json& tasInputs) {
         throw std::invalid_argument("design_fsbb: config.powerFlowDirection must be 'forward' or 'reverse', got '"
                                     + dir + "'");
     d.reverse = (dir == "reverse");
+    // MAS fourSwitchBuckBoost.bidirectional: the controller allows reverse flow. A reverse operating point
+    // needs it; the forward operating point's waveforms do not depend on it (the four switches are active in
+    // either case).
+    if (d.config.contains("bidirectional") && !cfg::get_bool(d.config, "bidirectional", false) && d.reverse)
+        throw std::invalid_argument("design_fsbb: a reverse power-flow operating point needs bidirectional=true");
+    // MAS fourSwitchBuckBoost.controlMode: Kirchhoff's buck-boost-band model is the LM5176 peak-current duty
+    // assignment (split-PWM with the fsbbSplitRatio split). The other controllers assign the band duties
+    // differently and are not modelled — refuse them rather than emit the LM5176 waveforms under their name.
+    {
+        const std::string controlMode = cfg::get_str(d.config, "controlMode", "peakCurrent");
+        if (controlMode != "peakCurrent")
+            throw std::invalid_argument("design_fsbb: controlMode '" + controlMode + "' is not modelled; Kirchhoff "
+                                        "models the peakCurrent (LM5176) duty assignment only");
+    }
     // Interleaved multi-phase (ABT #94): config.phaseCount = N builds N phase-shifted 4-switch buck-boost
     // legs sharing the input/output bus (interleaved by 360/N degrees). Each leg carries Iout/N, so its
     // inductor is sized for the per-phase current below. N=1 (default) is the ordinary single-phase deck.
@@ -127,6 +141,24 @@ FsbbDesign design_fsbb(const json& tasInputs) {
 
     d.loadResistance = Vdel * Vdel / d.outputPower;   // load sits on the delivered rail (Vo fwd / Vin rev)
     d.outputCapacitance = cfg::get(d.config, "outputCapacitance", 100e-6);
+    // MAS fourSwitchBuckBoost.outputVoltageRippleRatio (ΔVo/Vo): size Cout for it instead of the fixed bank.
+    // The worse of the two regions over the input range: buck (the triangular inductor ripple into Cout,
+    // ΔVo = ΔIL/(8·Fs·C)) at Vin_max, boost (the output diode current pulses, ΔVo = Io·D/(Fs·C)) at Vin_min.
+    if (d.config.contains("outputVoltageRippleRatio")) {
+        if (d.config.contains("outputCapacitance"))
+            throw std::invalid_argument("design_fsbb: give either outputVoltageRippleRatio or outputCapacitance, not both");
+        const double ratio = cfg::get(d.config, "outputVoltageRippleRatio", 0.0);
+        if (!(ratio > 0)) throw std::invalid_argument("design_fsbb: outputVoltageRippleRatio must be > 0");
+        const double dVo = ratio * Vdel;
+        const double ripple = cfg::get(d.config, "inductorRippleRatio", kRippleRatio) * IoPhase;
+        double C = ripple / (8.0 * Fs * dVo);
+        const double VsrcMin = d.reverse ? Vsrc : vinMin;   // forward: the input range's low end
+        if (VsrcMin < Vdel) {
+            const double Dboost = 1.0 - VsrcMin / Vdel;
+            C = std::max(C, Io * Dboost / (Fs * dVo));
+        }
+        d.outputCapacitance = C;
+    }
     return d;
 }
 
@@ -180,6 +212,7 @@ json build_fsbb_tas(const FsbbDesign& d) {
     const MAS::OperatingPoint aopWorst = AN::analytical_fsbb(srcWorst, delV, Idel, fsw, L_H, d.efficiency, kMode, d.splitRatio, maxDuty);
     const MAS::OperatingPoint aopNom   = AN::analytical_fsbb(srcNom,   delV, Idel, fsw, L_H, d.efficiency, kMode, d.splitRatio, maxDuty);
     const double IpkL  = AN::winding_current(aopWorst, 0, "peak");
+    cfg::check_maximum_switch_current(d.config, IpkL, "build_fsbb_tas");
     const double IrmsL = AN::winding_current(aopWorst, 0, "rms");
     json lind; lind["magnetic"] = json::object();
     lind["inputs"] = req::magnetic_inputs(d.inductance, 0.2, /*single winding*/ {}, {"primary"},
@@ -406,6 +439,7 @@ static json build_fsbb_interleaved_tas(const FsbbDesign& d) {
     const MAS::OperatingPoint aopWorst = AN::analytical_fsbb(srcWorst, delV, IdelPhase, fsw, L_H, d.efficiency, kMode, d.splitRatio);
     const MAS::OperatingPoint aopNom   = AN::analytical_fsbb(srcNom,   delV, IdelPhase, fsw, L_H, d.efficiency, kMode, d.splitRatio);
     const double IpkL  = AN::winding_current(aopWorst, 0, "peak");
+    cfg::check_maximum_switch_current(d.config, IpkL, "build_fsbb_tas");
     const double IrmsL = AN::winding_current(aopWorst, 0, "rms");
     const json indExc  = AN::excitations_processed(aopNom, "L").at(0);
 

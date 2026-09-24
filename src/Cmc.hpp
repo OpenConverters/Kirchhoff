@@ -54,6 +54,7 @@ struct CmcDesign {
     double parasiticCapPf = 0.0;       // 0 = not supplied (drives the CM excitation amplitude)
     double dvdtVPerNs = 0.0;           // 0 = not supplied
     std::vector<MAS::ImpedanceAtFrequency> impedancePoints;  // resolved Z(f) requirements
+    std::optional<double> maximumLeakageInductance;  // MAS commonModeChoke.maximumLeakageInductance (H)
     double computedInductance = 0.0;   // max L over impedancePoints [H]
     double dominantFrequency = 0.0;    // frequency of the hardest impedance point [Hz]
     double dominantImpedance = 0.0;    // |Z| of that point [Ω]

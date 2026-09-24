@@ -152,7 +152,18 @@ TEST_CASE("build_cmc_inputs: designRequirements carry the full CMC contract", "[
     // opposite directions through the dotted windings, so the three-phase snapshot at phase A's peak is
     // +6, −3, −3 A (Σ = 0: the DM flux cancels). Before, every winding carried +6 A, i.e. 18 A of DM
     // ampere-turns that a common-mode choke never sees.
-    REQUIRE(in.get_operating_points().size() == 1);
+    // Two operating points since 2026-09-24: the common-mode excitation, and the line-frequency (MAS
+    // lineFrequency) differential-mode current, whose flux cancels (zero winding voltage) — the copper stress.
+    REQUIRE(in.get_operating_points().size() == 2);
+    {
+        const auto& line = in.get_operating_points()[1];
+        REQUIRE(line.get_excitations_per_winding().size() == 3);
+        for (const auto& exc : line.get_excitations_per_winding()) {
+            CHECK(exc.get_frequency() == Approx(d.lineFrequency));
+            CHECK(exc.get_current()->get_processed()->get_rms().value() == Approx(6.0).epsilon(0.01));
+            CHECK(exc.get_voltage()->get_processed()->get_peak().value() == Approx(0.0).margin(1e-12));
+        }
+    }
     const auto& op = in.get_operating_points()[0];
     REQUIRE(op.get_excitations_per_winding().size() == 3);
     const double dm[] = {6.0, -3.0, -3.0};

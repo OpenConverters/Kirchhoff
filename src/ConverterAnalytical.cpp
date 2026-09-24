@@ -3449,5 +3449,43 @@ MAS::OperatingPoint analytical_common_mode_choke(double magnetizingInductance,
     return operatingPoint;
 }
 
+// The line-frequency (differential-mode) operating point of a common-mode choke: each winding carries its line
+// current √2·I·sin(2π·f_line·t + φ_k) — line/return in antiphase (2 windings), three phases 120° apart (3),
+// three phases plus a balanced neutral at zero (4) — in the MAS convention (all windings primary-side, dotted so
+// common-mode currents add). The line currents sum to zero, so the core flux and every winding voltage
+// L·d(Σ i)/dt are zero: this operating point carries the copper (line-current) stress only.
+MAS::OperatingPoint analytical_common_mode_choke_line(double operatingCurrent, double lineFrequency,
+                                                      int numberOfWindings, double ambientTemperature) {
+    using Lbl = MAS::WaveformLabel;
+    if (numberOfWindings < 2 || numberOfWindings > 4)
+        throw std::invalid_argument("analytical_common_mode_choke_line: numberOfWindings must be 2, 3, or 4");
+    if (!(operatingCurrent > 0)) throw std::invalid_argument("analytical_common_mode_choke_line: operatingCurrent must be > 0");
+    if (!(lineFrequency > 0)) throw std::invalid_argument("analytical_common_mode_choke_line: lineFrequency must be > 0");
+    std::vector<double> phase, amplitude;
+    const double a = std::sqrt(2.0) * operatingCurrent;
+    switch (numberOfWindings) {
+        case 2:  phase = {0.0, M_PI}; amplitude = {a, a}; break;
+        case 3:  phase = {0.0, -2.0 * M_PI / 3.0, -4.0 * M_PI / 3.0}; amplitude = {a, a, a}; break;
+        default: phase = {0.0, -2.0 * M_PI / 3.0, -4.0 * M_PI / 3.0, 0.0}; amplitude = {a, a, a, 0.0}; break;
+    }
+    const int n = 256;
+    const double T = 1.0 / lineFrequency;
+    std::vector<double> t(n + 1), zero(n + 1, 0.0);
+    for (int j = 0; j <= n; ++j) t[j] = T * j / n;
+    const auto names = cmc_winding_names(numberOfWindings);
+    MAS::OperatingPoint operatingPoint;
+    for (int w = 0; w < numberOfWindings; ++w) {
+        std::vector<double> i(n + 1);
+        for (int j = 0; j <= n; ++j) i[j] = amplitude[w] * std::sin(2.0 * M_PI * lineFrequency * t[j] + phase[w]);
+        MAS::Waveform iw; iw.set_ancillary_label(Lbl::CUSTOM); iw.set_data(i); iw.set_time(t);
+        MAS::Waveform vw; vw.set_ancillary_label(Lbl::CUSTOM); vw.set_data(zero); vw.set_time(t);
+        operatingPoint.get_mutable_excitations_per_winding().push_back(
+            WP::complete_excitation(iw, vw, lineFrequency, names[w]));
+    }
+    operatingPoint.get_mutable_conditions().set_ambient_temperature(ambientTemperature);
+    operatingPoint.set_name("Line frequency (differential mode)");
+    return operatingPoint;
+}
+
 } // namespace analytical
 } // namespace Kirchhoff

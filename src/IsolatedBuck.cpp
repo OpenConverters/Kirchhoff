@@ -88,7 +88,7 @@ IsolatedBuckDesign design_isolated_buck(const json& tasInputs) {
         if (!multiSecondary && k == 0) {
             leg.turnsRatio = d.turnsRatio;   // single internal secondary: byte-identical scalar ratio
         } else {
-            const double Vd = req::dideal_diode_drop(leg.power / leg.voltage);   // exposed rectifier drop
+            const double Vd = req::rectifier_drop(d.config, leg.power / leg.voltage);   // exposed rectifier drop
             double Nk = Vpri / (leg.voltage + Vd);
             leg.turnsRatio = req::provided_turns_ratio(dr, k).value_or(std::round(Nk * 100.0) / 100.0);
         }
@@ -151,10 +151,11 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
         // Worst-case corner (Vin_min → higher duty → higher magnetizing current) drives ratings; the
         // declared nominal operating point is what the TAS embeds. (Design uses ideal Vd=0.)
         const MAS::OperatingPoint aopWorst = AN::analytical_isolated_buck(d.inputVoltageMin, d.primaryVoltage,
-                                                IpriLoad, secV, secI, secN, fsw, Lm, 0.0, d.efficiency);
+                                                IpriLoad, secV, secI, secN, fsw, Lm, req::analytical_rectifier_drop(d.config), d.efficiency);
         const MAS::OperatingPoint aopNom   = AN::analytical_isolated_buck(d.inputVoltage,    d.primaryVoltage,
-                                                IpriLoad, secV, secI, secN, fsw, Lm, 0.0, d.efficiency);
+                                                IpriLoad, secV, secI, secN, fsw, Lm, req::analytical_rectifier_drop(d.config), d.efficiency);
         const double IpkPri  = AN::winding_current(aopWorst, 0, "peak");
+        cfg::check_maximum_switch_current(d.config, IpkPri, "build_isolated_buck_tas");
         const double IrmsPri = AN::winding_current(aopWorst, 0, "rms");
 
         // Synchronous buck pair QS1/QS2 each block Vin_max and carry the primary-winding current.
@@ -297,11 +298,12 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
     const double IpriLoad = d.primaryPower / d.primaryVoltage;
     const double IsecLoad = d.secondaryPower / d.secondaryVoltage;
     const MAS::OperatingPoint aopWorst = AN::analytical_isolated_buck(d.inputVoltageMin, d.primaryVoltage,
-                                            IpriLoad, d.secondaryVoltage, IsecLoad, fsw, Lm, N, 0.0, d.efficiency);
+                                            IpriLoad, d.secondaryVoltage, IsecLoad, fsw, Lm, N, req::analytical_rectifier_drop(d.config), d.efficiency);
     const MAS::OperatingPoint aopNom   = AN::analytical_isolated_buck(d.inputVoltage,    d.primaryVoltage,
-                                            IpriLoad, d.secondaryVoltage, IsecLoad, fsw, Lm, N, 0.0, d.efficiency);
+                                            IpriLoad, d.secondaryVoltage, IsecLoad, fsw, Lm, N, req::analytical_rectifier_drop(d.config), d.efficiency);
     // Primary winding (= buck inductor) stresses from the worst-case corner (winding 0).
     const double IpkPri  = AN::winding_current(aopWorst, 0, "peak");
+    cfg::check_maximum_switch_current(d.config, IpkPri, "build_isolated_buck_tas");
     const double IrmsPri = AN::winding_current(aopWorst, 0, "rms");
 
     // --- semiconductor stresses (max-stress corner Vin_max) ---

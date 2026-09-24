@@ -45,7 +45,7 @@ BoostDesign design_boost(const json& tasInputs) {
     d.synchronousRectifier = (cfg::get_str(d.config, "rectifier", "diode") == std::string("synchronous"));
     d.deadFraction = cfg::get(d.config, "deadTimeFraction", 0.01);   // 1% of the period per dead band
 
-    d.diodeDrop = req::dideal_diode_drop(d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
+    d.diodeDrop = req::rectifier_drop(d.config, d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
     const double Vo = d.outputVoltage + d.diodeDrop;
     // With a synchronous rectifier the output path is a near-ideal MOSFET (no Vf), so NO diode-drop
     // compensation: D = 1 - Vin*eff/Vout. With a diode, compensate for its forward drop as MKF does.
@@ -77,7 +77,7 @@ BoostDesign design_boost(const json& tasInputs) {
     // switch current (Iin + ΔIL/2) lands exactly on the cap (ABT #95). The boost inductor is the INPUT
     // inductor: its average at the vinMax sizing corner is Iin = Pout/(η·vinMax).
     const double iLavg = d.outputPower / (d.efficiency * vinMax);
-    const double maxCurrentRipple = cfg::max_current_ripple(d.config, rippleRatio, iout, iLavg, "design_boost");
+    const double maxCurrentRipple = cfg::max_current_ripple(d.config, rippleRatio, iout, iLavg, "design_boost", d.config.contains("rippleRatio"));
     d.inductance = req::provided_inductance(dr).value_or(
         vinMax * (d.outputVoltage - vinMax) / (maxCurrentRipple * d.switchingFrequency * d.outputVoltage));
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
@@ -104,9 +104,9 @@ json build_boost_tas(const BoostDesign& d) {
     // D>=1 and D<=0); a user tightens it via config to get a loud throw before the worst-case duty runs away.
     const double maxDuty = cfg::get(d.config, "maximumDutyCycle", 1.0);
     const MAS::OperatingPoint aopWorst = AN::analytical_boost(d.inputVoltageMin, d.outputVoltage, Iout, fsw,
-                                                              L_H, 0.0, d.efficiency, maxDuty);
+                                                              L_H, req::analytical_rectifier_drop(d.config), d.efficiency, maxDuty);
     const MAS::OperatingPoint aopNom   = AN::analytical_boost(d.inputVoltage,    d.outputVoltage, Iout, fsw,
-                                                              L_H, 0.0, d.efficiency, maxDuty);
+                                                              L_H, req::analytical_rectifier_drop(d.config), d.efficiency, maxDuty);
     const double Dmax  = AN::winding_current(aopWorst, 0, "dutyCycle");
     const double IpkL  = AN::winding_current(aopWorst, 0, "peak");
     const double IrmsL = AN::winding_current(aopWorst, 0, "rms");
