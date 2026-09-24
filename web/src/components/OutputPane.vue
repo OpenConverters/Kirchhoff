@@ -2,8 +2,10 @@
 // One selectable output pane. The workbench shows two of these side by side (default Schematic +
 // Waveforms). All design state + methods come from the injected `kh` context App provides, so the pane
 // is a pure view: pick a view type from its header dropdown, render it.
-import { computed, inject, nextTick, ref, watch } from 'vue'
+import { computed, inject, ref, watch } from 'vue'
 import WavePane from './WavePane.vue'
+import KhSchematic from '../lib/KhSchematic.vue'
+import KhWaveforms from '../lib/KhWaveforms.vue'
 import { useKirchhoff } from '../lib/context.js'
 
 const props = defineProps({ view: { type: String, required: true } })
@@ -24,30 +26,19 @@ const VIEWS = [
 
 const kh = inject('kh')
 const {
-  result, topo, diag, bomRows, selectedPart, schematicSvg, schematicError, schematicClick, schematicKey, openPart,
+  result, topo, topoId, diag, bomRows, selectedPart, openPart,
   waveTarget, waveMagnetics, deviceGroups, targetIsMagnetic, waveOps, waveOpIdx, waveSource,
   waveExcitations, waveMag, ngspiceOps, ngspiceBusy, simulateMagnetic, downloadMagneticInputs,
   exportSelectionCsv, exportDesignCsv, exportDesignJson, runExport, exportError,
-  deviceExcitation, deviceComp, componentBusy, fetchComponentWaves,
+  deviceExcitation, deviceComp, componentWaves, componentBusy, fetchComponentWaves,
   componentStress, stressSummary, verdict, mainExcNames, form, visualSim, visualScopeSet,
   deck, deckFlavor, deckFidelity, simStop, simStep, deckBusy, designStop, designStep, periodsShown,
   makeDeck, copyDeck, downloadDeck, si, pct,
 } = kh
 
-// Which component is open, ON THE DRAWING. The stylesheet has always carried `.sch-hot.selected`
-// (amber glow, white refdes, dashed ring round the hitbox) and nothing ever applied it: opening a part —
-// by clicking its symbol or its BOM row — highlighted the BOM row and left the schematic unmarked, so on
-// a 20-part resonant converter the reader had to hunt for the part whose drawer they were reading. The
-// SVG is injected with v-html, so the class is toggled on the live nodes rather than re-rendering the
-// whole drawing (a re-render on every selection would also throw away scroll/hover state).
-const schFrame = ref(null)
-watch([() => selectedPart.value?.ref, schematicSvg], async ([ref_]) => {
-  await nextTick()
-  const frame = schFrame.value
-  if (!frame) return
-  for (const g of frame.querySelectorAll('g.sch-hot.selected')) g.classList.remove('selected')
-  if (ref_) frame.querySelector(`g.sch-hot[data-ref="${CSS.escape(ref_)}"]:not(.sch-ann)`)?.classList.add('selected')
-}, { flush: 'post' })
+// Which component is open is marked ON THE DRAWING too (KhSchematic's selectedRef): opening a part —
+// by clicking its symbol or its BOM row — used to highlight only the BOM row, so on a 20-part resonant
+// converter the reader had to hunt for the part whose drawer they were reading.
 
 // Visual-sim panel height + a real drag handle. The iframe swallows pointer events over its area
 // (and setPointerCapture does NOT redirect them away from a cross-document iframe), so dragging the
@@ -109,19 +100,19 @@ const hasSelectionWaves = computed(() =>
     <div class="pane-body">
       <!-- schematic (scaled to fit the pane, no crop) -->
       <div v-if="view === 'schematic'" class="view-fill">
-        <!-- role=alert: when the generator refuses to draw (a netlist drift, or a design whose components
-             no layout can place) this banner REPLACES the drawing, and without a live region a screen
-             reader is told nothing at all — the pane simply stops having a schematic in it. -->
-        <div v-if="schematicError" class="wave-empty sch-error" role="alert">
-          Schematic ≠ netlist for <code>{{ topo.name }}</code>: {{ schematicError }}
-        </div>
-        <template v-else-if="schematicSvg">
-          <div ref="schFrame" class="schematic-frame fit" v-html="schematicSvg" @click="schematicClick" @keydown="schematicKey"></div>
-          <div class="sch-caption">Power-path sketch, checked against the CIAS netlist — click or tab to any component for its details.</div>
-        </template>
-        <div v-else class="wave-empty">
-          No schematic sketch for <code>{{ topo.name }}</code> yet — see the BOM view for every component.
-        </div>
+        <!-- The package's schematic: the CIAS-verified drawing, the refusal banner in its place when the
+             generator will not draw, or the no-sketch note. -->
+        <KhSchematic :topology="topoId" :tas="result?.tas" :variant="form.variant" :bom="bomRows"
+                     :topology-name="topo.name" :selected-ref="selectedPart?.ref ?? null" @select="openPart">
+          <template #caption>
+            <div class="sch-caption">Power-path sketch, checked against the CIAS netlist — click or tab to any component for its details.</div>
+          </template>
+          <template #empty>
+            <div class="wave-empty">
+              No schematic sketch for <code>{{ topo.name }}</code> yet — see the BOM view for every component.
+            </div>
+          </template>
+        </KhSchematic>
       </div>
 
       <!-- BOM -->
@@ -201,16 +192,8 @@ const hasSelectionWaves = computed(() =>
           </div>
         </template>
         <template v-else>
-          <template v-if="deviceExcitation">
-            <div class="mono wave-name">▸ {{ deviceExcitation.name }}
-              <span class="chip" style="margin-left: 0.4rem">{{ si(deviceExcitation.frequency, 'Hz') }}</span>
-            </div>
-            <WavePane :excitation="deviceExcitation" source-kind="ngspice" :periods="form.showPeriods" fill />
-            <div class="wave-readout">
-              <span class="i"><b>—</b> current · measured</span>
-              <span class="v"><b>—</b> {{ deviceComp?.voltage?.label ?? 'V' }} · measured</span>
-            </div>
-          </template>
+          <KhWaveforms v-if="deviceExcitation" :component-ref="deviceComp.ref" :waves="componentWaves"
+                       :periods="form.showPeriods" fill />
           <div v-else-if="componentBusy" class="boot" style="margin-top: 0.6rem"><div class="spin"></div> simulating components…</div>
           <div v-else class="wave-empty">
             Component waveforms need an ngspice run.
@@ -413,8 +396,4 @@ const hasSelectionWaves = computed(() =>
 }
 .falstad-grip:hover, .falstad-grip.dragging { color: var(--kh-amber); background: rgba(var(--kh-amber-rgb), 0.12); }
 .grip-dots { font-size: 9px; letter-spacing: 2px; line-height: 1; }
-/* --err is defined nowhere in the app: this was the only rule reaching for it, so the banner has always
-   painted itself with the hard-coded fallback instead of the palette's fault colour. */
-.sch-error { color: var(--kh-fault); white-space: pre-wrap; }
-.wave-name { font-size: 0.72rem; color: var(--kh-amber-hi); margin-bottom: 0.3rem; }
 </style>

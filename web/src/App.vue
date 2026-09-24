@@ -1,155 +1,37 @@
 <script setup>
-import { computed, onMounted, onUnmounted, provide, reactive, ref, watch } from 'vue'
-import { FAMILIES, FAMILY_SHORT, PLANNED, TOPOLOGIES, buildSpec, topologyById, variantAxis, defaultVariant, knobsFor, knobGroups } from './topologies.js'
+import { computed, onMounted, onUnmounted, provide, ref, watch } from 'vue'
+import { buildSpec } from './topologies.js'
 import { extractBom } from './bom.js'
 import { falstadExport, hasVisualSim } from './falstad.js'
-import { renderVerifiedSchematic, hasCiasSchematic } from './ciasSchematic.js'
+import { hasCiasSchematic } from './ciasSchematic.js'
 import { si, pct } from './units.js'
 import { resolveExcitations, designSignals, magneticSignals, componentSignals, toCsv, designExcitationsJson, stripNulls } from './waveExport.js'
 import { useKirchhoff } from './lib/context.js'
+import { useConverterForm } from './lib/converterForm.js'
+import KhConverterForm from './lib/KhConverterForm.vue'
 import PartDrawer from './components/PartDrawer.vue'
-import FamilyDial from './components/FamilyDial.vue'
 import OutputPane from './components/OutputPane.vue'
 
 // The engine instance main.js installed (createKirchhoff — WASM path, Kelvin shards, telemetry).
 const kh = useKirchhoff()
-const { loadEngine, processConverter, topologyWaveforms, extractOperatingPoint, componentWaveforms, realizeTas, generateNetlist, bindMagnetic } = kh
+const { processConverter, topologyWaveforms, extractOperatingPoint, componentWaveforms, realizeTas, generateNetlist, bindMagnetic } = kh
 const trackEvent = kh.track
 
-// ── engine boot ────────────────────────────────────────────────────────────
-const engineState = ref('loading')
-onMounted(async () => {
-  try {
-    await loadEngine()
-    engineState.value = 'ready'
-  } catch (e) {
-    engineState.value = 'error'
-    runError.value = `WASM engine failed to load: ${e.message}`
-  }
-})
-
-// ── topology & spec form ───────────────────────────────────────────────────
-const topoId = ref('flyback')
-// The bench needs a working default topology (flyback) so the spec form is populated, but the card
-// grid should NOT look pre-committed on load — no card is highlighted until the user actually picks
-// one. `topoTouched` flips on the first explicit card click (see pickTopology).
-const topoTouched = ref(false)
-// Same for the variant cards: a default variant is set so the design is valid, but no variant card
-// is highlighted until the user actually picks one (reset whenever the topology changes).
-const variantTouched = ref(false)
-// ngspice by default: the real transient is the reference; analytical stays one
-// click away for instant iteration. 100 periods settle the converter, 2 shown.
-// models: 'ideal' switches, or 'datasheet' — real-conduction semiconductor models
-// derived from the design requirements (real Rds(on) / forward drop).
-const form = reactive({ engine: 'ngspice', settlePeriods: 100, showPeriods: 2, models: 'ideal' })
-
-function selectTopology(id) {
-  topoId.value = id
-  const t = topologyById(id)
-  if (t) family.value = t.family   // keep the dial in sync when a converter is picked directly
-  form.variant = defaultVariant(id)
-  const p = t.preset
-  Object.assign(form, {
-    inputType: p.inputType,
-    vinMin: p.vinMin, vinNom: p.vinNom, vinMax: p.vinMax,
-    fs: p.fs, efficiency: p.efficiency, ambient: p.ambient,
-    isolation: p.isolation, lineFrequency: p.lineFrequency,
-    minOutputs: p.minOutputs, maxOutputs: p.maxOutputs,
-    outputs: p.outputs.map((o) => ({ ...o })),
-    ops: [{ name: 'full_load', vin: p.vinNom, ambient: p.ambient, powers: p.outputs.map((o) => o.power) }],
-    // Advanced knobs: fresh per topology (no leak across a switch), seeded off with the
-    // C++ default as the starting value so toggling override on gives something to edit.
-    knobs: Object.fromEntries(knobsFor(id).map((k) => [k.key, { on: false, value: k.def }])),
-  })
-  result.value = null
-  runError.value = null
+// ── engine boot, topology & spec form, the three-stage fold ─────────────────
+// All of it lives in the package's converter-form state (lib/converterForm.js), which <KhConverterForm>
+// renders; the app owns the state so its header, results strip, exports and test hook read the same refs.
+// A (re)selected topology clears everything derived from the previous design.
+const cf = useConverterForm({ engine: kh, onReset: () => {
   bomRows.value = []
   waveMagnetics.value = []
   ngspiceOps.value = {}
   componentWaves.value = null
   realizedTas.value = null
   selectedPart.value = null
-}
-const topo = computed(() => topologyById(topoId.value))
-
-// The rotary dial selects a family; the topology list shows only that family's converters.
-const family = ref(topo.value?.family ?? FAMILIES[0])
-const familyTopologies = computed(() => [
-  ...TOPOLOGIES.filter((t) => t.family === family.value),
-  ...PLANNED.filter((t) => t.family === family.value).map((t) => ({ ...t, planned: true })),
-])
-// Header count: topologies AND their variants (e.g. flyback's 4 conduction modes count as 4;
-// a topology with no variant axis counts as 1 via the STANDARD single-option axis).
-const topologyVariantCount = computed(() =>
-  TOPOLOGIES.reduce((sum, t) => sum + variantAxis(t.id).options.length, 0),
-)
-// Turning the dial to a new family auto-selects that family's first converter (unless the current one
-// already belongs to it — e.g. on first mount).
-watch(family, (f) => {
-  if (topo.value?.family === f) return
-  const first = TOPOLOGIES.find((t) => t.family === f)
-  if (first) selectTopology(first.id)
-})
-
-// ── the three-stage control flow: Topology ▸ Variant ▸ Spec ────────────────────
-// One stage is open at a time; picking in a stage collapses it and opens the next,
-// and any stage header re-opens that stage (Fallout-terminal fold, see style.css).
-const stage = ref('topology')          // 'topology' | 'variant' | 'spec'
-const axis = computed(() => variantAxis(topoId.value))
-const variantOptions = computed(() => axis.value.options)
-const currentVariant = computed(() => variantOptions.value.find((o) => o.id === form.variant) ?? variantOptions.value[0])
-// A single-option axis (no real variant) is trivially "chosen" — the header reads Standard.
-const hasVariantChoice = computed(() => variantOptions.value.length > 1)
-
-// Advanced per-topology knobs, grouped into tiers for the "Topology knobs" fold.
-const advGroups = computed(() => knobGroups(topoId.value))
-const hasKnobs = computed(() => knobsFor(topoId.value).length > 0)
-// The greyed placeholder shown while a knob is on auto — the C++ builder's own default.
-function knobPlaceholder(k) {
-  if (k.def === null || k.def === undefined) return 'auto'
-  if (k.type === 'bool') return k.def ? 'on' : 'off'
-  if (k.type === 'enum') return k.options.find((o) => o.id === k.def)?.name ?? String(k.def)
-  if (k.unit === 'H' || k.unit === 'F' || k.unit === 'Hz') return si(k.def, k.unit)
-  return String(k.def)
-}
-
-function pickTopology(id) {
-  topoTouched.value = true
-  variantTouched.value = false   // new topology → its variants start unselected
-  selectTopology(id)
-  trackEvent('topology_select', { target: id, name: topologyById(id)?.name, family: family.value })
-  // a topology with a single canonical build has nothing to choose — skip straight to the spec
-  stage.value = hasVariantChoice.value ? 'variant' : 'spec'
-}
-function pickVariant(id) {
-  variantTouched.value = true
-  form.variant = id
-  trackEvent('variant_select', { target: id, topology: topoId.value })
-  stage.value = 'spec'
-}
-
-function addOutput() {
-  form.outputs.push({ name: `out${form.outputs.length + 1}`, voltage: 12, power: 20 })
-  for (const op of form.ops) op.powers.push(20)
-}
-function removeOutput(i) {
-  form.outputs.splice(i, 1)
-  for (const op of form.ops) op.powers.splice(i, 1)
-}
-function addOp() {
-  form.ops.push({
-    name: `op_${form.ops.length + 1}`,
-    vin: form.vinNom,
-    ambient: form.ambient,
-    powers: form.outputs.map((o) => o.power / 2),
-  })
-}
+} })
+const { engineState, running, runError, result, lastSpec, topoId, topo, form, family, topologyVariantCount } = cf
 
 // ── solve ──────────────────────────────────────────────────────────────────
-const running = ref(false)
-const runError = ref(null)
-const result = ref(null)
-const lastSpec = ref(null)   // the exact spec JSON last sent to the engine (bench/test read-back)
 const bomRows = ref([])
 const waveMagnetics = ref([])
 // the two output panes default to schematic (left) + waveforms (right)
@@ -284,17 +166,8 @@ function enrichBom(rows, analyticalWaveforms) {
 }
 
 // ── schematic ──────────────────────────────────────────────────────────────
-// Prefer the CIAS-driven generator (one source of truth with ngspice + the visual sim) where a layout
-// exists; fall back to the hand-authored SVG elsewhere. If the generator throws (a real netlist drift),
-// SURFACE it — never silently substitute a possibly-wrong hand drawing (house rule: don't route around
-// broken things). The banner appears in the schematic pane; the hand-drawn art is not shown in its place.
-const schematicError = ref(null)
-const schematicSvg = computed(() => {
-  schematicError.value = null
-  if (!result.value) return null
-  try { return renderVerifiedSchematic(topoId.value, result.value.tas, form.variant, bomRows.value) }
-  catch (e) { schematicError.value = e?.message ?? String(e); return null }
-})
+// Drawn by the package's <KhSchematic> inside each OutputPane (the CIAS-driven generator, which refuses
+// to draw rather than substitute a possibly-wrong picture); the panes select parts through openPart.
 // ── visual simulation (CIAS-driven CircuitJS1 export, falstad.js) ──────────
 // Which scope set the sim shows ('overview' or 'magnetic'); changing it regenerates the URL below,
 // which reloads the iframe with the new scopes.
@@ -368,25 +241,6 @@ if (typeof window !== 'undefined') {
   }
 }
 
-selectTopology(topoId.value)
-
-function schematicClick(ev) {
-  const g = ev.target.closest('[data-ref]')
-  // .sch-ann marks something drawn that is not an orderable part (a FET's intrinsic body diode): it has
-  // no BOM row, so there is no drawer to open and the stylesheet gives it no cursor or hover either.
-  if (!g || g.classList.contains('sch-ann')) return
-  openPart(g.dataset.ref)
-}
-// The same activation from the keyboard (ABT #693): every component is a role="button" tab stop, and a
-// button that answers the mouse but not Enter/Space is not operable (WCAG 2.1.1). Space is prevented
-// because its default is to scroll the page out from under the drawing.
-function schematicKey(ev) {
-  if (ev.key !== 'Enter' && ev.key !== ' ') return
-  const g = ev.target.closest?.('[data-ref]')
-  if (!g || g.classList.contains('sch-ann')) return
-  ev.preventDefault()
-  openPart(g.dataset.ref)
-}
 function openPart(ref_) {
   const row = bomRows.value.find((r) => r.ref === ref_)
   if (row) {
@@ -694,7 +548,7 @@ function runExport(fn) {
 
 // Everything the two OutputPanes render is shared through this context (they are pure views).
 provide('kh', {
-  result, topo, diag, bomRows, selectedPart, schematicSvg, schematicError, schematicClick, schematicKey, openPart,
+  result, topo, topoId, diag, bomRows, selectedPart, openPart,
   waveTarget, waveMagnetics, deviceGroups, targetIsMagnetic, waveOps, waveOpIdx, waveSource,
   waveExcitations, waveMag, ngspiceOps, ngspiceBusy, simulateMagnetic, downloadMagneticInputs,
   exportSelectionCsv, exportDesignCsv, exportDesignJson, runExport, exportError,
@@ -752,201 +606,8 @@ provide('kh', {
     <div class="workbench">
       <!-- left: topology dial + list, spec, simulation, solve -->
       <aside class="controls panel">
-        <!-- three-stage terminal fold: Topology ▸ Variant ▸ Spec. One open at a time; a header re-opens its stage. -->
-        <div class="acc">
-          <!-- Stage 1 — Topology -->
-          <section class="acc-stage" :class="{ open: stage === 'topology' }">
-            <button class="acc-head" data-testid="stage-topology" @click="stage = 'topology'">
-              <span class="idx">1</span><span class="acc-title">Topology</span>
-              <span class="acc-pick">{{ topo.name }}</span><span class="acc-chev">▸</span>
-            </button>
-            <div class="acc-fold"><div class="acc-inner"><div class="acc-pad">
-              <FamilyDial v-model="family" :families="FAMILIES" :short="FAMILY_SHORT" />
-              <div class="topo-list">
-                <button
-                  v-for="t in familyTopologies" :key="t.id" :data-testid="`topo-${t.id}`"
-                  class="topo-card" :class="{ active: topoTouched && t.id === topoId, planned: t.planned }"
-                  :disabled="t.planned" @click="pickTopology(t.id)"
-                >
-                  <div class="t-name">{{ t.name }}<span v-if="t.planned" class="t-tag">planned</span></div>
-                  <div class="t-desc">{{ t.desc }}</div>
-                </button>
-              </div>
-            </div></div></div>
-          </section>
-
-          <!-- Stage 2 — Variant (only when the topology actually has a choice) -->
-          <section v-if="hasVariantChoice" class="acc-stage" :class="{ open: stage === 'variant' }">
-            <button class="acc-head" @click="stage = 'variant'">
-              <span class="idx">2</span><span class="acc-title">{{ axis.label }}</span>
-              <span class="acc-pick">{{ currentVariant.name }}</span><span class="acc-chev">▸</span>
-            </button>
-            <div class="acc-fold"><div class="acc-inner"><div class="acc-pad">
-              <div class="variant-list">
-                <button
-                  v-for="v in variantOptions" :key="v.id"
-                  class="topo-card variant-card" :class="{ active: variantTouched && v.id === form.variant }"
-                  @click="pickVariant(v.id)"
-                >
-                  <div class="t-name">{{ v.name }}</div>
-                  <div class="t-desc">{{ v.desc }}</div>
-                </button>
-              </div>
-            </div></div></div>
-          </section>
-
-          <!-- Stage 3 — Specification & Simulation -->
-          <section class="acc-stage" :class="{ open: stage === 'spec' }">
-            <button class="acc-head" data-testid="stage-spec" @click="stage = 'spec'">
-              <span class="idx">{{ hasVariantChoice ? '3' : '2' }}</span><span class="acc-title">Specification &amp; Simulation</span>
-              <span class="acc-chev">▸</span>
-            </button>
-            <div class="acc-fold"><div class="acc-inner"><div class="acc-pad">
-        <div class="grid2">
-          <label class="fld" v-if="form.inputType === 'dc'">
-            <span class="fld-label">Vin min <span class="u">V</span></span>
-            <input class="fld-in" type="number" v-model.number="form.vinMin" placeholder="opt" />
-          </label>
-          <label class="fld">
-            <span class="fld-label">{{ form.inputType === 'dc' ? 'Vin nom' : 'Vac rms' }} <span class="u">V</span></span>
-            <input class="fld-in" type="number" v-model.number="form.vinNom" />
-          </label>
-          <label class="fld" v-if="form.inputType === 'dc'">
-            <span class="fld-label">Vin max <span class="u">V</span></span>
-            <input class="fld-in" type="number" v-model.number="form.vinMax" placeholder="opt" />
-          </label>
-          <label class="fld" v-else>
-            <span class="fld-label">Line freq <span class="u">Hz</span></span>
-            <input class="fld-in" type="number" v-model.number="form.lineFrequency" />
-          </label>
-          <label class="fld">
-            <span class="fld-label">Switching <span class="u">Hz</span></span>
-            <input class="fld-in" type="number" v-model.number="form.fs" step="1000" />
-          </label>
-        </div>
-
-        <table class="row-table" style="margin-top: 0.6rem">
-          <thead><tr><th>Out</th><th>V</th><th>W</th><th></th></tr></thead>
-          <tbody>
-            <tr v-for="(o, i) in form.outputs" :key="i">
-              <td><input class="fld-in" v-model="o.name" /></td>
-              <td><input class="fld-in" type="number" v-model.number="o.voltage" /></td>
-              <td><input class="fld-in" type="number" v-model.number="o.power" @change="form.ops.forEach((op) => (op.powers[i] = o.power))" /></td>
-              <td><button v-if="form.outputs.length > form.minOutputs" class="row-btn" @click="removeOutput(i)">×</button></td>
-            </tr>
-          </tbody>
-        </table>
-        <button v-if="form.outputs.length < form.maxOutputs" class="row-btn" style="margin-top: 0.3rem" @click="addOutput">+ output</button>
-        <span v-if="form.minOutputs > 1" class="chip" style="margin-left: 0.5rem">needs ≥ {{ form.minOutputs }}</span>
-
-        <div class="section-label" style="margin-top: 1rem">Simulation</div>
-        <div class="grid2">
-          <label class="fld">
-            <span class="fld-label">Engine</span>
-            <select class="fld-in" v-model="form.engine">
-              <option value="ngspice">ngspice</option>
-              <option value="analytical">analytical</option>
-            </select>
-          </label>
-          <label class="fld">
-            <span class="fld-label">Models</span>
-            <select class="fld-in" v-model="form.models"
-                    title="ideal switches, or datasheet-derived real-conduction models (real Rds(on) / forward drop)">
-              <!-- Global semis/passives models. MAGNETIC model choice (ideal/datasheet/MKF) is
-                   per-component — click the magnetic and pick its Simulation model in the drawer. -->
-              <option value="ideal">ideal</option>
-              <option value="datasheet">datasheet</option>
-            </select>
-          </label>
-          <label class="fld" v-if="form.inputType === 'dc'">
-            <span class="fld-label">Settle cyc</span>
-            <input class="fld-in" type="number" min="1" step="10" v-model.number="form.settlePeriods"
-                   title="switching cycles the transient settles before the shown window" />
-          </label>
-          <label class="fld">
-            <span class="fld-label">Cyc shown</span>
-            <input class="fld-in" type="number" min="1" max="50" v-model.number="form.showPeriods" />
-          </label>
-        </div>
-
-        <details class="adv">
-          <summary>Advanced — efficiency, isolation, operating points</summary>
-          <div class="adv-body">
-            <div class="grid2">
-              <label class="fld">
-                <span class="fld-label">Efficiency <span class="u">0–1</span></span>
-                <input class="fld-in" type="number" step="0.01" min="0.5" max="1" v-model.number="form.efficiency" />
-              </label>
-              <label class="fld">
-                <span class="fld-label">Ambient <span class="u">°C</span></span>
-                <input class="fld-in" type="number" v-model.number="form.ambient" />
-              </label>
-              <label class="fld">
-                <span class="fld-label">Isolation <span class="u">V</span></span>
-                <input class="fld-in" type="number" v-model.number="form.isolation" placeholder="none" />
-              </label>
-            </div>
-            <table class="row-table" style="margin-top: 0.6rem">
-              <thead>
-                <tr><th>OP</th><th>Vin</th><th>°C</th><th v-for="(o, i) in form.outputs" :key="i">{{ o.name }} W</th><th></th></tr>
-              </thead>
-              <tbody>
-                <tr v-for="(op, j) in form.ops" :key="j">
-                  <td><input class="fld-in" v-model="op.name" /></td>
-                  <td><input class="fld-in" type="number" v-model.number="op.vin" /></td>
-                  <td><input class="fld-in" type="number" v-model.number="op.ambient" /></td>
-                  <td v-for="(o, i) in form.outputs" :key="i"><input class="fld-in" type="number" v-model.number="op.powers[i]" /></td>
-                  <td><button v-if="form.ops.length > 1" class="row-btn" @click="form.ops.splice(j, 1)">×</button></td>
-                </tr>
-              </tbody>
-            </table>
-            <button class="row-btn" style="margin-top: 0.3rem" @click="addOp">+ operating point</button>
-          </div>
-        </details>
-
-        <details v-if="hasKnobs" class="adv" data-testid="knobs-fold">
-          <summary>Topology knobs — override auto-designed parameters</summary>
-          <div class="adv-body">
-            <div v-for="g in advGroups" :key="g.id" class="knob-group" :data-testid="`knob-group-${g.id}`">
-              <div class="section-label">{{ g.label }}</div>
-              <div v-for="k in g.knobs" :key="k.key" class="knob-row">
-                <label class="knob-toggle" :title="k.tip">
-                  <input type="checkbox" v-model="form.knobs[k.key].on" :data-testid="`knob-${k.key}-auto`" />
-                  <span class="knob-name">{{ k.label }}</span>
-                  <span v-if="k.sym" class="knob-sym">{{ k.sym }}</span>
-                  <span v-if="k.unit" class="u">{{ k.unit }}</span>
-                </label>
-                <div class="knob-ctl">
-                  <template v-if="form.knobs[k.key].on">
-                    <select v-if="k.type === 'enum'" class="fld-in" v-model="form.knobs[k.key].value" :data-testid="`knob-${k.key}-input`">
-                      <option v-for="o in k.options" :key="o.id" :value="o.id">{{ o.name }}</option>
-                    </select>
-                    <label v-else-if="k.type === 'bool'" class="knob-bool">
-                      <input type="checkbox" v-model="form.knobs[k.key].value" :data-testid="`knob-${k.key}-input`" />
-                      <span>{{ form.knobs[k.key].value ? 'on' : 'off' }}</span>
-                    </label>
-                    <input v-else class="fld-in" type="number" :step="k.step ?? 'any'" :min="k.min" :max="k.max"
-                           v-model.number="form.knobs[k.key].value" :data-testid="`knob-${k.key}-input`" />
-                  </template>
-                  <span v-else class="knob-auto">auto · {{ knobPlaceholder(k) }}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </details>
-
-              <div class="solve-row">
-                <button class="btn solve-btn" data-testid="solve" :disabled="running || engineState !== 'ready'" @click="solve">
-                  {{ running ? (form.engine === 'ngspice' ? 'Simulating…' : 'Solving…') : 'Solve' }}
-                </button>
-                <div v-if="engineState === 'loading'" class="boot"><div class="spin"></div> loading…</div>
-                <span v-else-if="result" class="chip ok">ready</span>
-                <span v-else class="hint" style="font-size: 0.62rem">set spec ▸ solve</span>
-              </div>
-              <div v-if="runError" class="err-banner" data-testid="error-banner" style="margin-top: 0.5rem"><b>ENGINE ▸</b> {{ runError }}</div>
-            </div></div></div>
-          </section>
-        </div>
+        <!-- three-stage terminal fold: Topology ▸ Variant ▸ Spec (the package's converter form) -->
+        <KhConverterForm :state="cf" :solver="solve" />
       </aside>
 
       <!-- right: two selectable output panes -->

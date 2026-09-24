@@ -76,6 +76,7 @@
   /* schematic interaction */
   --kh-sch-glow:     rgba(var(--kh-amber-rgb), 0.9);  /* hover / selected part glow */
   --kh-sch-hot-ref:  #fff;              /* refdes of the hovered / focused part */
+  --kh-sch-muted-opacity: 0.35;         /* parts a host marks non-selectable (KhSchematic) */
 
   /* family dial */
   --kh-dial-face:    #100c07;
@@ -808,6 +809,10 @@
 :where(.kh-root) .sch-hot:focus-visible .sch-sym { stroke: var(--kh-amber-hi); }
 :where(.kh-root) .sch-hot:focus-visible .sch-fill { fill: var(--kh-amber-hi); }
 :where(.kh-root) .sch-hot:focus-visible .sch-ref { fill: var(--kh-sch-hot-ref); }
+/* A part the host marks non-selectable (KhSchematic's `selectable` predicate): faded, and inert to the
+   pointer (no cursor, hover or click); KhSchematic also takes it out of the tab order. The app itself
+   never marks one. */
+:where(.kh-root) .sch-hot.kh-sch-muted { opacity: var(--kh-sch-muted-opacity); pointer-events: none; cursor: default; }
 
 /* PRINT. The bench is a dark-phosphor instrument, but a schematic is the one thing people take OUT of
    it, and there is no export — Ctrl+P is the only route to paper or PDF. Printed as-is the drawing is
@@ -874,6 +879,11 @@
   background: rgba(var(--kh-shadow-rgb), 0.2);
 }
 :where(.kh-root) .wave-empty code { color: var(--kh-amber-hi); font-size: 0.75rem; }
+/* The schematic's refusal banner and a waveform's name line. (They were OutputPane-scoped styles; the
+   package's KhSchematic / KhWaveforms draw these elements now, so the rules live with the rest.) The
+   banner paints with the palette's fault colour — `--err`, which it once reached for, is defined nowhere. */
+:where(.kh-root) .sch-error { color: var(--kh-fault); white-space: pre-wrap; }
+:where(.kh-root) .wave-name { font-size: 0.72rem; color: var(--kh-amber-hi); margin-bottom: 0.3rem; }
 
 /* stat tiles for processed-only signals */
 :where(.kh-root) .stat-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 0.5rem; margin-top: 0.7rem; }
