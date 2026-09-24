@@ -1,8 +1,8 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { requirementRows } from '../bom.js'
-import { selectCandidates, kelvinCategoryFor, bindPart, mainMagneticInputs, enrichMagneticWaveforms, designMagneticInOpenMagnetics, suggestMagneticsInOpenMagnetics } from '../kh.js'
-import { trackEvent } from '../telemetry.js'
+import { kelvinCategoryFor } from '../kh.js'
+import { useKirchhoff } from '../lib/context.js'
 import WavePane from './WavePane.vue'
 
 const props = defineProps({
@@ -14,6 +14,10 @@ const props = defineProps({
   magneticModel: { type: String, default: 'auto' }, // App-owned per-magnetic model choice for THIS ref
 })
 const emit = defineEmits(['close', 'bound', 'bound-magnetic', 'magnetic-model'])
+
+// Sourcing, binding and the OpenMagnetics handoff all run on the app's engine instance.
+const kh = useKirchhoff()
+const { selectCandidates, bindPart, mainMagneticInputs, enrichMagneticWaveforms, designMagneticInOpenMagnetics, suggestMagneticsInOpenMagnetics } = kh
 
 const rows = computed(() => requirementRows(props.part?.requirements))
 
@@ -108,7 +112,7 @@ async function useCandidate(c) {
   try {
     const tas = await bindPart(props.tas, props.part.ref, props.part.kind, c)
     boundMpn.value = c.mpn
-    trackEvent('part_bind', { target: c.mpn, ref: props.part.ref, kind: props.part.kind, manufacturer: c.manufacturer })
+    kh.track('part_bind', { target: c.mpn, ref: props.part.ref, kind: props.part.kind, manufacturer: c.manufacturer })
     emit('bound', { ref: props.part.ref, mpn: c.mpn, tas })  // App swaps the TAS in and re-sims
   } catch (e) {
     bindErr.value = e?.message ?? String(e)

@@ -1,16 +1,20 @@
 <script setup>
 import { computed, onMounted, onUnmounted, provide, reactive, ref, watch } from 'vue'
 import { FAMILIES, FAMILY_SHORT, PLANNED, TOPOLOGIES, buildSpec, topologyById, variantAxis, defaultVariant, knobsFor, knobGroups } from './topologies.js'
-import { loadEngine, processConverter, topologyWaveforms, extractOperatingPoint, componentWaveforms, realizeTas, generateNetlist, bindMagnetic } from './kh.js'
 import { extractBom } from './bom.js'
 import { falstadExport, hasVisualSim } from './falstad.js'
 import { renderVerifiedSchematic, hasCiasSchematic } from './ciasSchematic.js'
 import { si, pct } from './units.js'
 import { resolveExcitations, designSignals, magneticSignals, componentSignals, toCsv, designExcitationsJson, stripNulls } from './waveExport.js'
-import { trackEvent } from './telemetry.js'
+import { useKirchhoff } from './lib/context.js'
 import PartDrawer from './components/PartDrawer.vue'
 import FamilyDial from './components/FamilyDial.vue'
 import OutputPane from './components/OutputPane.vue'
+
+// The engine instance main.js installed (createKirchhoff — WASM path, Kelvin shards, telemetry).
+const kh = useKirchhoff()
+const { loadEngine, processConverter, topologyWaveforms, extractOperatingPoint, componentWaveforms, realizeTas, generateNetlist, bindMagnetic } = kh
+const trackEvent = kh.track
 
 // ── engine boot ────────────────────────────────────────────────────────────
 const engineState = ref('loading')
