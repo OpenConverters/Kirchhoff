@@ -603,3 +603,27 @@ TEST_CASE("TasAssembler: a uic deck states its DC source levels in .ic", "[initi
     CHECK(deck.find(".ic v(XahbCell.cb_mid)=") != std::string::npos);
     CHECK(deck.find(" uic") != std::string::npos);
 }
+
+// ─── Web wizard inputs that the steady-state work broke (2026-09-25) ─────────────────────────────────
+// Each is the spec the web wizard sends (the PFC one without the phase count the wizard used to send on
+// every variant; Kirchhoff rejects numberOfPhases outside interleavedBoost). Four-Switch Buck-Boost and PFC were rejected with "cannot orient
+// the simulated voltage" (a zero-shift correlation of 0.18 / -0.05: a phase offset in one case, a whole-
+// line-cycle reference in the other). CLLLC "I know the design" declares only a rail precharge; shooting it
+// stranded the SR at t = 0 ("Timestep too small" natively, a run the browser engine never returned from).
+TEST_CASE("extract(NGSPICE): the web wizards' simulated operating points extract", "[extract][web-wizards]") {
+    if (!Kirchhoff::ngspice_in_process_available()) {
+        WARN("libngspice not linked — web-wizard extract skipped");
+        return;
+    }
+    const std::vector<std::pair<std::string, std::string>> cases = {
+        {"fsbb", R"KH({"designRequirements":{"inputType":"dc","inputVoltage":{"minimum":9,"maximum":18},"switchingFrequency":{"nominal":100000},"outputs":[{"name":"out","voltage":{"nominal":12},"regulation":"voltage"}],"efficiency":0.92},"operatingPoints":[{"name":"full_load","inputVoltage":13.5,"ambientTemperature":25,"outputs":[{"name":"out","power":24}]}],"config":{"rippleRatio":0.4,"tranStopTime":0.00052}})KH"},
+        {"pfc", R"KH({"designRequirements":{"inputType":"acSinglePhase","inputVoltage":{"minimum":85,"maximum":265},"switchingFrequency":{"nominal":65000},"outputs":[{"name":"out","voltage":{"nominal":400},"regulation":"voltage"}],"efficiency":0.95,"lineFrequency":{"nominal":50}},"operatingPoints":[{"name":"full_load","inputVoltage":175,"ambientTemperature":25,"outputs":[{"name":"out","power":300}]}],"config":{"rippleRatio":0.3,"topologyVariant":"boost"}})KH"},
+        {"clllc", R"KH({"designRequirements":{"inputType":"dc","inputVoltage":{"minimum":380,"maximum":420},"switchingFrequency":{"nominal":120000},"outputs":[{"name":"out","voltage":{"nominal":48},"regulation":"voltage"}],"efficiency":0.95,"magnetizingInductance":{"nominal":0.0005},"turnsRatios":[{"nominal":8}]},"operatingPoints":[{"name":"full_load","inputVoltage":400,"ambientTemperature":25,"outputs":[{"name":"out","power":240}]}],"config":{"resonantBandMin":90000,"resonantBandMax":150000,"tranStopTime":0.0004333333333333333}})KH"},
+    };
+    for (const auto& [topology, spec] : cases) {
+        INFO(topology);
+        const std::string out = Kirchhoff::api::process_converter(topology, spec, "ngspice");
+        INFO(out.substr(0, 300));
+        REQUIRE(out.rfind("Exception:", 0) != 0);
+    }
+}

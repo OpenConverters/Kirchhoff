@@ -408,8 +408,16 @@ MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vecto
         }
         if (lastMismatch <= kSteadyTolerance) { steady = true; break; }
         const double bytesThisRun = 8.0 * static_cast<double>(r.time.size()) * static_cast<double>(r.vectors.size() + 1);
-        const bool declaresIc = tasRun.contains("simulation") && tasRun.at("simulation").contains("initialConditions")
-                                && !tasRun.at("simulation").at("initialConditions").empty();
+        // Shooting needs the deck's STATE: a declared winding or inductor current alongside the rails (the
+        // DAB, AHB and isolated-buck decks declare theirs for exactly this). A deck that declares only a
+        // rail precharge (CLLLC, CLLC: a start-up aid for the synchronous rectifier) leaves its resonant
+        // tank undeclared, so Newton cannot converge -- and perturbing that lone rail stranded the SR at
+        // t = 0, a run the browser's ngspice never returns from. Such a deck takes the doubling path.
+        bool declaresIc = false;
+        if (tasRun.contains("simulation") && tasRun.at("simulation").contains("initialConditions")) {
+            for (const auto& ic : tasRun.at("simulation").at("initialConditions"))
+                if (ic.contains("current")) { declaresIc = true; break; }
+        }
         if (declaresIc && !shot) {
             // Not settled: solve for the periodic steady state. Converged, it is re-run briefly from that
             // state; not converged, the shot state is only a better start and is verified over kVerifyPeriods.
@@ -553,24 +561,59 @@ MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vecto
         if (refWf.get_time() && refWf.get_time()->size() == rd.size())
             rt = *refWf.get_time();
         else { rt.resize(rd.size()); for (size_t k = 0; k < rd.size(); ++k) rt[k] = period * k / rd.size(); }
+        // A reference that is not one period of the SAME cycle cannot orient anything: the PFC's
+        // analytical excitation is the whole line cycle (two of them, 40 ms at 50 Hz) while the
+        // simulated window is one switching period at the line peak. Like a processed-only
+        // reference, it leaves the signal in the deck's stated convention.
+        if (rt.size() >= 2) {
+            const double refSpan = rt.back() - rt.front();
+            if (std::abs(refSpan - period) > 0.25 * period) return sim;
+        }
         const auto& sd = sim.get_data();
         const std::vector<double> st = *sim.get_time();   // get_time() returns the optional by value
-        double dot = 0.0, ns = 0.0, nr = 0.0;
-        for (size_t k = 0; k < sd.size(); ++k) {
-            const double t = st[k];
-            size_t j = static_cast<size_t>(std::upper_bound(rt.begin(), rt.end(), t) - rt.begin());
-            double rv;
-            if (j == 0) rv = rd.front();
-            else if (j >= rt.size()) rv = rd.back();
-            else { const double f = (t - rt[j - 1]) / (rt[j] - rt[j - 1]); rv = rd[j - 1] + f * (rd[j] - rd[j - 1]); }
-            dot += sd[k] * rv; ns += sd[k] * sd[k]; nr += rv * rv;
+        // Both signals on one uniform grid over a period (time taken modulo the period).
+        auto sample_at = [&](const std::vector<double>& tt, const std::vector<double>& yy, double t) {
+            size_t j = static_cast<size_t>(std::upper_bound(tt.begin(), tt.end(), t) - tt.begin());
+            if (j == 0) return yy.front();
+            if (j >= tt.size()) return yy.back();
+            const double f = (t - tt[j - 1]) / (tt[j] - tt[j - 1]);
+            return yy[j - 1] + f * (yy[j] - yy[j - 1]);
+        };
+        constexpr size_t kGrid = 256;
+        const double t0 = st.front();
+        std::vector<double> sg(kGrid), rg(kGrid);
+        for (size_t k = 0; k < kGrid; ++k) {
+            const double t = period * k / kGrid;
+            sg[k] = sample_at(st, sd, t0 + t);
+            rg[k] = sample_at(rt, rd, rt.front() + t);
         }
+        double ns = 0.0, nr = 0.0;
+        for (size_t k = 0; k < kGrid; ++k) { ns += sg[k] * sg[k]; nr += rg[k] * rg[k]; }
         if (!(ns > 0) || !(nr > 0)) return sim;   // an all-zero winding has no orientation to fix
-        const double corr = dot / std::sqrt(ns * nr);
+        // The two periods are normally aligned (both start at the switching cycle), and then the zero-
+        // shift correlation decides. Searching every shift unconditionally is wrong: a near-symmetric
+        // square wave (flyback, push-pull windings) half a period away is almost exactly its own
+        // negative, and simulation noise let the inverted match win (-0.97, flipping every sign).
+        // Only when the zero shift is ambiguous -- a phase offset between the simulated and analytical
+        // periods, as on the Four-Switch Buck-Boost inductor (0.18) -- are the shapes compared at every
+        // circular shift, the orientation being the sign of the best match.
+        auto correlation_at = [&](size_t shift) {
+            double dot = 0.0;
+            for (size_t k = 0; k < kGrid; ++k) dot += sg[k] * rg[(k + shift) % kGrid];
+            return dot / std::sqrt(ns * nr);
+        };
+        double corr = correlation_at(0);
+        if (std::abs(corr) < 0.2) {
+            for (size_t shift = 1; shift < kGrid; ++shift) {
+                const double c = correlation_at(shift);
+                if (std::abs(c) > std::abs(corr)) corr = c;
+            }
+        }
         if (std::abs(corr) < 0.2)
             throw std::runtime_error(std::string("extract_operating_point(NGSPICE): cannot orient the simulated ") + what
                                      + " of winding " + std::to_string(w) + " of magnetic '" + mags[idx].name
-                                     + "' against the analytical one (correlation " + std::to_string(corr) + ")");
+                                     + "' against the analytical one (best correlation over every phase shift "
+                                     + std::to_string(corr) + ")");
         if (corr > 0) return sim;
         MAS::Waveform flipped = sim;
         std::vector<double> neg(sd.size());
