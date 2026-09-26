@@ -1,5 +1,5 @@
 // MKF_MODEL magnetic integration (Phase 4): a designed magnetic carries an MKF-exported ngspice
-// subcircuit in magnetic.modelOutputs.spiceSubcircuit. The assembler must HOIST that .subckt to the
+// subcircuit in the component's outputs.spiceSubcircuit (CIAS ABT #947). The assembler must HOIST that .subckt to the
 // deck top level (global, deduped) and the CIAS emitter must replace the ideal L+K with an X-instance
 // that maps the winding terminals to the subckt's per-winding ports P<i>+/-.
 //
@@ -39,7 +39,7 @@ std::string run_ngspice(const std::string& deck) {
 bool bind_magnetic_subckt(json& node, const std::string& text, const std::string& ref) {
     if (node.is_object()) {
         if (node.contains("data") && node["data"].is_object() && node["data"].contains("magnetic")) {
-            node["data"]["magnetic"]["modelOutputs"]["spiceSubcircuit"] = {{"text", text}, {"reference", ref}};
+            node["data"]["outputs"]["spiceSubcircuit"] = {{"text", text}, {"reference", ref}};
             return true;
         }
         for (auto& [k, v] : node.items()) if (bind_magnetic_subckt(v, text, ref)) return true;

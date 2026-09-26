@@ -121,7 +121,7 @@ def _stamp_subckt(tas, text, ref):
             for comp in c["components"]:
                 d = comp.get("data", {})
                 if "magnetic" in d:
-                    d["magnetic"]["modelOutputs"] = {"spiceSubcircuit": {"reference": ref, "text": text}}
+                    d["outputs"] = {"spiceSubcircuit": {"reference": ref, "text": text}}   # CIAS ABT #947
     return tas
 
 
@@ -136,12 +136,11 @@ def _mag_tas(sub_text, *, offset, peak=None, datasheet_isat=None, core_coil=None
     """Minimal single-winding-inductor TAS: one magnetic carrying the stamped subckt and (optionally) a
     datasheet Isat and/or a sourced core+coil, at a chosen DC operating (offset) current."""
     mag = dict(core_coil) if core_coil else {}
-    mag["modelOutputs"] = {"spiceSubcircuit": {"text": sub_text}}
     if datasheet_isat is not None:
         mag["manufacturerInfo"] = {"datasheetInfo": {"electrical": [{"saturationCurrentPeak": datasheet_isat}]}}
     proc = {"offset": offset, "peak": offset * 1.1 if peak is None else peak}
     return {"topology": {"stages": [{"circuit": {"components": [
-        {"name": "L1", "data": {"magnetic": mag,
+        {"name": "L1", "data": {"magnetic": mag, "outputs": {"spiceSubcircuit": {"text": sub_text}},
             "inputs": {"operatingPoints": [{"conditions": {"ambientTemperature": 25.0},
                 "excitationsPerWinding": [{"current": {"processed": proc}}]}]}}}]}}]}}
 
@@ -183,8 +182,8 @@ def test_saturation_skips_multiwinding():
 
     tas = {"topology": {"stages": [{"circuit": {"components": [
         {"name": "T1", "data": {"magnetic": {
-            "manufacturerInfo": {"datasheetInfo": {"electrical": [{"saturationCurrentPeak": 0.1}]}},
-            "modelOutputs": {"spiceSubcircuit": {"text": sub}}},
+            "manufacturerInfo": {"datasheetInfo": {"electrical": [{"saturationCurrentPeak": 0.1}]}}},
+            "outputs": {"spiceSubcircuit": {"text": sub}},
             "inputs": {"operatingPoints": [{"excitationsPerWinding": [_exc(2.0), _exc(5.0)]}]}}}]}}]}}
     assert R.saturation_findings(tas) == [], "multi-winding magnetic must not be flagged"
 

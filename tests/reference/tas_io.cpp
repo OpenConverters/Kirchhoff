@@ -71,7 +71,7 @@ int main(int argc, char** argv) {
             return NAN; };
         double vout = get("vout"), iin = get("iin");
         double pout = vout * vout / Rload, pin = std::fabs(iin) * Vin;
-        const bool real = deck.find("modelOutputs") != std::string::npos || deck.find(".subckt 9") != std::string::npos;
+        const bool real = deck.find("spiceSubcircuit") != std::string::npos || deck.find(".subckt 9") != std::string::npos;
         std::cout << "Vout=" << vout << " Iout=" << vout / Rload << " eff=" << (pin > 1e-9 ? pout / pin : 0)
                   << "  (" << (deck.find("\nRdc") != std::string::npos || deck.find(" Rdc") != std::string::npos ? "real" : "ideal/?") << ")\n";
         if (std::isnan(vout)) { std::cerr << out.substr(0, 600) << "\n"; return 1; }

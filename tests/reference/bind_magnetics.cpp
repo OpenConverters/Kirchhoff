@@ -1,6 +1,6 @@
 // Automated magnetic BIND step (the Heaviside/MKF hand-off): read a TAS, and for every magnetic
 // component that is still a seed (has inputs but no bound model), design a real magnetic via MKF from
-// its own inputs and stamp the exported ngspice subcircuit into magnetic.modelOutputs.spiceSubcircuit.
+// its own inputs and stamp the exported ngspice subcircuit into the component's outputs.spiceSubcircuit (CIAS ABT #947).
 // Kirchhoff then simulates the bound TAS at MKF_MODEL fidelity. Usage: bind_magnetics <in.json> <out.json>
 #include <iostream>
 #include <fstream>
@@ -27,7 +27,7 @@ static int bind(json& node) {
         if (node.contains("data") && node["data"].is_object()
             && node["data"].contains("magnetic") && node["data"].contains("inputs")) {
             json& comp = node["data"];
-            if (comp["magnetic"].is_object() && comp["magnetic"].contains("modelOutputs"))
+            if (comp.contains("outputs") && comp["outputs"].is_object() && comp["outputs"].contains("spiceSubcircuit"))
                 return 0;   // already bound — leave it
             try {
                 OpenMagnetics::Inputs inputs(comp.at("inputs"), /*processWaveform=*/true);
@@ -37,7 +37,7 @@ static int bind(json& node) {
                 OpenMagnetics::Magnetic mag = results[0].first.get_magnetic();
                 std::string sub = CircuitSimulatorExporter(CircuitSimulatorExporterModels::NGSPICE)
                     .export_magnetic_as_subcircuit(mag, 100e3, 25.0);
-                comp["magnetic"]["modelOutputs"]["spiceSubcircuit"] = {{"text", sub}, {"reference", subckt_name(sub)}};
+                comp["outputs"]["spiceSubcircuit"] = {{"text", sub}, {"reference", subckt_name(sub)}};
                 std::cerr << "  bound magnetic -> " << mag.get_reference() << "\n";
                 return 1;   // bound; do not recurse into it
             } catch (const std::exception& e) {

@@ -34,7 +34,15 @@ const magData = computed(() => {
   return null
 })
 const hasDatasheet = computed(() => !!magData.value?.manufacturerInfo?.datasheetInfo)
-const hasMkfModel = computed(() => !!magData.value?.modelOutputs?.spiceSubcircuit)
+// A fitted MKF subcircuit lives in the component's PEAS outputs (CIAS ABT #947), not on the magnetic.
+const componentData = computed(() => {
+  if (!props.tas || !props.part) return null
+  for (const stage of props.tas.topology?.stages ?? [])
+    for (const comp of stage.circuit?.components ?? [])
+      if (comp.name === props.part.ref) return comp.data ?? null
+  return null
+})
+const hasMkfModel = computed(() => !!componentData.value?.outputs?.spiceSubcircuit)
 function onModelPick(ev) {
   emit('magnetic-model', { ref: props.part.ref, model: ev.target.value })
 }

@@ -54,7 +54,10 @@ ClllcDesign design_clllc(const json& tasInputs) {
     const double fr = d.switchingFrequency;
     d.resonantFrequency = fr;
     const double Rload = Vo * Vo / d.outputPower;
-    const double Ro = (8.0 * n * n / (M_PI * M_PI)) * Rload;
+    // Everything downstream is referred through the transformer the stage is built around: the pinned
+    // ratio when the magnetic is chosen (I-know-the-design / della-Pollock pass 2), else the design ratio.
+    const double N = d.turnsRatio;
+    const double Ro = (8.0 * N * N / (M_PI * M_PI)) * Rload;
     const double wr = 2.0 * M_PI * fr;
     d.primaryResonantCapacitance = 1.0 / (2.0 * M_PI * cfg::get(d.config, "qualityFactor", kQualityFactor) * fr * Ro);
     d.primaryResonantInductance = 1.0 / (wr * wr * d.primaryResonantCapacitance);
@@ -130,8 +133,11 @@ ClllcDesign design_clllc(const json& tasInputs) {
         d.primaryResonantInductance = *pinnedLm / k;
         d.primaryResonantCapacitance = 1.0 / (wr * wr * d.primaryResonantInductance);
     }
-    d.secondaryResonantInductance = d.primaryResonantInductance / (n * n);
-    d.secondaryResonantCapacitance = n * n * d.primaryResonantCapacitance;
+    // The symmetric tank is Lr2 = Lr1/N^2, Cr2 = N^2*Cr1 with the transformer's REALISED ratio N. Referring it
+    // with the unpinned design value instead (n, efficiency-compensated since 7150de3: 7.92 against a pinned 8
+    // on the web's CLLLC) mismatched the two tanks, and the deck failed at t = 0 ("Timestep too small").
+    d.secondaryResonantInductance = d.primaryResonantInductance / (N * N);
+    d.secondaryResonantCapacitance = N * N * d.primaryResonantCapacitance;
     d.switchDuty = cfg::get(d.config, "switchDutyFraction", kSwitchDuty);
     d.loadResistance = Rload;
     d.outputCapacitance = 100e-6;
@@ -293,6 +299,24 @@ json build_clllc_tas(const ClllcDesign& d) {
     // ───────────────────────── POWER stage ─────────────────────────
     // A small in-line sense resistor in the secondary tank exposes the tank-current sign (senseP/senseM)
     // so the control stage can drive the SR diagonals current-aware.
+    // Secondary-bridge RC snubber (numerical aid, ABT #96 tagged). The synchronous rectifier switches in
+    // lock-step with the primary from t = 0, and with ideal switches and diodes the secondary bridge input
+    // (node_c/node_d) has no finite dV/dt: the web CLLLC "I know the design" deck died at t = 40 ps with
+    // "Timestep too small ... vvin#branch". A series RC across that pair (the house rectifier-snubber values,
+    // 100 pF + 100 ohm, as LLC/SRC use) gives it one; the output is unchanged (49.79 V either way). At real
+    // fidelity the assembler strips it -- the devices' own capacitance does the job there.
+    auto secSnubC = [&]() { json c; c["capacitor"] = json::object();
+        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::rectifier_snubber_cap(d.config);
+        c["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage * 3;
+        cfg::mark_numerical_aid(c); return c; };
+    auto secSnubR = [&]() { json c; c["resistor"] = json::object();
+        auto& dr = c["inputs"]["designRequirements"];
+        dr["deviceType"] = "resistor";
+        dr["resistance"]["nominal"] = cfg::snubber_res(d.config);
+        const double vSwing = d.outputVoltage * 2.0;   // the bridge input swings +-Vout
+        dr["powerRating"] = cfg::rectifier_snubber_cap(d.config) * vSwing * vSwing * d.switchingFrequency;
+        dr["role"] = "snubber"; cfg::mark_numerical_aid(c); return c; };
+
     json pcell; pcell["name"] = "clllc-power";
     pcell["ports"] = json::array({port("vin"), port("gnd"), port("sgnd"), port("vout"), port("g1"), port("g2"),
                                   port("senseP"), port("senseM")});
@@ -312,7 +336,8 @@ json build_clllc_tas(const ClllcDesign& d) {
         comp("QG", mosfetReq(reqSec)), comp("QH", mosfetReq(reqSec)),
         comp("DSE", diode(req::body_diode(ratedVdsSec, IsecPk))), comp("DSF", diode(req::body_diode(ratedVdsSec, IsecPk))),
         comp("DSG", diode(req::body_diode(ratedVdsSec, IsecPk))), comp("DSH", diode(req::body_diode(ratedVdsSec, IsecPk))),
-        comp("Cout", capBrick(d.outputCapacitance, d.outputVoltage * 2))});
+        comp("Cout", capBrick(d.outputCapacitance, d.outputVoltage * 2)),
+        comp("Rsns", secSnubR()), comp("Csns", secSnubC())});
     pcell["connections"] = json::array({
         // Primary full bridge. (Q1,Q4) on g1, (Q2,Q3) on g2 -> ±Vin.
         conn("vin_net",  {pin("Q1","drain"), pin("Q3","drain"), pin("DS1","cathode"), pin("DS3","cathode"), prt("vin")}),
@@ -325,9 +350,10 @@ json build_clllc_tas(const ClllcDesign& d) {
         conn("l2_mid",   {pin("Lr2","primary_end"), pin("Cr2","1")}),
         conn("senseP",   {pin("Cr2","2"), pin("Rsense","1"), prt("senseP")}),
         conn("node_c",   {pin("Rsense","2"), pin("QE","source"), pin("QF","drain"),
-                          pin("DSE","anode"), pin("DSF","cathode"), prt("senseM")}),
+                          pin("DSE","anode"), pin("DSF","cathode"), pin("Rsns","1"), prt("senseM")}),
         conn("node_d",   {pin("T1","secondary1_end"), pin("QG","source"), pin("QH","drain"),
-                          pin("DSG","anode"), pin("DSH","cathode")}),
+                          pin("DSG","anode"), pin("DSH","cathode"), pin("Csns","2")}),
+        conn("rc_sec_mid", {pin("Rsns","2"), pin("Csns","1")}),
         // SR full bridge (diode-emulating SR via the control stage). Body diodes rectify / enable start.
         conn("vout_net", {pin("QE","drain"), pin("QG","drain"), pin("DSE","cathode"), pin("DSG","cathode"),
                           pin("Cout","1"), prt("vout")}),

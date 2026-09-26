@@ -18,7 +18,7 @@ using json = nlohmann::json;
 static bool inject_subckt(json& node, const std::string& text, const std::string& ref) {
     if (node.is_object()) {
         if (node.contains("data") && node["data"].is_object() && node["data"].contains("magnetic")) {
-            node["data"]["magnetic"]["modelOutputs"]["spiceSubcircuit"] = {{"text", text}, {"reference", ref}};
+            node["data"]["outputs"]["spiceSubcircuit"] = {{"text", text}, {"reference", ref}};
             return true;
         }
         for (auto& [k, v] : node.items()) if (inject_subckt(v, text, ref)) return true;

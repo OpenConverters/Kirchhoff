@@ -941,7 +941,7 @@ def saturation_findings(tas):
         mag = data.get("magnetic")
         if not isinstance(mag, dict):
             continue
-        text = (mag.get("modelOutputs") or {}).get("spiceSubcircuit", {}).get("text")
+        text = (data.get("outputs") or {}).get("spiceSubcircuit", {}).get("text")   # CIAS ABT #947
         if not text:
             continue
         excs = _winding_excitations(data)

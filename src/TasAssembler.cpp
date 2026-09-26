@@ -174,12 +174,13 @@ PEAS::Fidelity infer_fidelity(const std::string& ref, const json& data, const PE
     else if (data.contains("magnetic"))    real = bound(data.at("magnetic"));
     PEAS::Fidelity f = base;
     f.origin = real ? PEAS::Fidelity::Origin::DATASHEET : PEAS::Fidelity::Origin::REQUIREMENTS;
-    // A magnetic carrying an MKF-exported subcircuit uses the MKF_MODEL origin specifically (the real
+    // A magnetic whose component carries an MKF-exported subcircuit in its PEAS `outputs` (CIAS ABT #947:
+    // magnetic.modelOutputs is a key the MAS magnetic schema forbids) uses the MKF_MODEL origin specifically (the real
     // magnetic path), as opposed to the DATASHEET (datasheet-parasitics) path used by other parts.
     if (data.contains("magnetic") && data.at("magnetic").is_object()
-        && data.at("magnetic").contains("modelOutputs")
-        && data.at("magnetic").at("modelOutputs").is_object()
-        && data.at("magnetic").at("modelOutputs").contains("spiceSubcircuit"))
+        && data.contains("outputs")
+        && data.at("outputs").is_object()
+        && data.at("outputs").contains("spiceSubcircuit"))
         f.origin = PEAS::Fidelity::Origin::MKF_MODEL;
     return f;
 }
@@ -424,11 +425,11 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
             // must not leave its (unreferenced) .subckt in the deck nor trigger the real-deck cshunt.
             if (compFidelity.origin == PEAS::Fidelity::Origin::MKF_MODEL
                 && data.contains("magnetic") && data.at("magnetic").is_object()
-                && data.at("magnetic").contains("modelOutputs")
-                && data.at("magnetic").at("modelOutputs").is_object()
-                && data.at("magnetic").at("modelOutputs").contains("spiceSubcircuit")) {
+                && data.contains("outputs")
+                && data.at("outputs").is_object()
+                && data.at("outputs").contains("spiceSubcircuit")) {
                 deckHasRealComponent = true;   // an MKF_MODEL magnetic is a stiff real core -> needs cshunt too
-                const json& sk = data.at("magnetic").at("modelOutputs").at("spiceSubcircuit");
+                const json& sk = data.at("outputs").at("spiceSubcircuit");
                 if (seenMagRefs.insert(sk.at("reference").get<std::string>()).second) {
                     std::string text = sk.at("text").get<std::string>();
                     magSubckts << text;
