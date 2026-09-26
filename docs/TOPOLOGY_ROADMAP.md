@@ -18,35 +18,44 @@ here as MKF returns to being a pure magnetics library — see `docs/MKF_MIGRATIO
 21 are gated by the MKF-equivalence suite; CLLLC/PFC/Vienna diverge from MKF by design
 (AC input and/or closed-loop control expressed in CIAS) and are validated standalone.
 
-## Remaining gaps — prioritized
+## Variants already implemented (formerly listed as gaps)
 
-### Tier 1 — fundamental gaps (conspicuous absences)
-- **Inverting buck-boost** — the textbook single-switch non-isolated buck-boost. We have its
-  derivatives (Ćuk/SEPIC/Zeta/FSBB) but not the parent. Cheapest add; closes a textbook hole.
-- **Symmetric (hard-switched) half-bridge** — split-cap two-switch isolated PWM converter.
-- **Hard-switched full-bridge (PWM)** — the non-phase-shifted full bridge. We have PSFB
-  (phase-shifted) and AHB (asymmetric) but not the plain PWM bridges those are variants of.
+- **Rectifier variants** for the isolated families — center-tapped / full-bridge / current-doubler /
+  voltage-doubler (`Rectifier.hpp`), incl. current-doubler on PSFB/full-bridge (ABT #83).
+- **Flyback conduction modes** — CCM / DCM / BCM / QRM valley switching (ABT #80).
+- **LLC/SRC full-bridge primary** + above/below-resonance operation (ABT #91).
+- **PFC variants** — totem-pole, interleaved, SEPIC, Ćuk; DCM / CrM / transition modes (ABT #92).
+- **Interleaving** — FSBB (ABT #94), Vienna (ABT #93), PFC (ABT #92) via `config.phaseCount`.
+- **AHB flyback** — the asymmetric-half-bridge flyback rectifier variant of AHB (ABT #87). Not the
+  same circuit as the active-clamp flyback below (clamp cap in series with the primary, not across it).
+- **CLLC/CLLLC bidirectional** reverse power flow (ABT #85).
+
+## Remaining gaps — prioritized (each tracked in ABT)
+
+### Tier 1 — fundamental gaps
+- **Inverting buck-boost** (ABT #1433) — textbook parent of Ćuk/SEPIC/Zeta/FSBB. Cheapest add.
+- **Symmetric (hard-switched) half-bridge PWM** (ABT #1434) — split-cap two-switch isolated converter.
+- **Hard-switched full-bridge PWM** (ABT #1435) — the plain bridge PSFB and AHB are variants of.
+- **Two-switch (double-ended) flyback** (ABT #1436) — clamp diodes return leakage energy to Vin.
 
 ### Tier 2 — high-value modern variants
-- **Active-clamp flyback (ACF flyback)** — distinct from the active-clamp *forward* we have;
-  the dominant USB-PD / GaN adapter topology. Reuses the ACF clamp logic.
-- **Totem-pole (bridgeless) PFC** — modern GaN PFC; successor to the boost PFC, companion to Vienna.
-- **Full-bridge LLC** (wide-range) — complement to the half-bridge LLC.
-- **DCM / QRM (valley-switching) flyback modes** — Flyback is CCM-only today (P4 in the plan).
+- **Active-clamp flyback** (ABT #1432) — clamp switch + clamp cap across the primary (high-/low-side),
+  ZVS, complementary / non-complementary modes. Dominant USB-PD / GaN adapter topology.
+- **LCC resonant** (ABT #1438) — series-parallel tank, HV outputs where winding capacitance is Cp.
 
-### Tier 3 — secondary-side & interleaving variants (cheap, practical)
-- **Current-doubler rectifier** option for PSFB / full-bridge (standard at low-V / high-I).
-- **Interleaved boost / interleaved buck (multiphase)** — VRM-relevant; mostly a multiplicity
-  wrapper over existing stages.
-- **Flying-capacitor multilevel (FCML) buck/boost** — non-isolated multilevel (we have 3-level
-  only on the isolated/AC side: PSHB, Vienna).
+### Tier 3 — interleaving & multilevel
+- **Interleaved (multiphase) buck / boost** (ABT #1437) — reuse `config.phaseCount`.
+- **Flying-capacitor multilevel (FCML) buck/boost** (ABT #1439).
 
 ### Tier 4 — scope expansion (deliberate yes/no, not drift)
-- **DC-AC inverters** — 1-φ full-bridge, 3-φ 2-level VSI, NPC inverter. Everything today is
-  DC-DC or AC-DC (rectifier); the whole inversion quadrant is empty. Large effort; decide
-  explicitly whether "any power-converter topology" includes inverters.
+- **DC-AC inverters** (ABT #1440) — 1-φ full-bridge, 3-φ 2-level VSI, NPC. Decide explicitly whether
+  "any power-converter topology" includes inverters.
+
+### PSFB practical refinements (not new topologies)
+- ZVS-aware Lr sizing + ZVS load boundary (ABT #1428), primary clamp diodes (ABT #1429),
+  DC-blocking cap + flux-walk test (ABT #1430), current-transformer flux / reset / placement (ABT #1431).
 
 ### Suggested next three
-1. Inverting buck-boost (trivial; closes the textbook hole).
-2. Hard-switched half-bridge + full-bridge (unlocks the PWM-bridge family the phase-shift variants imply).
-3. Active-clamp flyback (highest real-world relevance).
+1. Active-clamp flyback (highest real-world relevance).
+2. Inverting buck-boost (trivial; closes the textbook hole).
+3. Hard-switched half-bridge + full-bridge (the PWM-bridge family the phase-shift variants imply).
