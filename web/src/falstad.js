@@ -643,24 +643,29 @@ const LAYOUTS = {
   ahb: {
     // Q1/Q2 half-bridge → ideal switch-node drive (ABT#262; CircuitJS1 can't converge the totem pole).
     place: {
-      // DC-block: Cb|1 = Vin bus, Cb|2 = primary-start node (net2). Steady-state V ≈ Vin·(1−D).
+      // DC-block: Cb|1 = Vin bus, Cb|2 = primary-end node (net2). Steady-state V ≈ Vin·(1−D).
       Cb:   { pins: { 1: [680, 112], 2: [680, 160] }, line: (q, c) => `c 680 112 680 160 0 ${c.C(q)} ${c.vin * (1 - c.duty)}` },
       // T1: 2-winding transformer (full-bridge / current-doubler, single secondary) OR a 3-winding 406
       // Custom Transformer (center-tapped: one primary spanning the left column + two stacked secondaries).
+      // The deck puts T1's DOTTED primary terminal (primary_start) on the switch node and primary_end on
+      // Cb|2, so the winding sees +(Vin − Vcb) while Q1 conducts. Here the switch node is the lower primary
+      // post (y 192/208) and Cb|2 the upper one, so the labels sit bottom = start, top = end, and the
+      // coupling is flipped to match: flags 4 (secondary dot at the bottom) on the `T`, a -1 primary coil
+      // on the 406. Either way V(sw − Cb|2) drives +V(secondary1_start − secondary1_end), as in the deck.
       T1: {
         pins: (q) => isCTr(q)
-          ? { primary_start: [736, 128], primary_end: [736, 208],
+          ? { primary_start: [736, 208], primary_end: [736, 128],
               secondary1_start: [816, 128], secondary1_end: [816, 160],
               secondary2_start: [816, 176], secondary2_end: [816, 208] }
-          : { primary_start: [736, 160], primary_end: [736, 192], secondary1_start: [816, 160], secondary1_end: [816, 192] },
+          : { primary_start: [736, 192], primary_end: [736, 160], secondary1_start: [816, 160], secondary1_end: [816, 192] },
         line: (q, c) => {
           const sec = 1 / resolveDim(q.req.turnsRatios[0], `${q.ref} turnsRatios[0]`)
           return isCTr(q)
-            ? `406 736 128 816 128 0 ${c.L(q)} 0.999 1:${sec},${sec} 3 0 0 0`
-            : `T 736 160 816 160 0 ${c.L(q)} ${sec} 0 0 0.999`
+            ? `406 736 128 816 128 0 ${c.L(q)} 0.999 -1:${sec},${sec} 3 0 0 0`
+            : `T 736 160 816 160 4 ${c.L(q)} ${sec} 0 0 0.999`
         },
       },
-      // Series-RC damper across the primary: Rdmp (net2 → snubber-mid) then Cdmp (snubber-mid → sw/net1).
+      // Series-RC damper across the primary: Rdmp (net2 = Cb|2 → snubber-mid) then Cdmp (snubber-mid → sw).
       Rdmp: { pins: { 1: [608, 160], 2: [608, 224] }, line: (q, c) => `r 608 160 608 224 0 ${c.R(q)}` },
       Cdmp: { pins: { 1: [608, 224], 2: [608, 272] }, line: (q, c) => `c 608 224 608 272 0 ${c.C(q)} 0` },
       // Dr1/Dr2 RECTIFY (full-bridge & center-tapped: anode on a secondary leg, cathode → rectified rail)

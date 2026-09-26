@@ -6,6 +6,7 @@
 // that are either deliberately hard to script or not part of the knob surface under test.
 import { expect } from '@playwright/test'
 import { TOPOLOGIES, knobsFor } from '../../src/topologies.js'
+import { resolveDim } from '../../src/cias.js'
 
 export { expect }
 
@@ -91,6 +92,36 @@ export async function solve(page, engine = 'analytical') {
     () => window.__bench.running === false && (window.__bench.result || window.__bench.runError),
     null, { timeout: 90_000 })
   return page.evaluate(() => window.__bench.runError)
+}
+
+// The output the solved design sizes its IDEAL (lossless) circuit to reach — the same rule as
+// scripts/checkEquivalence.mjs. A design that honours the spec's efficiency scales its turns ratio so a
+// converter losing (1 - efficiency) delivers Vout; a lossless circuit loses nothing and lands at
+// Vout * n(efficiency 1) / n(design). The engine decides which designs compensate: the form is solved
+// again at efficiency 1 (then restored and re-solved, so the page is left on the design under test),
+// and an unchanged or absent turns ratio means the design sized for Vout itself.
+export async function losslessTargetVout(page) {
+  const read = () => page.evaluate(() => {
+    const tas = window.__bench.result?.tas
+    let ratio = null
+    for (const st of tas?.topology?.stages ?? []) for (const c of st.circuit?.components ?? []) {
+      const r = c.data?.inputs?.designRequirements?.turnsRatios
+      if (ratio === null && Array.isArray(r) && r.length > 0) ratio = r[0]
+    }
+    return { ratio, vout: tas?.inputs?.designRequirements?.outputs?.[0]?.voltage, efficiency: window.__bench.form.efficiency }
+  })
+  const design = await read()
+  const vout = resolveDim(design.vout, 'design Vout')
+  if (design.ratio === null || design.efficiency === undefined || design.efficiency === 1) return vout
+  await page.evaluate(() => { window.__bench.form.efficiency = 1 })
+  const idealError = await solve(page, 'analytical')
+  if (idealError) throw new Error(`solve at efficiency 1 failed: ${idealError}`)
+  const ideal = await read()
+  await page.evaluate((e) => { window.__bench.form.efficiency = e }, design.efficiency)
+  const restoreError = await solve(page, 'analytical')
+  if (restoreError) throw new Error(`re-solve at efficiency ${design.efficiency} failed: ${restoreError}`)
+  if (ideal.ratio === null) throw new Error('the efficiency-1 design declares no turns ratio, the stated one does')
+  return vout * resolveDim(ideal.ratio, 'turns ratio at efficiency 1') / resolveDim(design.ratio, 'design turns ratio')
 }
 
 export function readSpec(page) {

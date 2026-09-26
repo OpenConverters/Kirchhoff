@@ -75,11 +75,14 @@ test.describe('T2 physics', () => {
   test('dab: phase-shift knob sets the bridge-to-bridge phase', async ({ page }) => {
     await boot(page)
     await selectTopology(page, 'dab')
+    // The bridge-to-bridge shift drops across the series inductance, so it shows as the lag of the
+    // primary winding CURRENT behind its voltage. The two winding voltages of one transformer are in
+    // phase by physics (the MAS winding-voltage convention) and cannot carry it.
     async function measurePhase() {
       const pv = await windingWaveform(page, { winding: 0, side: 'voltage' })
-      const sv = await windingWaveform(page, { winding: 1, side: 'voltage' })
-      if (!pv || !sv) return null
-      return Math.abs(m.phaseBetween(pv, sv))
+      const pi = await windingWaveform(page, { winding: 0, side: 'current' })
+      if (!pv || !pi) return null
+      return Math.abs(m.phaseBetween(pv, pi))
     }
     await setKnob(page, 'dabPhaseShiftDeg', 20)
     await run(page)

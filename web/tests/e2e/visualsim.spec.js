@@ -3,7 +3,7 @@
 // to falstad.com. The exporter re-verifies the drawn wiring against the flattened CIAS nets on
 // every call and throws on drift — so `url` existing means the netlist-consistency proof passed.
 import { test } from '@playwright/test'
-import { boot, selectTopology, solve, expect } from './helpers.js'
+import { boot, selectTopology, solve, losslessTargetVout, expect } from './helpers.js'
 
 test('flyback solve produces a CIAS-consistent falstad export', async ({ page }) => {
   await boot(page)
@@ -141,6 +141,9 @@ for (const [id, variant] of RECT3_CASES) {
     await page.evaluate((v) => { window.__bench.form.variant = v }, variant)
     const err = await solve(page, 'analytical')
     expect(err, `solve error: ${err}`).toBeNull()
+    // The visual sim is lossless: judge it against the output the design sizes a lossless circuit
+    // for (Vout, or Vout/efficiency where the turns ratio carries the efficiency), not Vout itself.
+    const target = await losslessTargetVout(page)
     const { url, vout, error } = await page.evaluate(() => {
       const vs = window.__bench.visualSim
       return { url: vs?.url, vout: vs?.vout, error: vs?.error || null }
@@ -167,7 +170,7 @@ for (const [id, variant] of RECT3_CASES) {
       for (const e of window.CircuitJS1.getElements()) { try { const v = e.getVoltageDiff(); if (Math.abs(v) < 100 && Math.abs(v) > best) best = Math.abs(v) } catch {} }
       return best
     })
-    expect(vLoad, `${id}/${variant} Vout collapsed (${vLoad} V vs design ${vout} V) — check posts/phase`).toBeGreaterThan(vout * 0.7)
-    expect(vLoad).toBeLessThan(vout * 1.3)
+    expect(vLoad, `${id}/${variant} Vout collapsed (${vLoad} V vs lossless target ${target} V, design ${vout} V) — check posts/phase`).toBeGreaterThan(target * 0.7)
+    expect(vLoad, `${id}/${variant} Vout ${vLoad} V vs lossless target ${target} V (design ${vout} V)`).toBeLessThan(target * 1.3)
   })
 }

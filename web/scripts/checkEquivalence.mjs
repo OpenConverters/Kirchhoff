@@ -11,7 +11,9 @@
 //               EXPLICITLY declares consumed by its ideal `drive` — that list is printed, never implied
 //   4 DECK      every power component appears as an instance in the generated ngspice deck
 //   5 RUNS      the in-process libngspice transient actually runs (success, points > 0)
-//   6 VOUT      the simulated output settles within tolerance of the design's own Vout
+//   6 VOUT      the simulated output settles within tolerance of the output the design sizes the
+//               lossless deck for: Vout, or Vout/efficiency where the design compensates its turns ratio
+//               for the spec's stated efficiency (see idealDeckVout)
 //
 // Rules 4-6 are what make this more than a drawing check: the deck and the transient come from the same
 // TAS the schematic was drawn from, so a divergence anywhere shows up here.
@@ -40,6 +42,31 @@ function classify(tas) {
     else power.push(c.name)
   }
   return { power, aid, body, ctrl, all: [...power, ...aid, ...body, ...ctrl] }
+}
+
+// The first turns ratio a TAS's magnetics declare (primary to first secondary), or null when none does.
+function firstTurnsRatio(tas) {
+  for (const st of tas?.topology?.stages ?? []) for (const c of st.circuit?.components ?? []) {
+    const ratios = c.data?.inputs?.designRequirements?.turnsRatios
+    if (Array.isArray(ratios) && ratios.length > 0) return resolveDim(ratios[0], `${c.name} turnsRatios[0]`)
+  }
+  return null
+}
+
+// The output the design sizes the IDEAL (lossless) deck to reach. A design that honours the spec's
+// efficiency scales its turns ratio so a converter losing (1 - efficiency) delivers Vout; the ideal deck
+// loses nothing and so lands at Vout * n(efficiency 1) / n(design) -- Vout/efficiency where n scales
+// with efficiency. The engine decides which designs compensate: the same spec is designed again at
+// efficiency 1, and an unchanged (or absent) ratio means the design sized for Vout itself.
+function idealDeckVout(topologyId, spec, tas, designVout) {
+  const nDesign = firstTurnsRatio(tas)
+  const efficiency = spec.designRequirements?.efficiency
+  if (nDesign === null || efficiency === undefined || efficiency === 1) return designVout
+  const ideal = M.design_tas_full(topologyId, JSON.stringify({ ...spec, designRequirements: { ...spec.designRequirements, efficiency: 1 } }))
+  if (ideal.startsWith('Exception')) throw new Error(`${topologyId}: design at efficiency 1 failed: ${ideal.slice(0, 120)}`)
+  const nIdeal = firstTurnsRatio(JSON.parse(ideal).tas)
+  if (nIdeal === null) throw new Error(`${topologyId}: the efficiency-1 design declares no turns ratio, the stated one does`)
+  return designVout * nIdeal / nDesign
 }
 
 const deckInstances = (deck) => deck.split('\n')
@@ -101,7 +128,8 @@ for (const t of TOPOLOGIES) {
       if (!sim.success) problems.push(`RUNS: transient failed: ${sim.error || '(no reason given)'}`)
       else if (!(sim.points > 0)) problems.push('RUNS: transient produced no points')
       else {
-        const design = resolveDim(tas.inputs.designRequirements.outputs[0].voltage, 'design Vout')
+        const designVout = resolveDim(tas.inputs.designRequirements.outputs[0].voltage, 'design Vout')
+        const design = idealDeckVout(t.id, spec, tas, designVout)
         // Measure ACROSS THE LOAD, whatever the deck calls its rails: a single-ended converter gives
         // v(vout)-0, a differential bus (vienna: RRload busP busN) gives v(busP)-v(busN). Keying on a
         // node literally named 'vout' left the three-phase decks unverifiable.
@@ -116,8 +144,9 @@ for (const t of TOPOLOGIES) {
             problems.push(`VOUT SIGN: simulated ${got.toFixed(2)} V but the design declares ${design} V — the requirement's polarity is opposite to the circuit it generates`)
           else {
             const err = Math.abs(Math.abs(got) - Math.abs(design)) / Math.abs(design)
-            if (err > VOUT_TOL) problems.push(`VOUT: simulated ${got.toFixed(3)} V vs design ${design} V (${(err * 100).toFixed(0)}% off)`)
-            else notes.push(`Vout ${got.toFixed(2)}/${design} V`)
+            const target = design === designVout ? `design ${designVout} V` : `lossless-deck target ${design.toFixed(3)} V (design ${designVout} V at efficiency ${spec.designRequirements.efficiency})`
+            if (err > VOUT_TOL) problems.push(`VOUT: simulated ${got.toFixed(3)} V vs ${target} (${(err * 100).toFixed(0)}% off)`)
+            else notes.push(`Vout ${got.toFixed(2)}/${design === designVout ? designVout : design.toFixed(2)} V`)
           }
         }
       }
