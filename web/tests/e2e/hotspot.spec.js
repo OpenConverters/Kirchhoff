@@ -419,3 +419,19 @@ test('with the schematic in both panes, the open part is marked in both', async 
     .map((g) => g.dataset.ref))
   expect(marked, 'both drawings of the same design must mark the open part').toEqual(['L1', 'L1'])
 })
+
+// A drawing mounted while a part is already open must mark it too: an embedding app that restores a
+// view (its schematic re-mounted with the pick it had) otherwise shows the part picked but unmarked.
+test('a schematic drawn after the part was opened marks it', async ({ page }) => {
+  await boot(page)
+  await selectTopology(page, 'buck')
+  expect(await solve(page, 'analytical'), 'solve error').toBeNull()
+  await page.evaluate(() => window.__bench.openPart('L1'))
+  await expect(page.locator('aside.drawer')).toBeVisible()
+
+  await page.locator('.pane-select').last().selectOption('schematic')
+  await expect(page.locator('.schematic-frame svg')).toHaveCount(2)
+  const marked = await page.evaluate(() => [...document.querySelectorAll('.schematic-frame g.sch-hot.selected')]
+    .map((g) => g.dataset.ref))
+  expect(marked, 'the drawing mounted with L1 already open must mark it').toEqual(['L1', 'L1'])
+})

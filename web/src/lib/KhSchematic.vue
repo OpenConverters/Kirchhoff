@@ -64,7 +64,7 @@ watch([() => props.selectedRef, svg], async ([ref_]) => {
   if (!el) return
   for (const g of el.querySelectorAll('g.sch-hot.selected')) g.classList.remove('selected')
   if (ref_) el.querySelector(`g.sch-hot[data-ref="${CSS.escape(ref_)}"]:not(.sch-ann)`)?.classList.add('selected')
-}, { flush: 'post' })
+}, { flush: 'post', immediate: true })
 
 watch([svg, () => props.selectable, rows], async () => {
   if (!props.selectable) return      // nothing is ever muted: leave the drawing exactly as generated
