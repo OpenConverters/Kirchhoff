@@ -235,7 +235,12 @@ json build_push_pull_tas(const PushPullDesign& d) {
     }
     json xfmr; xfmr["magnetic"] = json::object();
     xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, xfmrRatios, xfmrIso, std::nullopt, 25.0,
-        AN::excitations_processed(aopNom, "T1"), ceil);
+        AN::excitations_processed(aopNom, "T1"), ceil,
+        // lmIsMinimum: an energy-TRANSFER transformer (separate output inductor), so Lm only sets the
+        // magnetizing current -- higher is always better and nothing bounds it from above. A nominal+/-10%
+        // window makes the magnetic adviser GAP the core down onto it; minimum-only leaves it ungapped,
+        // as PSFB/AHB-forward (abt #56/#58). The derived Lm stays the floor and drives the excitations. (ABT #1484)
+        /*lmIsMinimum=*/true);
     json capd; capd["capacitor"] = json::object();      // main-rail output cap (output-filter stage)
     capd["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;
     capd["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage * 2;

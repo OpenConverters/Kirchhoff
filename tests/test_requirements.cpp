@@ -39,6 +39,7 @@
 
 #include <nlohmann/json.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 
 #include <chrono>
 #include <cmath>
@@ -530,6 +531,32 @@ void check_turns_ratio_ceiling(const std::string& name, const std::vector<bool>&
     }
 }
 
+// ABT #1484: an energy-TRANSFER transformer (separate output inductor) has no upper bound on Lm, so the
+// transformer emits magnetizingInductance MINIMUM-only (lmIsMinimum, as PSFB/AHB-forward abt #56/#58):
+// no nominal, no maximum, and the minimum IS the design's derived Lm (not Lm*(1-tol)). The transformer is
+// identified by its turnsRatios length, as in check_turns_ratio_ceiling.
+void check_lm_minimum_only(const std::string& name, size_t nTurnsRatios, double designLm) {
+    json fx = load_fixture(name);
+    json di = kirchhoff_inputs(fx.at("inputs"));
+    Built b; bool built = false;
+    for (const auto& t : topologies()) if (t.name == name) { b = t.build(di); built = true; break; }
+    REQUIRE(built);
+    std::vector<json> mags; collect_magnetics(b.tas, mags);
+    const json* xfmr = nullptr;
+    for (const auto& m : mags) {
+        const json& dr = m.at("inputs").at("designRequirements");
+        if (dr.contains("turnsRatios") && dr.at("turnsRatios").size() == nTurnsRatios) { xfmr = &m; break; }
+    }
+    INFO(name << ": transformer with " << nTurnsRatios << " turns ratios");
+    REQUIRE(xfmr != nullptr);
+    const json& lm = xfmr->at("inputs").at("designRequirements").at("magnetizingInductance");
+    INFO(name << " magnetizingInductance = " << lm.dump());
+    CHECK_FALSE(lm.contains("nominal"));
+    CHECK_FALSE(lm.contains("maximum"));
+    REQUIRE(lm.contains("minimum"));
+    CHECK(lm.at("minimum").get<double>() == Catch::Approx(designLm).epsilon(1e-12));
+}
+
 }  // namespace
 
 // One TEST_CASE per topology (each tagged) so a failure names the offending converter directly.
@@ -578,6 +605,21 @@ TEST_CASE("Weinberg marks secondary turns ratios ceiling (abt #49)", "[requireme
 }
 TEST_CASE("Push-pull marks secondary turns ratios ceiling (abt #49 reference)", "[requirements][ceiling][pushpull]") {
     check_turns_ratio_ceiling("push_pull", {false, true, true});      // reference: [1:1 2nd primary, n, n]
+}
+
+// ABT #1484: the forward-family energy-transfer transformers emit Lm MINIMUM-only, like PSFB/AHB-forward.
+// The expected floor is the design's own derived Lm (design_* on the same fixture inputs).
+TEST_CASE("Forward transformer Lm is minimum-only (ABT #1484)", "[requirements][lmfloor][forward]") {
+    const json di = kirchhoff_inputs(load_fixture("forward").at("inputs"));
+    check_lm_minimum_only("forward", 2, Kirchhoff::design_forward(di).magnetizingInductance);   // [demag, n]
+}
+TEST_CASE("Two-switch forward transformer Lm is minimum-only (ABT #1484)", "[requirements][lmfloor][tsf]") {
+    const json di = kirchhoff_inputs(load_fixture("two_switch_forward").at("inputs"));
+    check_lm_minimum_only("two_switch_forward", 1, Kirchhoff::design_two_switch_forward(di).magnetizingInductance);
+}
+TEST_CASE("Push-pull transformer Lm is minimum-only (ABT #1484)", "[requirements][lmfloor][pushpull]") {
+    const json di = kirchhoff_inputs(load_fixture("push_pull").at("inputs"));
+    check_lm_minimum_only("push_pull", 3, Kirchhoff::design_push_pull(di).magnetizingInductance);   // [1:1, n, n]
 }
 
 // Multi-point: each topology at its MKF PtP reference-design operating points (validated our way).

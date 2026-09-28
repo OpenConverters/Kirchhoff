@@ -166,7 +166,12 @@ json build_forward_tas(const ForwardDesign& d) {
     // the explicit primary too (its length is turnsRatios.size()+1). (abt #49: each duty-derived ratio {maximum})
     json xfmr; xfmr["magnetic"] = json::object();
     xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, turnsRatios, xfmrIso, std::nullopt, 25.0,
-        AN::excitations_processed(aopNom, "T1"), ceil);
+        AN::excitations_processed(aopNom, "T1"), ceil,
+        // lmIsMinimum: an energy-TRANSFER transformer (separate output inductor), so Lm only sets the
+        // magnetizing current -- higher is always better and nothing bounds it from above. A nominal+/-10%
+        // window makes the magnetic adviser GAP the core down onto it; minimum-only leaves it ungapped,
+        // as PSFB/AHB-forward (abt #56/#58). The derived Lm stays the floor and drives the excitations. (ABT #1484)
+        /*lmIsMinimum=*/true);
 
     // --- semiconductor stresses (single-switch forward, 1:1 demag reset) ---
     // Primary switch blocks Vin_max + the reflected reset voltage. With a 1:1 demag winding the core
