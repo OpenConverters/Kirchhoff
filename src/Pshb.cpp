@@ -224,7 +224,13 @@ json build_pshb_tas(const PshbDesign& d) {
                                                           d.phaseDeg, req::analytical_rectifier_drop(d.config), rect);
     xwindings = AN::excitations_processed(aopT1, "T1");
     json xfmr; xfmr["magnetic"]=json::object();
-    xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, turnsRatios, isoSides, std::nullopt, 25.0, xwindings);
+    xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, turnsRatios, isoSides, std::nullopt, 25.0, xwindings,
+        /*turnsRatioIsCeiling=*/{},
+        // lmIsMinimum: an energy-TRANSFER transformer (separate output inductor), so Lm only sets the
+        // magnetizing current -- higher is always better and nothing bounds it from above. A nominal+/-10%
+        // window makes the magnetic adviser GAP the core down onto it; minimum-only leaves it ungapped,
+        // as PSFB/AHB-forward (abt #56/#58). The derived Lm stays the floor and drives the excitations. (ABT #1484)
+        /*lmIsMinimum=*/true);
     // MAS useLeakageInductance: the series (ZVS) inductance is realised as T1's leakage — each secondary pair
     // then carries Lr (primary-referred) and the discrete Lr is folded out of the stage below.
     const bool leakageIsSeriesInductor = cfg::get_bool(d.config, "useLeakageInductance", false);

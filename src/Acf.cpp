@@ -192,7 +192,15 @@ json build_acf_tas(const AcfDesign& d) {
     // Transformer (primary + N secondaries, no demag): turnsRatios = [n0,n1,…] -> (1+N) excitations (from the solver).
     json xfmr; xfmr["magnetic"] = json::object();
     xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, turnsRatios, xfmrIso, std::nullopt, 25.0,
-        AN::excitations_processed(aopNom, "T1"), ceil);   // each duty-derived ratio {maximum} (abt #49)
+        AN::excitations_processed(aopNom, "T1"), ceil,   // each duty-derived ratio {maximum} (abt #49)
+        // lmIsMinimum: an energy-TRANSFER transformer (separate output inductor), so Lm only sets the
+        // magnetizing current -- higher is always better and nothing bounds it from above. A nominal+/-10%
+        // window makes the magnetic adviser GAP the core down onto it; minimum-only leaves it ungapped,
+        // as PSFB/AHB-forward (abt #56/#58). The derived Lm stays the floor and drives the excitations. (ABT #1484)
+        // Here Lm is sized for ZVS, Lm = Vin_min*n/(Fs*Io) (design_acf): the floor keeps that magnetizing
+        // current available; a larger Lm trades ZVS margin for lower magnetizing current, and Alf chose
+        // minimum-only (no upper bound) for the ACF too.
+        /*lmIsMinimum=*/true);
 
     json cc; cc["capacitor"] = json::object();   // active-clamp capacitor
     cc["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.clampCapacitance;

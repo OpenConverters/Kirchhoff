@@ -621,6 +621,17 @@ TEST_CASE("Push-pull transformer Lm is minimum-only (ABT #1484)", "[requirements
     const json di = kirchhoff_inputs(load_fixture("push_pull").at("inputs"));
     check_lm_minimum_only("push_pull", 3, Kirchhoff::design_push_pull(di).magnetizingInductance);   // [1:1, n, n]
 }
+TEST_CASE("PSHB transformer Lm is minimum-only (ABT #1484)", "[requirements][lmfloor][pshb]") {
+    const json di = kirchhoff_inputs(load_fixture("pshb").at("inputs"));
+    const auto dp = Kirchhoff::design_pshb(di);
+    // [n] per secondary winding: 1 (full bridge / current doubler) or 2 (center-tapped halves)
+    check_lm_minimum_only("pshb", static_cast<size_t>(Kirchhoff::rectifier_windings_per_output(dp.rectifierType)),
+                          dp.magnetizingInductance);
+}
+TEST_CASE("ACF transformer Lm is minimum-only (ABT #1484)", "[requirements][lmfloor][acf]") {
+    const json di = kirchhoff_inputs(load_fixture("acf").at("inputs"));
+    check_lm_minimum_only("acf", 1, Kirchhoff::design_acf(di).magnetizingInductance);   // [n secondary]
+}
 
 // Multi-point: each topology at its MKF PtP reference-design operating points (validated our way).
 TEST_CASE("Buck PtP reference designs deliver spec", "[requirements][ptp][buck]")           { check_topo_points("buck"); }
