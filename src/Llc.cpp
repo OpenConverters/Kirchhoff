@@ -8,6 +8,9 @@
 #include <algorithm>
 #include <vector>
 #include <stdexcept>
+#include <sstream>
+#include <string>
+#include <utility>
 
 namespace Kirchhoff {
 using nlohmann::json;
@@ -23,6 +26,22 @@ constexpr double kFmin           = 80e3;
 constexpr double kFmax           = 200e3;
 constexpr double kSwitchDuty     = 0.45;  // ~50% minus dead time (MKF on-time 4.5µs of 10µs)
 } // namespace
+
+// The V/I a rail presents at its transformer WINDING terminal: the doublers reflect the winding through their
+// output stage (VD: Vo/2 and 2·Iout; CD: Vo/cdF and cdF·Iout); FB/CT are the output itself. The FHA solve and
+// the embedded analytical excitations both use it, so they see the same reflected load.
+// Numbers in the operating-frequency messages: 6 significant digits (std::to_string prints 1.294e-07 F as 0.000000).
+static std::string num(double v) { std::ostringstream o; o << v; return o.str(); }
+
+static std::pair<double, double> llc_winding_terminal(const LlcDesign& d, const LlcOutputLeg& leg) {
+    const double iout = leg.power / leg.voltage;
+    if (d.rectifierType == RectifierType::VoltageDoubler) return {leg.voltage / 2.0, 2.0 * iout};
+    if (d.rectifierType == RectifierType::CurrentDoubler) {
+        const double cdF = cfg::get(d.config, "cdOutputFactor", 0.465);
+        return {leg.voltage / cdF, cdF * iout};
+    }
+    return {leg.voltage, iout};
+}
 
 LlcDesign design_llc(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
@@ -91,7 +110,20 @@ LlcDesign design_llc(const json& tasInputs) {
     // Lr = Zr/(2π·fr), Cr = 1/(2π·fr·Zr), Lm = Ln·Lr.   (MKF Llc::process_design_requirements)
     const double Rload = Vo / Iout;
     const double Rac = (8.0 * n * n) / (M_PI * M_PI) * Rload;
-    const double fr = std::sqrt(cfg::get(d.config, "resonantBandMin", kFmin) * cfg::get(d.config, "resonantBandMax", kFmax));
+    const double bandMin = cfg::get(d.config, "resonantBandMin", kFmin);
+    const double bandMax = cfg::get(d.config, "resonantBandMax", kFmax);
+    if (!(bandMin > 0.0) || !(bandMax >= bandMin))
+        throw std::invalid_argument("design_llc: the switching-frequency band [" + std::to_string(bandMin) + ", " +
+                                    std::to_string(bandMax) + "] Hz is not a band (need 0 < min <= max)");
+    // Tank resonance: the caller's resonant frequency when it states one (the wizard's "Resonant frequency",
+    // ABT #1503 — it was never forwarded, so the tank always resonated at the band's geometric mean), else the
+    // geometric mean of the band.
+    double fr = std::sqrt(bandMin * bandMax);
+    if (d.config.contains("resonantFrequency")) {
+        fr = cfg::get(d.config, "resonantFrequency", fr);
+        if (!(fr > 0.0))
+            throw std::invalid_argument("design_llc: config.resonantFrequency must be > 0; got " + std::to_string(fr));
+    }
     const double Zr = cfg::get(d.config, "qualityFactor", kQualityFactor) * Rac;
     d.resonantFrequency = fr;
     // Driven at the operating point's switching frequency (MAS operating points state it), that frequency must
@@ -200,7 +232,100 @@ LlcDesign design_llc(const json& tasInputs) {
         d.magnetizingInductance =
             cfg::get(d.config, "inductanceRatio", kInductanceRatio) * d.resonantInductance;
     }
+
+    // ── Operating frequency (ABT #1503) ──
+    // The tank gain the main rail needs is the pinned ratio over the unity-gain ratio n computed above from the
+    // same rectifier-variant formula: M = n_pinned·(Vout+Vd_total)/(η·k_bridge·Vin·c_variant). An engine-sized
+    // ratio IS the unity-gain ratio, so it runs at fr (M(fr) = 1 for any load). A PINNED ratio generally is not:
+    // driving it at fr anyway clamped the transformer to ±n·Vout while the tank current came from a drive that
+    // delivers a different voltage — n=3, full bridge, 425 V -> 90 V gave a primary v·i of 5.2 kW against a
+    // 3.3 kW output. The LLC regulates by frequency, so solve the frequency in the band where the FHA gain meets
+    // the requirement, and refuse (throw) when none does.
+    d.requiredGain = d.turnsRatio / n;
+    const bool driveAtFsw = cfg::get_bool(d.config, "driveAtSwitchingFrequency", false);
+    if (driveAtFsw) {
+        // Explicit open-loop request: drive at the requested frequency and let the gain fall where it falls.
+        d.operatingFrequency = d.switchingFrequency;
+    } else if (req::provided_turns_ratio(dr, 0)) {
+        double reflectedConductance = 0.0;
+        for (const auto& leg : d.outputs) {
+            const auto [vE, iE] = llc_winding_terminal(d, leg);
+            reflectedConductance += (M_PI * M_PI) / (8.0 * leg.turnsRatio * leg.turnsRatio * (vE / iE));
+        }
+        const double Rac = 1.0 / reflectedConductance;
+        try {
+            d.operatingFrequency = solve_llc_operating_frequency(d.requiredGain, bandMin, bandMax,
+                                                                 d.magnetizingInductance, d.resonantInductance,
+                                                                 d.resonantCapacitance, Rac);
+        } catch (const std::invalid_argument& e) {
+            throw std::invalid_argument(
+                "design_llc: the pinned turns ratio " + num(d.turnsRatio) + " cannot deliver " +
+                num(Vo) + " V from " + num(Vin) + " V (" +
+                (d.fullBridge ? "full" : "half") + "-bridge primary): " + e.what() +
+                ". A turns ratio of " + num(n) + " gives the output at the tank resonance (" +
+                num(fr) + " Hz)");
+        }
+    } else {
+        d.operatingFrequency = fr;
+    }
     return d;
+}
+
+double solve_llc_operating_frequency(double requiredGain, double fmin, double fmax, double magnetizingInductance,
+                                     double seriesResonantInductance, double resonantCapacitance,
+                                     double reflectedLoadResistance) {
+    namespace AN = Kirchhoff::analytical;
+    if (!(requiredGain > 0.0))
+        throw std::invalid_argument("solve_llc_operating_frequency: required gain must be > 0");
+    if (!(fmin > 0.0) || !(fmax >= fmin))
+        throw std::invalid_argument("solve_llc_operating_frequency: band must satisfy 0 < fmin <= fmax");
+    auto gainAt = [&](double f) {
+        return AN::llc_fha_tank(f, magnetizingInductance, seriesResonantInductance, resonantCapacitance,
+                                reflectedLoadResistance).gain();
+    };
+    // Scan the band log-spaced (the gain curve has at most one peak, below resonance), keep the reachable range,
+    // then bisect the HIGHEST bracket: the right-hand side of the peak is the inductive (ZVS) branch the LLC is
+    // regulated on.
+    constexpr int kSamples = 2000;
+    std::vector<double> f(kSamples + 1), err(kSamples + 1);
+    double gMin = std::numeric_limits<double>::max(), gMax = std::numeric_limits<double>::lowest();
+    for (int i = 0; i <= kSamples; ++i) {
+        f[i] = fmin * std::pow(fmax / fmin, static_cast<double>(i) / kSamples);
+        const double g = gainAt(f[i]);
+        gMin = std::min(gMin, g);
+        gMax = std::max(gMax, g);
+        err[i] = g - requiredGain;
+    }
+    bool found = false;
+    double root = 0.0;
+    for (int i = kSamples; i >= 0 && !found; --i) {
+        if (err[i] == 0.0) { root = f[i]; found = true; break; }
+        if (i == 0 || (err[i - 1] < 0.0) == (err[i] < 0.0)) continue;
+        double lo = f[i - 1], hi = f[i], eLo = err[i - 1];
+        for (int it = 0; it < 200 && (hi - lo) > 1e-9 * hi; ++it) {
+            const double mid = 0.5 * (lo + hi);
+            const double eMid = gainAt(mid) - requiredGain;
+            if ((eMid < 0.0) == (eLo < 0.0)) { lo = mid; eLo = eMid; } else { hi = mid; }
+        }
+        root = 0.5 * (lo + hi);
+        found = true;
+    }
+    if (!found)
+        throw std::invalid_argument(
+            "it needs a tank gain of " + num(requiredGain) + ", but the FHA gain over the switching band [" +
+            num(fmin) + ", " + num(fmax) + "] Hz only reaches [" + num(gMin) + ", " +
+            num(gMax) + "] (Lm " + num(magnetizingInductance) + " H, Lr " +
+            num(seriesResonantInductance) + " H, Cr " + num(resonantCapacitance) +
+            " F, reflected load " + num(reflectedLoadResistance) + " ohm); no switching frequency in the "
+            "band delivers the output");
+    const auto tank = AN::llc_fha_tank(root, magnetizingInductance, seriesResonantInductance, resonantCapacitance,
+                                       reflectedLoadResistance);
+    if (!(tank.zinIm > 0.0))
+        throw std::invalid_argument(
+            "the tank gain of " + num(requiredGain) + " is only reached at " + num(root) +
+            " Hz, left of the gain peak where the tank input is capacitive (no ZVS, and outside the FHA regulation "
+            "branch)");
+    return root;
 }
 
 json build_llc_tas(const LlcDesign& d) {
@@ -237,8 +362,9 @@ json build_llc_tas(const LlcDesign& d) {
     // improvement over MKF's off-resonance rectifier-test config). config.driveAtSwitchingFrequency=true
     // instead drives at the REQUESTED switchingFrequency, so above/below-resonance operating points are
     // produced — the embedded FHA gain, the tank/switch stresses and the gate stimulus all follow it (ABT #91).
-    const bool driveAtFsw = cfg::get_bool(d.config, "driveAtSwitchingFrequency", false);
-    const double fr   = driveAtFsw ? d.switchingFrequency : d.resonantFrequency, Tfr = 1.0 / fr;
+    // The operating frequency design_llc settled (fr, the FHA-solved frequency for a pinned ratio, or the
+    // requested switchingFrequency under driveAtSwitchingFrequency) — ABT #1503.
+    const double fr   = d.operatingFrequency, Tfr = 1.0 / fr;
     const double Vdrive = d.fullBridge ? d.inputVoltage : d.inputVoltage / 2.0;   // bridge-leg amplitude
     const double Pin  = d.outputPower / d.efficiency;
     const double Iout = d.outputPower / d.outputVoltage;
@@ -317,13 +443,7 @@ json build_llc_tas(const LlcDesign& d) {
     // solve the embedded tank/windings at 2×/~0.47× the real reflected operating point. FB/CT feed directly.
     std::vector<double> vEmbeds, iEmbeds, nEmbeds;
     for (const auto& leg : d.outputs) {
-        const double iout_i = leg.power / leg.voltage;
-        double vE = leg.voltage, iE = iout_i;
-        if (d.rectifierType == RectifierType::VoltageDoubler) { vE = leg.voltage / 2.0; iE = 2.0 * iout_i; }
-        else if (d.rectifierType == RectifierType::CurrentDoubler) {
-            const double cdF = cfg::get(d.config, "cdOutputFactor", 0.465);
-            vE = leg.voltage / cdF; iE = cdF * iout_i;
-        }
+        const auto [vE, iE] = llc_winding_terminal(d, leg);
         vEmbeds.push_back(vE); iEmbeds.push_back(iE); nEmbeds.push_back(leg.turnsRatio);
     }
     const MAS::OperatingPoint aopT1 = AN::analytical_llc(d.inputVoltage, vEmbeds, iEmbeds, nEmbeds, fr,
@@ -369,7 +489,7 @@ json build_llc_tas(const LlcDesign& d) {
         dr["resistance"]["nominal"] = cfg::snubber_res(d.config);
         // RC-snubber R dissipates the cap energy each cycle: P = C*V^2*f (V = clamped reverse swing).
         const double vClamp = d.outputVoltage * 3.0;
-        dr["powerRating"] = cfg::rectifier_snubber_cap(d.config) * vClamp * vClamp * d.switchingFrequency;
+        dr["powerRating"] = cfg::rectifier_snubber_cap(d.config) * vClamp * vClamp * fr;
         dr["role"] = "snubber"; cfg::mark_numerical_aid(c); return c; };   // RC-snubber R paired with snubC — tagged (ABT #96)
     // Cap-divider BALANCING resistors. The bus-split midpoint msplit (Chi/Clo junction, = Vbus/2)
     // otherwise has NO DC path — only the two caps (open at DC) and the transformer primary inductor —
@@ -670,7 +790,9 @@ json build_llc_tas(const LlcDesign& d) {
     dreq["efficiency"] = d.efficiency;
     dreq["inputType"] = "dc";
     dreq["inputVoltage"] = {{"minimum", d.inputVoltageMin}, {"nominal", d.inputVoltage}, {"maximum", d.inputVoltageMax}};
-    dreq["switchingFrequency"]["nominal"] = d.switchingFrequency;
+    // The frequency the converter actually switches at, so the diagnostics report the operating point that was
+    // computed rather than the request (they printed the requested 180 kHz while the deck ran at 173 kHz).
+    dreq["switchingFrequency"]["nominal"] = d.operatingFrequency;
     // Per-rail designRequirements.outputs + operatingPoints.outputs (main = "out"/Vout; extras "out2"/Vout2…).
     // Single-output emits exactly {out} — byte-identical to the original.
     dreq["outputs"] = json::array();

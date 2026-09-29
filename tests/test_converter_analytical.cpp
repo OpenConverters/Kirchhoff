@@ -1430,3 +1430,115 @@ TEST_CASE("design_push_pull: pinned turns ratio feasibility and duty agreement",
     clash["config"]["maxDutyCycle"] = 0.45;
     CHECK_THROWS_WITH(Kirchhoff::design_push_pull(clash), Catch::Matchers::ContainsSubstring("disagree"));
 }
+
+// ─── ABT #1503: LLC with a pinned turns ratio regulates by frequency, or refuses ─────────────────────────────
+// A user's "I know the design" LLC: Q 0.3, Ln 4.8, n 3, Lm 29 uH, integrated Lr, full-bridge rectifier,
+// full-bridge primary, band 100-300 kHz, fr 180 kHz, 425 V -> 90 V / 3.3 kW, efficiency 97 %. The engine drove
+// every pinned-ratio LLC at fr, where the gain is 1 whatever the ratio: the transformer was clamped to ±n·Vout
+// while the tank current came from a drive that delivers n=3 -> 142 V, so the primary v·i (5.2 kW) and the
+// secondary (3.3 kW) described two different converters. It must now either solve the frequency at which the
+// FHA gain meets the output, or throw.
+#include "Llc.hpp"
+#include "ComponentRequirements.hpp"
+
+namespace {
+nlohmann::json llc_1503_spec(double turnsRatio, const char* bridgeType) {
+    nlohmann::json s;
+    auto& dr = s["designRequirements"];
+    dr["inputType"] = "dc";
+    dr["inputVoltage"] = {{"nominal", 425.0}, {"minimum", 350.0}};
+    dr["switchingFrequency"] = {{"nominal", 180e3}};
+    dr["outputs"] = nlohmann::json::array({{{"name", "out"}, {"voltage", {{"nominal", 90.0}}}, {"regulation", "voltage"}}});
+    dr["efficiency"] = 0.97;
+    dr["magnetizingInductance"] = {{"nominal", 29e-6}};
+    dr["turnsRatios"] = nlohmann::json::array({{{"nominal", turnsRatio}}});
+    s["operatingPoints"] = nlohmann::json::array({{{"name", "full_load"}, {"inputVoltage", 425.0},
+        {"ambientTemperature", 25.0}, {"outputs", nlohmann::json::array({{{"name", "out"}, {"power", 3300.0}}})}}});
+    s["config"] = {{"qualityFactor", 0.3}, {"inductanceRatio", 4.8}, {"resonantBandMin", 100e3},
+                   {"resonantBandMax", 300e3}, {"resonantFrequency", 180e3}, {"rectifierType", "fullBridge"},
+                   {"bridgeType", bridgeType}, {"integratedResonantInductor", true}};
+    return s;
+}
+// Cycle-average of v·i and rms of i over one winding's waveforms (both sampled on the same time grid).
+struct WindingPower { double power, currentRms; };
+WindingPower winding_power(const nlohmann::json& exc) {
+    const auto& t = exc.at("current").at("waveform").at("time");
+    const auto& i = exc.at("current").at("waveform").at("data");
+    const auto& v = exc.at("voltage").at("waveform").at("data");
+    REQUIRE(t.size() == i.size());
+    REQUIRE(v.size() == i.size());
+    double p = 0.0, i2 = 0.0;
+    for (size_t k = 1; k < t.size(); ++k) {
+        const double dt = t[k].get<double>() - t[k - 1].get<double>();
+        p  += 0.5 * dt * (v[k].get<double>() * i[k].get<double>() + v[k - 1].get<double>() * i[k - 1].get<double>());
+        i2 += 0.5 * dt * (i[k].get<double>() * i[k].get<double>() + i[k - 1].get<double>() * i[k - 1].get<double>());
+    }
+    const double T = t.back().get<double>() - t.front().get<double>();
+    return {p / T, std::sqrt(i2 / T)};
+}
+}  // namespace
+
+TEST_CASE("LLC pinned n=3, full bridge, 425 V -> 90 V: no frequency in the band reaches it, so it throws (ABT #1503)",
+          "[analytical][llc][abt1503]") {
+    // Needed gain n·(Vout+2Vd)/(η·Vin) ≈ 0.67; the tank reaches only ≈[0.83, 1.40] over 100–300 kHz.
+    const std::string out = Kirchhoff::api::process_converter("llc", llc_1503_spec(3.0, "fullBridge").dump(), "analytical");
+    INFO(out.substr(0, 600));
+    REQUIRE(out.rfind("Exception:", 0) == 0);
+    CHECK_THAT(out, Catch::Matchers::ContainsSubstring("pinned turns ratio 3 cannot deliver 90 V from 425 V"));
+    CHECK_THAT(out, Catch::Matchers::ContainsSubstring("needs a tank gain of 0.668"));
+    CHECK_THAT(out, Catch::Matchers::ContainsSubstring("only reaches [0.830"));
+    CHECK_THAT(out, Catch::Matchers::ContainsSubstring("[100000, 300000] Hz"));
+}
+
+TEST_CASE("LLC pinned turns ratio: the operating point is solved in the band, meets Vout and balances power (ABT #1503)",
+          "[analytical][llc][abt1503]") {
+    // Two reachable variants of the user's design: the same n=3 behind a HALF-bridge primary (needs M≈1.34,
+    // below resonance) and n=4 behind the full bridge (needs M≈0.89, above resonance).
+    struct Case { double n; const char* bridge; double k; bool belowResonance; };
+    for (const Case c : {Case{3.0, "halfBridge", 0.5, true}, Case{4.0, "fullBridge", 1.0, false}}) {
+        DYNAMIC_SECTION("n=" << c.n << " " << c.bridge) {
+            const nlohmann::json spec = llc_1503_spec(c.n, c.bridge);
+            const Kirchhoff::LlcDesign d = Kirchhoff::design_llc(spec);
+            const double Vin = 425.0, Vout = 90.0, Pout = 3300.0, eta = 0.97, Iout = Pout / Vout;
+            const double Vd = Kirchhoff::req::rectifier_drop(spec.at("config"), Iout);
+
+            // The tank resonates at the requested 180 kHz: Lr = Lm/Ln, Cr = 1/((2π·180k)²·Lr) = 129.4 nF.
+            CHECK(d.resonantFrequency == Catch::Approx(180e3));
+            CHECK(d.resonantCapacitance == Catch::Approx(129.4e-9).epsilon(0.002));
+            // The operating frequency is inside the band, on the correct side of resonance ...
+            CHECK(d.operatingFrequency >= 100e3);
+            CHECK(d.operatingFrequency <= 300e3);
+            CHECK((d.operatingFrequency < d.resonantFrequency) == c.belowResonance);
+            // ... and the FHA gain there delivers the output: Vout = M·η·k·Vin/n − 2·Vd.
+            const double Rac = 8.0 / (M_PI * M_PI) * c.n * c.n * Vout / Iout;
+            const double M = Kirchhoff::analytical::llc_fha_tank(d.operatingFrequency, d.magnetizingInductance,
+                                                                 d.resonantInductance, d.resonantCapacitance, Rac).gain();
+            CHECK(M * eta * c.k * Vin / c.n - 2.0 * Vd == Catch::Approx(Vout).epsilon(0.001));
+
+            const std::string raw = Kirchhoff::api::process_converter("llc", spec.dump(), "analytical");
+            INFO(raw.substr(0, 400));
+            REQUIRE(raw.rfind("Exception:", 0) != 0);
+            const nlohmann::json out = nlohmann::json::parse(raw);
+            // The diagnostics report the frequency the converter runs at, and the 180 kHz tank.
+            CHECK(out.at("diagnostics").at("switchingFrequency").get<double>() == Catch::Approx(d.operatingFrequency));
+            CHECK(out.at("diagnostics").at("computed").at("resonantCapacitance").get<double>() ==
+                  Catch::Approx(129.4e-9).epsilon(0.002));
+
+            const auto& exc = out.at("operatingPoint").at("excitationsPerWinding");
+            REQUIRE(exc.size() == 2);   // primary + one full-bridge secondary
+            const WindingPower pri = winding_power(exc.at(0));
+            const WindingPower sec = winding_power(exc.at(1));
+            INFO("fsw " << d.operatingFrequency << " Hz, P_pri " << pri.power << " W, P_sec " << sec.power
+                 << " W, I_sec,rms " << sec.currentRms << " A, Vd " << Vd << " V");
+            // Secondary: the rectifier delivers Pout (its current is scaled to Iout; the residual is the part of
+            // the reflected current that FHA puts outside the voltage's polarity — measured ≈1 %).
+            CHECK(sec.power == Catch::Approx(Pout).epsilon(0.02));
+            // Primary: the transformer carries Pout/η plus the rectifier conduction loss (the gain was solved
+            // for Vout + 2·Vd), i.e. Pout/η·(1 + 2·Vd/Vout); FHA's sinusoidal current against the square winding
+            // voltage and the triangular magnetizing current leave ≈1 % — 2 % tolerance.
+            CHECK(pri.power == Catch::Approx(Pout / eta * (1.0 + 2.0 * Vd / Vout)).epsilon(0.02));
+            // A full-bridge rectifier's winding current is ≈ the half-sine family: rms = π/(2√2)·Iout ≈ 40.7 A.
+            CHECK(sec.currentRms == Catch::Approx(M_PI / (2.0 * std::sqrt(2.0)) * Iout).epsilon(0.03));
+        }
+    }
+}

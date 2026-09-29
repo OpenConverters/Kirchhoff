@@ -44,7 +44,12 @@ struct LlcDesign {
     double resonantInductance;        // Lr
     double resonantCapacitance;       // Cr
     double magnetizingInductance;     // Lm = Ln·Lr
-    double resonantFrequency;         // fr = √(fmin·fmax)
+    double resonantFrequency;         // fr = config.resonantFrequency, else √(fmin·fmax)
+    double operatingFrequency;        // the frequency the bridge is driven at (the operating point's frequency):
+                                      // fr for an engine-sized turns ratio (unity gain there), the FHA-solved
+                                      // frequency for a pinned turns ratio, or switchingFrequency when
+                                      // config.driveAtSwitchingFrequency asks for an open-loop point (ABT #1503)
+    double requiredGain;              // tank gain the main rail needs: n·(Vout+Vd_total)/(η·k_bridge·Vin)
     double switchDuty;                // per-switch on-fraction (~0.45, complementary with dead time)
     double loadResistance;
     double outputCapacitance;
@@ -65,6 +70,15 @@ struct LlcDesign {
  * @return A design struct (turns ratio, Lr, Cr, Lm, resonant frequency, load, output cap).
  */
 LlcDesign design_llc(const nlohmann::json& tasInputs);
+/**
+ * @brief Find the switching frequency in [fmin, fmax] at which the LLC tank's FHA gain equals requiredGain.
+ *        Among several solutions the highest frequency is taken (the inductive, ZVS side of the gain peak).
+ * @throws std::invalid_argument naming the required gain and the gain range the band reaches when no
+ *         frequency in the band gives it, or when the only solution leaves the tank input capacitive.
+ */
+double solve_llc_operating_frequency(double requiredGain, double fmin, double fmax, double magnetizingInductance,
+                                     double seriesResonantInductance, double resonantCapacitance,
+                                     double reflectedLoadResistance);
 /**
  * @brief Assemble an LLC design into a full TAS topology document.
  * @param d A design returned by design_llc().

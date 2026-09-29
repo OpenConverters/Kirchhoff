@@ -2363,6 +2363,28 @@ MAS::OperatingPoint analytical_src(double inputVoltage,
 // (Lm is clamped to +/-Vo = +/-n*Vout by the secondary rectifier); the secondary carries n*(ILs - ILm)
 // rectified. FHA is NOT singular at fr (Ls-Cr cancel, Zin -> Lm||Rac), so it is valid at/above/below fr.
 // ─────────────────────────────────────────────────────────────────────────────
+double LlcFhaTank::gain() const {
+    return std::hypot(zpRe, zpIm) / std::hypot(zinRe, zinIm);
+}
+
+LlcFhaTank llc_fha_tank(double frequency, double magnetizingInductance, double seriesResonantInductance,
+                        double resonantCapacitance, double reflectedLoadResistance) {
+    if (!(frequency > 0) || !(magnetizingInductance > 0) || !(seriesResonantInductance > 0) ||
+        !(resonantCapacitance > 0) || !(reflectedLoadResistance > 0))
+        throw std::invalid_argument("llc_fha_tank: frequency, Lm, Ls, Cr and Rac must all be > 0");
+    const double w = 2.0 * M_PI * frequency;
+    const double XLs = w * seriesResonantInductance, XCr = 1.0 / (w * resonantCapacitance);
+    const double XLm = w * magnetizingInductance, Rac = reflectedLoadResistance;
+    // Lm || Rac (complex): Zp = (jXLm.Rac)/(Rac + jXLm) = Rac.XLm^2/D + j.Rac^2.XLm/D,  D = Rac^2 + XLm^2.
+    const double D = Rac * Rac + XLm * XLm;
+    LlcFhaTank t{};
+    t.zpRe = Rac * XLm * XLm / D;
+    t.zpIm = Rac * Rac * XLm / D;
+    t.zinRe = t.zpRe;
+    t.zinIm = (XLs - XCr) + t.zpIm;
+    return t;
+}
+
 MAS::OperatingPoint analytical_llc(double inputVoltage,
                                    const std::vector<double>& outputVoltages,
                                    const std::vector<double>& outputCurrents,
@@ -2393,19 +2415,24 @@ MAS::OperatingPoint analytical_llc(double inputVoltage,
     const double Vout0 = outputVoltages[0], Iout0 = outputCurrents[0];
     if (Vout0 <= 0 || Iout0 <= 0) throw std::invalid_argument("analytical_llc: main output V/I must be > 0");
     const double Vo = n_main * Vout0;                                    // reflected output (magnetizing clamp)
-    const double Rload = Vout0 / Iout0;
-    const double Rac = (8.0 / (M_PI * M_PI)) * n_main * n_main * Rload;   // FHA AC-equivalent load
+    // FHA AC-equivalent load: every rail reflects Rac_i = (8/pi^2)*n_i^2*Rload_i to the primary and the tank sees
+    // them in PARALLEL (single output: Rac = (8/pi^2)*n^2*Vout/Iout).
+    double reflectedConductance = 0.0;
+    for (size_t i = 0; i < outputVoltages.size(); ++i) {
+        if (!(outputVoltages[i] > 0) || !(outputCurrents[i] > 0) || !(turnsRatios[i] > 0)) continue;
+        const double rac_i = (8.0 / (M_PI * M_PI)) * turnsRatios[i] * turnsRatios[i] * outputVoltages[i] / outputCurrents[i];
+        reflectedConductance += 1.0 / rac_i;
+    }
+    const double Rac = 1.0 / reflectedConductance;
 
     const double w = 2.0 * M_PI * fsw;
-    const double XLs = w * Ls, XCr = 1.0 / (w * Cr), XLm = w * Lm;
-    // Lm || Rac (complex): Zp = (jXLm.Rac)/(Rac + jXLm) = Rac.XLm^2/D + j.Rac^2.XLm/D,  D = Rac^2 + XLm^2.
-    const double D = Rac * Rac + XLm * XLm;
-    const double Zp_re = Rac * XLm * XLm / D;
-    const double Zp_im = Rac * Rac * XLm / D;
-    const double Zin_re = Zp_re;
-    const double Zin_im = (XLs - XCr) + Zp_im;
-    const double Zin_mag = std::sqrt(Zin_re * Zin_re + Zin_im * Zin_im);
-    const double phi = std::atan2(Zin_im, Zin_re);
+    const LlcFhaTank tank = llc_fha_tank(fsw, Lm, Ls, Cr, Rac);
+    const double Zin_mag = std::hypot(tank.zinRe, tank.zinIm);
+    // The winding voltage (+/-n*Vout square) is in phase with the voltage across Lm || Rac, which leads the tank
+    // current by arg(Zp). (arg(Zin) is the lag behind the BRIDGE square; the two coincide only at resonance.
+    // Using arg(Zin) off resonance put the winding voltage out of phase with the current it transfers: the
+    // primary v*i no longer matched the delivered power — ABT #1503.)
+    const double phi = std::atan2(tank.zpIm, tank.zpRe);
 
     const double Vin_fund_pk = (4.0 / M_PI) * k_bridge * inputVoltage;
     const double ILs_pk = (Zin_mag > 0) ? Vin_fund_pk / Zin_mag : 0.0;

@@ -422,20 +422,30 @@ MAS::OperatingPoint analytical_src(double inputVoltage,
                                    double bridgeVoltageFactor = 1.0,
                                    SrcRectifier rectifier = SrcRectifier::FULL_BRIDGE);
 
-// LLC resonant converter via the Runo Nielsen TIME-DOMAIN analysis (TDA), NOT FHA. A half-bridge drives a
-// series Lr-Cr tank in series with the transformer magnetizing inductance Lm; the tank state
-// x = [I_Ls, I_Lm, V_Cr] evolves through three linear sub-states (A_POS / A_NEG secondary-conducting,
-// B_FW freewheeling) whose event-driven closed-form segments compose one half cycle. Steady state is the
-// half-wave antisymmetry x(Thalf) = −x(0), enforced by a multi-start damped-Newton solve (with LIP
-// singularity perturbation + physical-bound sanity fallback) on the 3-vector residual. Pushes Primary
-// (tank current I_Ls + topology-dependent voltage: VLm for a separate Lr, or Vi−VCr for an integrated Lr)
-// + per output either two center-tapped "Secondary i Half {1,2}" half-windings or one full-bridge
-// "Secondary i". Secondary current = (I_Ls − I_Lm)·share·n (the transferred diode current). Ported from
-// MKF converter_models/Llc.cpp (LlcStateVector/propagate_substate/find_next_event/propagate_half_cycle/
-// solve_steady_state/sample_segments :315-783, process_operating_point_for_input_voltage :786). MKF's
-// ZVS/LIP diagnostics and the VOLTAGE_DOUBLER/CURRENT_DOUBLER rectifiers (no SrcRectifier equivalent) are
-// omitted; the tank solver is transcribed exactly. `bridgeVoltageFactor` k_bridge = 0.5 (half bridge,
-// the LLC convention) or 1.0 (full bridge). Throws on non-positive fsw / Lm / Ls / Cr / turns ratio.
+// The LLC tank under the First-Harmonic Approximation — the ONE model both the operating-frequency solve
+// (design_llc) and the waveform solver (analytical_llc) use. A series Ls-Cr branch feeds Lm in parallel with
+// the reflected AC load Rac = (8/pi^2)*n^2*Rload:
+//   Zp = (j*w*Lm) || Rac,   Zin = j*(w*Ls - 1/(w*Cr)) + Zp,   gain M = |Zp| / |Zin|
+// M is the ratio of the fundamental across the transformer (Lm || Rac) to the fundamental of the bridge
+// square. At the series resonance w = 1/sqrt(Ls*Cr) the series branch cancels and M = 1 for every load.
+struct LlcFhaTank {
+    double zpRe, zpIm;     // Zp = Lm || Rac
+    double zinRe, zinIm;   // Zin = j(XLs - XCr) + Zp
+    double gain() const;   // |Zp| / |Zin|
+};
+LlcFhaTank llc_fha_tank(double frequency, double magnetizingInductance, double seriesResonantInductance,
+                        double resonantCapacitance, double reflectedLoadResistance);
+
+// LLC resonant converter via the load-aware First-Harmonic Approximation (see LlcFhaTank). The primary
+// winding carries the sinusoidal tank current ILs = (4/pi)*k_bridge*Vin/|Zin|; the transformer winding voltage
+// is the +/-n*Vout square clamped by the rectifier, in phase with the voltage across Lm || Rac (so the tank
+// current lags it by arg(Zp), NOT by arg(Zin) — the bridge square also carries the Ls-Cr drop). The
+// magnetizing current is the Lm triangle; the secondary carries n*(ILs - ILm), scaled so its rectified mean is
+// the DC output current. Pushes Primary + per output either two center-tapped "Secondary i Half {1,2}"
+// half-windings or one full-bridge "Secondary i". The reflected load is the parallel combination of every
+// rail's Rac_i. The caller is responsible for choosing a switchingFrequency at which the tank gain actually
+// delivers the output (design_llc solves it); this function does not check it. `bridgeVoltageFactor` k_bridge
+// = 0.5 (half bridge) or 1.0 (full bridge). Throws on non-positive fsw / Lm / Ls / Cr / turns ratio.
 MAS::OperatingPoint analytical_llc(double inputVoltage,
                                    const std::vector<double>& outputVoltages,
                                    const std::vector<double>& outputCurrents,
