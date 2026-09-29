@@ -549,7 +549,7 @@ void check_bidirectional_t1(const std::string& name, const Design& d, bool rever
     CaseSpec c;
     c.name = name;
     c.op = it->second.template get<MAS::OperatingPoint>();
-    c.frequency = d.switchingFrequency;
+    c.frequency = d.operatingFrequency;   // the waveform period (ABT #1503: not the requested fr)
     c.magnetizingInductance = d.magnetizingInductance;
     const double n = d.turnsRatio;
     if (reverse) {

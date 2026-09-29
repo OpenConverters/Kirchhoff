@@ -1181,18 +1181,19 @@ TEST_CASE("CLLC: Kirchhoff design+simulation matches MKF ideal reference", "[equ
     json di = kirchhoff_inputs(in);
     di["simStimulusFsw"] = json::array({in.at("switchingFrequency").get<double>()});
     Kirchhoff::CllcDesign d = Kirchhoff::design_cllc(di);
+    di["simStimulusFsw"] = json::array({d.operatingFrequency});   // the deck's drive frequency (ABT #1503)
     json tas = Kirchhoff::build_cllc_tas(d);
     KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "cllc");
 
-    // Kirchhoff now designs the CLLC with ~8% GAIN HEADROOM (n sized so the fr peak delivers
-    // kGainHeadroom·Vo) so the closed-loop regulator hits Vo just above fr (abt #62). MKF had no headroom,
-    // so the OPEN-LOOP output at fr overshoots spec by that factor BY DESIGN — the cutover makes Kirchhoff
-    // the authoritative resonant designer (it no longer matches the retired MKF model). The closed-loop
-    // regulator trims this to Vo in production. Compare open-loop figures against headroom-scaled spec.
-    constexpr double kGainHeadroom = 1.08;   // mirrors Cllc.cpp kGainHeadroom
-    check_close("Vout vs headroom·spec", r.vout, in.at("outputVoltage").get<double>() * kGainHeadroom, kSpecTol);
-    check_close("Iout vs headroom·spec", r.iout,
-                (in.at("outputPower").get<double>()/in.at("outputVoltage").get<double>()) * kGainHeadroom, kSpecTol);
+    // Kirchhoff designs the CLLC with ~8% GAIN HEADROOM (n sized so the fr peak would deliver kGainHeadroom·Vo,
+    // abt #62) and — since ABT #1503 — DRIVES it at the frequency where the FHA tank gain is 1/kGainHeadroom, i.e.
+    // just above fr, so the open-loop deck targets the bare spec (it used to be driven at fr and overshoot to
+    // 1.08·Vo by design). Measured 580.3 V against 600 V (-3.3 %): the switch RON conduction loss plus the
+    // lock-step synchronous rectifier, which commutates on the primary edge rather than at the (lagging) current
+    // zero once the tank runs above resonance. Within the spec tolerance.
+    check_close("Vout vs spec (FHA-solved operating frequency)", r.vout, in.at("outputVoltage").get<double>(), kSpecTol);
+    check_close("Iout vs spec (FHA-solved operating frequency)", r.iout,
+                in.at("outputPower").get<double>() / in.at("outputVoltage").get<double>(), kSpecTol);
     // Efficiency directional: both decks are all-active-switch (no rectifier diode drop), but MKF senses
     // input at the primary switch drains while Kirchhoff senses the true source current; Kirchhoff's is
     // the cleaner figure -> >= MKF's, with a sub-unity ceiling to catch a gross energy-balance bug.

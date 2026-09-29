@@ -11,7 +11,9 @@
 #include "MAS.hpp"
 
 #include <nlohmann/json.hpp>
+#include <functional>
 #include <limits>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -435,6 +437,51 @@ struct LlcFhaTank {
 };
 LlcFhaTank llc_fha_tank(double frequency, double magnetizingInductance, double seriesResonantInductance,
                         double resonantCapacitance, double reflectedLoadResistance);
+
+// The two-sided CLLC / CLLLC tank under the First-Harmonic Approximation — the ONE model the operating-frequency
+// solve (design_cllc / design_clllc) and the waveform solvers (analytical_cllc / analytical_clllc) use. The
+// driving-side series Lr1-Cr1 branch feeds Lm in parallel with the receiving-side series Lr2-Cr2 branch (referred
+// to the driving side: Lr2' = Lr2*n^2, Cr2' = Cr2/n^2) in series with the reflected AC load Rac:
+//   Zsec = Rac + j*(w*Lr2' - 1/(w*Cr2')),  Zp = (j*w*Lm) || Zsec,  Zin = j*(w*Lr1 - 1/(w*Cr1)) + Zp
+//   gain M = |Zp| * Rac / (|Zin| * |Zsec|)
+// M is the ratio of the fundamental across Rac (the rectifier input, referred to the driving side) to the
+// fundamental of the driving bridge square. With the LLC tank's Xsec = 0 it reduces to LlcFhaTank's |Zp|/|Zin|.
+// When both branches resonate at w (a symmetric tank at fr) they cancel and M = 1 for every load.
+struct CllcFhaTank {
+    double zsecRe, zsecIm; // Zsec = Rac + jXsec'
+    double zpRe, zpIm;     // Zp = jXLm || Zsec
+    double zinRe, zinIm;   // Zin = jXpri + Zp
+    double gain() const;   // |Zp|*Rac / (|Zin|*|Zsec|)
+};
+CllcFhaTank cllc_fha_tank(double frequency, double magnetizingInductance,
+                          double primaryResonantInductance, double primaryResonantCapacitance,
+                          double referredSecondaryResonantInductance, double referredSecondaryResonantCapacitance,
+                          double reflectedLoadResistance);
+
+// The FHA gain and the sign of the tank input reactance at one frequency (what the operating-frequency solve needs).
+struct FhaTankPoint { double gain; bool inductiveInput; };
+
+// Find the switching frequency in [fmin, fmax] at which a resonant tank's FHA gain equals requiredGain — the
+// operating-frequency solve shared by LLC, CLLC and CLLLC (ABT #1503). The band is scanned log-spaced (2000
+// points) and the HIGHEST bracketing root bisected: the right-hand side of the gain peak is the inductive (ZVS)
+// branch the converter is regulated on. `tankDescription` names the tank values for the error message.
+// @throws std::invalid_argument naming the required gain and the gain range the band reaches when no frequency in
+//         the band gives it, or when the only solution leaves the tank input capacitive.
+double solve_fha_operating_frequency(double requiredGain, double fmin, double fmax,
+                                     const std::function<FhaTankPoint(double)>& tankAt,
+                                     const std::string& tankDescription);
+
+// The CLLC / CLLLC operating-frequency solve over a switching band whose ends may be unstated (std::nullopt).
+// A stated end is honoured as given. An unstated lower end is the tank's no-load resonance
+// 1/(2*pi*sqrt((Lr1+Lm)*Cr1)) (the gain peak of any load lies above it); an unstated upper end is found by
+// doubling from 2*fr until the gain falls below requiredGain (the gain falls monotonically to 0 above fr) — the
+// physics of the tank bounds the search, not an invented band. Throws as solve_fha_operating_frequency does.
+double solve_cllc_operating_frequency(double requiredGain, std::optional<double> fmin, std::optional<double> fmax,
+                                      double magnetizingInductance,
+                                      double primaryResonantInductance, double primaryResonantCapacitance,
+                                      double referredSecondaryResonantInductance,
+                                      double referredSecondaryResonantCapacitance,
+                                      double reflectedLoadResistance);
 
 // LLC resonant converter via the load-aware First-Harmonic Approximation (see LlcFhaTank). The primary
 // winding carries the sinusoidal tank current ILs = (4/pi)*k_bridge*Vin/|Zin|; the transformer winding voltage

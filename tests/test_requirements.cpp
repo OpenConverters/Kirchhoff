@@ -211,13 +211,16 @@ const std::vector<Topology>& topologies() {
 //  • cuk — the drop-compensated operating point is CORRECT but won't converge with ideal diodes in its
 //    resonant coupling loop (the design is right; the ngspice sim isn't). Left at Vd=0 (matches MKF).
 // These are REPORTED loudly (WARN), never silently dropped, but not asserted.
-//  • src, cllc — designed with ~8% GAIN HEADROOM (n sized so the fr peak delivers kGainHeadroom·Vo) so the
+//  • src — designed with ~8% GAIN HEADROOM (n sized so the fr peak delivers kGainHeadroom·Vo) so the
 //    closed-loop regulator can hit Vo just ABOVE fr where the tank is efficient, instead of pinning the
-//    nominal point at the M=1 peak with zero margin (abt #62). A gain-margin resonant design INHERENTLY
-//    overshoots open-loop at fr (the gain peaks there), so an open-loop "delivers spec" gate cannot apply —
-//    the regulator trims the overshoot to Vo in production. That CLOSED-LOOP delivery IS gated, by the HS
-//    realism gate (src reaches verdict=pass). Reported here loudly, not silently dropped.
-const std::set<std::string> kNotPinned = {"src", "cllc"};  // resonant gain-headroom designs: regulator-pinned, not open-loop-pinned
+//    nominal point at the M=1 peak with zero margin (abt #62). Driven at fr it INHERENTLY overshoots open-loop
+//    (the gain peaks there), so an open-loop "delivers spec" gate cannot apply — the regulator trims the
+//    overshoot to Vo in production. That CLOSED-LOOP delivery IS gated, by the HS realism gate (src reaches
+//    verdict=pass). Reported here loudly, not silently dropped.
+//    (cllc left this set with ABT #1503: its deck is now driven at the frequency where the FHA gain is
+//    1/kGainHeadroom, so it targets the bare spec open-loop and is gated like every other topology — measured
+//    -3.3..-3.9 % at the fixture and PtP points, the switch RON and lock-step SR losses.)
+const std::set<std::string> kNotPinned = {"src"};  // resonant gain-headroom design driven at fr: regulator-pinned, not open-loop-pinned
 // Flybuck-family: the MEASURED output is the primary buck rail; the design needs a second (internal
 // isolated secondary) output spec, taken from the fixture's design section.
 const std::set<std::string> kDualOutput = {"isolated_buck", "isolated_buck_boost"};
@@ -339,7 +342,7 @@ void check_topo_points(const std::string& topo) {
             INFO(p.topo << " @ Vin=" << p.vin << " -> " << p.vout << " V " << p.iout << " A: Vout=" << vout
                  << " (err " << 100.0 * std::fabs(vout - vReq) / vReq << " %), Pout=" << pout << "/" << pReq);
             if (kNotPinned.count(p.topo)) {
-                // Resonant gain-headroom design (src/cllc): the open-loop output at fr overshoots spec by
+                // Resonant gain-headroom design (src): the open-loop output at fr overshoots spec by
                 // ~kGainHeadroom BY DESIGN (abt #62), and the closed-loop regulator trims it to spec in
                 // production (gated by the HS realism gate). So do not gate the open-loop point to bare spec;
                 // require only that the sim CONVERGED and overshoots in the expected direction (never undershoots).

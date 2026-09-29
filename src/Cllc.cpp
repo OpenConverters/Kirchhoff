@@ -6,6 +6,9 @@
 #include <cmath>
 #include <limits>
 #include <algorithm>
+#include <optional>
+#include <sstream>
+#include <string>
 #include <vector>
 
 namespace Kirchhoff {
@@ -13,6 +16,8 @@ using nlohmann::json;
 
 namespace {
 double nominal(const json& j) { return PEAS::resolve_dimensional_values(j); }
+// Numbers in the operating-frequency messages: 6 significant digits.
+std::string num(double v) { std::ostringstream o; o << v; return o.str(); }
 constexpr double kQualityFactor   = 0.3;   // MKF Cllc default (Infineon AN: 0.2–0.4)
 constexpr double kInductanceRatio = 4.45;  // k = Lm/Lr1 (MKF defaultInductanceRatio)
 constexpr double kSwitchDuty      = 0.47;  // ~50% minus dead time
@@ -61,16 +66,6 @@ CllcDesign design_cllc(const json& tasInputs) {
     d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(n);
     const double fr = d.switchingFrequency;
     d.resonantFrequency = fr;
-    // MAS cllcResonant.min/maxSwitchingFrequency: the regulation band. Kirchhoff designs and operates the tank
-    // at fr = the operating switching frequency, which must therefore lie inside the band.
-    if (d.config.contains("minSwitchingFrequency") || d.config.contains("maxSwitchingFrequency")) {
-        const double fmin = cfg::get(d.config, "minSwitchingFrequency", 0.0);
-        const double fmax = cfg::get(d.config, "maxSwitchingFrequency", std::numeric_limits<double>::infinity());
-        if (!(fr >= fmin && fr <= fmax))
-            throw std::invalid_argument("design_cllc: the operating/resonant frequency " + std::to_string(fr) +
-                                        " Hz lies outside the switching-frequency band [" + std::to_string(fmin) +
-                                        ", " + std::to_string(fmax) + "] Hz");
-    }
     // MAS cllcResonant.bridgeType: Kirchhoff's CLLC is a full bridge on both sides (bridge-voltage factor 1).
     if (cfg::get_str(d.config, "bridgeType", "fullBridge") != "fullBridge")
         throw std::invalid_argument("design_cllc: bridgeType '" + cfg::get_str(d.config, "bridgeType", "") +
@@ -131,7 +126,89 @@ CllcDesign design_cllc(const json& tasInputs) {
     // carry reverse power. The forward operating point's winding waveforms are the same either way.
     if (d.reverse && !cfg::get_bool(d.config, "bidirectional", true))
         throw std::invalid_argument("design_cllc: a reverse power-flow operating point needs bidirectional=true");
+
+    // ── Operating frequency (ABT #1503) ──
+    // The CLLC regulates by frequency. The tank resonates at fr, where a symmetric tank's FHA gain is 1 whatever
+    // the ratio, but neither ratio is sized for unity gain there: the engine-sized one carries the 1.08 gain
+    // headroom (at fr it would deliver 1.08·Vout) and a pinned one is whatever the chosen magnetic realised.
+    // Driving at fr anyway clamped the transformer to ±n·Vout while the tank current came from a drive that
+    // delivers a different voltage. Solve the frequency where the gain delivers the output, or refuse.
+    const bool pinnedRatio = req::provided_turns_ratio(dr, 0).has_value();
+    const auto op = two_sided_resonant_operating_point(
+        "design_cllc",
+        pinnedRatio ? "pinned turns ratio"
+                    : "turns ratio sized with a gain headroom of " +
+                          num(cfg::get(d.config, "gainHeadroom", kGainHeadroom)),
+        d.config, d.reverse, d.turnsRatio, req::conversion_efficiency(dr), Vin, Vo, d.outputPower, fr,
+        d.magnetizingInductance, d.primaryResonantInductance, d.primaryResonantCapacitance,
+        d.secondaryResonantInductance, d.secondaryResonantCapacitance);
+    d.operatingFrequency = op.operatingFrequency;
+    d.requiredGain = op.requiredGain;
     return d;
+}
+
+TwoSidedOperatingPoint two_sided_resonant_operating_point(
+    const std::string& who, const std::string& ratioOrigin, const json& config, bool reverse,
+    double turnsRatio, double efficiency, double inputVoltage, double outputVoltage, double outputPower,
+    double resonantFrequency, double magnetizingInductance, double primaryResonantInductance,
+    double primaryResonantCapacitance, double secondaryResonantInductance, double secondaryResonantCapacitance) {
+    namespace AN = Kirchhoff::analytical;
+    const double N = turnsRatio, eta = efficiency, fr = resonantFrequency;
+    if (!(N > 0) || !(eta > 0) || !(inputVoltage > 0) || !(outputVoltage > 0) || !(outputPower > 0) || !(fr > 0))
+        throw std::invalid_argument(who + ": turns ratio, efficiency, voltages, power and fr must all be > 0");
+    // The switching band: MAS cllcResonant/clllcResonant min/maxSwitchingFrequency, or the resonantBandMin/Max
+    // keys the web runtime sends for every resonant topology. Both spellings stated and disagreeing -> refuse.
+    auto bandEnd = [&](const char* masKey, const char* aliasKey) -> std::optional<double> {
+        const bool hasMas = config.contains(masKey), hasAlias = config.contains(aliasKey);
+        if (!hasMas && !hasAlias) return std::nullopt;
+        const double vMas = hasMas ? cfg::get(config, masKey, 0.0) : 0.0;
+        const double vAlias = hasAlias ? cfg::get(config, aliasKey, 0.0) : 0.0;
+        if (hasMas && hasAlias && std::abs(vMas - vAlias) > 1e-9 * std::max(std::abs(vMas), std::abs(vAlias)))
+            throw std::invalid_argument(who + ": config." + masKey + " = " + num(vMas) + " Hz and config." + aliasKey +
+                                        " = " + num(vAlias) + " Hz state two different switching bands");
+        const double v = hasMas ? vMas : vAlias;
+        if (!(v > 0.0))
+            throw std::invalid_argument(who + ": config." + (hasMas ? masKey : aliasKey) + " must be > 0; got " + num(v));
+        return v;
+    };
+    const auto fmin = bandEnd("minSwitchingFrequency", "resonantBandMin");
+    const auto fmax = bandEnd("maxSwitchingFrequency", "resonantBandMax");
+    if (fmin && fmax && !(*fmax >= *fmin))
+        throw std::invalid_argument(who + ": the switching-frequency band [" + num(*fmin) + ", " + num(*fmax) +
+                                    "] Hz is not a band (need min <= max)");
+
+    // The tank as the DRIVING bridge sees it. Forward: the Vin side drives Lr1/Cr1, Lm, and Lr2/Cr2 referred up by
+    // N², into Rac = (8/π²)·N²·Vout²/P. Reverse: the Vout side drives Lr2/Cr2, Lm/N², and Lr1/Cr1 referred down,
+    // into (8/π²)·Vin²/(N²·P). Required gain = delivered rail referred to the driver / (η·driving bus).
+    double Lm = magnetizingInductance, Lr1 = primaryResonantInductance, Cr1 = primaryResonantCapacitance;
+    double Lr2p = secondaryResonantInductance * N * N, Cr2p = secondaryResonantCapacitance / (N * N);
+    double Rac = (8.0 / (M_PI * M_PI)) * N * N * outputVoltage * outputVoltage / outputPower;
+    double requiredGain = N * outputVoltage / (eta * inputVoltage);
+    double ratioAtResonance = eta * inputVoltage / outputVoltage;   // gain 1: n = η·Vin/Vout
+    if (reverse) {
+        Lm = magnetizingInductance / (N * N);
+        Lr1 = secondaryResonantInductance; Cr1 = secondaryResonantCapacitance;
+        Lr2p = primaryResonantInductance / (N * N); Cr2p = primaryResonantCapacitance * N * N;
+        Rac = (8.0 / (M_PI * M_PI)) * inputVoltage * inputVoltage / (N * N * outputPower);
+        requiredGain = inputVoltage / (eta * N * outputVoltage);
+        ratioAtResonance = inputVoltage / (eta * outputVoltage);
+    }
+    TwoSidedOperatingPoint op{fr, requiredGain};
+    // At fr the requirement is already met (a unity-gain ratio behind a symmetric tank): run there, unsolved.
+    const double gainAtResonance = AN::cllc_fha_tank(fr, Lm, Lr1, Cr1, Lr2p, Cr2p, Rac).gain();
+    const bool frInBand = (!fmin || fr >= *fmin) && (!fmax || fr <= *fmax);
+    if (frInBand && std::abs(gainAtResonance - requiredGain) <= 1e-9 * requiredGain) return op;
+    try {
+        op.operatingFrequency = AN::solve_cllc_operating_frequency(requiredGain, fmin, fmax, Lm, Lr1, Cr1, Lr2p, Cr2p, Rac);
+    } catch (const std::invalid_argument& e) {
+        throw std::invalid_argument(
+            who + ": the " + ratioOrigin + " " + num(N) + " cannot deliver " +
+            (reverse ? num(inputVoltage) + " V to the HV side from " + num(outputVoltage) + " V (reverse power flow)"
+                     : num(outputVoltage) + " V from " + num(inputVoltage) + " V") +
+            ": " + e.what() + ". A turns ratio of " + num(ratioAtResonance) +
+            " gives the output at the tank resonance (" + num(fr) + " Hz)");
+    }
+    return op;
 }
 
 json build_cllc_tas(const CllcDesign& d) {
@@ -167,7 +244,9 @@ json build_cllc_tas(const CllcDesign& d) {
     // offset 0). Primary tank current = real load current (Pin/Vtank1_rms) + reactive magnetizing
     // (Lm sees ±Vin, triangle peak Vin·(T/4)/Lm). The secondary tank/winding carries the reflected real
     // load current ×n (n=Vin/Vo>1 here).
-    const double fr   = d.resonantFrequency, Tfr = 1.0 / fr;
+    // Evaluated at the OPERATING frequency design_cllc settled (fr when the ratio gives the output there, else the
+    // FHA-solved frequency in the band — ABT #1503); the tank itself still resonates at d.resonantFrequency.
+    const double fr   = d.operatingFrequency, Tfr = 1.0 / fr;
     const double Pin  = d.outputPower / d.efficiency;
     // The DRIVING bus sets the tank fundamental: forward drives the Vin side, reverse drives the Vout side
     // (ABT #85). The symmetric tank makes the sizing identical — only WHICH winding is the driver (carrying
@@ -356,7 +435,9 @@ json build_cllc_tas(const CllcDesign& d) {
     dreq["efficiency"] = d.efficiency;
     dreq["inputType"] = "dc";
     dreq["inputVoltage"] = {{"minimum", srcVmin}, {"nominal", srcV}, {"maximum", srcVmax}};
-    dreq["switchingFrequency"]["nominal"] = d.switchingFrequency;
+    // The frequency the converter actually switches at (ABT #1503), so the diagnostics report the operating point
+    // that was computed rather than the request (which is the tank resonance).
+    dreq["switchingFrequency"]["nominal"] = d.operatingFrequency;
     { json o; o["name"] = "out"; o["voltage"]["nominal"] = deliverV; o["regulation"] = "voltage";
       dreq["outputs"] = json::array({o}); }
     { json op; op["name"] = "full_load"; op["inputVoltage"] = srcV; op["ambientTemperature"] = 25.0;
@@ -386,7 +467,7 @@ json build_cllc_tas(const CllcDesign& d) {
     // secondary is gated synchronously with the primary (forward power flow).
     auto stim = [&](const char* sw, const char* sig, double phaseDeg) {
         json st; st["stage"] = "cllcCell"; st["component"] = sw; st["signal"] = sig;
-        st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;
+        st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.operatingFrequency;
         st["waveform"]["dutyCycle"] = d.switchDuty; st["waveform"]["phase"] = phaseDeg;
         return st; };
     // Only ONE stimulus per shared gate node: Q1 drives the g1 port (shared by Q1/Q4/Qa/Qd), Q2 drives

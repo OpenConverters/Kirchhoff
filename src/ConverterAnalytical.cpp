@@ -7,6 +7,7 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -2385,6 +2386,137 @@ LlcFhaTank llc_fha_tank(double frequency, double magnetizingInductance, double s
     return t;
 }
 
+double CllcFhaTank::gain() const {
+    return std::hypot(zpRe, zpIm) * zsecRe / (std::hypot(zinRe, zinIm) * std::hypot(zsecRe, zsecIm));
+}
+
+CllcFhaTank cllc_fha_tank(double frequency, double magnetizingInductance,
+                          double primaryResonantInductance, double primaryResonantCapacitance,
+                          double referredSecondaryResonantInductance, double referredSecondaryResonantCapacitance,
+                          double reflectedLoadResistance) {
+    if (!(frequency > 0) || !(magnetizingInductance > 0) || !(primaryResonantInductance > 0) ||
+        !(primaryResonantCapacitance > 0) || !(referredSecondaryResonantInductance > 0) ||
+        !(referredSecondaryResonantCapacitance > 0) || !(reflectedLoadResistance > 0))
+        throw std::invalid_argument("cllc_fha_tank: frequency, Lm, Lr1, Cr1, Lr2', Cr2' and Rac must all be > 0");
+    const double w = 2.0 * M_PI * frequency;
+    const double Xpri = w * primaryResonantInductance - 1.0 / (w * primaryResonantCapacitance);
+    const double Xsec = w * referredSecondaryResonantInductance - 1.0 / (w * referredSecondaryResonantCapacitance);
+    const double XLm = w * magnetizingInductance, Rac = reflectedLoadResistance;
+    // Zp = (jXLm)||Zsec = (jXLm.Zsec)/(jXLm + Zsec);  jXLm.(Rac + jXsec) = -XLm.Xsec + j.XLm.Rac.
+    const double numRe = -XLm * Xsec, numIm = XLm * Rac;
+    const double denRe = Rac, denIm = XLm + Xsec;
+    const double den2 = denRe * denRe + denIm * denIm;
+    CllcFhaTank t{};
+    t.zsecRe = Rac;
+    t.zsecIm = Xsec;
+    t.zpRe = (numRe * denRe + numIm * denIm) / den2;
+    t.zpIm = (numIm * denRe - numRe * denIm) / den2;
+    t.zinRe = t.zpRe;
+    t.zinIm = Xpri + t.zpIm;
+    return t;
+}
+
+// Numbers in the operating-frequency messages: 6 significant digits (std::to_string prints 1.294e-07 F as 0.000000).
+static std::string fha_num(double v) { std::ostringstream o; o << v; return o.str(); }
+
+double solve_fha_operating_frequency(double requiredGain, double fmin, double fmax,
+                                     const std::function<FhaTankPoint(double)>& tankAt,
+                                     const std::string& tankDescription) {
+    if (!(requiredGain > 0.0))
+        throw std::invalid_argument("solve_fha_operating_frequency: required gain must be > 0");
+    if (!(fmin > 0.0) || !(fmax >= fmin))
+        throw std::invalid_argument("solve_fha_operating_frequency: band must satisfy 0 < fmin <= fmax");
+    auto gainAt = [&](double f) { return tankAt(f).gain; };
+    // Scan the band log-spaced (the gain curve has at most one peak, below resonance), keep the reachable range,
+    // then bisect the HIGHEST bracket: the right-hand side of the peak is the inductive (ZVS) branch the
+    // converter is regulated on.
+    constexpr int kSamples = 2000;
+    std::vector<double> f(kSamples + 1), err(kSamples + 1);
+    double gMin = std::numeric_limits<double>::max(), gMax = std::numeric_limits<double>::lowest();
+    for (int i = 0; i <= kSamples; ++i) {
+        f[i] = fmin * std::pow(fmax / fmin, static_cast<double>(i) / kSamples);
+        const double g = gainAt(f[i]);
+        gMin = std::min(gMin, g);
+        gMax = std::max(gMax, g);
+        err[i] = g - requiredGain;
+    }
+    bool found = false;
+    double root = 0.0;
+    for (int i = kSamples; i >= 0 && !found; --i) {
+        if (err[i] == 0.0) { root = f[i]; found = true; break; }
+        if (i == 0 || (err[i - 1] < 0.0) == (err[i] < 0.0)) continue;
+        double lo = f[i - 1], hi = f[i], eLo = err[i - 1];
+        for (int it = 0; it < 200 && (hi - lo) > 1e-9 * hi; ++it) {
+            const double mid = 0.5 * (lo + hi);
+            const double eMid = gainAt(mid) - requiredGain;
+            if ((eMid < 0.0) == (eLo < 0.0)) { lo = mid; eLo = eMid; } else { hi = mid; }
+        }
+        root = 0.5 * (lo + hi);
+        found = true;
+    }
+    if (!found)
+        throw std::invalid_argument(
+            "it needs a tank gain of " + fha_num(requiredGain) + ", but the FHA gain over the switching band [" +
+            fha_num(fmin) + ", " + fha_num(fmax) + "] Hz only reaches [" + fha_num(gMin) + ", " + fha_num(gMax) +
+            "] (" + tankDescription + "); no switching frequency in the band delivers the output");
+    if (!tankAt(root).inductiveInput)
+        throw std::invalid_argument(
+            "the tank gain of " + fha_num(requiredGain) + " is only reached at " + fha_num(root) +
+            " Hz, left of the gain peak where the tank input is capacitive (no ZVS, and outside the FHA regulation "
+            "branch)");
+    return root;
+}
+
+double solve_cllc_operating_frequency(double requiredGain, std::optional<double> fmin, std::optional<double> fmax,
+                                      double magnetizingInductance,
+                                      double primaryResonantInductance, double primaryResonantCapacitance,
+                                      double referredSecondaryResonantInductance,
+                                      double referredSecondaryResonantCapacitance,
+                                      double reflectedLoadResistance) {
+    auto tankAt = [&](double f) {
+        const CllcFhaTank t = cllc_fha_tank(f, magnetizingInductance, primaryResonantInductance,
+                                            primaryResonantCapacitance, referredSecondaryResonantInductance,
+                                            referredSecondaryResonantCapacitance, reflectedLoadResistance);
+        return FhaTankPoint{t.gain(), t.zinIm > 0.0};
+    };
+    if (!(requiredGain > 0.0))
+        throw std::invalid_argument("solve_cllc_operating_frequency: required gain must be > 0");
+    const double fr = 1.0 / (2.0 * M_PI * std::sqrt(primaryResonantInductance * primaryResonantCapacitance));
+    // Unstated lower end: the no-load (Rac -> infinity) resonance of Lr1 + Lm with Cr1. The loaded gain peak lies
+    // between it and fr, so the whole regulation branch is above it.
+    const double lo = fmin ? *fmin
+                           : 1.0 / (2.0 * M_PI * std::sqrt((primaryResonantInductance + magnetizingInductance) *
+                                                           primaryResonantCapacitance));
+    double hi = 0.0;
+    if (fmax) {
+        hi = *fmax;
+    } else {
+        // Unstated upper end: above fr the gain falls monotonically to 0, so double until it is below the target.
+        hi = 2.0 * std::max(fr, lo);
+        int doublings = 0;
+        while (tankAt(hi).gain >= requiredGain) {
+            if (++doublings > 40)
+                throw std::invalid_argument("solve_cllc_operating_frequency: the FHA gain stays above " +
+                                            fha_num(requiredGain) + " up to " + fha_num(hi) + " Hz");
+            hi *= 2.0;
+        }
+    }
+    std::string band;
+    if (!fmin && !fmax)
+        band = "; no switching band was stated: the search ran from the tank's no-load resonance up to where the "
+               "gain falls below the target";
+    else if (!fmin)
+        band = "; no band minimum was stated: the search started at the tank's no-load resonance";
+    else if (!fmax)
+        band = "; no band maximum was stated: the search ran up to where the gain falls below the target";
+    return solve_fha_operating_frequency(
+        requiredGain, lo, hi, tankAt,
+        "Lm " + fha_num(magnetizingInductance) + " H, Lr1 " + fha_num(primaryResonantInductance) + " H, Cr1 " +
+            fha_num(primaryResonantCapacitance) + " F, Lr2 referred " + fha_num(referredSecondaryResonantInductance) +
+            " H, Cr2 referred " + fha_num(referredSecondaryResonantCapacitance) + " F, reflected load " +
+            fha_num(reflectedLoadResistance) + " ohm" + band);
+}
+
 MAS::OperatingPoint analytical_llc(double inputVoltage,
                                    const std::vector<double>& outputVoltages,
                                    const std::vector<double>& outputCurrents,
@@ -2571,19 +2703,13 @@ MAS::OperatingPoint analytical_cllc(double inputVoltage,
     const double Lr2p = Lr2s * n * n, Cr2p = Cr2s / (n * n);  // secondary tank reflected to primary
 
     const double w = 2.0 * M_PI * fsw;
-    const double Xpri = w * Lr1 - 1.0 / (w * Cr1);            // primary tank reactance
-    const double Xsec = w * Lr2p - 1.0 / (w * Cr2p);         // reflected secondary tank reactance
-    const double XLm  = w * Lm;
-    // Zsec = Rac + jXsec;  Zpar = (jXLm)||Zsec = (jXLm.Zsec)/(jXLm + Zsec).  jXLm.(Rac+jXsec) = -XLm.Xsec + j.XLm.Rac.
-    const double num_re = -XLm * Xsec, num_im = XLm * Rac;
-    const double den_re = Rac,          den_im = XLm + Xsec;  // (Rac) + j(XLm + Xsec)
-    const double denMag2 = den_re * den_re + den_im * den_im;
-    const double Zpar_re = (num_re * den_re + num_im * den_im) / denMag2;
-    const double Zpar_im = (num_im * den_re - num_re * den_im) / denMag2;
-    const double Zin_re = Zpar_re;
-    const double Zin_im = Xpri + Zpar_im;
-    const double Zin_mag = std::sqrt(Zin_re * Zin_re + Zin_im * Zin_im);
-    const double phi = std::atan2(Zin_im, Zin_re);
+    const CllcFhaTank tank = cllc_fha_tank(fsw, Lm, Lr1, Cr1, Lr2p, Cr2p, Rac);
+    const double Zin_mag = std::hypot(tank.zinRe, tank.zinIm);
+    // The winding voltage (+/-n*Vout square) is in phase with the voltage across Lm (Zp), which leads the tank
+    // current by arg(Zp). arg(Zin) is the lag behind the BRIDGE square, which also carries the Lr1-Cr1 drop; the
+    // two coincide only at resonance. Off resonance (the operating frequency design_cllc/design_clllc solve for
+    // the gain, ABT #1503) arg(Zin) put the winding voltage out of phase with the current it transfers.
+    const double phi = std::atan2(tank.zpIm, tank.zpRe);
 
     const double Vin_fund_pk = (4.0 / M_PI) * k_bridge * inputVoltage;
     const double ILr1_pk = (Zin_mag > 0) ? Vin_fund_pk / Zin_mag : 0.0;
@@ -2694,19 +2820,13 @@ MAS::OperatingPoint analytical_clllc(double inputVoltage,
     const double Lr2p = Lr2s * n * n, Cr2p = Cr2s / (n * n);  // secondary tank reflected to primary
 
     const double w = 2.0 * M_PI * fsw;
-    const double Xpri = w * Lr1 - 1.0 / (w * Cr1);            // primary tank reactance
-    const double Xsec = w * Lr2p - 1.0 / (w * Cr2p);         // reflected secondary tank reactance
-    const double XLm  = w * Lm;
-    // Zsec = Rac + jXsec;  Zpar = (jXLm)||Zsec = (jXLm.Zsec)/(jXLm + Zsec).  jXLm.(Rac+jXsec) = -XLm.Xsec + j.XLm.Rac.
-    const double num_re = -XLm * Xsec, num_im = XLm * Rac;
-    const double den_re = Rac,          den_im = XLm + Xsec;  // (Rac) + j(XLm + Xsec)
-    const double denMag2 = den_re * den_re + den_im * den_im;
-    const double Zpar_re = (num_re * den_re + num_im * den_im) / denMag2;
-    const double Zpar_im = (num_im * den_re - num_re * den_im) / denMag2;
-    const double Zin_re = Zpar_re;
-    const double Zin_im = Xpri + Zpar_im;
-    const double Zin_mag = std::sqrt(Zin_re * Zin_re + Zin_im * Zin_im);
-    const double phi = std::atan2(Zin_im, Zin_re);
+    const CllcFhaTank tank = cllc_fha_tank(fsw, Lm, Lr1, Cr1, Lr2p, Cr2p, Rac);
+    const double Zin_mag = std::hypot(tank.zinRe, tank.zinIm);
+    // The winding voltage (+/-n*Vout square) is in phase with the voltage across Lm (Zp), which leads the tank
+    // current by arg(Zp). arg(Zin) is the lag behind the BRIDGE square, which also carries the Lr1-Cr1 drop; the
+    // two coincide only at resonance. Off resonance (the operating frequency design_cllc/design_clllc solve for
+    // the gain, ABT #1503) arg(Zin) put the winding voltage out of phase with the current it transfers.
+    const double phi = std::atan2(tank.zpIm, tank.zpRe);
 
     const double Vin_fund_pk = (4.0 / M_PI) * k_bridge * inputVoltage;
     const double ILr1_pk = (Zin_mag > 0) ? Vin_fund_pk / Zin_mag : 0.0;

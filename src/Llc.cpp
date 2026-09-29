@@ -275,57 +275,17 @@ double solve_llc_operating_frequency(double requiredGain, double fmin, double fm
                                      double seriesResonantInductance, double resonantCapacitance,
                                      double reflectedLoadResistance) {
     namespace AN = Kirchhoff::analytical;
-    if (!(requiredGain > 0.0))
-        throw std::invalid_argument("solve_llc_operating_frequency: required gain must be > 0");
-    if (!(fmin > 0.0) || !(fmax >= fmin))
-        throw std::invalid_argument("solve_llc_operating_frequency: band must satisfy 0 < fmin <= fmax");
-    auto gainAt = [&](double f) {
-        return AN::llc_fha_tank(f, magnetizingInductance, seriesResonantInductance, resonantCapacitance,
-                                reflectedLoadResistance).gain();
-    };
-    // Scan the band log-spaced (the gain curve has at most one peak, below resonance), keep the reachable range,
-    // then bisect the HIGHEST bracket: the right-hand side of the peak is the inductive (ZVS) branch the LLC is
-    // regulated on.
-    constexpr int kSamples = 2000;
-    std::vector<double> f(kSamples + 1), err(kSamples + 1);
-    double gMin = std::numeric_limits<double>::max(), gMax = std::numeric_limits<double>::lowest();
-    for (int i = 0; i <= kSamples; ++i) {
-        f[i] = fmin * std::pow(fmax / fmin, static_cast<double>(i) / kSamples);
-        const double g = gainAt(f[i]);
-        gMin = std::min(gMin, g);
-        gMax = std::max(gMax, g);
-        err[i] = g - requiredGain;
-    }
-    bool found = false;
-    double root = 0.0;
-    for (int i = kSamples; i >= 0 && !found; --i) {
-        if (err[i] == 0.0) { root = f[i]; found = true; break; }
-        if (i == 0 || (err[i - 1] < 0.0) == (err[i] < 0.0)) continue;
-        double lo = f[i - 1], hi = f[i], eLo = err[i - 1];
-        for (int it = 0; it < 200 && (hi - lo) > 1e-9 * hi; ++it) {
-            const double mid = 0.5 * (lo + hi);
-            const double eMid = gainAt(mid) - requiredGain;
-            if ((eMid < 0.0) == (eLo < 0.0)) { lo = mid; eLo = eMid; } else { hi = mid; }
-        }
-        root = 0.5 * (lo + hi);
-        found = true;
-    }
-    if (!found)
-        throw std::invalid_argument(
-            "it needs a tank gain of " + num(requiredGain) + ", but the FHA gain over the switching band [" +
-            num(fmin) + ", " + num(fmax) + "] Hz only reaches [" + num(gMin) + ", " +
-            num(gMax) + "] (Lm " + num(magnetizingInductance) + " H, Lr " +
-            num(seriesResonantInductance) + " H, Cr " + num(resonantCapacitance) +
-            " F, reflected load " + num(reflectedLoadResistance) + " ohm); no switching frequency in the "
-            "band delivers the output");
-    const auto tank = AN::llc_fha_tank(root, magnetizingInductance, seriesResonantInductance, resonantCapacitance,
-                                       reflectedLoadResistance);
-    if (!(tank.zinIm > 0.0))
-        throw std::invalid_argument(
-            "the tank gain of " + num(requiredGain) + " is only reached at " + num(root) +
-            " Hz, left of the gain peak where the tank input is capacitive (no ZVS, and outside the FHA regulation "
-            "branch)");
-    return root;
+    // The scan/bisect/refuse logic is shared with CLLC/CLLLC (AN::solve_fha_operating_frequency); the LLC tank
+    // model is llc_fha_tank.
+    return AN::solve_fha_operating_frequency(
+        requiredGain, fmin, fmax,
+        [&](double f) {
+            const auto t = AN::llc_fha_tank(f, magnetizingInductance, seriesResonantInductance, resonantCapacitance,
+                                            reflectedLoadResistance);
+            return AN::FhaTankPoint{t.gain(), t.zinIm > 0.0};
+        },
+        "Lm " + num(magnetizingInductance) + " H, Lr " + num(seriesResonantInductance) + " H, Cr " +
+            num(resonantCapacitance) + " F, reflected load " + num(reflectedLoadResistance) + " ohm");
 }
 
 json build_llc_tas(const LlcDesign& d) {

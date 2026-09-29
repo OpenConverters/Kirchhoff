@@ -228,7 +228,8 @@ TEST_CASE("NRMSE gate: CLLC tank current — analytical vs ngspice", "[nrmse][cl
     }
     json spec = spec_for(400, 48, 480, 100000);
     Kirchhoff::CllcDesign d = Kirchhoff::design_cllc(spec);
-    const double fdrive = d.resonantFrequency;
+    // The deck drives at the operating frequency (above fr for the 1.08 gain headroom — ABT #1503).
+    const double fdrive = d.operatingFrequency;
 
     json tas = Kirchhoff::build_cllc_tas(d);
     PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
@@ -292,7 +293,7 @@ TEST_CASE("NRMSE gate: CLLLC tank current — analytical vs ngspice", "[nrmse][c
     }
     json spec = spec_for(400, 48, 480, 100000);
     Kirchhoff::ClllcDesign d = Kirchhoff::design_clllc(spec);
-    const double fdrive = d.resonantFrequency;
+    const double fdrive = d.operatingFrequency;   // the deck's drive frequency (= fr for this unity-gain ratio)
 
     json tas = Kirchhoff::build_clllc_tas(d);
     PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
@@ -372,7 +373,7 @@ TEST_CASE("NRMSE gate: resonant secondary winding rms vs ngspice", "[nrmse][seco
     }
     // CLLLC (full-bridge: analytical "Secondary 0" vs spice lt1_sec1; trap deck)
     {
-        auto d = Kirchhoff::design_clllc(spec_for(400,48,480,100000)); double f = d.resonantFrequency, T = 1.0/f;
+        auto d = Kirchhoff::design_clllc(spec_for(400,48,480,100000)); double f = d.operatingFrequency, T = 1.0/f;
         auto deck = std::regex_replace(Kirchhoff::tas_to_ngspice(Kirchhoff::build_clllc_tas(d), ideal), std::regex("method=gear"), "method=trap");
         auto r = Kirchhoff::run_ngspice_in_process(deck); REQUIRE(r.success);
         double vo = r.average("v(vout)", r.time.back()-T, r.time.back()).value_or(0);
@@ -384,7 +385,7 @@ TEST_CASE("NRMSE gate: resonant secondary winding rms vs ngspice", "[nrmse][seco
     }
     // CLLC (off-unity design → looser; bounded, not tight)
     {
-        auto d = Kirchhoff::design_cllc(spec_for(400,48,480,100000)); double f = d.resonantFrequency, T = 1.0/f;
+        auto d = Kirchhoff::design_cllc(spec_for(400,48,480,100000)); double f = d.operatingFrequency, T = 1.0/f;
         auto r = Kirchhoff::run_ngspice_in_process(Kirchhoff::tas_to_ngspice(Kirchhoff::build_cllc_tas(d), ideal)); REQUIRE(r.success);
         double vo = r.average("v(vout)", r.time.back()-T, r.time.back()).value_or(0);
         double io = vo/(d.outputVoltage/(d.outputPower/d.outputVoltage));

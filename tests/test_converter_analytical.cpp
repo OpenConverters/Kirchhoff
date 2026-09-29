@@ -1542,3 +1542,178 @@ TEST_CASE("LLC pinned turns ratio: the operating point is solved in the band, me
         }
     }
 }
+
+// ─── ABT #1503 (CLLC / CLLLC): the two-sided resonant tanks regulate by frequency too, or refuse ──────────────
+// Both were always driven at fr = the requested switching frequency, where a symmetric tank's FHA gain is 1 for any
+// ratio. The CLLC's engine-sized ratio carries a 1.08 gain headroom (at fr it would deliver 1.08·Vout) and a pinned
+// ratio of either is whatever the magnetic realised, so the transformer was clamped to ±n·Vout while the tank
+// current came from a drive delivering a different voltage. Now the operating frequency is solved from the FHA gain
+// inside the switching band, or the design throws naming the required gain, the reachable range and a working ratio.
+#include "Cllc.hpp"
+#include "Clllc.hpp"
+
+namespace {
+// 400 V -> 48 V / 480 W, tank resonance 100 kHz, efficiency 95 %, band 70-200 kHz. turnsRatio <= 0: engine-sized.
+nlohmann::json two_sided_1503_spec(double turnsRatio) {
+    nlohmann::json s;
+    auto& dr = s["designRequirements"];
+    dr["inputType"] = "dc";
+    dr["inputVoltage"] = {{"nominal", 400.0}, {"minimum", 380.0}, {"maximum", 420.0}};
+    dr["switchingFrequency"] = {{"nominal", 100e3}};
+    dr["outputs"] = nlohmann::json::array({{{"name", "out"}, {"voltage", {{"nominal", 48.0}}}, {"regulation", "voltage"}}});
+    dr["efficiency"] = 0.95;
+    if (turnsRatio > 0) dr["turnsRatios"] = nlohmann::json::array({{{"nominal", turnsRatio}}});
+    s["operatingPoints"] = nlohmann::json::array({{{"name", "full_load"}, {"inputVoltage", 400.0},
+        {"ambientTemperature", 25.0}, {"outputs", nlohmann::json::array({{{"name", "out"}, {"power", 480.0}}})}}});
+    s["config"] = {{"minSwitchingFrequency", 70e3}, {"maxSwitchingFrequency", 200e3}};
+    return s;
+}
+
+// The design's FHA gain at its operating frequency (forward power flow), from the shared tank model.
+template <class D>
+double two_sided_gain_at_operating_frequency(const D& d) {
+    const double N = d.turnsRatio;
+    const double Rac = 8.0 / (M_PI * M_PI) * N * N * d.outputVoltage * d.outputVoltage / d.outputPower;
+    return Kirchhoff::analytical::cllc_fha_tank(d.operatingFrequency, d.magnetizingInductance,
+                                                d.primaryResonantInductance, d.primaryResonantCapacitance,
+                                                d.secondaryResonantInductance * N * N,
+                                                d.secondaryResonantCapacitance / (N * N), Rac).gain();
+}
+
+// Solve checks shared by both topologies: in band, on the expected side of fr, gain meets Vout; then the emitted
+// transformer excitations balance power and the secondary rms is the full-bridge rectifier's.
+template <class D>
+void check_two_sided_operating_point(const char* topology, const D& d, const nlohmann::json& spec, bool belowResonance) {
+    const double Vin = 400.0, Vout = 48.0, Pout = 480.0, eta = 0.95, Iout = Pout / Vout;
+    CHECK(d.resonantFrequency == Catch::Approx(100e3));
+    CHECK(d.operatingFrequency >= 70e3);
+    CHECK(d.operatingFrequency <= 200e3);
+    CHECK((d.operatingFrequency < d.resonantFrequency) == belowResonance);
+    // Vout = M·η·Vin/N (full bridge both sides, synchronous rectifier: no diode drop).
+    const double M = two_sided_gain_at_operating_frequency(d);
+    CHECK(M == Catch::Approx(d.requiredGain).epsilon(1e-6));
+    CHECK(M * eta * Vin / d.turnsRatio == Catch::Approx(Vout).epsilon(0.001));
+
+    const std::string raw = Kirchhoff::api::process_converter(topology, spec.dump(), "analytical");
+    INFO(raw.substr(0, 400));
+    REQUIRE(raw.rfind("Exception:", 0) != 0);
+    const nlohmann::json out = nlohmann::json::parse(raw);
+    CHECK(out.at("diagnostics").at("switchingFrequency").get<double>() == Catch::Approx(d.operatingFrequency));
+    const auto& exc = out.at("operatingPoint").at("excitationsPerWinding");
+    REQUIRE(exc.size() == 2);   // primary + one full-bridge secondary
+    const WindingPower pri = winding_power(exc.at(0));
+    const WindingPower sec = winding_power(exc.at(1));
+    INFO(topology << ": n " << d.turnsRatio << ", fsw " << d.operatingFrequency << " Hz (fr " << d.resonantFrequency
+         << "), M " << M << ", P_pri " << pri.power << " W, P_sec " << sec.power << " W, I_sec,rms " << sec.currentRms);
+    // Secondary: the synchronous rectifier delivers Pout (its current is scaled to Iout).
+    CHECK(sec.power == Catch::Approx(Pout).epsilon(0.02));
+    // Primary: the gain was solved for Vout from η·Vin, so the transformer carries Pout/η. The residual is FHA's
+    // sinusoidal current against the square winding voltage (second order in the secondary-tank reactance,
+    // Rac/|Zsec| ≈ 1 − (Xsec/Rac)²/2) and the triangular magnetizing current — 2 % tolerance, as the LLC.
+    CHECK(pri.power == Catch::Approx(Pout / eta).epsilon(0.02));
+    // A full-bridge rectifier's winding current is ≈ a sinusoid of mean |i| = Iout: rms = π/(2√2)·Iout ≈ 11.1 A.
+    CHECK(sec.currentRms == Catch::Approx(M_PI / (2.0 * std::sqrt(2.0)) * Iout).epsilon(0.03));
+}
+}  // namespace
+
+TEST_CASE("CLLC: the operating frequency is solved from the FHA gain in the band, meets Vout and balances power "
+          "(ABT #1503)", "[analytical][cllc][abt1503]") {
+    SECTION("engine-sized ratio with the 1.08 gain headroom runs above resonance at gain 1/1.08") {
+        const nlohmann::json spec = two_sided_1503_spec(0.0);
+        const Kirchhoff::CllcDesign d = Kirchhoff::design_cllc(spec);
+        CHECK(d.turnsRatio == Catch::Approx(0.95 * 400.0 / (1.08 * 48.0)));
+        CHECK(d.requiredGain == Catch::Approx(1.0 / 1.08));
+        check_two_sided_operating_point("cllc", d, spec, false);
+    }
+    SECTION("pinned n=8.5 needs gain 1.07, below resonance") {
+        const nlohmann::json spec = two_sided_1503_spec(8.5);
+        const Kirchhoff::CllcDesign d = Kirchhoff::design_cllc(spec);
+        CHECK(d.requiredGain == Catch::Approx(8.5 * 48.0 / (0.95 * 400.0)));
+        check_two_sided_operating_point("cllc", d, spec, true);
+    }
+}
+
+TEST_CASE("CLLC pinned n=12, 400 V -> 48 V: no frequency in the band reaches gain 1.52, so it throws (ABT #1503)",
+          "[analytical][cllc][abt1503]") {
+    const std::string out = Kirchhoff::api::process_converter("cllc", two_sided_1503_spec(12.0).dump(), "analytical");
+    INFO(out.substr(0, 800));
+    REQUIRE(out.rfind("Exception:", 0) == 0);
+    CHECK_THAT(out, Catch::Matchers::ContainsSubstring("pinned turns ratio 12 cannot deliver 48 V from 400 V"));
+    CHECK_THAT(out, Catch::Matchers::ContainsSubstring("needs a tank gain of 1.51579"));
+    CHECK_THAT(out, Catch::Matchers::ContainsSubstring("[70000, 200000] Hz only reaches ["));
+    CHECK_THAT(out, Catch::Matchers::ContainsSubstring("A turns ratio of 7.91667 gives the output at the tank resonance (100000 Hz)"));
+}
+
+TEST_CASE("CLLLC: the unity-gain ratio stays at resonance; a pinned ratio solves its frequency in the band (ABT #1503)",
+          "[analytical][clllc][abt1503]") {
+    SECTION("engine-sized ratio N = η·Vin/Vout is the unity-gain ratio: runs at fr") {
+        const Kirchhoff::ClllcDesign d = Kirchhoff::design_clllc(two_sided_1503_spec(0.0));
+        CHECK(d.requiredGain == Catch::Approx(1.0));
+        CHECK(d.operatingFrequency == d.resonantFrequency);
+        check_two_sided_operating_point("clllc", d, two_sided_1503_spec(0.0), false);
+    }
+    SECTION("pinned N=7.5 needs gain 0.947, above resonance") {
+        const nlohmann::json spec = two_sided_1503_spec(7.5);
+        const Kirchhoff::ClllcDesign d = Kirchhoff::design_clllc(spec);
+        CHECK(d.requiredGain == Catch::Approx(7.5 * 48.0 / (0.95 * 400.0)));
+        check_two_sided_operating_point("clllc", d, spec, false);
+    }
+    SECTION("pinned N=8.05 needs gain 1.017, below resonance (this Q=0.4, K=6 tank peaks at ~1.03)") {
+        const nlohmann::json spec = two_sided_1503_spec(8.05);
+        check_two_sided_operating_point("clllc", Kirchhoff::design_clllc(spec), spec, true);
+    }
+}
+
+TEST_CASE("CLLLC pinned N=4, 400 V -> 48 V: no frequency in the band reaches gain 0.505, so it throws (ABT #1503)",
+          "[analytical][clllc][abt1503]") {
+    const std::string out = Kirchhoff::api::process_converter("clllc", two_sided_1503_spec(4.0).dump(), "analytical");
+    INFO(out.substr(0, 800));
+    REQUIRE(out.rfind("Exception:", 0) == 0);
+    CHECK_THAT(out, Catch::Matchers::ContainsSubstring("pinned turns ratio 4 cannot deliver 48 V from 400 V"));
+    CHECK_THAT(out, Catch::Matchers::ContainsSubstring("needs a tank gain of 0.505263"));
+    CHECK_THAT(out, Catch::Matchers::ContainsSubstring("[70000, 200000] Hz only reaches ["));
+    CHECK_THAT(out, Catch::Matchers::ContainsSubstring("A turns ratio of 7.91667 gives the output at the tank resonance (100000 Hz)"));
+}
+
+TEST_CASE("CLLC reverse power flow: the Vout-side drive solves its own frequency and balances power (ABT #1503)",
+          "[analytical][cllc][reverse][abt1503]") {
+    // Reverse: the 48 V side drives Lr2/Cr2 with Lm/N² and delivers 400 V through 1/N. The engine-sized ratio
+    // (N = η·Vin/(1.08·Vout)) needs gain Vin/(η·N·Vout) = 1.08/η² there — below resonance.
+    nlohmann::json spec = two_sided_1503_spec(0.0);
+    spec["config"]["powerFlowDirection"] = "reverse";
+    const Kirchhoff::CllcDesign d = Kirchhoff::design_cllc(spec);
+    const double Vin = 400.0, Vout = 48.0, P = 480.0, eta = 0.95, N = d.turnsRatio;
+    CHECK(d.requiredGain == Catch::Approx(Vin / (eta * N * Vout)));
+    CHECK(d.requiredGain == Catch::Approx(1.08 / (eta * eta)));
+    CHECK(d.operatingFrequency >= 70e3);
+    CHECK(d.operatingFrequency < d.resonantFrequency);
+    const double RacLv = 8.0 / (M_PI * M_PI) * Vin * Vin / (N * N * P);
+    const auto tank = Kirchhoff::analytical::cllc_fha_tank(d.operatingFrequency, d.magnetizingInductance / (N * N),
+                                                          d.secondaryResonantInductance, d.secondaryResonantCapacitance,
+                                                          d.primaryResonantInductance / (N * N),
+                                                          d.primaryResonantCapacitance * N * N, RacLv);
+    const double M = tank.gain();
+    // Receiving-tank power factor: the model's square winding voltage is in phase with Lm's voltage, the rectifier
+    // current with Rac; they differ by arg(Zsec), negligible near fr but not 28 % below it.
+    const double pfRecv = tank.zsecRe / std::hypot(tank.zsecRe, tank.zsecIm);
+    CHECK(M * eta * N * Vout == Catch::Approx(Vin).epsilon(0.001));
+
+    const std::string raw = Kirchhoff::api::process_converter("cllc", spec.dump(), "analytical");
+    INFO(raw.substr(0, 400));
+    REQUIRE(raw.rfind("Exception:", 0) != 0);
+    const nlohmann::json out = nlohmann::json::parse(raw);
+    CHECK(out.at("diagnostics").at("switchingFrequency").get<double>() == Catch::Approx(d.operatingFrequency));
+    const auto& exc = out.at("operatingPoint").at("excitationsPerWinding");
+    REQUIRE(exc.size() == 2);
+    const WindingPower hv = winding_power(exc.at(0));   // receiver (Vin winding)
+    const WindingPower lv = winding_power(exc.at(1));   // driver (Vout winding)
+    INFO("fsw " << d.operatingFrequency << " Hz, M " << M << ", P_hv " << hv.power << " W, P_lv " << lv.power
+         << " W, I_hv,rms " << hv.currentRms);
+    // The driven winding carries P/η. The receiving winding's v·i is P·cos(arg Zsec) (its current is scaled to the
+    // delivered DC current; its square voltage leads it by the receiving tank's angle). Solved ~28 % below fr the
+    // receiving tank is off resonance, so that factor is ~0.988 here (≈1 at the forward points above).
+    INFO("receiving-tank power factor " << pfRecv);
+    CHECK(std::abs(lv.power) == Catch::Approx(P / eta).epsilon(0.02));
+    CHECK(std::abs(hv.power) == Catch::Approx(P * pfRecv).epsilon(0.02));
+    CHECK(hv.currentRms == Catch::Approx(M_PI / (2.0 * std::sqrt(2.0)) * P / Vin).epsilon(0.03));
+}

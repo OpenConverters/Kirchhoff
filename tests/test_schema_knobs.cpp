@@ -114,9 +114,18 @@ TEST_CASE("schema: CLLC asymmetric tank ratios and the switching-frequency band"
     CHECK(d.secondaryResonantCapacitance == Catch::Approx(1.05 * n * n * d.primaryResonantCapacitance));
     s["config"]["symmetricDesign"] = true;   // contradicts the ratios
     CHECK_THROWS_WITH(Kirchhoff::design_cllc(s), ContainsSubstring("symmetricDesign"));
+    // The band bounds the OPERATING frequency, which is solved from the FHA gain (ABT #1503): the default 1.08 gain
+    // headroom needs gain 1/1.08, reached ~17 % above the 200 kHz resonance. A band starting at 210 kHz therefore
+    // holds the operating point (it used to throw because fr itself lay outside it); a band ending at 210 kHz does
+    // not, and the design refuses.
     json band = spec(400, 48, 480, 200e3);
     band["config"]["minSwitchingFrequency"] = 210e3;
-    CHECK_THROWS_WITH(Kirchhoff::design_cllc(band), ContainsSubstring("outside the switching-frequency band"));
+    const auto inBand = Kirchhoff::design_cllc(band);
+    CHECK(inBand.operatingFrequency >= 210e3);
+    CHECK(inBand.operatingFrequency > inBand.resonantFrequency);
+    json below = spec(400, 48, 480, 200e3);
+    below["config"]["maxSwitchingFrequency"] = 210e3;
+    CHECK_THROWS_WITH(Kirchhoff::design_cllc(below), ContainsSubstring("no switching frequency in the band delivers the output"));
 }
 
 TEST_CASE("schema: AHB input-voltage step adds a transient operating point, explicit Lo/Cb honoured", "[schema]") {

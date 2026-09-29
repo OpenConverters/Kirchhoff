@@ -110,7 +110,8 @@ TEST_CASE("resonant validation grid: LLC (FHA baseline)", "[resval][llc]") {
     std::vector<double> tankAtFr;
     auto grid = sweep("LLC", fr, {0.85, 0.95, 1.0, 1.10}, {1.0, 0.5}, [&](double fdrive, double lf,
                        double& nrmse, double& aPk, double& sPk, double& vout, double& iout, double& trms) {
-        auto dd = d; dd.switchingFrequency = fdrive;
+        // The deck drives at operatingFrequency (ABT #1503); switchingFrequency is only the request.
+        auto dd = d; dd.switchingFrequency = fdrive; dd.operatingFrequency = fdrive;
         std::string deck = Kirchhoff::tas_to_ngspice(Kirchhoff::build_llc_tas(dd), ideal);
         deck = std::regex_replace(deck, std::regex("method=gear"), "method=trap");
         deck = std::regex_replace(deck, std::regex(R"(Rload Vout 0 \S+)"), "Rload Vout 0 " + std::to_string(baseRload / lf));
@@ -156,7 +157,8 @@ void run_two_sided(const char* name, DesignT d, BuildT buildTas, AnaT analytical
     std::vector<double> tankAtFr;
     auto grid = sweep(name, fr, {0.85, 0.95, 1.0, 1.10}, {1.0, 0.5}, [&](double fdrive, double lf,
                        double& nrmse, double& aPk, double& sPk, double& vout, double& iout, double& trms) {
-        auto dd = d; dd.switchingFrequency = fdrive;
+        // The deck drives at operatingFrequency (ABT #1503); switchingFrequency is only the request.
+        auto dd = d; dd.switchingFrequency = fdrive; dd.operatingFrequency = fdrive;
         std::string deck = Kirchhoff::tas_to_ngspice(buildTas(dd), ideal);
         if (trap) deck = std::regex_replace(deck, std::regex("method=gear"), "method=trap");
         deck = std::regex_replace(deck, std::regex(R"(Rload Vout 0 \S+)"), "Rload Vout 0 " + std::to_string(baseRload / lf));

@@ -34,7 +34,10 @@ struct ClllcDesign {
     double magnetizingInductance;      // Lm = k·Lr1
     double secondaryResonantInductance;  // Lr2 = Lr1/n² (symmetric)
     double secondaryResonantCapacitance; // Cr2 = n²·Cr1 (symmetric)
-    double resonantFrequency;          // fr (= fsw)
+    double resonantFrequency;          // fr = designRequirements.switchingFrequency: the tank resonance
+    double operatingFrequency;         // the frequency the bridges are driven at: fr when the turns ratio gives the
+                                       // output there, else the FHA-solved frequency in the band (ABT #1503)
+    double requiredGain;               // tank gain the delivered rail needs (forward N·Vout/(η·Vin))
     double switchDuty;                 // primary per-switch on-fraction
     double loadResistance;
     double outputCapacitance;
