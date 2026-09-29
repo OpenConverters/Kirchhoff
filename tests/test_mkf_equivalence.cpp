@@ -1019,10 +1019,21 @@ TEST_CASE("LLC full-bridge delivers ~2x the half-bridge for the same turns ratio
     json diFb = kirchhoff_inputs(in);
     diFb["simStimulusFsw"] = json::array({in.at("switchingFrequency").get<double>()});
     diFb["designRequirements"]["turnsRatios"] = json::array({nPin});   // SAME ratio as the half-bridge
+    // ABT #1503: design_llc now solves the drive frequency for a pinned ratio and THROWS when no band
+    // frequency reaches the spec. The full bridge at the half-bridge's ratio cannot deliver the 48 V spec
+    // (it needs gain ~0.5; the band floor is ~0.53), so it used to be sized silently for a spec it could not
+    // meet. Ask the full bridge for the output it physically makes at that ratio instead: 2x the voltage at
+    // 4x the power keeps the load resistance (V^2/P) identical to the half-bridge, and the required gain is
+    // ~1, so the drive stays at the tank resonance where the gain is ~1 whatever Q is. (The tank values are
+    // not bit-identical: the reflected load includes the rectifier drop, which is a smaller share of 96 V.)
+    // The output ratio at resonance is therefore the bridge factor, which is the property under test.
+    diFb["designRequirements"]["outputs"][0]["voltage"]["nominal"] = 2.0 * in.at("outputVoltage").get<double>();
+    diFb["operatingPoints"][0]["outputs"][0]["power"] = 4.0 * in.at("outputPower").get<double>();
     diFb["config"]["bridgeType"] = "fullBridge";
     Kirchhoff::LlcDesign dFb = Kirchhoff::design_llc(diFb);
     REQUIRE(dFb.fullBridge);
     CHECK(std::fabs(dFb.turnsRatio - dHb.turnsRatio) < 1e-9);   // pinned identical
+    CHECK(std::fabs(dFb.loadResistance - dHb.loadResistance) < 1e-9 * dHb.loadResistance);   // same load
     json tasFb = Kirchhoff::build_llc_tas(dFb);
     KirchhoffResult rFb = run_kirchhoff(diFb, tasFb, dFb.loadResistance, dFb.outputCapacitance, dFb.inputVoltage, "llc_fb_pin");
 
