@@ -366,6 +366,13 @@ MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vecto
                                      + "s — cannot verify steady state for magnetic '" + mags[idx].name + "'");
         const double periodsBack = std::max(1.0, std::floor(0.5 * span / cmpPeriod * (1.0 + 1e-9)));
         const double tMid = tEndRun - periodsBack * cmpPeriod;
+        // A second earlier window, about three quarters into the run (ABT #1525). One comparison aliases with a
+        // slow ring whose period divides the half-run: the diode-rectified CLLLC's output capacitor rings
+        // against the tank at ~0.5 kHz after start-up (source power 3.0 → 4.0 → 3.5 kW at 3 / 4 / 8 ms), and
+        // mid-run (2 ms) and the end (4 ms) sat on the same phase of it, so a run 15 % off its steady power
+        // passed as settled. Two windows a quarter-run apart cannot both line up with such a ring.
+        const double periodsBackQuarter = std::max(1.0, std::floor(0.25 * span / cmpPeriod * (1.0 + 1e-9)));
+        const double tThreeQuarter = tEndRun - periodsBackQuarter * cmpPeriod;
         // Compare the winding currents over [tEnd-cmp, tEnd] and [tMid-cmp, tMid] on a common 256-point grid.
         auto window = [&](const std::vector<double>& src, double tStop) {
             const int M = 256;
@@ -384,15 +391,18 @@ MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vecto
         // carries almost nothing (an unloaded or blocked rail) is not judged on its own noise.
         double refRms = 0.0;
         std::vector<std::pair<std::vector<double>, std::vector<double>>> pairs;
+        size_t windingsFound = 0;
         for (size_t w = 0; w < excs0.size(); ++w) {
             const std::vector<double>* sig = branch_of(r, w);
             if (!sig) break;   // the extraction below throws the specific missing-branch error
-            auto a = window(*sig, tEndRun), b = window(*sig, tMid);
+            ++windingsFound;
+            auto a = window(*sig, tEndRun);
             double ra = 0.0; for (double v : a) ra += v * v;
             refRms = std::max(refRms, std::sqrt(ra / a.size()));
-            pairs.emplace_back(std::move(a), std::move(b));
+            pairs.emplace_back(a, window(*sig, tMid));
+            pairs.emplace_back(std::move(a), window(*sig, tThreeQuarter));
         }
-        if (pairs.size() != excs0.size()) { steady = true; break; }   // let the extraction name the branch
+        if (windingsFound != excs0.size()) { steady = true; break; }   // let the extraction name the branch
         if (!(refRms > 0))
             throw std::runtime_error("extract_operating_point(NGSPICE): every winding current of magnetic '"
                                      + mags[idx].name + "' is zero at the end of the run");
@@ -404,7 +414,7 @@ MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vecto
                 d2 += dv * dv;
             }
             const double nrmse = std::sqrt(d2 / pairs[w].first.size()) / refRms;
-            if (nrmse > lastMismatch) { lastMismatch = nrmse; lastMismatchWinding = std::to_string(w); }
+            if (nrmse > lastMismatch) { lastMismatch = nrmse; lastMismatchWinding = std::to_string(w / 2); }
         }
         if (lastMismatch <= kSteadyTolerance) { steady = true; break; }
         const double bytesThisRun = 8.0 * static_cast<double>(r.time.size()) * static_cast<double>(r.vectors.size() + 1);

@@ -356,13 +356,16 @@ TEST_CASE("the deck's transient never stops inside a gate edge", "[extract][tran
     std::string stepToken, stopToken;
     tranLine >> stepToken >> stopToken;
     CHECK(deck.find("to=" + stopToken + "\n") != std::string::npos);
-    // A stop time clear of every edge is left exactly as requested.
+    // A stop time between periods is rounded UP to a whole number of switching periods (ABT #1525: the extraction
+    // reads the last period before the stop and orients it against the analytical cycle, which starts at a period
+    // boundary), and then kept clear of that period's gate edge like any other: 52.5 periods -> 53, + 1..2 ns.
     spec["config"]["tranStopTime"] = 52.5 / fsw;
     const std::string deck2 = Kirchhoff::api::generate_ngspice_circuit(
         Kirchhoff::api::design_tas("isolated_buck", spec.dump()), R"({"origin":"REQUIREMENTS"})");
     const auto p2 = deck2.find("\n.tran ");
     REQUIRE(std::sscanf(deck2.c_str() + p2 + 7, "%lf %lf", &tstep, &tstop) == 2);
-    CHECK(tstop == Catch::Approx(52.5 / fsw).epsilon(1e-9));
+    CHECK(tstop > 53.0 / fsw + 1e-9 - 1e-14);   // 1e-14: the deck prints 10 significant digits
+    CHECK(tstop < 53.0 / fsw + 2e-9 + 1e-14);
 }
 
 

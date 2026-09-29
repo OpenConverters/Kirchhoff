@@ -1717,3 +1717,177 @@ TEST_CASE("CLLC reverse power flow: the Vout-side drive solves its own frequency
     CHECK(std::abs(hv.power) == Catch::Approx(P * pfRecv).epsilon(0.02));
     CHECK(hv.currentRms == Catch::Approx(M_PI / (2.0 * std::sqrt(2.0)) * P / Vin).epsilon(0.03));
 }
+
+// ── ABT #1525: the CLLC/CLLLC ngspice deck must rectify on the receiving bridge, at any operating frequency ──
+namespace {
+nlohmann::json two_sided_1525_spec(double turnsRatio, double efficiency) {
+    nlohmann::json s;
+    auto& dr = s["designRequirements"];
+    dr["inputType"] = "dc";
+    dr["inputVoltage"] = {{"nominal", 400.0}, {"minimum", 380.0}, {"maximum", 420.0}};
+    dr["switchingFrequency"] = {{"nominal", 120e3}};
+    dr["outputs"] = nlohmann::json::array({{{"name", "out"}, {"voltage", {{"nominal", 400.0}}}, {"regulation", "voltage"}}});
+    dr["efficiency"] = efficiency;
+    if (turnsRatio > 0) dr["turnsRatios"] = nlohmann::json::array({{{"nominal", turnsRatio}}});
+    s["operatingPoints"] = nlohmann::json::array({{{"name", "full_load"}, {"inputVoltage", 400.0},
+        {"ambientTemperature", 25.0}, {"outputs", nlohmann::json::array({{{"name", "out"}, {"power", 3300.0}}})}}});
+    s["config"] = {{"resonantBandMin", 80e3}, {"resonantBandMax", 200e3}, {"qualityFactor", 0.4}, {"inductanceRatio", 5.0}};
+    return s;
+}
+}  // namespace
+
+#include "TasAssembler.hpp"
+#include "Cllc.hpp"
+#include "Clllc.hpp"
+#include "NgspiceRunner.hpp"
+
+namespace {
+// The design's own deck, run in-process (libngspice): output voltage and the source / load power averaged over
+// the last 20 switching periods. `deliveredNode` is Vout forward, Vin in reverse (the HV rail is the load).
+struct TwoSidedDeckRun { double vDelivered, pSource, pLoad; };
+TwoSidedDeckRun run_two_sided_deck(const nlohmann::json& tas, double fsw, double vSource, const char* sourceBranch,
+                                   const char* deliveredNode, double loadResistance) {
+    // 16 ms: past the output capacitor's start-up ring against the tank (~0.5 kHz, decaying over ~10 ms), so the
+    // averages are the steady state rather than a phase of that ring.
+    nlohmann::json settled = tas;
+    for (auto& an : settled.at("simulation").at("analyses"))
+        if (an.value("type", "") == "transient") an["stopTime"] = 0.016;
+    const std::string deck = Kirchhoff::tas_to_ngspice(settled, PEAS::Fidelity(PEAS::Fidelity::Origin::REQUIREMENTS));
+    const Kirchhoff::NgspiceRunResult r = Kirchhoff::run_ngspice_in_process(deck);
+    REQUIRE(r.success);
+    const double tEnd = r.time.back(), from = tEnd - 20.0 / fsw;
+    const auto v = r.average(deliveredNode, from, tEnd);
+    const auto i = r.average(sourceBranch, from, tEnd);
+    REQUIRE(v.has_value());
+    REQUIRE(i.has_value());
+    // Load power as the average of v·i: in reverse the delivered HV rail has no filter capacitor, so its voltage
+    // is a rectified waveform and V_avg²/R understates what the load takes.
+    const auto& t = r.time;
+    const std::vector<double>* vl = nullptr;
+    for (const auto& kv : r.vectors) if (kv.first == deliveredNode) vl = &kv.second;
+    REQUIRE(vl != nullptr);
+    double pLoad = 0.0, span = 0.0;
+    for (size_t k = 1; k < t.size(); ++k) {
+        if (t[k - 1] < from) continue;
+        const double dt = t[k] - t[k - 1];
+        pLoad += 0.5 * dt * ((*vl)[k] * (*vl)[k] + (*vl)[k - 1] * (*vl)[k - 1]) / loadResistance;
+        span += dt;
+    }
+    // A DC source's branch current is positive INTO its + terminal: a sourcing supply reads negative.
+    return {*v, -*i * vSource, pLoad / span};
+}
+
+// ABT #1525 regression: the ngspice path of a CLLC/CLLLC design, at whatever frequency the design runs.
+//  - the deck regulates to the spec open loop (within the equivalence suite's kSpecTol, 6 %),
+//  - power flows forward through the transformer on both windings, and balances with the analytical operating
+//    point taken to the deck's output voltage (5 %: the deck's receiving bridge rectifies through ideal diodes
+//    where the analytical model has an ideal SR, and the FHA sinusoid stands in for the simulated tank current).
+//    The analytical point sits at the spec Vout with the design's efficiency losses; the ideal-part deck has
+//    none of those losses and settles where its tank gain puts it (e.g. the unity-gain CLLLC at Vin/N = 412 V
+//    for a 400 V spec at η = 0.97), so the analytical winding powers are scaled by (Vout_deck / Vout_spec)²,
+//    the load power ratio of the resistive load at the two voltages,
+//  - the deck's source-to-load efficiency is plausible (ideal parts: above 90 %, and no energy created).
+template <class D>
+void check_two_sided_ngspice(const char* topology, const D& d, const nlohmann::json& spec, const nlohmann::json& tas) {
+    const double Vin = 400.0, Vout = 400.0;
+    const TwoSidedDeckRun deck = run_two_sided_deck(tas, d.operatingFrequency, Vin, "vvin#branch", "vout",
+                                                    d.loadResistance);
+    const std::string rawSim = Kirchhoff::api::process_converter(topology, spec.dump(), "ngspice");
+    const std::string rawAn  = Kirchhoff::api::process_converter(topology, spec.dump(), "analytical");
+    INFO(rawSim.substr(0, 400));
+    REQUIRE(rawSim.rfind("Exception:", 0) != 0);
+    REQUIRE(rawAn.rfind("Exception:", 0) != 0);
+    const nlohmann::json simOut = nlohmann::json::parse(rawSim), anOut = nlohmann::json::parse(rawAn);
+    const auto& simExc = simOut.at("operatingPoint").at("excitationsPerWinding");
+    const auto& anExc  = anOut.at("operatingPoint").at("excitationsPerWinding");
+    REQUIRE(simExc.size() == 2);
+    REQUIRE(anExc.size() == 2);
+    const double simPri = winding_power(simExc.at(0)).power, simSec = winding_power(simExc.at(1)).power;
+    const double anPri  = winding_power(anExc.at(0)).power,  anSec  = winding_power(anExc.at(1)).power;
+    INFO(topology << ": n " << d.turnsRatio << ", fsw " << d.operatingFrequency << " Hz (fr " << d.resonantFrequency
+         << "), deck Vout " << deck.vDelivered << " V, Psource " << deck.pSource << " W, Pload " << deck.pLoad
+         << " W; ngspice P_pri " << simPri << " W, P_sec " << simSec << " W; analytical P_pri " << anPri
+         << " W, P_sec " << anSec << " W");
+    CHECK(deck.vDelivered == Catch::Approx(Vout).epsilon(0.06));
+    CHECK(simPri > 0.0);
+    CHECK(simSec > 0.0);
+    const double loadScale = (deck.vDelivered / Vout) * (deck.vDelivered / Vout);
+    CHECK(simPri == Catch::Approx(anPri * loadScale).epsilon(0.05));
+    CHECK(simSec == Catch::Approx(anSec * loadScale).epsilon(0.05));
+    CHECK(simSec == Catch::Approx(simPri).epsilon(0.03));   // an ideal transformer passes the power through
+    const double eff = deck.pLoad / deck.pSource;
+    CHECK(eff > 0.90);
+    CHECK(eff <= 1.0);
+}
+}  // namespace
+
+TEST_CASE("CLLC ngspice: the receiving bridge rectifies, so power is forward and balanced off resonance (ABT #1525)",
+          "[ngspice][cllc][abt1525]") {
+    SECTION("engine-sized ratio: runs above resonance") {
+        const auto spec = two_sided_1525_spec(0.0, 0.97);
+        const auto d = Kirchhoff::design_cllc(spec);
+        CHECK(d.operatingFrequency > 1.1 * d.resonantFrequency);
+        check_two_sided_ngspice("cllc", d, spec, Kirchhoff::build_cllc_tas(d));
+    }
+    SECTION("pinned n=0.9: runs above resonance") {
+        const auto spec = two_sided_1525_spec(0.9, 0.97);
+        const auto d = Kirchhoff::design_cllc(spec);
+        CHECK(d.operatingFrequency > 1.1 * d.resonantFrequency);
+        check_two_sided_ngspice("cllc", d, spec, Kirchhoff::build_cllc_tas(d));
+    }
+    SECTION("n=1, efficiency 1: runs at resonance") {
+        const auto spec = two_sided_1525_spec(1.0, 1.0);
+        const auto d = Kirchhoff::design_cllc(spec);
+        CHECK(d.operatingFrequency == d.resonantFrequency);
+        check_two_sided_ngspice("cllc", d, spec, Kirchhoff::build_cllc_tas(d));
+    }
+}
+
+TEST_CASE("CLLLC ngspice: the receiving bridge rectifies, forward power balances (ABT #1525)",
+          "[ngspice][clllc][abt1525]") {
+    SECTION("engine-sized ratio (unity gain, at resonance)") {
+        const auto spec = two_sided_1525_spec(0.0, 0.97);
+        const auto d = Kirchhoff::design_clllc(spec);
+        check_two_sided_ngspice("clllc", d, spec, Kirchhoff::build_clllc_tas(d));
+    }
+    SECTION("pinned N=0.9: off resonance") {
+        const auto spec = two_sided_1525_spec(0.9, 0.97);
+        const auto d = Kirchhoff::design_clllc(spec);
+        CHECK(std::abs(d.operatingFrequency - d.resonantFrequency) > 0.05 * d.resonantFrequency);
+        check_two_sided_ngspice("clllc", d, spec, Kirchhoff::build_clllc_tas(d));
+    }
+}
+
+TEST_CASE("CLLC / CLLLC reverse ngspice: the HV bridge rectifies what the LV bridge drives (ABT #1525)",
+          "[ngspice][cllc][clllc][reverse][abt1525]") {
+    // n = 1: the engine-sized ratio (sized for forward, with the 1.08 headroom) cannot reach 400 V in reverse in
+    // this band, and design_cllc says so (ABT #1503); n = 1 needs gain 1/0.97, just below resonance.
+    auto reverse_spec = [] { auto s = two_sided_1525_spec(1.0, 0.97);
+        s["config"]["powerFlowDirection"] = "reverse"; return s; };
+    auto check = [](double fsw, double fr, double loadR, const nlohmann::json& tas) {
+        // Reverse: the Vout rail (400 V here) sources, the Vin rail (400 V) is delivered.
+        const TwoSidedDeckRun r = run_two_sided_deck(tas, fsw, 400.0, "vvout#branch", "vin", loadR);
+        INFO("fsw " << fsw << " (fr " << fr << "), delivered " << r.vDelivered << " V, Psource " << r.pSource
+             << " W, Pload " << r.pLoad << " W");
+        // The reverse deck has no capacitor on the delivered HV rail (its builders put the only output capacitor
+        // on the LV side), so the HV rail carries the rectified tank voltage straight into the load and its
+        // average is not the FHA's filtered output: check genuine delivery (as the ABT #85 equivalence test
+        // does) and the energy balance, which a bridge conducting against the current breaks.
+        CHECK(r.vDelivered > 0.6 * 400.0);
+        CHECK(r.vDelivered < 1.15 * 400.0);
+        CHECK(r.pSource > 0.5 * 3300.0);
+        CHECK(r.pLoad / r.pSource > 0.90);
+        CHECK(r.pLoad / r.pSource <= 1.0);
+    };
+    const double loadR = 400.0 * 400.0 / 3300.0;
+    SECTION("CLLC") {
+        const auto d = Kirchhoff::design_cllc(reverse_spec());
+        REQUIRE(d.reverse);
+        check(d.operatingFrequency, d.resonantFrequency, loadR, Kirchhoff::build_cllc_tas(d));
+    }
+    SECTION("CLLLC") {
+        const auto d = Kirchhoff::design_clllc(reverse_spec());
+        REQUIRE(d.reverse);
+        check(d.operatingFrequency, d.resonantFrequency, loadR, Kirchhoff::build_clllc_tas(d));
+    }
+}

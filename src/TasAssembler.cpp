@@ -222,8 +222,17 @@ bool stage_has_analog_control_law(const json& stage) {
     const json& brick = stage.at("circuit");
     if (!brick.contains("components") || !brick.at("components").is_array()) return false;
     for (const auto& c : brick.at("components")) {
-        if (c.contains("data") && c.at("data").is_object() && c.at("data").contains("analog"))
+        if (!c.contains("data") || !c.at("data").is_object()) continue;
+        const json& data = c.at("data");
+        if (data.contains("analog"))
             return true;   // a raw AAS analog block (comparator/integrator/multiplier/summer) -> render
+        // A CTAS controller carrying its BEHAVIOURAL law (controller.behavioral, lowered by ctas_to_cias into AAS
+        // blocks) is a gate driver too: the CLLC/CLLLC current-sensed synchronous rectifier, whose comparators
+        // commutate the receiving bridge on the sign of its tank current (ABT #1525). A controller-IC seed
+        // (controller + designRequirements, no behavioral) stays BOM-only.
+        if (data.contains("controller") && data.at("controller").is_object() &&
+            data.at("controller").contains("behavioral"))
+            return true;
     }
     return false;
 }
@@ -673,6 +682,17 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
                                  "stimulus frequency and no lineFrequency to size the transient / averaging window");
     if (stopTime <= 0) stopTime = 600 * refPeriod;
     if (maxStep <= 0) maxStep = refPeriod / 200.0;
+    // End a switching deck on a WHOLE number of switching periods (ABT #1525). The extraction reads the LAST
+    // period before the stop time and orients each simulated winding signal by its correlation with the
+    // analytical one, which starts at the switching cycle (the PULSE delays count from t = 0). The builders ask
+    // for a fixed stop time (4 ms), a whole number of periods only at round frequencies: a CLLC solved to
+    // 139.32 kHz stopped 0.28 of a period into a cycle, the correlation of the shifted current came out
+    // negative, and the extraction flipped both winding currents (-3223 W primary / -3227 W secondary for a
+    // converter delivering +3.3 kW). Rounding UP keeps at least the requested settle time.
+    if (fswKnown) {
+        const double periods = std::ceil(stopTime / refPeriod - 1e-6);
+        stopTime = std::max(1.0, periods) * refPeriod;
+    }
     stopTime = stop_time_clear_of_gate_edges(stopTime, pulseEdges);
 
     // Optional initial conditions: pre-charge nodes at t=0 (e.g. a resonant converter's output cap)

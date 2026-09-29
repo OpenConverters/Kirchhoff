@@ -308,8 +308,8 @@ json build_clllc_tas(const ClllcDesign& d) {
     // ───────────────────────── POWER stage ─────────────────────────
     // A small in-line sense resistor in the secondary tank exposes the tank-current sign (senseP/senseM)
     // so the control stage can drive the SR diagonals current-aware.
-    // Secondary-bridge RC snubber (numerical aid, ABT #96 tagged). The synchronous rectifier switches in
-    // lock-step with the primary from t = 0, and with ideal switches and diodes the secondary bridge input
+    // Secondary-bridge RC snubber (numerical aid, ABT #96 tagged). The secondary bridge commutates from
+    // t = 0, and with ideal switches and diodes the secondary bridge input
     // (node_c/node_d) has no finite dV/dt: the web CLLLC "I know the design" deck died at t = 40 ps with
     // "Timestep too small ... vvin#branch". A series RC across that pair (the house rectifier-snubber values,
     // 100 pF + 100 ohm, as LLC/SRC use) gives it one; the output is unchanged (49.79 V either way). At real
@@ -328,6 +328,7 @@ json build_clllc_tas(const ClllcDesign& d) {
 
     json pcell; pcell["name"] = "clllc-power";
     pcell["ports"] = json::array({port("vin"), port("gnd"), port("sgnd"), port("vout"), port("g1"), port("g2"),
+                                  port("g3"), port("g4"),
                                   port("senseP"), port("senseM")});
     pcell["components"] = json::array({
         // primary full bridge + body diodes (DS1..DS4 = Q1..Q4 body diodes -> bare seed, deferred)
@@ -363,7 +364,8 @@ json build_clllc_tas(const ClllcDesign& d) {
         conn("node_d",   {pin("T1","secondary1_end"), pin("QG","source"), pin("QH","drain"),
                           pin("DSG","anode"), pin("DSH","cathode"), pin("Csns","2")}),
         conn("rc_sec_mid", {pin("Rsns","2"), pin("Csns","1")}),
-        // SR full bridge (diode-emulating SR via the control stage). Body diodes rectify / enable start.
+        // SR full bridge (diode-emulating SR via the control stage). Body diodes carry the dead time around each
+        // current zero, inside the comparators' hysteresis.
         conn("vout_net", {pin("QE","drain"), pin("QG","drain"), pin("DSE","cathode"), pin("DSG","cathode"),
                           pin("Cout","1"), prt("vout")}),
         // Primary and secondary returns are DIFFERENT nodes (ABT #778): one gnd_net put both bridges'
@@ -372,16 +374,14 @@ json build_clllc_tas(const ClllcDesign& d) {
                           prt("gnd")}),
         conn("sgnd_net", {pin("QF","source"), pin("QH","source"), pin("DSF","anode"), pin("DSH","anode"),
                           pin("Cout","2"), prt("sgnd")}),
-        // Gates: both bridges run off the SAME two stimulus signals. Primary diagonals (Q1,Q4) on g1 /
-        // (Q2,Q3) on g2 give vab=±Vin; the secondary SR diagonals are driven SYNCHRONOUS with them —
-        // diagonal A (QE,QH) on g1, diagonal B (QF,QG) on g2 — so each SR FET conducts in lock-step with
-        // its own body diode (DSE..DSH still rectify / enable the cold start). This is the same 2-signal
-        // lock-step SR drive CLLC uses. (The current-sensed srControl stage below is sourced for the BOM
-        // but its behavioural gate law is NOT lowered into the power deck — a control stage is skipped by
-        // the assembler — so wiring the SR gates to the separate driveA/driveB control nets left them
-        // FLOATING and the converter delivered 0 V; abt #60.)
-        conn("g1_net", {pin("Q1","gate"), pin("Q4","gate"), pin("QE","gate"), pin("QH","gate"), prt("g1")}),
-        conn("g2_net", {pin("Q2","gate"), pin("Q3","gate"), pin("QF","gate"), pin("QG","gate"), prt("g2")})});
+        // Gates: each bridge has its OWN two gate nets (ABT #1525). Primary diagonals (Q1,Q4) on g1 / (Q2,Q3) on
+        // g2; secondary diagonals (QE,QH) on g3 / (QF,QG) on g4. The SOURCE-side bridge is driven by the stimulus;
+        // forward, the secondary is the current-sensed SR (srControl below drives g3/g4); reverse, the primary's
+        // gates are held off and DS1..DS4 rectify — see the stimulus below.
+        conn("g1_net", {pin("Q1","gate"), pin("Q4","gate"), prt("g1")}),
+        conn("g2_net", {pin("Q2","gate"), pin("Q3","gate"), prt("g2")}),
+        conn("g3_net", {pin("QE","gate"), pin("QH","gate"), prt("g3")}),
+        conn("g4_net", {pin("QF","gate"), pin("QG","gate"), prt("g4")})});
     // MAS clllcResonant.integratedResonantInductors: Lr1/Lr2 realised as T1's leakage (requirement set on T1
     // above) — fold the discrete equivalents out of the cell.
     if (cfg::get_bool(d.config, "integratedResonantInductors", false)) {
@@ -445,23 +445,39 @@ json build_clllc_tas(const ClllcDesign& d) {
             isc("GND",  "externalPort", "input",  {sp("clllcPower", "gnd")}),
             isc("SGND", "externalPort", "input",  {sp("clllcPower", "sgnd")}),
             isc("Vout", "externalPort", "output", {sp("clllcPower", "vout")})});
-    // tank-current sense: power -> control (the SR controller IC is sourced for the BOM and reads the sense
-    // resistor; the SR power gates are driven in lock-step off g1/g2 in the power cell, so no driveA/driveB
-    // gate nets are wired — they would float, abt #60).
+    // tank-current sense: power -> control. The SR controller reads the sense resistor and, forward, drives the
+    // secondary diagonals: gA -> g3 (QE,QH) conducts for a positive senseP->senseM current, gB -> g4 (QF,QG) for a
+    // negative one (ABT #1525). The assembler lowers its behavioural law (controller.behavioral) into two
+    // comparators, so the SR follows the tank current at any operating frequency. Reverse, the secondary bridge
+    // is the DRIVEN one (stimulus on g3/g4) and gA/gB stay unwired.
     powerRails.push_back(isc("senseP", "wire", "", {sp("clllcPower", "senseP"), sp("srControl", "senseP")}));
     powerRails.push_back(isc("senseM", "wire", "", {sp("clllcPower", "senseM"), sp("srControl", "senseM")}));
+    if (!d.reverse) {
+        powerRails.push_back(isc("srGateA", "wire", "", {sp("srControl", "gA"), sp("clllcPower", "g3")}));
+        powerRails.push_back(isc("srGateB", "wire", "", {sp("srControl", "gB"), sp("clllcPower", "g4")}));
+    }
     tas["topology"]["interStageConnections"] = std::move(powerRails);
 
     json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
     tas["simulation"]["analyses"] = json::array({an});
-    // ONLY the primary bridge is open-loop driven; the SR is closed-loop via the control stage.
-    auto stim = [&](const char* sw, double phaseDeg) {
+    // Only the SOURCE-side bridge is open-loop driven (ABT #1525). Forward: g1 (Q1,Q4) phase 0 / g2 (Q2,Q3) phase 180;
+    // the secondary bridge is the synchronous rectifier, gated by srControl on the sign of its tank current. It used
+    // to be gated in lock-step with the primary, which is only right AT the tank resonance: since ABT #1503 the
+    // converter runs at the FHA-solved frequency, often off resonance, where the lock-step FETs conduct against the
+    // current (a 3.3 kW 400 V -> 400 V design with a pinned N = 0.9, solved to 139 kHz, delivered 377 V, not ~400 V).
+    // Reverse: the secondary bridge is driven, g3 (QE,QH) phase 0 / g4 (QF,QG) phase 180, and the primary (HV) bridge
+    // rectifies through its body diodes (its gates held off: dutyCycle 0 is a DC 0 V gate). The deck has no
+    // primary-side current sense for an SR there; one diode drop on the HV rail is a small fraction of it.
+    auto stim = [&](const char* sw, double phaseDeg, double duty) {
         json st; st["stage"] = "clllcPower"; st["component"] = sw; st["signal"] = "gate";
         st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.operatingFrequency;
-        st["waveform"]["dutyCycle"] = d.switchDuty; st["waveform"]["phase"] = phaseDeg;
+        st["waveform"]["dutyCycle"] = duty; st["waveform"]["phase"] = phaseDeg;
         return st; };
-    tas["simulation"]["stimulus"] = json::array({stim("Q1", 0.0), stim("Q2", 180.0)});
-    // Precharge the DELIVERED bus so the active SR can start; forward precharges Vout, reverse Vin (ABT #85).
+    tas["simulation"]["stimulus"] = d.reverse
+        ? json::array({stim("QE", 0.0, d.switchDuty), stim("QF", 180.0, d.switchDuty),
+                       stim("Q1", 0.0, 0.0), stim("Q2", 0.0, 0.0)})
+        : json::array({stim("Q1", 0.0, d.switchDuty), stim("Q2", 180.0, d.switchDuty)});
+    // Precharge the DELIVERED bus so the SR has a rail to rectify into from the first cycle; forward precharges Vout, reverse Vin (ABT #85).
     { json ic; ic["node"] = d.reverse ? "Vin" : "Vout"; ic["voltage"] = deliverV;
       tas["simulation"]["initialConditions"] = json::array({ic}); }
     req::finalize_control_seeds(tas, Topology::CLLLC_RESONANT_CONVERTER);  // CTAS seed: topology+fsw for switching controllers

@@ -21,6 +21,8 @@ std::string num(double v) { std::ostringstream o; o << v; return o.str(); }
 constexpr double kQualityFactor   = 0.3;   // MKF Cllc default (Infineon AN: 0.2–0.4)
 constexpr double kInductanceRatio = 4.45;  // k = Lm/Lr1 (MKF defaultInductanceRatio)
 constexpr double kSwitchDuty      = 0.47;  // ~50% minus dead time
+constexpr double kSenseResistance = 0.01;  // in-line current-sense resistor in the secondary tank [Ω]
+constexpr double kSenseHysteresis = 5e-3;  // SR comparator hysteresis on the i·Rsense signal [V]
 constexpr double kGainHeadroom    = 1.08;  // size n for M=1 at fr -> 1.08·Vo, so the nominal operating
                                            // point sits just ABOVE fr (efficient) not at the M=1 peak
 } // namespace
@@ -237,6 +239,16 @@ json build_cllc_tas(const CllcDesign& d) {
     auto capBrick = [&](double c, double vrated) { json j; j["capacitor"] = json::object();
         j["inputs"]["designRequirements"]["capacitance"]["nominal"] = c;
         j["inputs"]["designRequirements"]["ratedVoltage"] = vrated; return j; };
+    auto resBrick = [&](double r) { json j; j["resistor"] = json::object();
+        auto& dr = j["inputs"]["designRequirements"];
+        dr["deviceType"] = "resistor";
+        dr["resistance"]["nominal"] = r;
+        // Conservative requirement floor: a resistor dissipates I^2*R (series) or V^2/R (shunt);
+        // the physical value is the smaller. Exact for load resistors (=Pout), safe for sense/divider.
+        const double Iout_ = d.outputPower / d.outputVoltage, Vb_ = d.outputVoltage;
+        const double i2r_ = Iout_*Iout_*r, v2r_ = Vb_*Vb_/r;
+        dr["powerRating"] = (i2r_ < v2r_ ? i2r_ : v2r_);
+        return j; };
 
     // --- resonant-tank stresses (FHA, evaluated at the nominal point, operated AT resonance fr) ---
     // CLLC is a FULL bridge both sides, so the primary tank sees a ±Vin square (fund. rms 2√2·Vin/π).
@@ -368,7 +380,8 @@ json build_cllc_tas(const CllcDesign& d) {
 
     json cell; cell["name"] = "cllc-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("sgnd"), port("vout"),
-                                 port("g1"), port("g2")});
+                                 port("g1"), port("g2"), port("g3"), port("g4"),
+                                 port("senseP"), port("senseM")});
     cell["components"] = json::array({
         // primary full bridge + body diodes (DS1..DS4 = Q1..Q4 body diodes -> bare seed, deferred)
         comp("Q1", mosfetReq(reqPri)), comp("Q2", mosfetReq(reqPri)),
@@ -376,6 +389,8 @@ json build_cllc_tas(const CllcDesign& d) {
         comp("DS1", diode()), comp("DS2", diode()), comp("DS3", diode()), comp("DS4", diode()),
         // primary tank + transformer + secondary tank
         comp("Cr1", cr1), comp("Lr1", lr1), comp("T1", t1), comp("Lr2", lr2), comp("Cr2", cr2),
+        // in-line secondary-tank current sense: the SR controller reads the tank-current sign across it
+        comp("Rsense", resBrick(cfg::get(d.config, "senseResistance", kSenseResistance))),
         // secondary active synchronous rectifier (4 switches) + body diodes (DSa..DSd = Qa..Qd body
         // diodes -> bare seed, deferred; the rectifiers are the SR MOSFETs themselves)
         comp("Qa", mosfetReq(reqSec)), comp("Qb", mosfetReq(reqSec)),
@@ -396,16 +411,17 @@ json build_cllc_tas(const CllcDesign& d) {
         // Primary series tank: node_a -> Cr1 -> Lr1 -> Lpri(=Lm) -> node_b.
         conn("c1_mid",   {pin("Cr1", "2"), pin("Lr1", "primary_start")}),
         conn("pri_top",  {pin("Lr1", "primary_end"), pin("T1", "primary_start")}),
-        // Secondary series tank: sec_p -> Lr2 -> Cr2 -> node_c ; sec_n -> node_d.
+        // Secondary series tank: sec_p -> Lr2 -> Cr2 -> senseP -> Rsense -> node_c ; sec_n -> node_d.
         conn("sec_p",    {pin("T1", "secondary1_start"), pin("Lr2", "primary_start")}),
         conn("l2_mid",   {pin("Lr2", "primary_end"), pin("Cr2", "1")}),
-        conn("node_c",   {pin("Cr2", "2"), pin("Qa", "source"), pin("Qb", "drain"),
-                          pin("DSa", "anode"), pin("DSb", "cathode")}),
+        conn("senseP",   {pin("Cr2", "2"), pin("Rsense", "1"), prt("senseP")}),
+        conn("node_c",   {pin("Rsense", "2"), pin("Qa", "source"), pin("Qb", "drain"),
+                          pin("DSa", "anode"), pin("DSb", "cathode"), prt("senseM")}),
         conn("node_d",   {pin("T1", "secondary1_end"), pin("Qc", "source"), pin("Qd", "drain"),
                           pin("DSc", "anode"), pin("DSd", "cathode")}),
-        // ── Secondary active bridge. Diagonal pairs (Qa,Qd) on g1, (Qb,Qc) on g2 — synchronous with
-        // the primary (forward power flow). Body diodes DSa..DSd form a full-bridge rectifier that lets
-        // the converter start once the output is precharged (simulation.initialConditions).
+        // ── Secondary active bridge. Diagonal pairs (Qa,Qd) on g3, (Qb,Qc) on g4 — its OWN gate nets, not
+        // the primary's (ABT #1525). Forward, srControl gates them on the sign of the secondary tank current
+        // (synchronous rectifier); the body diodes DSa..DSd carry the dead time around each current zero.
         conn("vout_net", {pin("Qa", "drain"), pin("Qc", "drain"),
                           pin("DSa", "cathode"), pin("DSc", "cathode"), pin("Cout", "1"), prt("vout")}),
         // Primary and secondary returns are DIFFERENT nodes (ABT #778). One gnd_net here put the
@@ -415,12 +431,30 @@ json build_cllc_tas(const CllcDesign& d) {
                           pin("DS2", "anode"), pin("DS4", "anode"), prt("gnd")}),
         conn("sgnd_net", {pin("Qb", "source"), pin("Qd", "source"),
                           pin("DSb", "anode"), pin("DSd", "anode"), pin("Cout", "2"), prt("sgnd")}),
-        conn("g1_net", {pin("Q1", "gate"), pin("Q4", "gate"), pin("Qa", "gate"), pin("Qd", "gate"), prt("g1")}),
-        conn("g2_net", {pin("Q2", "gate"), pin("Q3", "gate"), pin("Qb", "gate"), pin("Qc", "gate"), prt("g2")})});
+        conn("g1_net", {pin("Q1", "gate"), pin("Q4", "gate"), prt("g1")}),
+        conn("g2_net", {pin("Q2", "gate"), pin("Q3", "gate"), prt("g2")}),
+        conn("g3_net", {pin("Qa", "gate"), pin("Qd", "gate"), prt("g3")}),
+        conn("g4_net", {pin("Qb", "gate"), pin("Qc", "gate"), prt("g4")})});
     // Integrated resonant inductors (MAS cllcResonant.integratedResonantInductor1/2) are realised as T1's
     // leakage (requirement set on T1 above): fold the discrete equivalents out of the cell.
     if (cfg::get_bool(d.config, "integratedResonantInductor1", false)) req::fold_series_inductor(cell, "Lr1");
     if (cfg::get_bool(d.config, "integratedResonantInductor2", false)) req::fold_series_inductor(cell, "Lr2");
+
+    // ──────────────────── SR CONTROL stage (swappable) ────────────────────
+    // ONE CTAS `controller` component — a current-sensed full-bridge synchronous-rectifier controller, the same
+    // one CLLLC uses. The assembler lowers its agnostic behavioural law (CTAS controller.behavioral) into two
+    // comparators that read the tank-current sign across Rsense (senseP/senseM) and gate the two rectifying
+    // diagonals (gA/gB), so the SR follows the tank current at any operating frequency (ABT #1525).
+    auto syncRect = [&](double hyst) { json j; json& b = j["controller"]["behavioral"];
+        b["controlScheme"] = "synchronousRectifier"; b["topology"] = "fullBridge"; b["sensing"] = "current";
+        b["hysteresis"] = hyst; b["driveHigh"] = 5.0; b["driveLow"] = 0.0; b["threshold"] = 0.0; return j; };
+    json ccell; ccell["name"] = "cllc-sr-control";
+    ccell["ports"] = json::array({port("senseP"), port("senseM"), port("gA"), port("gB")});
+    ccell["components"] = json::array({comp("SR", syncRect(cfg::get(d.config, "senseHysteresis", kSenseHysteresis)))});
+    ccell["connections"] = json::array({
+        conn("senseP", {pin("SR","senseP"), prt("senseP")}),
+        conn("senseM", {pin("SR","senseM"), prt("senseM")}),
+        conn("gA", {pin("SR","gA"), prt("gA")}), conn("gB", {pin("SR","gB"), prt("gB")})});
 
     // The TAS inputs describe the SOURCE and DELIVERED rails. Forward: source = Vin, deliver = Vout. Reverse
     // (ABT #85): source = Vout (LV), deliver = Vin (HV). The assembler drives a DC source on the "input"
@@ -446,10 +480,11 @@ json build_cllc_tas(const CllcDesign& d) {
 
     tas["topology"]["stages"] = json::array({
         req::control_stage("llcController"),
-        pstage("cllcCell", "switchingCell", cell, bind("vin", "dcBus"), bind("vout", "dcOutput"))});
+        pstage("cllcCell", "switchingCell", cell, bind("vin", "dcBus"), bind("vout", "dcOutput")),
+        pstage("srControl", "control", ccell, bind("senseP", "sense"), bind("gA", "drive"))});
     // Node names stay tied to the physical rails (Vin = HV bridge port, Vout = LV bridge port); only the
     // source/load DIRECTION flips for reverse power flow (ABT #85).
-    tas["topology"]["interStageConnections"] = d.reverse
+    json powerRails = d.reverse
         ? json::array({
             isc("Vout", "externalPort", "input",  {sp("cllcCell", "vout")}),   // LV rail sources
             isc("GND",  "externalPort", "input",  {sp("cllcCell", "gnd")}),
@@ -460,22 +495,39 @@ json build_cllc_tas(const CllcDesign& d) {
             isc("GND",  "externalPort", "input",  {sp("cllcCell", "gnd")}),
             isc("SGND", "externalPort", "input",  {sp("cllcCell", "sgnd")}),
             isc("Vout", "externalPort", "output", {sp("cllcCell", "vout")})});
+    // Tank-current sense: power -> control. Forward, the SR controller drives the secondary diagonals: gA -> g3
+    // (Qa,Qd) conducts for a positive senseP->senseM current, gB -> g4 (Qb,Qc) for a negative one (ABT #1525).
+    // Reverse, the secondary bridge is the DRIVEN one (stimulus on g3/g4) and gA/gB stay unwired.
+    powerRails.push_back(isc("senseP", "wire", "", {sp("cllcCell", "senseP"), sp("srControl", "senseP")}));
+    powerRails.push_back(isc("senseM", "wire", "", {sp("cllcCell", "senseM"), sp("srControl", "senseM")}));
+    if (!d.reverse) {
+        powerRails.push_back(isc("srGateA", "wire", "", {sp("srControl", "gA"), sp("cllcCell", "g3")}));
+        powerRails.push_back(isc("srGateB", "wire", "", {sp("srControl", "gB"), sp("cllcCell", "g4")}));
+    }
+    tas["topology"]["interStageConnections"] = std::move(powerRails);
 
     json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
     tas["simulation"]["analyses"] = json::array({an});
-    // Both bridges are square waves: g1 (Q1,Q4,Qa,Qd) phase 0, g2 (Q2,Q3,Qb,Qc) phase 180. The
-    // secondary is gated synchronously with the primary (forward power flow).
-    auto stim = [&](const char* sw, const char* sig, double phaseDeg) {
-        json st; st["stage"] = "cllcCell"; st["component"] = sw; st["signal"] = sig;
+    // Only the SOURCE-side bridge is open-loop driven (ABT #1525). Forward: g1 (Q1,Q4) phase 0 / g2 (Q2,Q3) phase
+    // 180; the secondary bridge is the synchronous rectifier, gated by srControl on the sign of its tank current.
+    // It used to be gated in lock-step with the primary, which is only right AT the tank resonance, where the
+    // receiving current is in phase with the drive. Since ABT #1503 the converter runs at the FHA-solved frequency,
+    // often off resonance; there the lock-step FETs conducted against the current (a 3.3 kW 400 V -> 400 V design
+    // solved to 139 kHz sagged ~11% below its target).
+    // Reverse: the secondary bridge is driven, g3 (Qa,Qd) phase 0 / g4 (Qb,Qc) phase 180, and the primary (HV)
+    // bridge rectifies through its body diodes (its gates held off: dutyCycle 0 is a DC 0 V gate). The deck has
+    // no primary-side current sense for an SR there; one diode drop on the HV rail is a small fraction of it.
+    // ONE stimulus per gate net (a voltage source per switch would short the net's shared gate node).
+    auto stim = [&](const char* sw, double phaseDeg, double duty) {
+        json st; st["stage"] = "cllcCell"; st["component"] = sw; st["signal"] = "gate";
         st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.operatingFrequency;
-        st["waveform"]["dutyCycle"] = d.switchDuty; st["waveform"]["phase"] = phaseDeg;
+        st["waveform"]["dutyCycle"] = duty; st["waveform"]["phase"] = phaseDeg;
         return st; };
-    // Only ONE stimulus per shared gate node: Q1 drives the g1 port (shared by Q1/Q4/Qa/Qd), Q2 drives
-    // g2 (shared by Q2/Q3/Qb/Qc). Emitting one per switch would put 4 voltage sources on one node
-    // (singular). The four switches on each gate are driven together — exactly the 2-signal CLLC drive.
-    tas["simulation"]["stimulus"] = json::array({
-        stim("Q1", "gate", 0.0), stim("Q2", "gate", 180.0)});
-    // Precharge the DELIVERED bus to its target so the active synchronous rectifier can start and the deck
+    tas["simulation"]["stimulus"] = d.reverse
+        ? json::array({stim("Qa", 0.0, d.switchDuty), stim("Qb", 180.0, d.switchDuty),
+                       stim("Q1", 0.0, 0.0), stim("Q2", 0.0, 0.0)})
+        : json::array({stim("Q1", 0.0, d.switchDuty), stim("Q2", 180.0, d.switchDuty)});
+    // Precharge the DELIVERED bus to its target so the SR has a rail to rectify into from the first cycle and the deck
     // runs with use-initial-conditions (skipping the resonant tank's singular DC operating point). Forward
     // precharges Vout; reverse precharges Vin (the HV side is now the delivered rail — ABT #85).
     { json ic; ic["node"] = d.reverse ? "Vin" : "Vout"; ic["voltage"] = deliverV;
