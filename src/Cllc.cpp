@@ -73,16 +73,19 @@ CllcDesign design_cllc(const json& tasInputs) {
         throw std::invalid_argument("design_cllc: bridgeType '" + cfg::get_str(d.config, "bridgeType", "") +
                                     "' is not modelled; Kirchhoff's CLLC has a full-bridge primary");
 
-    // Infineon FHA: Ro = 8n²/π²·Rload, Cr1 = 1/(2π·Q·fr·Ro), Lr1 = 1/((2π·fr)²·Cr1), Lm = k·Lr1.
-    // Symmetric tank (a=b=1): Lr2 = Lr1/n², Cr2 = n²·Cr1.  (MKF Cllc::calculate_resonant_parameters)
+    // Everything downstream is referred through the transformer the stage is built around: the pinned ratio when
+    // the magnetic is chosen (I-know-the-design / della-Pollock pass 2), else the design ratio n. Sizing Ro and the
+    // secondary tank with the unpinned n instead left the tank asymmetric for a pinned ratio (a = n_pinned²·Lr2/Lr1
+    // = 1.17 at n = 0.97 where 1 was asked, ABT #1537).
+    const double N = d.turnsRatio;
+    // Infineon FHA: Ro = 8N²/π²·Rload, Cr1 = 1/(2π·Q·fr·Ro), Lr1 = 1/((2π·fr)²·Cr1), Lm = k·Lr1.
+    // Symmetric tank (a=b=1): Lr2 = Lr1/N², Cr2 = N²·Cr1.  (MKF Cllc::calculate_resonant_parameters)
     const double Rload = Vo * Vo / d.outputPower;
-    const double Ro = (8.0 * n * n / (M_PI * M_PI)) * Rload;
+    const double Ro = (8.0 * N * N / (M_PI * M_PI)) * Rload;
     const double wr = 2.0 * M_PI * fr;
     d.primaryResonantCapacitance = 1.0 / (2.0 * M_PI * cfg::get(d.config, "qualityFactor", kQualityFactor) * fr * Ro);
     d.primaryResonantInductance = 1.0 / (wr * wr * d.primaryResonantCapacitance);
     const auto pinnedLm = req::provided_inductance(dr);
-    d.magnetizingInductance = pinnedLm.value_or(
-        cfg::get(d.config, "inductanceRatio", kInductanceRatio) * d.primaryResonantInductance);
     // della-Pollock resonant tank CO-DESIGN: the closed-loop realize pins Lm to the REALIZED magnetizing
     // inductance of the chosen transformer core (sized for a saturation margin, so typically larger than
     // k·Lr1). Once Lm is fixed it no longer equals k·Lr1, so the tank is DETUNED (k=Lm/Lr1 drifts, the gain
@@ -93,11 +96,37 @@ CllcDesign design_cllc(const json& tasInputs) {
     // magnetics and Cr1/Cr2 near-nominal (role="resonant") sourced caps, so all track the new values; only
     // the pinned transformer is fixed. (No pin → original Q·Ro sizing stands; the mkf_equivalence ideal
     // deck never pins Lm and is unchanged.)
+    const double kRatio = cfg::get(d.config, "inductanceRatio", kInductanceRatio);
     if (pinnedLm) {
-        const double k = cfg::get(d.config, "inductanceRatio", kInductanceRatio);
-        d.primaryResonantInductance = *pinnedLm / k;
+        d.primaryResonantInductance = *pinnedLm / kRatio;
         d.primaryResonantCapacitance = 1.0 / (wr * wr * d.primaryResonantInductance);
     }
+    // Explicit tank pins (ABT #1538), the CLLC counterpart of the LLC's desiredResonantInductance /
+    // desiredResonantCapacitance: Lr1 / Cr1 through those same keys, Lr2 / Cr2 (physical, Vout side) through
+    // desiredSecondaryResonantInductance / desiredSecondaryResonantCapacitance. They win over the Q and the pinned-Lm
+    // sizing above. One primary element pinned: the other follows so Lr1–Cr1 still resonates at fr. Both pinned:
+    // they are taken verbatim and the tank resonates where they do. The operating frequency is solved from the tank
+    // as pinned (below), or the design throws.
+    const auto pinnedLr1 = req::provided_resonant_inductance(dr);
+    const auto pinnedCr1 = req::provided_resonant_capacitance(dr);
+    const auto pinnedLr2 = req::provided_secondary_resonant_inductance(dr);
+    const auto pinnedCr2 = req::provided_secondary_resonant_capacitance(dr);
+    for (const auto& [pin, key] : {std::pair{pinnedLr1, "desiredResonantInductance"},
+                                   std::pair{pinnedCr1, "desiredResonantCapacitance"},
+                                   std::pair{pinnedLr2, "desiredSecondaryResonantInductance"},
+                                   std::pair{pinnedCr2, "desiredSecondaryResonantCapacitance"}})
+        if (pin && !(*pin > 0.0))
+            throw std::invalid_argument(std::string("design_cllc: designRequirements.") + key + " must be > 0; got " +
+                                        num(*pin));
+    if (pinnedLr1) d.primaryResonantInductance = *pinnedLr1;
+    if (pinnedCr1) d.primaryResonantCapacitance = *pinnedCr1;
+    if (pinnedLr1 && !pinnedCr1) d.primaryResonantCapacitance = 1.0 / (wr * wr * d.primaryResonantInductance);
+    if (pinnedCr1 && !pinnedLr1) d.primaryResonantInductance = 1.0 / (wr * wr * d.primaryResonantCapacitance);
+    if (pinnedLr1 && pinnedCr1)
+        d.resonantFrequency =
+            1.0 / (2.0 * M_PI * std::sqrt(d.primaryResonantInductance * d.primaryResonantCapacitance));
+    // Unpinned Lm keeps the design ratio k against the primary tank as it ends up (pinned or sized).
+    d.magnetizingInductance = pinnedLm.value_or(kRatio * d.primaryResonantInductance);
     // Tank asymmetry (MAS cllcResonant.resonantInductorRatio a = n²·Lr2/Lr1, resonantCapacitorRatio
     // b = Cr2/(n²·Cr1); symmetric a = b = 1). symmetricDesign (deprecated) must agree with the ratios.
     const double a = cfg::get(d.config, "resonantInductorRatio", 1.0);
@@ -112,8 +141,23 @@ CllcDesign design_cllc(const json& tasInputs) {
                                         " contradicts resonantInductorRatio=" + std::to_string(a) +
                                         ", resonantCapacitorRatio=" + std::to_string(b));
     }
-    d.secondaryResonantInductance = a * d.primaryResonantInductance / (n * n);
-    d.secondaryResonantCapacitance = b * n * n * d.primaryResonantCapacitance;
+    d.secondaryResonantInductance = pinnedLr2.value_or(a * d.primaryResonantInductance / (N * N));
+    d.secondaryResonantCapacitance = pinnedCr2.value_or(b * N * N * d.primaryResonantCapacitance);
+    // A pinned secondary element and a stated ratio for it are two statements of the same thing: they must agree.
+    if (pinnedLr2 && d.config.contains("resonantInductorRatio")) {
+        const double aPinned = N * N * *pinnedLr2 / d.primaryResonantInductance;
+        if (std::abs(aPinned - a) > 1e-6 * a)
+            throw std::invalid_argument("design_cllc: desiredSecondaryResonantInductance " + num(*pinnedLr2) +
+                                        " H gives resonantInductorRatio n²·Lr2/Lr1 = " + num(aPinned) +
+                                        ", but config.resonantInductorRatio is " + num(a));
+    }
+    if (pinnedCr2 && d.config.contains("resonantCapacitorRatio")) {
+        const double bPinned = *pinnedCr2 / (N * N * d.primaryResonantCapacitance);
+        if (std::abs(bPinned - b) > 1e-6 * b)
+            throw std::invalid_argument("design_cllc: desiredSecondaryResonantCapacitance " + num(*pinnedCr2) +
+                                        " F gives resonantCapacitorRatio Cr2/(n²·Cr1) = " + num(bPinned) +
+                                        ", but config.resonantCapacitorRatio is " + num(b));
+    }
 
     d.switchDuty = cfg::get(d.config, "switchDutyFraction", kSwitchDuty);
     d.loadResistance = Rload;
@@ -141,7 +185,7 @@ CllcDesign design_cllc(const json& tasInputs) {
         pinnedRatio ? "pinned turns ratio"
                     : "turns ratio sized with a gain headroom of " +
                           num(cfg::get(d.config, "gainHeadroom", kGainHeadroom)),
-        d.config, d.reverse, d.turnsRatio, req::conversion_efficiency(dr), Vin, Vo, d.outputPower, fr,
+        d.config, d.reverse, d.turnsRatio, req::conversion_efficiency(dr), Vin, Vo, d.outputPower, d.resonantFrequency,
         d.magnetizingInductance, d.primaryResonantInductance, d.primaryResonantCapacitance,
         d.secondaryResonantInductance, d.secondaryResonantCapacitance);
     d.operatingFrequency = op.operatingFrequency;
@@ -195,6 +239,8 @@ TwoSidedOperatingPoint two_sided_resonant_operating_point(
         requiredGain = inputVoltage / (eta * N * outputVoltage);
         ratioAtResonance = inputVoltage / (eta * outputVoltage);
     }
+    // Only a symmetric tank (secondary referred to the driver equal to the primary) has gain 1 at resonance.
+    const bool symmetricTank = std::abs(Lr2p - Lr1) <= 1e-9 * Lr1 && std::abs(Cr2p - Cr1) <= 1e-9 * Cr1;
     TwoSidedOperatingPoint op{fr, requiredGain};
     // At fr the requirement is already met (a unity-gain ratio behind a symmetric tank): run there, unsolved.
     const double gainAtResonance = AN::cllc_fha_tank(fr, Lm, Lr1, Cr1, Lr2p, Cr2p, Rac).gain();
@@ -207,8 +253,12 @@ TwoSidedOperatingPoint two_sided_resonant_operating_point(
             who + ": the " + ratioOrigin + " " + num(N) + " cannot deliver " +
             (reverse ? num(inputVoltage) + " V to the HV side from " + num(outputVoltage) + " V (reverse power flow)"
                      : num(outputVoltage) + " V from " + num(inputVoltage) + " V") +
-            ": " + e.what() + ". A turns ratio of " + num(ratioAtResonance) +
-            " gives the output at the tank resonance (" + num(fr) + " Hz)");
+            ": " + e.what() +
+            (symmetricTank ? ". A turns ratio of " + num(ratioAtResonance) +
+                                 " gives the output at the tank resonance (" + num(fr) + " Hz)"
+                           : std::string(". The tank is asymmetric (secondary referred Lr2 " + num(Lr2p) + " H, Cr2 " +
+                                         num(Cr2p) + " F against Lr1 " + num(Lr1) + " H, Cr1 " + num(Cr1) +
+                                         " F), so its gain at resonance is not 1")));
     }
     return op;
 }

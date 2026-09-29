@@ -137,8 +137,14 @@ Notes:
 - **Not pinnable anywhere:** series/resonant inductance `Lr` (computed from Q/Ln or the phase shift),
   DAB/PSFB/PSHB `seriesInductance`, split/DC-blocking caps. `sepic`, `cuk`, `zeta`, `pfc`, `vienna`
   support **no** pinning at all (L is always computed).
-- LLC-only explicit tank pins exist: `desiredResonantInductance`/`resonantInductance` +
+- LLC explicit tank pins: `desiredResonantInductance`/`resonantInductance` +
   `desiredResonantCapacitance`/`resonantCapacitance` override Lr/Cr verbatim (applied last).
+- CLLC explicit tank pins (ABT #1538): the same two keys pin the primary Lr1/Cr1, and
+  `desiredSecondaryResonantInductance` / `desiredSecondaryResonantCapacitance` pin the physical
+  (Vout-side) Lr2/Cr2. One primary element pinned: the other follows so Lr1–Cr1 resonates at
+  `switchingFrequency`; both pinned: verbatim, the tank resonates where they do. CLLLC pins Lr1/Cr1
+  through `config.primarySeriesInductance` / `config.primaryResonantCapacitance` (MAS clllcResonant)
+  with the same rule. Both solve the operating frequency from the pinned tank (ABT #1503) or throw.
 
 ---
 

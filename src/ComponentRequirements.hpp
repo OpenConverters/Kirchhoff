@@ -151,6 +151,19 @@ inline std::optional<double> provided_resonant_capacitance(const json& designReq
                 return PEAS::resolve_dimensional_values(designRequirements.at(k));
     return std::nullopt;
 }
+// The SECONDARY half of a two-sided (CLLC) tank: designRequirements.desiredSecondaryResonantInductance /
+// desiredSecondaryResonantCapacitance (number or {nominal/…}), the physical Lr2 / Cr2 on the Vout side (not
+// referred). The primary half uses provided_resonant_inductance / provided_resonant_capacitance above (ABT #1538).
+inline std::optional<double> provided_secondary_resonant_inductance(const json& designRequirements) {
+    if (designRequirements.is_object() && designRequirements.contains("desiredSecondaryResonantInductance"))
+        return PEAS::resolve_dimensional_values(designRequirements.at("desiredSecondaryResonantInductance"));
+    return std::nullopt;
+}
+inline std::optional<double> provided_secondary_resonant_capacitance(const json& designRequirements) {
+    if (designRequirements.is_object() && designRequirements.contains("desiredSecondaryResonantCapacitance"))
+        return PEAS::resolve_dimensional_values(designRequirements.at("desiredSecondaryResonantCapacitance"));
+    return std::nullopt;
+}
 
 // --- semiconductor: MOSFET main switch ---
 inline json mosfet(const std::string& role, double ratedVds, double ratedId,

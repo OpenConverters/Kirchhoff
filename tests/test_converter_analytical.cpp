@@ -16,6 +16,8 @@
 
 #include <nlohmann/json.hpp>
 #include <cmath>
+#include <cctype>
+#include <sstream>
 #include <vector>
 
 using Kirchhoff::analytical::analytical_buck;
@@ -1746,12 +1748,12 @@ namespace {
 // the last 20 switching periods. `deliveredNode` is Vout forward, Vin in reverse (the HV rail is the load).
 struct TwoSidedDeckRun { double vDelivered, pSource, pLoad; };
 TwoSidedDeckRun run_two_sided_deck(const nlohmann::json& tas, double fsw, double vSource, const char* sourceBranch,
-                                   const char* deliveredNode, double loadResistance) {
+                                   const char* deliveredNode, double loadResistance, double stopTime = 0.016) {
     // 16 ms: past the output capacitor's start-up ring against the tank (~0.5 kHz, decaying over ~10 ms), so the
     // averages are the steady state rather than a phase of that ring.
     nlohmann::json settled = tas;
     for (auto& an : settled.at("simulation").at("analyses"))
-        if (an.value("type", "") == "transient") an["stopTime"] = 0.016;
+        if (an.value("type", "") == "transient") an["stopTime"] = stopTime;
     const std::string deck = Kirchhoff::tas_to_ngspice(settled, PEAS::Fidelity(PEAS::Fidelity::Origin::REQUIREMENTS));
     const Kirchhoff::NgspiceRunResult r = Kirchhoff::run_ngspice_in_process(deck);
     REQUIRE(r.success);
@@ -1788,10 +1790,11 @@ TwoSidedDeckRun run_two_sided_deck(const nlohmann::json& tas, double fsw, double
 //    the load power ratio of the resistive load at the two voltages,
 //  - the deck's source-to-load efficiency is plausible (ideal parts: above 90 %, and no energy created).
 template <class D>
-void check_two_sided_ngspice(const char* topology, const D& d, const nlohmann::json& spec, const nlohmann::json& tas) {
+void check_two_sided_ngspice(const char* topology, const D& d, const nlohmann::json& spec, const nlohmann::json& tas,
+                             double stopTime = 0.016) {
     const double Vin = 400.0, Vout = 400.0;
     const TwoSidedDeckRun deck = run_two_sided_deck(tas, d.operatingFrequency, Vin, "vvin#branch", "vout",
-                                                    d.loadResistance);
+                                                    d.loadResistance, stopTime);
     const std::string rawSim = Kirchhoff::api::process_converter(topology, spec.dump(), "ngspice");
     const std::string rawAn  = Kirchhoff::api::process_converter(topology, spec.dump(), "analytical");
     INFO(rawSim.substr(0, 400));
@@ -1889,5 +1892,288 @@ TEST_CASE("CLLC / CLLLC reverse ngspice: the HV bridge rectifies what the LV bri
         const auto d = Kirchhoff::design_clllc(reverse_spec());
         REQUIRE(d.reverse);
         check(d.operatingFrequency, d.resonantFrequency, loadR, Kirchhoff::build_clllc_tas(d));
+    }
+}
+
+// ── ABT #1537 / #1538: a pinned turns ratio and pinned tank values reach the design, the analytical point and the
+// ngspice deck ──────────────────────────────────────────────────────────────────────────────────────────────────
+namespace {
+// The value an element of the ngspice deck carries: the first line whose element name is `name` (SPICE letter
+// prefix optional, a single-winding magnetic's "_pri" winding suffix optional, case-insensitive), last numeric
+// token with its SPICE scale suffix.
+double deck_element_value(const std::string& deck, const std::string& name) {
+    auto lower = [](std::string s) { for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c))); return s; };
+    const std::string want = lower(name);
+    std::istringstream in(deck);
+    std::string line;
+    while (std::getline(in, line)) {
+        std::istringstream ls(line);
+        std::string head;
+        if (!(ls >> head)) continue;
+        const std::string h = lower(head);
+        // A capacitor is "C<name>"; a single-winding magnetic is its primary winding "L<name>_pri".
+        if (h != want && h.substr(1) != want && h.substr(1) != want + "_pri") continue;
+        std::vector<std::string> toks;
+        for (std::string t; ls >> t;) toks.push_back(t);
+        for (auto it = toks.rbegin(); it != toks.rend(); ++it) {
+            std::string t = lower(*it);
+            size_t pos = 0;
+            double v = 0.0;
+            try { v = std::stod(t, &pos); } catch (...) { continue; }
+            const std::string suf = t.substr(pos);
+            double scale = 1.0;
+            if (suf.rfind("meg", 0) == 0) scale = 1e6;
+            else if (!suf.empty()) switch (suf[0]) {
+                case 'f': scale = 1e-15; break; case 'p': scale = 1e-12; break; case 'n': scale = 1e-9; break;
+                case 'u': scale = 1e-6; break;  case 'm': scale = 1e-3; break;  case 'k': scale = 1e3; break;
+                case 'g': scale = 1e9; break;   case 't': scale = 1e12; break;  default: continue;
+            }
+            return v * scale;
+        }
+    }
+    std::string near;
+    { std::istringstream all(deck); std::string l;
+      while (std::getline(all, l)) if (lower(l).find(want) != std::string::npos) near += "\n  " + l; }
+    FAIL("deck has no element " << name << "; lines mentioning it:" << near);
+    return 0.0;
+}
+
+// The ABT #1537 web case: 400 V -> 400 V / 3.3 kW, fr 120 kHz, band 80-200 kHz, Q 0.4, k 5, efficiency 0.97.
+nlohmann::json cllc_web_spec(double turnsRatio, double pinnedLm) {
+    nlohmann::json s = two_sided_1525_spec(turnsRatio, 0.97);
+    if (pinnedLm > 0) s["designRequirements"]["magnetizingInductance"] = {{"nominal", pinnedLm}};
+    return s;
+}
+
+std::string deck_of(const nlohmann::json& tas) {
+    return Kirchhoff::tas_to_ngspice(tas, PEAS::Fidelity(PEAS::Fidelity::Origin::REQUIREMENTS));
+}
+
+// The tank values of a design reach the deck verbatim.
+template <class D>
+void check_tank_in_deck(const D& d, const nlohmann::json& tas) {
+    const std::string deck = deck_of(tas);
+    CHECK(deck_element_value(deck, "Lr1") == Catch::Approx(d.primaryResonantInductance).epsilon(1e-4));
+    CHECK(deck_element_value(deck, "Cr1") == Catch::Approx(d.primaryResonantCapacitance).epsilon(1e-4));
+    CHECK(deck_element_value(deck, "Lr2") == Catch::Approx(d.secondaryResonantInductance).epsilon(1e-4));
+    CHECK(deck_element_value(deck, "Cr2") == Catch::Approx(d.secondaryResonantCapacitance).epsilon(1e-4));
+}
+
+// The design's FHA gain at its operating frequency meets the requirement, and the analytical operating point
+// balances power: the secondary delivers Pout, the primary carries Pout/η (2 %, as the #1503 checks).
+template <class D>
+void check_two_sided_solved(const char* topology, const D& d, const nlohmann::json& spec, double Pout, double eta) {
+    CHECK(two_sided_gain_at_operating_frequency(d) == Catch::Approx(d.requiredGain).epsilon(1e-6));
+    const std::string raw = Kirchhoff::api::process_converter(topology, spec.dump(), "analytical");
+    INFO(raw.substr(0, 600));
+    REQUIRE(raw.rfind("Exception:", 0) != 0);
+    const nlohmann::json out = nlohmann::json::parse(raw);
+    CHECK(out.at("diagnostics").at("switchingFrequency").get<double>() == Catch::Approx(d.operatingFrequency));
+    const auto& exc = out.at("operatingPoint").at("excitationsPerWinding");
+    REQUIRE(exc.size() == 2);
+    const WindingPower pri = winding_power(exc.at(0)), sec = winding_power(exc.at(1));
+    INFO(topology << ": fsw " << d.operatingFrequency << " Hz (fr " << d.resonantFrequency << "), P_pri " << pri.power
+         << " W, P_sec " << sec.power << " W");
+    // The primary carries Pout/η times the receiving tank's power factor Rac/|Zsec|: the model's square winding
+    // voltage is in phase with Lm's voltage, the rectifier current with Rac, and they differ by arg(Zsec) — ≈1 for a
+    // symmetric tank near fr, 0.976 for the asymmetric pinned tank below (Lr2 referred 40 uH against Cr2 47 nF).
+    const double N = d.turnsRatio;
+    const auto tank = Kirchhoff::analytical::cllc_fha_tank(
+        d.operatingFrequency, d.magnetizingInductance, d.primaryResonantInductance, d.primaryResonantCapacitance,
+        d.secondaryResonantInductance * N * N, d.secondaryResonantCapacitance / (N * N),
+        8.0 / (M_PI * M_PI) * N * N * d.outputVoltage * d.outputVoltage / d.outputPower);
+    const double pf = tank.zsecRe / std::hypot(tank.zsecRe, tank.zsecIm);
+    INFO("receiving-tank power factor " << pf);
+    CHECK(sec.power == Catch::Approx(Pout).epsilon(0.02));
+    CHECK(pri.power == Catch::Approx(Pout / eta * pf).epsilon(0.02));
+}
+}  // namespace
+
+TEST_CASE("CLLC with a pinned turns ratio sizes Ro and the secondary tank with THAT ratio: a = b = 1 (ABT #1537)",
+          "[analytical][cllc][abt1537]") {
+    // (n = 1 needs a tank gain of 1.031 at this efficiency, beyond the band: design_cllc throws for it, ABT #1503.)
+    for (const double n : {0.9, 0.95, 0.97}) {
+        for (const double Lm : {0.0, 200e-6}) {
+            INFO("pinned n " << n << ", pinned Lm " << Lm);
+            const auto d = Kirchhoff::design_cllc(cllc_web_spec(n, Lm));
+            REQUIRE(d.turnsRatio == Catch::Approx(n));
+            // Symmetric tank at the REQUESTED ratios: a = n²·Lr2/Lr1 = 1, b = Cr2/(n²·Cr1) = 1.
+            CHECK(n * n * d.secondaryResonantInductance / d.primaryResonantInductance == Catch::Approx(1.0).epsilon(1e-12));
+            CHECK(d.secondaryResonantCapacitance / (n * n * d.primaryResonantCapacitance) == Catch::Approx(1.0).epsilon(1e-12));
+            if (Lm == 0.0) {
+                // Q sizing against the load reflected through the pinned ratio: Ro = 8n²/π²·Rload, Cr1 = 1/(2π·Q·fr·Ro).
+                const double Ro = 8.0 * n * n / (M_PI * M_PI) * (400.0 * 400.0 / 3300.0);
+                CHECK(d.primaryResonantCapacitance == Catch::Approx(1.0 / (2.0 * M_PI * 0.4 * 120e3 * Ro)).epsilon(1e-12));
+            }
+        }
+    }
+    SECTION("the ticket's web case: n 0.97, Lm 200 uH, k 5 -> Lr1 40 uH, Lr2 = 40/0.97^2 = 42.51 uH (was 49.59)") {
+        const auto d = Kirchhoff::design_cllc(cllc_web_spec(0.97, 200e-6));
+        CHECK(d.primaryResonantInductance == Catch::Approx(40e-6));
+        CHECK(d.secondaryResonantInductance == Catch::Approx(40e-6 / (0.97 * 0.97)));
+        check_tank_in_deck(d, Kirchhoff::build_cllc_tas(d));
+    }
+    SECTION("an asymmetric tank ratio is applied against the pinned ratio too") {
+        auto spec = cllc_web_spec(0.97, 0.0);
+        spec["config"]["resonantInductorRatio"] = 0.95;
+        spec["config"]["resonantCapacitorRatio"] = 1.05;
+        const auto d = Kirchhoff::design_cllc(spec);
+        CHECK(d.secondaryResonantInductance == Catch::Approx(0.95 * d.primaryResonantInductance / (0.97 * 0.97)));
+        CHECK(d.secondaryResonantCapacitance == Catch::Approx(1.05 * 0.97 * 0.97 * d.primaryResonantCapacitance));
+    }
+    SECTION("the #1503 solve still meets Vout and balances power at the pinned ratio") {
+        const auto spec = cllc_web_spec(0.97, 200e-6);
+        check_two_sided_solved("cllc", Kirchhoff::design_cllc(spec), spec, 3300.0, 0.97);
+    }
+}
+
+TEST_CASE("CLLLC with a pinned turns ratio keeps a symmetric tank at that ratio (ABT #1537)",
+          "[analytical][clllc][abt1537]") {
+    for (const double n : {0.9, 0.97, 1.0}) {
+        INFO("pinned N " << n);
+        const auto d = Kirchhoff::design_clllc(cllc_web_spec(n, 0.0));
+        CHECK(n * n * d.secondaryResonantInductance / d.primaryResonantInductance == Catch::Approx(1.0).epsilon(1e-12));
+        CHECK(d.secondaryResonantCapacitance / (n * n * d.primaryResonantCapacitance) == Catch::Approx(1.0).epsilon(1e-12));
+    }
+}
+
+TEST_CASE("CLLC ngspice with a pinned turns ratio: the symmetric tank reaches the deck, power is forward and balanced "
+          "(ABT #1537)", "[ngspice][cllc][abt1537]") {
+    const auto spec = cllc_web_spec(0.97, 200e-6);
+    const auto d = Kirchhoff::design_cllc(spec);
+    const auto tas = Kirchhoff::build_cllc_tas(d);
+    check_tank_in_deck(d, tas);
+    CHECK(deck_element_value(deck_of(tas), "Lr2") == Catch::Approx(40e-6 / (0.97 * 0.97)).epsilon(1e-4));
+    check_two_sided_ngspice("cllc", d, spec, tas);
+}
+
+TEST_CASE("CLLC honours pinned tank values and solves the operating frequency from them, or throws (ABT #1538)",
+          "[analytical][cllc][abt1538]") {
+    SECTION("Lr1, Cr1 and Lr2 pinned, engine-sized ratio: verbatim, resonance from Lr1-Cr1, frequency solved") {
+        auto spec = cllc_web_spec(0.0, 0.0);
+        auto& dr = spec["designRequirements"];
+        dr["desiredResonantInductance"] = {{"nominal", 36e-6}};
+        dr["desiredResonantCapacitance"] = {{"nominal", 47e-9}};
+        dr["desiredSecondaryResonantInductance"] = {{"nominal", 50e-6}};
+        const auto d = Kirchhoff::design_cllc(spec);
+        CHECK(d.primaryResonantInductance == 36e-6);
+        CHECK(d.primaryResonantCapacitance == 47e-9);
+        CHECK(d.secondaryResonantInductance == 50e-6);
+        // Unpinned Cr2 follows the pinned primary through b = 1 and the ratio; unpinned Lm is k·Lr1.
+        CHECK(d.secondaryResonantCapacitance == Catch::Approx(d.turnsRatio * d.turnsRatio * 47e-9));
+        CHECK(d.magnetizingInductance == Catch::Approx(5.0 * 36e-6));
+        CHECK(d.resonantFrequency == Catch::Approx(1.0 / (2.0 * M_PI * std::sqrt(36e-6 * 47e-9))));
+        CHECK(d.operatingFrequency >= 80e3);
+        CHECK(d.operatingFrequency <= 200e3);
+        check_two_sided_solved("cllc", d, spec, 3300.0, 0.97);
+        check_tank_in_deck(d, Kirchhoff::build_cllc_tas(d));
+    }
+    SECTION("pinned n 0.97 and Lm 200 uH with Lr1 and Cr1 pinned: the tank pins win over the Lm re-size") {
+        auto spec = cllc_web_spec(0.97, 200e-6);
+        spec["designRequirements"]["desiredResonantInductance"] = {{"nominal", 45e-6}};
+        spec["designRequirements"]["desiredResonantCapacitance"] = {{"nominal", 40e-9}};
+        const auto d = Kirchhoff::design_cllc(spec);
+        CHECK(d.primaryResonantInductance == 45e-6);
+        CHECK(d.primaryResonantCapacitance == 40e-9);
+        CHECK(d.magnetizingInductance == 200e-6);
+        CHECK(d.secondaryResonantInductance == Catch::Approx(45e-6 / (0.97 * 0.97)));
+        check_two_sided_solved("cllc", d, spec, 3300.0, 0.97);
+    }
+    SECTION("only Lr1 pinned: Cr1 follows so the tank still resonates at fr") {
+        auto spec = cllc_web_spec(0.0, 0.0);
+        spec["designRequirements"]["desiredResonantInductance"] = 30e-6;
+        const auto d = Kirchhoff::design_cllc(spec);
+        CHECK(d.primaryResonantInductance == 30e-6);
+        CHECK(d.resonantFrequency == Catch::Approx(120e3));
+        CHECK(1.0 / (2.0 * M_PI * std::sqrt(d.primaryResonantInductance * d.primaryResonantCapacitance)) ==
+              Catch::Approx(120e3));
+    }
+    SECTION("a pinned tank that cannot reach the output in the band throws, naming the tank") {
+        auto spec = cllc_web_spec(0.97, 0.0);
+        spec["designRequirements"]["desiredResonantInductance"] = 40e-6;
+        spec["designRequirements"]["desiredResonantCapacitance"] = 44e-9;
+        spec["designRequirements"]["desiredSecondaryResonantInductance"] = 400e-6;   // a = 9.4: gain collapses
+        const std::string out = Kirchhoff::api::process_converter("cllc", spec.dump(), "analytical");
+        INFO(out.substr(0, 800));
+        REQUIRE(out.rfind("Exception:", 0) == 0);
+        CHECK_THAT(out, Catch::Matchers::ContainsSubstring("pinned turns ratio 0.97 cannot deliver 400 V from 400 V"));
+        CHECK_THAT(out, Catch::Matchers::ContainsSubstring("Lr1 4e-05 H, Cr1 4.4e-08 F"));
+        CHECK_THAT(out, Catch::Matchers::ContainsSubstring("The tank is asymmetric"));
+    }
+    SECTION("a pinned secondary element that contradicts a stated tank ratio throws") {
+        auto spec = cllc_web_spec(0.97, 0.0);
+        spec["designRequirements"]["desiredSecondaryResonantInductance"] = 50e-6;
+        spec["config"]["resonantInductorRatio"] = 1.0;
+        CHECK_THROWS_WITH(Kirchhoff::design_cllc(spec), Catch::Matchers::ContainsSubstring("but config.resonantInductorRatio is 1"));
+    }
+    SECTION("a non-positive pin throws") {
+        auto spec = cllc_web_spec(0.0, 0.0);
+        spec["designRequirements"]["desiredResonantCapacitance"] = 0.0;
+        CHECK_THROWS_WITH(Kirchhoff::design_cllc(spec), Catch::Matchers::ContainsSubstring("desiredResonantCapacitance must be > 0"));
+    }
+}
+
+TEST_CASE("CLLLC honours pinned primarySeriesInductance and primaryResonantCapacitance off fr and solves from them "
+          "(ABT #1538)", "[analytical][clllc][abt1538]") {
+    SECTION("the web I-know seed: 400 V -> 48 V, N 8, Lm 500 uH, Lr1 50 uH, Cr1 33 nF (123.9 kHz against 120 kHz)") {
+        nlohmann::json spec = two_sided_1503_spec(8.0);
+        spec["designRequirements"]["switchingFrequency"] = {{"nominal", 120e3}};
+        spec["designRequirements"]["magnetizingInductance"] = {{"nominal", 500e-6}};
+        spec["config"] = {{"minSwitchingFrequency", 90e3}, {"maxSwitchingFrequency", 150e3},
+                          {"primarySeriesInductance", 50e-6}, {"primaryResonantCapacitance", 33e-9}};
+        const auto d = Kirchhoff::design_clllc(spec);
+        CHECK(d.primaryResonantInductance == 50e-6);
+        CHECK(d.primaryResonantCapacitance == 33e-9);
+        CHECK(d.magnetizingInductance == 500e-6);
+        CHECK(d.secondaryResonantInductance == Catch::Approx(50e-6 / 64.0));
+        CHECK(d.secondaryResonantCapacitance == Catch::Approx(64.0 * 33e-9));
+        CHECK(d.resonantFrequency == Catch::Approx(1.0 / (2.0 * M_PI * std::sqrt(50e-6 * 33e-9))));
+        CHECK(d.operatingFrequency >= 90e3);
+        CHECK(d.operatingFrequency <= 150e3);
+        check_two_sided_solved("clllc", d, spec, 480.0, 0.95);
+        check_tank_in_deck(d, Kirchhoff::build_clllc_tas(d));
+    }
+    SECTION("a stated primaryResonantFrequency must agree with the pinned tank") {
+        nlohmann::json spec = two_sided_1503_spec(8.0);
+        spec["config"]["primarySeriesInductance"] = 50e-6;
+        spec["config"]["primaryResonantCapacitance"] = 33e-9;
+        spec["config"]["primaryResonantFrequency"] = 100e3;
+        CHECK_THROWS_WITH(Kirchhoff::design_clllc(spec), Catch::Matchers::ContainsSubstring("differs from the tank resonance"));
+    }
+}
+
+TEST_CASE("CLLC / CLLLC ngspice with pinned tank values: the pins reach the deck and the deck balances off resonance "
+          "(ABT #1538)", "[ngspice][cllc][clllc][abt1538]") {
+    SECTION("CLLC: Lr1 36 uH, Cr1 47 nF, Lr2 50 uH, engine-sized ratio") {
+        auto spec = cllc_web_spec(0.0, 0.0);
+        spec["designRequirements"]["desiredResonantInductance"] = 36e-6;
+        spec["designRequirements"]["desiredResonantCapacitance"] = 47e-9;
+        spec["designRequirements"]["desiredSecondaryResonantInductance"] = 50e-6;
+        const auto d = Kirchhoff::design_cllc(spec);
+        const auto tas = Kirchhoff::build_cllc_tas(d);
+        const std::string deck = deck_of(tas);
+        CHECK(deck_element_value(deck, "Lr1") == Catch::Approx(36e-6).epsilon(1e-4));
+        CHECK(deck_element_value(deck, "Cr1") == Catch::Approx(47e-9).epsilon(1e-4));
+        CHECK(deck_element_value(deck, "Lr2") == Catch::Approx(50e-6).epsilon(1e-4));
+        CHECK(std::abs(d.operatingFrequency - d.resonantFrequency) > 0.05 * d.resonantFrequency);
+        // 30 ms: the pinned tank (characteristic impedance ~39 ohm against a ~32-39 ohm reflected load, Q ~1) rings
+        // against the output capacitor longer than the engine-sized one; at 16 ms the output is still settling and
+        // the source-to-load average reads a few 0.01 % above 1.
+        check_two_sided_ngspice("cllc", d, spec, tas, 0.030);
+    }
+    SECTION("CLLLC: Lr1 50 uH, Cr1 33 nF, pinned N 0.95") {
+        auto spec = cllc_web_spec(0.95, 0.0);
+        spec["config"]["primarySeriesInductance"] = 50e-6;
+        spec["config"]["primaryResonantCapacitance"] = 33e-9;
+        const auto d = Kirchhoff::design_clllc(spec);
+        const auto tas = Kirchhoff::build_clllc_tas(d);
+        const std::string deck = deck_of(tas);
+        CHECK(deck_element_value(deck, "Lr1") == Catch::Approx(50e-6).epsilon(1e-4));
+        CHECK(deck_element_value(deck, "Cr1") == Catch::Approx(33e-9).epsilon(1e-4));
+        CHECK(d.operatingFrequency != d.resonantFrequency);
+        // 30 ms: the pinned tank (characteristic impedance ~39 ohm against a ~32-39 ohm reflected load, Q ~1) rings
+        // against the output capacitor longer than the engine-sized one; at 16 ms the output is still settling and
+        // the source-to-load average reads a few 0.01 % above 1.
+        check_two_sided_ngspice("clllc", d, spec, tas, 0.030);
     }
 }

@@ -66,12 +66,6 @@ ClllcDesign design_clllc(const json& tasInputs) {
     // fr = designRequirements.switchingFrequency and driven by frequency (FHA, no inter-bridge phase shift) at the
     // operating frequency solved below. Fields that ask for anything else are checked here and refused with the
     // reason, never silently re-interpreted.
-    if (d.config.contains("primaryResonantFrequency") &&
-        std::abs(cfg::get(d.config, "primaryResonantFrequency", fr) - fr) > 1e-3 * fr)
-        throw std::invalid_argument("design_clllc: primaryResonantFrequency " +
-                                    std::to_string(cfg::get(d.config, "primaryResonantFrequency", fr)) +
-                                    " Hz differs from the tank resonance (designRequirements.switchingFrequency) " + std::to_string(fr) +
-                                    " Hz; Kirchhoff designs the CLLLC tank to resonate there");
     if (std::abs(cfg::get(d.config, "tankSymmetryRatio", 1.0) - 1.0) > 1e-9)
         throw std::invalid_argument("design_clllc: tankSymmetryRatio " +
                                     std::to_string(cfg::get(d.config, "tankSymmetryRatio", 1.0)) +
@@ -92,7 +86,10 @@ ClllcDesign design_clllc(const json& tasInputs) {
                                         " deg is not modelled (the FHA operating point has no phase shift)");
     }
     // MAS clllcResonant.primarySeriesInductance / primaryResonantCapacitance: explicit Lr1 / Cr1 override the
-    // Q/K derivation. The tank still has to resonate at the operating frequency (one given → the other follows).
+    // Q/K derivation. One given: the other follows so the tank resonates at fr. Both given: they are taken verbatim
+    // and the tank resonates where they do; the operating frequency is solved from that tank below, or the design
+    // throws (ABT #1538 — before the solve existed both had to resonate at fr within 1%, so the web's 50 uH / 33 nF
+    // I-know seed, 123.9 kHz against 120 kHz, could not be honoured).
     {
         const bool hasL = d.config.contains("primarySeriesInductance");
         const bool hasC = d.config.contains("primaryResonantCapacitance");
@@ -102,14 +99,19 @@ ClllcDesign design_clllc(const json& tasInputs) {
             throw std::invalid_argument("design_clllc: primarySeriesInductance / primaryResonantCapacitance must be > 0");
         if (hasL && !hasC) d.primaryResonantCapacitance = 1.0 / (wr * wr * d.primaryResonantInductance);
         if (hasC && !hasL) d.primaryResonantInductance = 1.0 / (wr * wr * d.primaryResonantCapacitance);
-        if (hasL && hasC) {
-            const double ftank = 1.0 / (2.0 * M_PI * std::sqrt(d.primaryResonantInductance * d.primaryResonantCapacitance));
-            if (std::abs(ftank - fr) > 0.01 * fr)
-                throw std::invalid_argument("design_clllc: primarySeriesInductance and primaryResonantCapacitance "
-                                            "resonate at " + std::to_string(ftank) + " Hz, not at the operating "
-                                            "switching frequency " + std::to_string(fr) + " Hz");
-        }
+        if (hasL && hasC)
+            d.resonantFrequency =
+                1.0 / (2.0 * M_PI * std::sqrt(d.primaryResonantInductance * d.primaryResonantCapacitance));
     }
+    // MAS clllcResonant.primaryResonantFrequency states the tank resonance: it must agree with the tank.
+    if (d.config.contains("primaryResonantFrequency") &&
+        std::abs(cfg::get(d.config, "primaryResonantFrequency", d.resonantFrequency) - d.resonantFrequency) >
+            1e-3 * d.resonantFrequency)
+        throw std::invalid_argument("design_clllc: primaryResonantFrequency " +
+                                    std::to_string(cfg::get(d.config, "primaryResonantFrequency", d.resonantFrequency)) +
+                                    " Hz differs from the tank resonance " + std::to_string(d.resonantFrequency) +
+                                    " Hz (designRequirements.switchingFrequency, or the resonance of the pinned "
+                                    "primarySeriesInductance and primaryResonantCapacitance)");
     const auto pinnedLm = req::provided_inductance(dr);
     d.magnetizingInductance = pinnedLm.value_or(
         cfg::get(d.config, "inductanceRatio", kInductanceRatio) * d.primaryResonantInductance);
@@ -150,7 +152,7 @@ ClllcDesign design_clllc(const json& tasInputs) {
     const auto op = two_sided_resonant_operating_point(
         "design_clllc",
         req::provided_turns_ratio(dr, 0).has_value() ? "pinned turns ratio" : "turns ratio",
-        d.config, d.reverse, N, req::conversion_efficiency(dr), Vin, Vo, d.outputPower, fr,
+        d.config, d.reverse, N, req::conversion_efficiency(dr), Vin, Vo, d.outputPower, d.resonantFrequency,
         d.magnetizingInductance, d.primaryResonantInductance, d.primaryResonantCapacitance,
         d.secondaryResonantInductance, d.secondaryResonantCapacitance);
     d.operatingFrequency = op.operatingFrequency;
