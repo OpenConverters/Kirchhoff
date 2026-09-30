@@ -244,8 +244,54 @@ LlcDesign design_llc(const json& tasInputs) {
     d.requiredGain = d.turnsRatio / n;
     const bool driveAtFsw = cfg::get_bool(d.config, "driveAtSwitchingFrequency", false);
     if (driveAtFsw) {
-        // Explicit open-loop request: drive at the requested frequency and let the gain fall where it falls.
+        // Explicit open-loop request ("I know the design I want", ABT #1539): drive the tank at exactly the
+        // requested frequency. The output voltage is then a RESULT of the tank gain there, not the target: the
+        // embedded excitations, the stresses and the TAS outputs all carry the rail the tank delivers into the
+        // design load (the load resistance is kept; the power follows V²/R). Embedding the target Vout instead
+        // left the analytical point power-inconsistent off resonance. No re-solve and no throw for missing the
+        // target; only a non-physical point (capacitive tank input, or a rail that cannot be positive) throws.
         d.operatingFrequency = d.switchingFrequency;
+        namespace AN = Kirchhoff::analytical;
+        double reflectedConductance = 0.0;
+        for (const auto& leg : d.outputs) {
+            const auto [vE, iE] = llc_winding_terminal(d, leg);
+            reflectedConductance += (M_PI * M_PI) / (8.0 * leg.turnsRatio * leg.turnsRatio * (vE / iE));
+        }
+        const double RacDrive = 1.0 / reflectedConductance;
+        const auto tank = AN::llc_fha_tank(d.operatingFrequency, d.magnetizingInductance, d.resonantInductance,
+                                           d.resonantCapacitance, RacDrive);
+        if (!(tank.zinIm > 0.0))
+            throw std::invalid_argument(
+                "design_llc: driven at " + num(d.operatingFrequency) + " Hz the tank input is capacitive (Lm " +
+                num(d.magnetizingInductance) + " H, Lr " + num(d.resonantInductance) + " H, Cr " +
+                num(d.resonantCapacitance) + " F, reflected load " + num(RacDrive) +
+                " ohm): the bridge loses ZVS and the FHA operating point is not physical. Raise the operating "
+                "frequency above the gain peak");
+        const double M = tank.gain();
+        d.requiredGain = M;
+        // The rail each secondary delivers at gain M: the rectified winding fundamental matches the reflected
+        // drive, n_i·(Vo_i + k·Vd_i) = c·M·η·Vbridge — the same per-variant relation the unity-gain ratio above
+        // solves for M = 1 (CT: c 1, k 1; FB: c 1, k 2; VD: c 2, k 2; CD: c cdOutputFactor, k 1).
+        for (size_t i = 0; i < d.outputs.size(); ++i) {
+            auto& leg = d.outputs[i];
+            double c = 1.0, k = 1.0;
+            switch (d.rectifierType) {
+                case RectifierType::FullBridge:     c = 1.0; k = 2.0; break;
+                case RectifierType::VoltageDoubler: c = 2.0; k = 2.0; break;
+                case RectifierType::CurrentDoubler: c = cfg::get(d.config, "cdOutputFactor", 0.465); k = 1.0; break;
+                case RectifierType::CenterTapped:   c = 1.0; k = 1.0; break;
+            }
+            const double delivered = c * M * etaConv * Vbridge / leg.turnsRatio - k * leg.diodeDrop;
+            if (!(delivered > 0.0))
+                throw std::invalid_argument(
+                    "design_llc: driven at " + num(d.operatingFrequency) + " Hz the tank gain is " + num(M) +
+                    ", which leaves output " + std::to_string(i + 1) + " (turns ratio " + num(leg.turnsRatio) +
+                    ") no positive voltage above its rectifier drop");
+            leg.voltage = delivered;
+            leg.power = delivered * delivered / leg.loadResistance;
+        }
+        d.outputVoltage = d.outputs.at(0).voltage;
+        d.outputPower = d.outputs.at(0).power;
     } else if (req::provided_turns_ratio(dr, 0)) {
         double reflectedConductance = 0.0;
         for (const auto& leg : d.outputs) {

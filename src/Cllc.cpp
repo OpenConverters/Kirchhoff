@@ -27,6 +27,31 @@ constexpr double kGainHeadroom    = 1.08;  // size n for M=1 at fr -> 1.08·Vo, 
                                            // point sits just ABOVE fr (efficient) not at the M=1 peak
 } // namespace
 
+// The switching band: MAS cllcResonant/clllcResonant min/maxSwitchingFrequency, or the resonantBandMin/Max keys the
+// web runtime sends for every resonant topology. Both spellings stated and disagreeing -> refuse.
+static std::pair<std::optional<double>, std::optional<double>> two_sided_band(const std::string& who,
+                                                                               const json& config) {
+    auto bandEnd = [&](const char* masKey, const char* aliasKey) -> std::optional<double> {
+        const bool hasMas = config.contains(masKey), hasAlias = config.contains(aliasKey);
+        if (!hasMas && !hasAlias) return std::nullopt;
+        const double vMas = hasMas ? cfg::get(config, masKey, 0.0) : 0.0;
+        const double vAlias = hasAlias ? cfg::get(config, aliasKey, 0.0) : 0.0;
+        if (hasMas && hasAlias && std::abs(vMas - vAlias) > 1e-9 * std::max(std::abs(vMas), std::abs(vAlias)))
+            throw std::invalid_argument(who + ": config." + masKey + " = " + num(vMas) + " Hz and config." + aliasKey +
+                                        " = " + num(vAlias) + " Hz state two different switching bands");
+        const double v = hasMas ? vMas : vAlias;
+        if (!(v > 0.0))
+            throw std::invalid_argument(who + ": config." + (hasMas ? masKey : aliasKey) + " must be > 0; got " + num(v));
+        return v;
+    };
+    const auto fmin = bandEnd("minSwitchingFrequency", "resonantBandMin");
+    const auto fmax = bandEnd("maxSwitchingFrequency", "resonantBandMax");
+    if (fmin && fmax && !(*fmax >= *fmin))
+        throw std::invalid_argument(who + ": the switching-frequency band [" + num(*fmin) + ", " + num(*fmax) +
+                                    "] Hz is not a band (need min <= max)");
+    return {fmin, fmax};
+}
+
 CllcDesign design_cllc(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     CllcDesign d{};
@@ -66,7 +91,24 @@ CllcDesign design_cllc(const json& tasInputs) {
     // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
     // the duty-derived value so the rest of the stage is sized around the fixed transformer.
     d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(n);
-    const double fr = d.switchingFrequency;
+    // Tank resonance and drive frequency (ABT #1539). By default the CLLC's designRequirements.switchingFrequency IS
+    // the tank resonance and design_cllc solves the drive frequency from the tank gain (below). With
+    // config.driveAtSwitchingFrequency the caller forces the drive: switchingFrequency is then the frequency both
+    // bridges switch at, config.resonantFrequency (when stated) the tank resonance, and the output voltage becomes a
+    // result. A resonantFrequency that differs from switchingFrequency without the flag states two tank resonances.
+    const bool driveAtFsw = cfg::get_bool(d.config, "driveAtSwitchingFrequency", false);
+    double fr = d.switchingFrequency;
+    if (d.config.contains("resonantFrequency")) {
+        const double frStated = cfg::get(d.config, "resonantFrequency", 0.0);
+        if (!(frStated > 0.0))
+            throw std::invalid_argument("design_cllc: config.resonantFrequency must be > 0; got " + num(frStated));
+        if (!driveAtFsw && std::abs(frStated - fr) > 1e-9 * fr)
+            throw std::invalid_argument(
+                "design_cllc: config.resonantFrequency " + num(frStated) + " Hz differs from "
+                "designRequirements.switchingFrequency " + num(fr) + " Hz, which is the tank resonance unless "
+                "config.driveAtSwitchingFrequency forces the drive frequency");
+        fr = frStated;
+    }
     d.resonantFrequency = fr;
     // MAS cllcResonant.bridgeType: Kirchhoff's CLLC is a full bridge on both sides (bridge-voltage factor 1).
     if (cfg::get_str(d.config, "bridgeType", "fullBridge") != "fullBridge")
@@ -173,6 +215,41 @@ CllcDesign design_cllc(const json& tasInputs) {
     if (d.reverse && !cfg::get_bool(d.config, "bidirectional", true))
         throw std::invalid_argument("design_cllc: a reverse power-flow operating point needs bidirectional=true");
 
+    if (driveAtFsw) {
+        // Forced drive (ABT #1539, "I know the design I want"): both bridges switch at switchingFrequency and the
+        // output is what the two-sided FHA tank delivers there into the design load. No re-solve, no throw for
+        // missing the Vout target; a capacitive tank input (no ZVS, outside the FHA regulation branch) throws.
+        namespace AN = Kirchhoff::analytical;
+        if (d.reverse)
+            throw std::invalid_argument("design_cllc: config.driveAtSwitchingFrequency with reverse power flow is not "
+                                        "modelled; the forced-frequency operating point is forward only");
+        const double fsw = d.switchingFrequency;
+        const auto [fmin, fmax] = two_sided_band("design_cllc", d.config);
+        if ((fmin && fsw < *fmin) || (fmax && fsw > *fmax))
+            throw std::invalid_argument("design_cllc: the operating switching frequency " + num(fsw) +
+                                        " Hz lies outside the band [" + (fmin ? num(*fmin) : std::string("-")) +
+                                        ", " + (fmax ? num(*fmax) : std::string("-")) + "] Hz");
+        const double RacDrive = (8.0 * N * N / (M_PI * M_PI)) * Rload;
+        const auto tank = AN::cllc_fha_tank(fsw, d.magnetizingInductance, d.primaryResonantInductance,
+                                            d.primaryResonantCapacitance, d.secondaryResonantInductance * N * N,
+                                            d.secondaryResonantCapacitance / (N * N), RacDrive);
+        if (!(tank.zinIm > 0.0))
+            throw std::invalid_argument(
+                "design_cllc: driven at " + num(fsw) + " Hz the tank input is capacitive (Lm " +
+                num(d.magnetizingInductance) + " H, Lr1 " + num(d.primaryResonantInductance) + " H, Cr1 " +
+                num(d.primaryResonantCapacitance) + " F, Lr2 " + num(d.secondaryResonantInductance) + " H, Cr2 " +
+                num(d.secondaryResonantCapacitance) + " F, turns ratio " + num(N) + ", reflected load " +
+                num(RacDrive) + " ohm): the bridge loses ZVS and the FHA operating point is not physical. Raise the "
+                "operating frequency above the gain peak");
+        const double M = tank.gain();
+        const double delivered = M * req::conversion_efficiency(dr) * Vin / N;
+        d.operatingFrequency = fsw;
+        d.requiredGain = M;
+        d.outputVoltage = delivered;
+        d.outputPower = delivered * delivered / Rload;
+        return d;
+    }
+
     // ── Operating frequency (ABT #1503) ──
     // The CLLC regulates by frequency. The tank resonates at fr, where a symmetric tank's FHA gain is 1 whatever
     // the ratio, but neither ratio is sized for unity gain there: the engine-sized one carries the 1.08 gain
@@ -202,26 +279,7 @@ TwoSidedOperatingPoint two_sided_resonant_operating_point(
     const double N = turnsRatio, eta = efficiency, fr = resonantFrequency;
     if (!(N > 0) || !(eta > 0) || !(inputVoltage > 0) || !(outputVoltage > 0) || !(outputPower > 0) || !(fr > 0))
         throw std::invalid_argument(who + ": turns ratio, efficiency, voltages, power and fr must all be > 0");
-    // The switching band: MAS cllcResonant/clllcResonant min/maxSwitchingFrequency, or the resonantBandMin/Max
-    // keys the web runtime sends for every resonant topology. Both spellings stated and disagreeing -> refuse.
-    auto bandEnd = [&](const char* masKey, const char* aliasKey) -> std::optional<double> {
-        const bool hasMas = config.contains(masKey), hasAlias = config.contains(aliasKey);
-        if (!hasMas && !hasAlias) return std::nullopt;
-        const double vMas = hasMas ? cfg::get(config, masKey, 0.0) : 0.0;
-        const double vAlias = hasAlias ? cfg::get(config, aliasKey, 0.0) : 0.0;
-        if (hasMas && hasAlias && std::abs(vMas - vAlias) > 1e-9 * std::max(std::abs(vMas), std::abs(vAlias)))
-            throw std::invalid_argument(who + ": config." + masKey + " = " + num(vMas) + " Hz and config." + aliasKey +
-                                        " = " + num(vAlias) + " Hz state two different switching bands");
-        const double v = hasMas ? vMas : vAlias;
-        if (!(v > 0.0))
-            throw std::invalid_argument(who + ": config." + (hasMas ? masKey : aliasKey) + " must be > 0; got " + num(v));
-        return v;
-    };
-    const auto fmin = bandEnd("minSwitchingFrequency", "resonantBandMin");
-    const auto fmax = bandEnd("maxSwitchingFrequency", "resonantBandMax");
-    if (fmin && fmax && !(*fmax >= *fmin))
-        throw std::invalid_argument(who + ": the switching-frequency band [" + num(*fmin) + ", " + num(*fmax) +
-                                    "] Hz is not a band (need min <= max)");
+    const auto [fmin, fmax] = two_sided_band(who, config);
 
     // The tank as the DRIVING bridge sees it. Forward: the Vin side drives Lr1/Cr1, Lm, and Lr2/Cr2 referred up by
     // N², into Rac = (8/π²)·N²·Vout²/P. Reverse: the Vout side drives Lr2/Cr2, Lm/N², and Lr1/Cr1 referred down,

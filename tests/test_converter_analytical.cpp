@@ -19,6 +19,7 @@
 #include <cctype>
 #include <sstream>
 #include <vector>
+#include <functional>
 
 using Kirchhoff::analytical::analytical_buck;
 
@@ -2175,5 +2176,219 @@ TEST_CASE("CLLC / CLLLC ngspice with pinned tank values: the pins reach the deck
         // against the output capacitor longer than the engine-sized one; at 16 ms the output is still settling and
         // the source-to-load average reads a few 0.01 % above 1.
         check_two_sided_ngspice("clllc", d, spec, tas, 0.030);
+    }
+}
+
+// ── ABT #1539: "I know the design I want" forces the drive frequency; the output voltage is a result ────────────
+// config.driveAtSwitchingFrequency drives the tank at exactly designRequirements.switchingFrequency. The LLC used to
+// embed the TARGET Vout at that frequency (a power-inconsistent point off resonance) and the CLLC had no such key at
+// all (the wizard's Op. Frequency was silently ignored, ABT #1503 solved its own). Now the rail is what the FHA tank
+// delivers there into the design load, the deck is driven at that frequency, and only a capacitive (non-ZVS) point
+// throws.
+namespace {
+double stimulus_frequency(const nlohmann::json& tas) {
+    const auto& st = tas.at("simulation").at("stimulus");
+    REQUIRE(!st.empty());
+    const double f = st.at(0).at("waveform").at("frequency").get<double>();
+    for (const auto& s : st) CHECK(s.at("waveform").at("frequency").get<double>() == f);
+    return f;
+}
+nlohmann::json llc_1539_spec(double fsw) {
+    nlohmann::json s = llc_1503_spec(3.0, "halfBridge");   // n 3 half bridge, fr 180 kHz, band 100-300 kHz
+    s["designRequirements"]["switchingFrequency"] = {{"nominal", fsw}};
+    s["config"]["driveAtSwitchingFrequency"] = true;
+    return s;
+}
+// The forced point's analytical operating point. The winding powers follow the model the solved #1503 points use:
+// P_sec = Pout*pf and P_pri = Pout/eta*pf, pf = Rac/|Zsec| the receiving tank's power factor. KNOWN MODEL LIMIT
+// (ABT #1546, open): physically both windings carry the load power; analytical_cllc places the rectifier square at
+// the Lm phase, so off resonance the excitations fall short by pf (0.939 at 150 kHz here). Near fr pf ~1 and this
+// is the #1503 check. When #1546 is fixed the pf factor goes and these become P_sec = P_pri = Pout.
+void check_two_sided_forced(const char* topology, const Kirchhoff::CllcDesign& d, const nlohmann::json& spec, double eta) {
+    const std::string raw = Kirchhoff::api::process_converter(topology, spec.dump(), "analytical");
+    INFO(raw.substr(0, 400));
+    REQUIRE(raw.rfind("Exception:", 0) != 0);
+    const nlohmann::json out = nlohmann::json::parse(raw);
+    CHECK(out.at("diagnostics").at("switchingFrequency").get<double>() == Catch::Approx(d.operatingFrequency));
+    const auto& exc = out.at("operatingPoint").at("excitationsPerWinding");
+    REQUIRE(exc.size() == 2);
+    const WindingPower pri = winding_power(exc.at(0)), sec = winding_power(exc.at(1));
+    const double N = d.turnsRatio;
+    const auto tank = Kirchhoff::analytical::cllc_fha_tank(
+        d.operatingFrequency, d.magnetizingInductance, d.primaryResonantInductance, d.primaryResonantCapacitance,
+        d.secondaryResonantInductance * N * N, d.secondaryResonantCapacitance / (N * N),
+        8.0 / (M_PI * M_PI) * N * N * d.loadResistance);
+    const double pf = tank.zsecRe / std::hypot(tank.zsecRe, tank.zsecIm);
+    INFO(topology << ": forced fsw " << d.operatingFrequency << " Hz (fr " << d.resonantFrequency << "), Pout "
+         << d.outputPower << " W, P_pri " << pri.power << " W, P_sec " << sec.power << " W, pf " << pf);
+    CHECK(sec.power == Catch::Approx(d.outputPower * pf).epsilon(0.02));
+    CHECK(pri.power == Catch::Approx(d.outputPower / eta * pf).epsilon(0.02));
+}
+nlohmann::json cllc_1539_spec(double fsw) {
+    nlohmann::json s = cllc_web_spec(0.97, 200e-6);        // 400 V -> 400 V / 3.3 kW, eff 0.97, band 80-200 kHz
+    s["designRequirements"]["switchingFrequency"] = {{"nominal", fsw}};
+    s["config"]["resonantFrequency"] = 120e3;
+    s["config"]["driveAtSwitchingFrequency"] = true;
+    return s;
+}
+}  // namespace
+
+TEST_CASE("LLC driveAtSwitchingFrequency: the forced frequency reaches the deck and Vout is the tank's result "
+          "(ABT #1539)", "[analytical][llc][abt1539]") {
+    const double Vin = 425.0, eta = 0.97, k = 0.5, n = 3.0, Rload = 90.0 * 90.0 / 3300.0;
+    struct Case { double fsw; int side; };   // side: -1 below fr, 0 at fr, +1 above
+    for (const Case c : {Case{180e3, 0}, Case{140e3, -1}, Case{240e3, +1}}) {
+        DYNAMIC_SECTION("fsw " << c.fsw) {
+            const nlohmann::json spec = llc_1539_spec(c.fsw);
+            const Kirchhoff::LlcDesign d = Kirchhoff::design_llc(spec);
+            const double Vd = d.outputs.at(0).diodeDrop;
+            CHECK(d.resonantFrequency == Catch::Approx(180e3));
+            CHECK(d.operatingFrequency == c.fsw);
+            CHECK(d.loadResistance == Catch::Approx(Rload));
+            // The rail is the tank's: n·(Vo + 2·Vd) = M·η·k·Vin (full-bridge rectifier), power V²/R.
+            const double Rac = 8.0 / (M_PI * M_PI) * n * n * Rload;
+            const double M = Kirchhoff::analytical::llc_fha_tank(c.fsw, d.magnetizingInductance, d.resonantInductance,
+                                                                 d.resonantCapacitance, Rac).gain();
+            CHECK(d.requiredGain == Catch::Approx(M));
+            CHECK(d.outputVoltage == Catch::Approx(M * eta * k * Vin / n - 2.0 * Vd).epsilon(1e-9));
+            CHECK(d.outputPower == Catch::Approx(d.outputVoltage * d.outputVoltage / Rload).epsilon(1e-9));
+            if (c.side == 0) CHECK(M == Catch::Approx(1.0).epsilon(1e-9));
+            if (c.side < 0) CHECK(M > 1.02);   // below resonance the LLC boosts
+            if (c.side > 0) CHECK(M < 0.98);   // above resonance it bucks
+            // The 90 V target is NOT met (n 3 half bridge at 180 kHz gives ~68 V) and nothing throws or re-solves.
+            CHECK(std::abs(d.outputVoltage - 90.0) > 5.0);
+
+            const nlohmann::json tas = Kirchhoff::build_llc_tas(d);
+            CHECK(stimulus_frequency(tas) == c.fsw);
+            CHECK(tas.at("inputs").at("designRequirements").at("outputs").at(0).at("voltage").at("nominal").get<double>() ==
+                  Catch::Approx(d.outputVoltage));
+
+            const std::string raw = Kirchhoff::api::process_converter("llc", spec.dump(), "analytical");
+            INFO(raw.substr(0, 400));
+            REQUIRE(raw.rfind("Exception:", 0) != 0);
+            const nlohmann::json out = nlohmann::json::parse(raw);
+            CHECK(out.at("diagnostics").at("switchingFrequency").get<double>() == c.fsw);
+            const auto& exc = out.at("operatingPoint").at("excitationsPerWinding");
+            REQUIRE(exc.size() == 2);
+            const WindingPower pri = winding_power(exc.at(0)), sec = winding_power(exc.at(1));
+            INFO("fsw " << c.fsw << ": M " << M << ", Vout " << d.outputVoltage << " V, Pout " << d.outputPower
+                 << " W, P_pri " << pri.power << " W, P_sec " << sec.power << " W");
+            // Power balance of the analytical point at the delivered rail (as the #1503 checks).
+            CHECK(sec.power == Catch::Approx(d.outputPower).epsilon(0.02));
+            CHECK(pri.power == Catch::Approx(d.outputPower / eta * (1.0 + 2.0 * Vd / d.outputVoltage)).epsilon(0.02));
+        }
+    }
+}
+
+TEST_CASE("LLC driveAtSwitchingFrequency: the ngspice deck switches at the forced frequency and lands on the FHA "
+          "rail (ABT #1539)", "[ngspice][llc][abt1539]") {
+    // Discrete resonant inductor: the integrated-Lr deck realises T1's leakage through a K coupling that shrinks
+    // the effective turns ratio and lands ~13% high at EVERY frequency, forced or not (ABT #1545, open). The
+    // forced drive is what is under test here, so the deck carries Lr as its own part.
+    // Measured deck vs FHA Vout: 150 kHz 77.30 vs 72.91 V (FHA's below-resonance underestimate, ABT #1548), 220 kHz
+    // 61.54 vs 61.77 V.
+    for (const double fsw : {150e3, 220e3}) {
+        DYNAMIC_SECTION("fsw " << fsw) {
+            nlohmann::json spec = llc_1539_spec(fsw);
+            spec["config"]["integratedResonantInductor"] = false;
+            const Kirchhoff::LlcDesign d = Kirchhoff::design_llc(spec);
+            const nlohmann::json tas = Kirchhoff::build_llc_tas(d);
+            const TwoSidedDeckRun r = run_two_sided_deck(tas, fsw, 425.0, "vvin#branch", "vout", d.loadResistance);
+            INFO("fsw " << fsw << ": FHA Vout " << d.outputVoltage << " V, deck Vout " << r.vDelivered << " V, P_src "
+                 << r.pSource << " W, P_load " << r.pLoad << " W");
+            CHECK(r.vDelivered == Catch::Approx(d.outputVoltage).epsilon(0.08));
+            CHECK(r.pSource > 0.0);
+            CHECK(r.pLoad / r.pSource > 0.85);
+            CHECK(r.pLoad / r.pSource <= 1.0);
+        }
+    }
+}
+
+TEST_CASE("LLC driveAtSwitchingFrequency: a capacitive or out-of-band point throws (ABT #1539)",
+          "[analytical][llc][abt1539]") {
+    SECTION("below the no-load resonance fr/sqrt(1+Ln) the tank input is capacitive") {
+        nlohmann::json spec = llc_1539_spec(60e3);
+        spec["config"]["resonantBandMin"] = 40e3;
+        CHECK_THROWS_WITH(Kirchhoff::design_llc(spec), Catch::Matchers::ContainsSubstring("tank input is capacitive"));
+    }
+    SECTION("outside the switching band") {
+        CHECK_THROWS_WITH(Kirchhoff::design_llc(llc_1539_spec(350e3)), Catch::Matchers::ContainsSubstring("lies outside the band"));
+    }
+}
+
+TEST_CASE("CLLC driveAtSwitchingFrequency: the tank resonates at config.resonantFrequency, the bridges switch at the "
+          "forced frequency and Vout is the tank's result (ABT #1539)", "[analytical][cllc][abt1539]") {
+    const double Vin = 400.0, eta = 0.97, n = 0.97, Rload = 400.0 * 400.0 / 3300.0;
+    struct Case { double fsw; int side; };
+    // The tank input turns capacitive below ~110.5 kHz at this load (independent FHA Zin: 110 kHz -0.6 deg, 112 kHz
+    // +2.3 deg, 115 kHz +6.6 deg), so the below-resonance point is 115 kHz. This Q ~0.8 tank boosts little there
+    // (M 1.008): the check is M > 1, i.e. Vout above the unity-gain 400 V.
+    for (const Case c : {Case{120e3, 0}, Case{115e3, -1}, Case{150e3, +1}}) {
+        DYNAMIC_SECTION("fsw " << c.fsw) {
+            const nlohmann::json spec = cllc_1539_spec(c.fsw);
+            const Kirchhoff::CllcDesign d = Kirchhoff::design_cllc(spec);
+            CHECK(d.resonantFrequency == Catch::Approx(120e3));
+            CHECK(1.0 / (2.0 * M_PI * std::sqrt(d.primaryResonantInductance * d.primaryResonantCapacitance)) ==
+                  Catch::Approx(120e3));
+            CHECK(d.operatingFrequency == c.fsw);
+            CHECK(d.loadResistance == Catch::Approx(Rload));
+            const double M = two_sided_gain_at_operating_frequency(d);
+            CHECK(d.requiredGain == Catch::Approx(M));
+            CHECK(d.outputVoltage == Catch::Approx(M * eta * Vin / n).epsilon(1e-9));
+            CHECK(d.outputPower == Catch::Approx(d.outputVoltage * d.outputVoltage / Rload).epsilon(1e-9));
+            if (c.side == 0) CHECK(d.outputVoltage == Catch::Approx(400.0).epsilon(1e-9));   // symmetric tank: M(fr) = 1
+            if (c.side < 0) CHECK(d.outputVoltage > 400.0);
+            if (c.side > 0) CHECK(d.outputVoltage < 0.99 * 400.0);
+
+            const nlohmann::json tas = Kirchhoff::build_cllc_tas(d);
+            CHECK(stimulus_frequency(tas) == c.fsw);
+            CHECK(tas.at("inputs").at("designRequirements").at("outputs").at(0).at("voltage").at("nominal").get<double>() ==
+                  Catch::Approx(d.outputVoltage));
+            check_two_sided_forced("cllc", d, spec, eta);
+        }
+    }
+}
+
+TEST_CASE("CLLC driveAtSwitchingFrequency: the ngspice deck switches at the forced frequency and lands on the FHA "
+          "rail with forward, balanced power (ABT #1539)", "[ngspice][cllc][abt1539]") {
+    // 115 kHz: below fr inside the inductive region (110 kHz is capacitive, see above); 140 kHz above fr.
+    for (const double fsw : {115e3, 140e3}) {
+        DYNAMIC_SECTION("fsw " << fsw) {
+            const Kirchhoff::CllcDesign d = Kirchhoff::design_cllc(cllc_1539_spec(fsw));
+            const nlohmann::json tas = Kirchhoff::build_cllc_tas(d);
+            const TwoSidedDeckRun r = run_two_sided_deck(tas, fsw, 400.0, "vvin#branch", "vout", d.loadResistance, 0.030);
+            INFO("fsw " << fsw << ": FHA Vout " << d.outputVoltage << " V, deck Vout " << r.vDelivered << " V, P_src "
+                 << r.pSource << " W, P_load " << r.pLoad << " W");
+            CHECK(r.vDelivered == Catch::Approx(d.outputVoltage).epsilon(0.08));
+            CHECK(r.pSource > 0.0);
+            CHECK(r.pLoad / r.pSource > 0.90);
+            CHECK(r.pLoad / r.pSource <= 1.0);
+        }
+    }
+}
+
+TEST_CASE("CLLC driveAtSwitchingFrequency: contradictions, reverse flow and capacitive points throw (ABT #1539)",
+          "[analytical][cllc][abt1539]") {
+    SECTION("a resonantFrequency different from switchingFrequency without the flag states two resonances") {
+        nlohmann::json spec = cllc_1539_spec(140e3);
+        spec["config"].erase("driveAtSwitchingFrequency");
+        CHECK_THROWS_WITH(Kirchhoff::design_cllc(spec), Catch::Matchers::ContainsSubstring("differs from designRequirements.switchingFrequency"));
+    }
+    SECTION("reverse power flow is not modelled under the flag") {
+        nlohmann::json spec = cllc_1539_spec(140e3);
+        spec["config"]["powerFlowDirection"] = "reverse";
+        CHECK_THROWS_WITH(Kirchhoff::design_cllc(spec), Catch::Matchers::ContainsSubstring("not modelled"));
+    }
+    SECTION("outside the switching band") {
+        CHECK_THROWS_WITH(Kirchhoff::design_cllc(cllc_1539_spec(210e3)), Catch::Matchers::ContainsSubstring("lies outside the band"));
+    }
+    SECTION("far below resonance the tank input is capacitive") {
+        nlohmann::json spec = cllc_1539_spec(50e3);
+        spec["config"]["resonantBandMin"] = 30e3;
+        CHECK_THROWS_WITH(Kirchhoff::design_cllc(spec), Catch::Matchers::ContainsSubstring("tank input is capacitive"));
+    }
+    SECTION("just below the inductive boundary (~110.5 kHz here) it throws, just above it designs") {
+        CHECK_THROWS_WITH(Kirchhoff::design_cllc(cllc_1539_spec(110e3)), Catch::Matchers::ContainsSubstring("tank input is capacitive"));
+        CHECK_NOTHROW(Kirchhoff::design_cllc(cllc_1539_spec(112e3)));
     }
 }

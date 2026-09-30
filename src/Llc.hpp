@@ -49,7 +49,9 @@ struct LlcDesign {
                                       // fr for an engine-sized turns ratio (unity gain there), the FHA-solved
                                       // frequency for a pinned turns ratio, or switchingFrequency when
                                       // config.driveAtSwitchingFrequency asks for an open-loop point (ABT #1503)
-    double requiredGain;              // tank gain the main rail needs: n·(Vout+Vd_total)/(η·k_bridge·Vin)
+    double requiredGain;              // tank gain the main rail needs: n·(Vout+Vd_total)/(η·k_bridge·Vin); under
+                                      // driveAtSwitchingFrequency the FHA gain the tank realizes at that frequency,
+                                      // and outputVoltage/outputPower/outputs[] then carry the DELIVERED rails (ABT #1539)
     double switchDuty;                // per-switch on-fraction (~0.45, complementary with dead time)
     double loadResistance;
     double outputCapacitance;

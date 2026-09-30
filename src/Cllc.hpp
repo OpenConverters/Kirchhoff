@@ -30,12 +30,16 @@ struct CllcDesign {
     double magnetizingInductance;      // Lm = k·Lr1
     double secondaryResonantInductance;  // Lr2 = Lr1/n² (symmetric)
     double secondaryResonantCapacitance; // Cr2 = n²·Cr1 (symmetric)
-    double resonantFrequency;          // fr = designRequirements.switchingFrequency: the tank resonance
+    double resonantFrequency;          // fr = designRequirements.switchingFrequency: the tank resonance (with
+                                       // config.driveAtSwitchingFrequency: config.resonantFrequency when stated)
     double operatingFrequency;         // the frequency both bridges are driven at (the operating point's): fr when
                                        // the turns ratio gives the output there, else the frequency in the switching
-                                       // band where the FHA tank gain delivers it (ABT #1503)
+                                       // band where the FHA tank gain delivers it (ABT #1503); switchingFrequency
+                                       // under config.driveAtSwitchingFrequency, when outputVoltage/outputPower carry
+                                       // the rail the tank delivers there (ABT #1539)
     double requiredGain;               // tank gain the delivered rail needs (forward n·Vout/(η·Vin); reverse
-                                       // Vin/(η·n·Vout)); an engine-sized ratio has 1/gainHeadroom
+                                       // Vin/(η·n·Vout)); an engine-sized ratio has 1/gainHeadroom; the realized FHA
+                                       // gain under config.driveAtSwitchingFrequency
     double switchDuty;                 // per-switch on-fraction (~0.47, complementary with dead time)
     double loadResistance;
     double outputCapacitance;
