@@ -2392,3 +2392,135 @@ TEST_CASE("CLLC driveAtSwitchingFrequency: contradictions, reverse flow and capa
         CHECK_NOTHROW(Kirchhoff::design_cllc(cllc_1539_spec(112e3)));
     }
 }
+
+// ── ABT #1539 (SRC): the wizard's resonant frequency was silently ignored — KH used switchingFrequency as both the
+// tank resonance and the drive. config.driveAtSwitchingFrequency now separates them: the tank resonates at
+// config.resonantFrequency, the bridge switches at switchingFrequency, and the output voltage is the tank's result.
+#include "Src.hpp"
+namespace {
+nlohmann::json src_1539_spec(double fsw, bool force) {
+    nlohmann::json s;
+    auto& dr = s["designRequirements"];
+    dr["inputType"] = "dc";
+    dr["inputVoltage"] = {{"nominal", 400.0}, {"minimum", 380.0}, {"maximum", 420.0}};
+    dr["switchingFrequency"] = {{"nominal", fsw}};
+    dr["outputs"] = nlohmann::json::array({{{"name", "out"}, {"voltage", {{"nominal", 48.0}}}, {"regulation", "voltage"}}});
+    dr["efficiency"] = 0.95;
+    s["operatingPoints"] = nlohmann::json::array({{{"name", "full_load"}, {"inputVoltage", 400.0},
+        {"ambientTemperature", 25.0}, {"outputs", nlohmann::json::array({{{"name", "out"}, {"power", 480.0}}})}}});
+    s["config"] = {{"resonantFrequency", 100e3}};
+    if (force) s["config"]["driveAtSwitchingFrequency"] = true;
+    return s;
+}
+}  // namespace
+
+TEST_CASE("SRC driveAtSwitchingFrequency: the tank resonates at config.resonantFrequency, the bridge switches at the "
+          "forced frequency and Vout is the tank's result (ABT #1539)", "[analytical][src][abt1539]") {
+    const double Vin = 400.0, eta = 0.95, k = 0.5, Rload = 48.0 * 48.0 / 480.0;
+    for (const double fsw : {100e3, 115e3, 140e3}) {
+        DYNAMIC_SECTION("fsw " << fsw) {
+            const nlohmann::json spec = src_1539_spec(fsw, true);
+            const Kirchhoff::SrcDesign d = Kirchhoff::design_src(spec);
+            const double n = d.turnsRatio, Vd = d.outputs.at(0).diodeDrop;
+            CHECK(d.resonantFrequency == Catch::Approx(100e3));
+            CHECK(1.0 / (2.0 * M_PI * std::sqrt(d.resonantInductance * d.resonantCapacitance)) == Catch::Approx(100e3));
+            CHECK(d.switchingFrequency == fsw);
+            CHECK(d.loadResistance == Catch::Approx(Rload));
+            // Series-tank FHA gain into the reflected design load (centre-tapped: n·(Vo + Vd) = M·η·k·Vin).
+            const double w = 2.0 * M_PI * fsw, Rac = 8.0 / (M_PI * M_PI) * n * n * Rload;
+            const double X = w * d.resonantInductance - 1.0 / (w * d.resonantCapacitance);
+            const double M = Rac / std::hypot(Rac, X);
+            CHECK(d.tankGain == Catch::Approx(M));
+            CHECK(d.outputVoltage == Catch::Approx(M * eta * k * Vin / n - Vd).epsilon(1e-9));
+            CHECK(d.outputPower == Catch::Approx(d.outputVoltage * d.outputVoltage / Rload).epsilon(1e-9));
+            // At resonance the tank gain is 1 and the rail carries the design's 1.08 gain headroom; above it the series
+            // tank steps down from there (M < 1). With that headroom 115 kHz still sits above 48 V (50.6 V).
+            if (fsw == 100e3) CHECK(d.outputVoltage == Catch::Approx(1.08 * (48.0 + Vd) - Vd).epsilon(1e-3));
+            else { CHECK(M < 1.0); CHECK(d.outputVoltage < 1.08 * (48.0 + Vd) - Vd); }
+
+            const nlohmann::json tas = Kirchhoff::build_src_tas(d);
+            CHECK(stimulus_frequency(tas) == fsw);
+            // The resonant inductor carries the tank current, which lags the bridge by arg(Zin): the in-phase part
+            // carries Pin, so |I| = Pin/(Vtank1·cos) with cos = Rac/|Zin| = M (plus the small magnetizing term).
+            {
+                const nlohmann::json* lr = nullptr;
+                std::function<void(const nlohmann::json&)> find = [&](const nlohmann::json& j) {
+                    if (lr) return;
+                    if (j.is_object()) {
+                        if (j.contains("name") && j.at("name") == "Lr" && j.contains("data")) { lr = &j.at("data"); return; }
+                        for (const auto& kv : j.items()) find(kv.value());
+                    } else if (j.is_array()) for (const auto& e : j) find(e);
+                };
+                find(tas);
+                REQUIRE(lr != nullptr);
+                const nlohmann::json& exLr = lr->at("inputs").at("operatingPoints").at(0).at("excitationsPerWinding").at(0);
+                const double iLrRms = exLr.at("current").at("processed").at("rms").get<double>();
+                const double Vt = 2.0 * std::sqrt(2.0) * (k * Vin) / M_PI;
+                const double iLoad = d.outputPower / eta / (Vt * M);
+                const double iMag = (k * Vin) * (0.25 / fsw) / d.magnetizingInductance / std::sqrt(3.0);
+                INFO("Lr rms " << iLrRms << " A, expected " << std::hypot(iLoad, iMag) << " A");
+                CHECK(iLrRms == Catch::Approx(std::hypot(iLoad, iMag)).epsilon(1e-6));
+            }
+            CHECK(tas.at("inputs").at("designRequirements").at("outputs").at(0).at("voltage").at("nominal").get<double>() ==
+                  Catch::Approx(d.outputVoltage));
+            const std::string raw = Kirchhoff::api::process_converter("src", spec.dump(), "analytical");
+            INFO(raw.substr(0, 400));
+            REQUIRE(raw.rfind("Exception:", 0) != 0);
+            const nlohmann::json out = nlohmann::json::parse(raw);
+            CHECK(out.at("diagnostics").at("switchingFrequency").get<double>() == fsw);
+            const auto& exc = out.at("operatingPoint").at("excitationsPerWinding");
+            REQUIRE(exc.size() == 3);   // primary + two centre-tapped halves
+            const WindingPower pri = winding_power(exc.at(0));
+            const WindingPower s1 = winding_power(exc.at(1)), s2 = winding_power(exc.at(2));
+            INFO("fsw " << fsw << ": M " << M << ", Vout " << d.outputVoltage << " V, Pout " << d.outputPower
+                 << " W, P_pri " << pri.power << " W, P_sec " << s1.power + s2.power << " W");
+            // analytical_src's transformer is lossless (P_sec = P_pri, as on the help-me path) and carries the input
+            // power into the delivered rail and its diodes: Pout/eta*(1 + Vd/Vout).
+            CHECK(s1.power + s2.power == Catch::Approx(pri.power).epsilon(1e-6));
+            CHECK(pri.power == Catch::Approx(d.outputPower / eta * (1.0 + Vd / d.outputVoltage)).epsilon(0.02));
+        }
+    }
+}
+
+TEST_CASE("SRC driveAtSwitchingFrequency: the ngspice deck switches at the forced frequency and lands on the FHA rail "
+          "(ABT #1539)", "[ngspice][src][abt1539]") {
+    // The deck's efficiency is compared with the same tank's help-me deck (driven at its resonance): at REQUIREMENTS
+    // fidelity the 100 ohm rectifier aids sit across each diode and take ~18% at this 480 W point on either path
+    // (ABT #1547, open), so an absolute figure would measure them rather than the forced drive.
+    const Kirchhoff::SrcDesign d0 = Kirchhoff::design_src(src_1539_spec(100e3, false));
+    const TwoSidedDeckRun r0 = run_two_sided_deck(Kirchhoff::build_src_tas(d0), 100e3, 400.0, "vvin#branch", "vout",
+                                                  d0.loadResistance);
+    REQUIRE(r0.pSource > 0.0);
+    const double eff0 = r0.pLoad / r0.pSource;
+    for (const double fsw : {100e3, 120e3}) {
+        DYNAMIC_SECTION("fsw " << fsw) {
+            const Kirchhoff::SrcDesign d = Kirchhoff::design_src(src_1539_spec(fsw, true));
+            const nlohmann::json tas = Kirchhoff::build_src_tas(d);
+            const TwoSidedDeckRun r = run_two_sided_deck(tas, fsw, 400.0, "vvin#branch", "vout", d.loadResistance);
+            INFO("fsw " << fsw << ": FHA Vout " << d.outputVoltage << " V, deck Vout " << r.vDelivered << " V, P_src "
+                 << r.pSource << " W, P_load " << r.pLoad << " W, help-me deck efficiency " << eff0);
+            CHECK(r.vDelivered == Catch::Approx(d.outputVoltage).epsilon(0.08));
+            CHECK(r.pSource > 0.0);
+            CHECK(r.pLoad / r.pSource == Catch::Approx(eff0).margin(0.02));
+            CHECK(r.pLoad / r.pSource <= 1.0);
+        }
+    }
+}
+
+TEST_CASE("SRC: a resonant frequency without the flag, or a forced point below resonance, throws (ABT #1539)",
+          "[analytical][src][abt1539]") {
+    SECTION("resonantFrequency differing from switchingFrequency without the flag") {
+        CHECK_THROWS_WITH(Kirchhoff::design_src(src_1539_spec(120e3, false)),
+                          Catch::Matchers::ContainsSubstring("differs from the operating switching frequency"));
+    }
+    SECTION("the help-me path is unchanged: resonantFrequency equal to switchingFrequency designs and drives at fr") {
+        const auto d = Kirchhoff::design_src(src_1539_spec(100e3, false));
+        CHECK(d.resonantFrequency == Catch::Approx(100e3));
+        CHECK(d.outputVoltage == 48.0);
+        CHECK(d.tankGain == 1.0);
+    }
+    SECTION("below the series resonance the tank input is capacitive") {
+        CHECK_THROWS_WITH(Kirchhoff::design_src(src_1539_spec(90e3, true)), Catch::Matchers::ContainsSubstring("capacitive"));
+    }
+}
+

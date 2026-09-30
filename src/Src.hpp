@@ -39,7 +39,10 @@ struct SrcDesign {
     double resonantInductance;        // Lr
     double resonantCapacitance;       // Cr
     double magnetizingInductance;     // Lm ≈ 10·Lr (large, non-resonant)
-    double resonantFrequency;         // fr (= fsw here: operate at series resonance)
+    double resonantFrequency;         // fr: the series-tank resonance (= switchingFrequency unless
+                                      // config.driveAtSwitchingFrequency states config.resonantFrequency, ABT #1539)
+    double tankGain;                  // series-tank FHA gain at switchingFrequency (1 at resonance); under a forced
+                                      // drive frequency outputVoltage/outputPower/outputs[] carry the DELIVERED rails
     double switchDuty;                // per-switch on-fraction (~0.45, complementary with dead time)
     double loadResistance;
     double outputCapacitance;

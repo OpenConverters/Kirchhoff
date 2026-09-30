@@ -93,7 +93,23 @@ SrcDesign design_src(const json& tasInputs) {
     // Lr = Zr/(2π·fr), Cr = 1/(2π·fr·Zr). Lm made large (10·Lr) so it does not load the resonance.
     const double Rload = Vo / Iout;
     const double Rac = (8.0 * n * n) / (M_PI * M_PI) * Rload;
-    const double fr = d.switchingFrequency;   // designed/operated at series resonance
+    // Tank resonance and drive frequency (ABT #1539). By default the series tank is designed AND driven at
+    // designRequirements.switchingFrequency (series resonance). config.driveAtSwitchingFrequency ("I know the design I
+    // want") separates them: the tank resonates at config.resonantFrequency (when stated), the bridge switches at
+    // switchingFrequency, and the output voltage is what the tank gain delivers there (below).
+    const bool driveAtFsw = cfg::get_bool(d.config, "driveAtSwitchingFrequency", false);
+    double fr = d.switchingFrequency;
+    if (d.config.contains("resonantFrequency")) {
+        const double frStated = cfg::get(d.config, "resonantFrequency", 0.0);
+        if (!(frStated > 0.0))
+            throw std::invalid_argument("design_src: config.resonantFrequency must be > 0; got " + std::to_string(frStated));
+        if (!driveAtFsw && std::abs(frStated - fr) > 1e-3 * fr)
+            throw std::invalid_argument("design_src: resonantFrequency " + std::to_string(frStated) +
+                                        " Hz differs from the operating switching frequency " + std::to_string(fr) +
+                                        " Hz; Kirchhoff designs the series tank at resonance unless "
+                                        "config.driveAtSwitchingFrequency forces the drive frequency");
+        if (driveAtFsw) fr = frStated;
+    }
     const double Zr = cfg::get(d.config, "qualityFactor", kQualityFactor) * Rac;
     d.resonantFrequency = fr;
     d.resonantInductance = Zr / (2.0 * M_PI * fr);
@@ -101,19 +117,16 @@ SrcDesign design_src(const json& tasInputs) {
     // MAS seriesResonant: Kirchhoff designs and operates the series tank AT resonance, fr = the operating
     // switching frequency, with an isolation transformer and a diode rectifier. Spec fields are checked against
     // that model and refused with the reason when they ask for something else.
+    // The switching band bounds the frequency the bridge is driven at (= fr unless driveAtSwitchingFrequency).
     if (d.config.contains("minSwitchingFrequency") || d.config.contains("maxSwitchingFrequency")) {
         const double fmin = cfg::get(d.config, "minSwitchingFrequency", 0.0);
         const double fmax = cfg::get(d.config, "maxSwitchingFrequency", std::numeric_limits<double>::infinity());
-        if (!(fr >= fmin && fr <= fmax))
-            throw std::invalid_argument("design_src: the operating/resonant frequency " + std::to_string(fr) +
+        const double fsw = d.switchingFrequency;
+        if (!(fsw >= fmin && fsw <= fmax))
+            throw std::invalid_argument("design_src: the operating switching frequency " + std::to_string(fsw) +
                                         " Hz lies outside the switching-frequency band [" + std::to_string(fmin) +
                                         ", " + std::to_string(fmax) + "] Hz");
     }
-    if (d.config.contains("resonantFrequency") && std::abs(cfg::get(d.config, "resonantFrequency", fr) - fr) > 1e-3 * fr)
-        throw std::invalid_argument("design_src: resonantFrequency " +
-                                    std::to_string(cfg::get(d.config, "resonantFrequency", fr)) +
-                                    " Hz differs from the operating switching frequency " + std::to_string(fr) +
-                                    " Hz; Kirchhoff designs the series tank at resonance");
     if (!cfg::get_bool(d.config, "isolated", true))
         throw std::invalid_argument("design_src: isolated=false (tank driving the rectifier directly) is not modelled; "
                                     "Kirchhoff's SRC has an isolation transformer");
@@ -134,7 +147,9 @@ SrcDesign design_src(const json& tasInputs) {
             const double ftank = 1.0 / (2.0 * M_PI * std::sqrt(d.resonantInductance * d.resonantCapacitance));
             if (std::abs(ftank - fr) > 0.01 * fr)
                 throw std::invalid_argument("design_src: the pinned Lr/Cr resonate at " + std::to_string(ftank) +
-                                            " Hz, not at the operating switching frequency " + std::to_string(fr) + " Hz");
+                                            " Hz, not at the " +
+                                            (driveAtFsw ? "stated tank resonance " : "operating switching frequency ") +
+                                            std::to_string(fr) + " Hz");
         }
     }
     d.magnetizingInductance = req::provided_inductance(dr).value_or(
@@ -209,6 +224,53 @@ SrcDesign design_src(const json& tasInputs) {
         d.magnetizingInductance = req::provided_inductance(dr).value_or(
             cfg::get(d.config, "inductanceRatio", kLmRatio) * d.resonantInductance);
     }
+
+    // ── Forced drive frequency (ABT #1539) ──
+    // Driven at a forced frequency the output voltage is a RESULT, at resonance too (gain 1 there delivers the
+    // design's gain headroom above the target, which the default path leaves to the closed-loop regulator): the series-tank FHA gain M = Rac/|Rac + j(ωLr − 1/(ωCr))| (the
+    // model analytical_src uses; Lm = 10·Lr stays out of it) into the design load delivers, per rail,
+    // n_i·(Vo_i + k·Vd_i) = c·M·η·Vbridge (CT: c 1, k 1; FB: c 1, k 2; CD: c cdOutputFactor, k 1), the same relation
+    // the ratio above is sized from at M = 1/headroom. The load resistance is kept; the power follows V²/R. Below
+    // resonance the tank input is capacitive (no ZVS) and outside this model: that throws.
+    d.tankGain = 1.0;
+    if (driveAtFsw) {
+        const double fsw = d.switchingFrequency;
+        const double ftank = 1.0 / (2.0 * M_PI * std::sqrt(d.resonantInductance * d.resonantCapacitance));
+        if (fsw < ftank * (1.0 - 1e-6))   // analytical_src's tolerance: fsw == fr is resonance, not below it
+            throw std::invalid_argument("design_src: driven at " + std::to_string(fsw) +
+                                        " Hz, below the series-tank resonance " + std::to_string(ftank) +
+                                        " Hz, the tank input is capacitive (no ZVS): below-resonance operation is not "
+                                        "modelled. Drive at or above the resonance");
+        const double w = 2.0 * M_PI * fsw;
+        const double X = w * d.resonantInductance - 1.0 / (w * d.resonantCapacitance);
+        double gac = 0.0;
+        for (const auto& leg : d.outputs) {
+            double rE = leg.loadResistance;   // winding-terminal resistance (CD reflects through cdOutputFactor²)
+            if (d.rectifierType == RectifierType::CurrentDoubler) {
+                const double cdF = cfg::get(d.config, "cdOutputFactor", 0.465);
+                rE = leg.loadResistance / (cdF * cdF);
+            }
+            gac += (M_PI * M_PI) / (8.0 * leg.turnsRatio * leg.turnsRatio * rE);
+        }
+        const double RacDrive = 1.0 / gac;
+        const double M = RacDrive / std::hypot(RacDrive, X);
+        d.tankGain = M;
+        for (size_t i = 0; i < d.outputs.size(); ++i) {
+            auto& leg = d.outputs[i];
+            double c = 1.0, k = 1.0;
+            if (d.rectifierType == RectifierType::FullBridge) k = 2.0;
+            if (d.rectifierType == RectifierType::CurrentDoubler) c = cfg::get(d.config, "cdOutputFactor", 0.465);
+            const double delivered = c * M * etaConv * Vbridge / leg.turnsRatio - k * leg.diodeDrop;
+            if (!(delivered > 0.0))
+                throw std::invalid_argument("design_src: driven at " + std::to_string(fsw) + " Hz the tank gain is " +
+                                            std::to_string(M) + ", which leaves output " + std::to_string(i + 1) +
+                                            " no positive voltage above its rectifier drop");
+            leg.voltage = delivered;
+            leg.power = delivered * delivered / leg.loadResistance;
+        }
+        d.outputVoltage = d.outputs.at(0).voltage;
+        d.outputPower = d.outputs.at(0).power;
+    }
     return d;
 }
 
@@ -242,12 +304,16 @@ json build_src_tas(const SrcDesign& d) {
     // Vin full-bridge — ABT #91; fund. rms 2√2·Vdrive/π). Unlike LLC the magnetizing Lm is large (10·Lr) and
     // kept out of the resonance, so the tank current is essentially the real load current (Pin/Vtank1_rms);
     // the small magnetizing component is added too.
-    const double fr   = d.resonantFrequency, Tfr = 1.0 / fr;
+    // Evaluated at the frequency the bridge switches at: the series resonance by default, the forced
+    // switchingFrequency under config.driveAtSwitchingFrequency (ABT #1539).
+    const double fr   = d.switchingFrequency, Tfr = 1.0 / fr;
     const double Vdrive = d.fullBridge ? d.inputVoltage : d.inputVoltage / 2.0;   // bridge-leg amplitude
     const double Pin  = d.outputPower / d.efficiency;
     const double Iout = d.outputPower / d.outputVoltage;
     const double Vtank1Rms = 2.0 * std::sqrt(2.0) * Vdrive / M_PI;       // fund. rms of the ±Vdrive square
-    const double IloadRms  = Pin / Vtank1Rms;                            // real (in-phase) tank current
+    // Tank current: the series tank's input power factor is Rac/|Zin| = the tank gain M, so the current that
+    // carries Pin is Pin/(Vtank1·M) (M = 1 at resonance, the default; below 1 under a forced drive, ABT #1539).
+    const double IloadRms  = Pin / (Vtank1Rms * d.tankGain);
     const double ImagPk    = Vdrive * (Tfr / 4.0) / d.magnetizingInductance;  // Lm triangle pk
     const double ImagRms   = ImagPk / std::sqrt(3.0);
     const double ItankRms  = std::sqrt(IloadRms * IloadRms + ImagRms * ImagRms);  // primary winding current
