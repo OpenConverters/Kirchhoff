@@ -783,6 +783,8 @@
   letter-spacing: 0.03em;
 }
 :where(.kh-root) .sch-val { font-family: var(--kh-mono); font-size: 10px; fill: var(--kh-ink-dim); }
+/* the part number of a slot bound to a real part (EMI filter BOM rows carry partLabel) */
+:where(.kh-root) .sch-part { font-family: var(--kh-mono); font-size: 10px; fill: var(--kh-cyan); }
 :where(.kh-root) .sch-port { font-family: var(--kh-mono); font-size: 11px; fill: var(--kh-cyan); letter-spacing: 0.05em; }
 
 /* Control-plane drawing: dashed signal wires, signal net-label flags, control block/IC symbols.
@@ -826,6 +828,7 @@
   :where(.kh-root) .schematic-frame .sch-fill, :where(.kh-root) .schematic-frame .sch-node { fill: var(--kh-print-ink); }
   :where(.kh-root) .schematic-frame .sch-ref { fill: var(--kh-print-ref); }
   :where(.kh-root) .schematic-frame .sch-val { fill: var(--kh-print-val); }
+  :where(.kh-root) .schematic-frame .sch-part { fill: var(--kh-print-port); }
   :where(.kh-root) .schematic-frame .sch-blk { fill: var(--kh-print-val); }
   :where(.kh-root) .schematic-frame .sch-port, :where(.kh-root) .schematic-frame .sch-sig { fill: var(--kh-print-port); }
   :where(.kh-root) .schematic-frame .sch-ctl { stroke: var(--kh-print-port); opacity: 1; }

@@ -187,9 +187,13 @@ function passiveOnlyNets({ g, pins, pinNet, magRefs, refRoots, twoTerm }) {
 }
 
 // { svg, pins:[{ref,pin,x,y}], tas } -> string[] problems. Mirrors checkSchematicNets.mjs exactly.
-export function checkSchematic({ svg, pins, tas }) {
+// A drawing of a lone CIAS brick (no TAS around it — the EMI line filter) passes its nets instead:
+// { svg, pins, pinNet: Map('ref|pin' -> net), magRefs: Set(ref) } — the same rules, the brick's nets.
+export function checkSchematic({ svg, pins, tas, pinNet: brickPinNet, magRefs: brickMagRefs }) {
+  if (!tas === !brickPinNet) throw new Error('checkSchematic: pass exactly one of tas or pinNet')
+  if (brickPinNet && !(brickMagRefs instanceof Set)) throw new Error('checkSchematic: a pinNet check needs magRefs (a Set, empty when there is no magnetic)')
   const g = wireGraph(svg)
-  const pinNet = flattenNets(tas)
+  const pinNet = brickPinNet ?? flattenNets(tas)
   // FLOOR — the checker must refuse to certify what it cannot see. Every rule below is of the form "for
   // each drawn anchor, check X", so an EMPTY drawing satisfies all of them: fed a blank <svg> and an
   // empty pin list, this function returned [] for buck — a clean bill of health for a blank page. That
@@ -220,8 +224,8 @@ export function checkSchematic({ svg, pins, tas }) {
     if (!ann && !wired.has(ref) && !/class="sch-ctl"/.test(body))
       floor.push(`${ref} is drawn but registered no terminals — nothing about its connections can be verified`)
   if (floor.length) return floor
-  const magRefs = new Set()
-  for (const st of tas.topology?.stages ?? []) for (const c of st.circuit?.components ?? []) if (c.data?.magnetic !== undefined) magRefs.add(c.name)
+  const magRefs = new Set(brickMagRefs ?? [])
+  if (tas) for (const st of tas.topology?.stages ?? []) for (const c of st.circuit?.components ?? []) if (c.data?.magnetic !== undefined) magRefs.add(c.name)
 
   const byKey = new Map(), magTerms = new Map(), refRoots = new Set()
   const primGndCoords = [], secRtnCoords = []

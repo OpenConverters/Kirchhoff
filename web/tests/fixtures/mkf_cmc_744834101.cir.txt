@@ -1,0 +1,27 @@
+* Magnetic model made with OpenMagnetics
+* 744834101
+
+.subckt 744834101 P1+ P1- P2+ P2-
+Rdc1 P1+ Node_R_Lmag_1 {Rdc_1_Value}
+Lmag_1 Node_R_Lmag_1 P1- {NumberTurns_1**2*Permeance}
+Rdc2 P2+ Node_R_Lmag_2 {Rdc_2_Value}
+Lmag_2 Node_R_Lmag_2 P2- {NumberTurns_2**2*Permeance}
+K Lmag_1 Lmag_2 0.999928
+
+* ==== STRAY CAPACITANCE NETWORK ====
+* Per-winding self-capacitance (self-resonance) + inter-winding
+* capacitance (CM coupling), lumped positive caps from StrayCapacitance.
+Cself_1 P1+ P1- 0.000000000005078194
+Cwind_1_2 P1+ P2+ 0.000000000006344945
+Cself_2 P2+ P2- 0.000000000005078194
+
+.param MagnetizingInductance_Value=0.001017055013207
+.param Permeance=MagnetizingInductance_Value/NumberTurns_1**2
+.param Rdc_1_Value=0.004955
+.param NumberTurns_1=11
+.param Rdc_2_Value=0.004955
+.param NumberTurns_2=11
+.param Llk_2_Value=0.000000145984322
+.param CouplingCoefficient_12_Value=0.999928229270
+
+.ends 744834101

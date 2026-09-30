@@ -14,7 +14,7 @@
     "check:drawing": "node scripts/auditSchematics.mjs && node scripts/auditSchematicLabels.mjs && node scripts/checkSchematicGlyphs.mjs && node scripts/checkSchematicValues.mjs",
     "check:equivalence": "node scripts/checkEquivalence.mjs",
     "check:sweep": "node scripts/checkSweep.mjs   # slow: 9 design points x every topology/variant",
-    "check": "npm run check:nets && npm run check:drawing && npm run check:anchoring && npm run check:hotspots && npm run check:contrast && npm run check:equivalence && npm run check:gates && npm run check:values && npm run check:isolation",
+    "check": "npm run check:nets && npm run check:drawing && npm run check:anchoring && npm run check:hotspots && npm run check:contrast && npm run check:equivalence && npm run check:gates && npm run check:values && npm run check:isolation && npm run check:emi",
     "test:e2e": "playwright test",
     "test:e2e:smoke": "playwright test smoke",
     "test": "npm run check && npm run test:unit && npm run test:e2e",
@@ -23,7 +23,8 @@
     "check:hotspots": "node scripts/checkSchematicHotspots.mjs",
     "check:isolation": "node scripts/checkIsolationNetlist.mjs",
     "check:gates": "node scripts/checkGateDrive.mjs",
-    "check:values": "node scripts/checkValueFidelity.mjs"
+    "check:values": "node scripts/checkValueFidelity.mjs",
+    "check:emi": "node scripts/checkEmiFilterAc.mjs"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.3.0",
@@ -34,6 +35,7 @@
   "devDependencies": {
     "@playwright/test": "^1.61.1",
     "@vitejs/plugin-vue": "^6.0.1",
+    "ajv": "^8.20.0",
     "vite": "^7.2.2"
   }
 }

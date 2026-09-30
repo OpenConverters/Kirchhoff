@@ -17,6 +17,7 @@
 //                        shipped is the bundle's business — the Kirchhoff app emits it as its own file
 //                        (main.js), the package inlines it (lib/index.js supplies this default).
 import { trackEvent } from './telemetry.js'
+import { buildEmiFilterAcDeck, buildLisnReferenceDeck, insertionLossDb, EMI_PROBES } from './emiFilter.js'
 
 // Injection key under which app.use(kh) provides the instance (see lib/context.js useKirchhoff()).
 export const KIRCHHOFF_KEY = Symbol.for('kirchhoff.engine')
@@ -253,6 +254,30 @@ export function createKirchhoff({
     return callJson('simulate_ngspice', JSON.stringify(tas), JSON.stringify(fidelity))
   }
 
+  // A raw ngspice .ac deck through the engine's in-process libngspice (run_ngspice_ac). Resolves to
+  // { success: true, error, frequenciesHz, vectors: { <name>: { re, im } } }; a failed run (or an engine
+  // built without libngspice) REJECTS with ngspice's own error text rather than resolving success:false.
+  async function runNgspiceAc(deck) {
+    if (typeof deck !== 'string' || !deck.trim()) throw new Error('runNgspiceAc: deck text is required')
+    const r = await callJson('run_ngspice_ac', deck)
+    if (!r || r.success !== true) throw new Error(`ngspice .ac run failed: ${r?.error || 'no error text'}`)
+    return r
+  }
+
+  // The EMI filter's insertion loss: builds the filter deck and the LISN reference deck (emiFilter.js),
+  // runs both, and returns { frequenciesHz, ilDb, probe, decks: { filter, reference } }. Arguments are
+  // buildEmiFilterAcDeck's ({ cias, models, lisn, mode, source, fStart, fStop, pointsPerDecade }) plus
+  // `probe` (EMI_PROBES.line | EMI_PROBES.neutral) — required, like everything else here.
+  async function emiFilterInsertionLoss({ cias, models, lisn, mode, source, fStart, fStop, pointsPerDecade, probe } = {}) {
+    if (!Object.values(EMI_PROBES).includes(probe)) throw new Error(`emiFilterInsertionLoss: probe must be one of ${Object.values(EMI_PROBES).join(', ')}`)
+    const filter = buildEmiFilterAcDeck({ cias, models, lisn, mode, source, fStart, fStop, pointsPerDecade })
+    const reference = buildLisnReferenceDeck({ lisn, mode, source, fStart, fStop, pointsPerDecade })
+    // libngspice is one engine instance: the worker serialises the two runs anyway
+    const ref = await runNgspiceAc(reference)
+    const filt = await runNgspiceAc(filter)
+    return { ...insertionLossDb(ref, filt, probe), probe, decks: { filter, reference } }
+  }
+
   // ── Kelvin component sourcing (real parts from the TAS DB) ──────────────────
   // Prebuilt per-family index shards (.kidx) are hosted next to the SPA (public/kelvin/) and
   // loaded into the WASM engine on first use of a category; selection then runs fully in-browser
@@ -444,7 +469,8 @@ export function createKirchhoff({
     track,
     loadEngine, processConverter, topologyWaveforms, componentWaveforms, realizeTas, extractOperatingPoint,
     mainMagneticInputs, enrichMagneticWaveforms, designMagneticInOpenMagnetics, suggestMagneticsInOpenMagnetics,
-    bindMagnetic, generateNetlist, simulateNgspice, kelvinCategoryFor, selectCandidates, bindPart, crossReference,
+    bindMagnetic, generateNetlist, simulateNgspice, runNgspiceAc, emiFilterInsertionLoss,
+    kelvinCategoryFor, selectCandidates, bindPart, crossReference,
     // Stop the worker (and with it the WASM heap). Pending calls reject; a later call starts a fresh worker.
     terminate() {
       if (!worker) return

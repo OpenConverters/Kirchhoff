@@ -82,13 +82,17 @@ function hot(ref, bom, box, body, labelPos) {
   // document order (which is the order the layout places parts — the power path), role="button" says
   // what it does, and the name carries what a sighted reader gets from the two label lines: the refdes,
   // the kind and the value. Annotations get none of it — they do nothing when activated.
-  const name = row ? `Component ${ref}${row.kind ? ', ' + row.kind : ''}${val ? ', ' + val : ''}` : null
-  return `<g class="sch-hot${row ? '' : ' sch-ann'}" data-ref="${esc(ref)}"` +
+  // A row carrying `partLabel` is a slot bound to a real part (the EMI filter's BOM rows set it): the
+  // part number is printed as a third line and the group is marked .sch-bound. TAS BOM rows never set
+  // it, so every converter drawing is byte-identical to what it was before this existed.
+  const part = row?.partLabel ? String(row.partLabel) : ''
+  const name = row ? `Component ${ref}${row.kind ? ', ' + row.kind : ''}${val ? ', ' + val : ''}${part ? ', part ' + part : ''}` : null
+  return `<g class="sch-hot${row ? '' : ' sch-ann'}${part ? ' sch-bound' : ''}" data-ref="${esc(ref)}"` +
     (name ? ` tabindex="0" role="button" aria-label="${esc(name)}"` : '') + `>
     <rect class="sch-hitbox" x="${bx}" y="${by}" width="${bw}" height="${bh}"/>
     ${body}
     ${txt(lx, ly, ref, 'sch-ref', anchor)}
-    ${val ? txt(lx, ly + 12, val, 'sch-val', anchor) : ''}
+    ${val ? txt(lx, ly + 12, val, 'sch-val', anchor) : ''}${part ? txt(lx, ly + (val ? 24 : 12), part, 'sch-part', anchor) : ''}
   </g>`
 }
 
@@ -322,6 +326,32 @@ function xfmr(ref, bom, x, y, opts = {}) {
   return hot(ref, bom, [x - 22, t - 6, 44, h + 12], body, lab)
 }
 
+// Two-winding common-mode choke drawn across a PAIR of horizontal rails (EMI line filter). Pins sit ON
+// the rails — P1/P2 on the upper rail (yTop), S1/S2 on the lower (yBot), 1 at the left — and each
+// winding is jogged toward the core by a short lead so the two coils face each other across two core
+// bars, the usual CMC glyph. Polarity dots at the P1 and S1 ends: both windings start at the dot, which
+// is what makes the choke a COMMON-mode choke. The terminals are named after the CIAS pins, so a layout
+// wires 'CMC1.P1' directly.
+function cmcRails(ref, bom, x, yTop, yBot, labelDy = -44) {
+  const wTop = yTop + 30, wBot = yBot - 30, yMid = (yTop + yBot) / 2
+  const coilDown = (x0, y) => {           // coilH's humps mirrored: bulging DOWN, away from the core
+    let d = `M ${x0} ${y}`
+    for (let i = 0; i < 4; ++i) d += ` s 0 8.4 7 8.4 s 7 -8.4 7 -8.4`
+    return d
+  }
+  const body =
+    P(`M ${x - 28} ${yTop} L ${x - 28} ${wTop} M ${x + 28} ${yTop} L ${x + 28} ${wTop}`) +
+    P(`M ${x - 28} ${yBot} L ${x - 28} ${wBot} M ${x + 28} ${yBot} L ${x + 28} ${wBot}`) +
+    P(coilH(x - 28, wTop)) + P(coilDown(x - 28, wBot)) +
+    // core: two bars between the windings — 'sch-sym', never 'sch-wire' (it is not a conductor)
+    P(`M ${x - 26} ${yMid - 2} L ${x + 26} ${yMid - 2} M ${x - 26} ${yMid + 2} L ${x + 26} ${yMid + 2}`) +
+    `<circle class="sch-fill" cx="${x - 22}" cy="${wTop + 6}" r="2.3"/>` +
+    `<circle class="sch-fill" cx="${x - 22}" cy="${wBot - 6}" r="2.3"/>`
+  regPin(ref, 'P1', x - 28, yTop); regPin(ref, 'P2', x + 28, yTop)
+  regPin(ref, 'S1', x - 28, yBot); regPin(ref, 'S2', x + 28, yBot)
+  return hot(ref, bom, [x - 34, yTop - 12, 68, yBot - yTop + 24], body, [x, yTop + labelDy, 'middle'])
+}
+
 // Source-COM-DC: drawn +/− marks (plus toward the top terminal), ×0.3 of the tile.
 function srcDC(x, y, label = 'VIN') {
   regPin('@src', 'p0', x, y - 15); regPin('@src', 'p1', x, y + 15)
@@ -454,7 +484,7 @@ function xfmr3(ref, bom, x, y, opts = {}) {
 // regPin side effects are inert unless a collectPins recording is active).
 export const symbols = {
   svg, wire, dot, mosfetV, mosfetH, diode, indH, indV, capV, capH, resV, resH,
-  xfmr, xfmr3, xfmr4, srcDC, srcAC, gnd, isoGnd, loadR, port, sig, ctrlIC, icBox, txt,
+  xfmr, xfmr3, xfmr4, cmcRails, srcDC, srcAC, gnd, isoGnd, loadR, port, sig, ctrlIC, icBox, txt,
 }
 
 // Verification hook: render once with terminal recording on, returning { svg, pins } where pins is a

@@ -4,14 +4,21 @@
 // host places it inside its own layout box.
 //
 // Props
-//   topology      topology id (required)
+//   topology      topology id (required). 'emi_filter' (EMI_FILTER_SCHEMATIC) draws a lone CIAS brick
+//                 from buildEmiFilterCias instead of a converter TAS — pass it as `cias`.
 //   tas | result  the design: a TAS, or processConverter's result (its .tas)
+//   cias          the EMI filter brick (topology 'emi_filter' only). Its BOM rows (emiFilterBom) carry
+//                 kind 'CommonModeChoke' | 'Capacitor', role 'cmc' | 'cx' | 'cy' and, for a bound slot,
+//                 partLabel (the part number, drawn as a third label line). Pass `bom` =
+//                 emiFilterBom(cias, { values }) to print values too.
 //   variant       the topology variant the design was built with (informational; the TAS is drawn)
 //   bom           BOM rows (bom.js extractBom); default: extracted from the TAS
 //   topologyName  the name the refusal banner quotes (default: the topology's own name)
 //   selectable    (component) => boolean, component = { ref, kind, ...bomRow } (kind as bom.js names
-//                 it: 'MOSFET', 'Diode', 'Capacitor', 'Inductor', 'Transformer', …). Parts it rejects
-//                 are drawn muted and are neither clickable nor focusable. Default: every part.
+//                 it: 'MOSFET', 'Diode', 'Capacitor', 'Inductor', 'Transformer', …; for the EMI filter
+//                 'CommonModeChoke' | 'Capacitor', plus role). Parts it rejects are drawn muted and are
+//                 neither clickable nor focusable. Default: every part.
+//                 e.g. EMI filter, choke + X caps only: (c) => c.role === 'cmc' || c.role === 'cx'
 //   selectedRef   the part drawn selected
 // Events
 //   select(ref)   a selectable part was clicked, or activated with Enter/Space
@@ -19,13 +26,15 @@
 //   caption       under the frame, only when a drawing was produced
 //   empty         when there is no design (default: a one-line note)
 import { computed, nextTick, ref, watch } from 'vue'
-import { renderVerifiedSchematic } from '../ciasSchematic.js'
+import { renderVerifiedSchematic, renderVerifiedEmiFilterSchematic, EMI_FILTER_SCHEMATIC } from '../ciasSchematic.js'
+import { emiFilterBom } from '../emiFilter.js'
 import { extractBom } from '../bom.js'
 import { topologyById } from '../topologies.js'
 
 const props = defineProps({
   topology: { type: String, required: true },
   tas: { type: Object, default: null },
+  cias: { type: Object, default: null },
   result: { type: Object, default: null },
   variant: { type: String, default: null },
   bom: { type: Array, default: null },
@@ -35,15 +44,27 @@ const props = defineProps({
 })
 const emit = defineEmits(['select'])
 
+const isEmi = computed(() => props.topology === EMI_FILTER_SCHEMATIC)
 const designTas = computed(() => props.tas ?? props.result?.tas ?? null)
-const rows = computed(() => props.bom ?? (designTas.value ? extractBom(designTas.value) : []))
-const name = computed(() => props.topologyName ?? topologyById(props.topology)?.name ?? props.topology)
+// For the EMI filter the rows are read off the brick only once it has DRAWN: a brick that is not a
+// valid EMI filter makes the render refuse (the banner), and there is then nothing to select.
+const rows = computed(() => {
+  if (props.bom) return props.bom
+  if (isEmi.value) return svg.value ? emiFilterBom(props.cias) : []
+  return designTas.value ? extractBom(designTas.value) : []
+})
+const name = computed(() => props.topologyName ?? (isEmi.value ? 'EMI line filter' : topologyById(props.topology)?.name ?? props.topology))
 
 // Prefer a loud refusal over a wrong picture: if the generator throws (a real netlist drift), the
 // banner says so and nothing is drawn in its place.
 const error = ref(null)
 const svg = computed(() => {
   error.value = null
+  if (isEmi.value) {
+    if (!props.cias) return null
+    try { return renderVerifiedEmiFilterSchematic(props.cias, props.bom ?? null) }
+    catch (e) { error.value = e?.message ?? String(e); return null }
+  }
   if (!designTas.value) return null
   try { return renderVerifiedSchematic(props.topology, designTas.value, props.variant, rows.value) }
   catch (e) { error.value = e?.message ?? String(e); return null }

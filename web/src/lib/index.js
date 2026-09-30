@@ -46,7 +46,16 @@ export {
   topologyById, variantAxis, defaultVariant, knobsFor, knobGroups, buildSpec,
 } from '../topologies.js'
 export { extractBom, requirementRows } from '../bom.js'
-export { renderVerifiedSchematic, hasCiasSchematic } from '../ciasSchematic.js'
+export {
+  renderVerifiedSchematic, hasCiasSchematic, renderVerifiedEmiFilterSchematic, EMI_FILTER_SCHEMATIC,
+} from '../ciasSchematic.js'
+// EMI line filter: the CIAS brick, its BOM rows, and the ngspice insertion-loss decks (see emiFilter.js).
+// kh.runNgspiceAc(deck) / kh.emiFilterInsertionLoss({...}) run them on the engine.
+export {
+  buildEmiFilterCias, parseEmiFilterCias, emiFilterComponents, emiFilterNets, emiFilterBom,
+  buildEmiFilterAcDeck, buildLisnReferenceDeck, insertionLossDb, capacitorSubckt,
+  CISPR16_LISN, CISPR25_LISN, IDEAL_NOISE_SOURCE, EMI_PROBES, MKF_CMC_PIN_MAP, EMI_FILTER_TOPOLOGIES, EMI_FILTER_MAX_STAGES,
+} from '../emiFilter.js'
 export { symbols, withPinRecording } from '../schematics.js'
 export {
   resolveExcitations, magneticSignals, componentSignals, designSignals, toCsv, designExcitationsJson, stripNulls, tile,

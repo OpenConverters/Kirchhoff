@@ -22,9 +22,10 @@ import { symbols as S, withPinRecording } from './schematics.js'
 import { ciasComponents } from './cias.js'
 import { TOPOLOGIES } from './topologies.js'
 import { extractBom } from './bom.js'
-import { checkSchematic } from './schematicCheck.js'
+import { checkSchematic, wireGraph } from './schematicCheck.js'
+import { parseEmiFilterCias, emiFilterBom } from './emiFilter.js'
 
-const { svg, wire, dot, mosfetV, mosfetH, diode, indH, indV, capV, capH, resV, resH, xfmr, xfmr3, xfmr4, srcDC, srcAC, gnd, isoGnd, loadR, port, sig, ctrlIC, icBox, txt } = S
+const { svg, wire, dot, mosfetV, mosfetH, diode, indH, indV, capV, capH, resV, resH, xfmr, xfmr3, xfmr4, cmcRails, srcDC, srcAC, gnd, isoGnd, loadR, port, sig, ctrlIC, icBox, txt } = S
 
 // wire(...pts) helper takes a flat point list; our layout stores polylines as flat arrays.
 const poly = (pts) => wire(...pts)
@@ -1326,7 +1327,7 @@ const LAYOUTS = {
 
 // Can this topology be drawn? Every one can (ABT #684) — the test remains so that adding a topology
 // without a layout fails loudly at the call sites rather than rendering nothing.
-export function hasCiasSchematic(topologyId) { return topologyId in LAYOUTS }
+export function hasCiasSchematic(topologyId) { return topologyId in LAYOUTS || topologyId === EMI_FILTER_SCHEMATIC }
 
 // EXACTLY what the app renders, plus the anchor pins the offline checkers need. Every gate must render
 // through here: while a second, hand-authored generator existed, the audits measured IT rather than the
@@ -1412,4 +1413,136 @@ export function renderCiasSchematic(topologyId, tas) {
 // measures the drawing the app shows.
 export function renderCiasSchematicWithPins(topologyId, tas) {
   return buildCias(topologyId, tas)
+}
+
+// ── EMI line filter (a lone CIAS brick, no TAS) ─────────────────────────────────────────────────────
+// The brick comes from emiFilter.js (buildEmiFilterCias); this is its drawing. Same machinery as the
+// converter layouts — terminal-named wires, derived dots, checkSchematic — plus one check the converter
+// layouts do not need: the drawn connectivity must be EXACTLY the brick's partition of pins and ports.
+// checkSchematic identifies nets through MOSFET/diode anchors and this circuit has none (capacitors, a
+// choke and ports), so on its own it would certify far less here than it does for a converter.
+//
+// Geometry, per stage (ANP015 Fig. 13 read from the mains on the left): X capacitor across the rails,
+// the choke, then the two Y capacitors hanging to the PE rail. C_YL's lead crosses the neutral rail
+// without joining it (no vertex there, so no dot). Labels: C_X left, the choke above, C_YL left (under
+// the choke), C_YN right.
+export const EMI_FILTER_SCHEMATIC = 'emi_filter'
+const EMI = { yL: 80, yN: 170, yPE: 280, xPort: 60, stageW: 340 }
+const EMI_PORT_LABELS = {
+  mains: { line_in: 'L IN', neutral_in: 'N IN', line_out: 'L OUT', neutral_out: 'N OUT', pe: 'PE' },
+  dc: { line_in: '+ IN', neutral_in: '− IN', line_out: '+ OUT', neutral_out: '− OUT', pe: 'CHASSIS' },
+}
+// symbol terminal -> CIAS pin, per part kind
+const EMI_PIN = { cx: { p0: '1', p1: '2' }, cy: { p0: '1', p1: '2' }, cmc: { P1: 'P1', P2: 'P2', S1: 'S1', S2: 'S2' } }
+
+function emiLayout(stages, topology) {
+  const { yL, yN, yPE, xPort, stageW } = EMI
+  const yX = (yL + yN) / 2, yY = (yN + yPE) / 2
+  const xR = xPort + stages * stageW
+  const lab = EMI_PORT_LABELS[topology]
+  const place = {}, wires = []
+  for (let s = 1; s <= stages; s++) {
+    const x0 = xPort + (s - 1) * stageW
+    const xX = x0 + 100, xC = x0 + 190, xYL = x0 + 250, xYN = x0 + 300
+    place[`C_X${s}`] = { draw: (b) => capV(`C_X${s}`, b, xX, yX, 'left') }
+    place[`CMC${s}`] = { draw: (b) => cmcRails(`CMC${s}`, b, xC, yL, yN) }
+    place[`C_YL${s}`] = { draw: (b) => capV(`C_YL${s}`, b, xYL, yY, 'left') }
+    place[`C_YN${s}`] = { draw: (b) => capV(`C_YN${s}`, b, xYN, yY, 'right') }
+    // the rails INTO this stage's choke: from the input ports, or from the previous choke's outputs
+    wires.push({ from: s === 1 ? '@port.line_in' : `CMC${s - 1}.P2`, to: `CMC${s}.P1` })
+    wires.push({ from: s === 1 ? '@port.neutral_in' : `CMC${s - 1}.S2`, to: `CMC${s}.S1` })
+    wires.push({ from: `C_X${s}.p0`, to: [xX, yL] }, { from: `C_X${s}.p1`, to: [xX, yN] })
+    wires.push({ from: `C_YL${s}.p0`, to: [xYL, yL] }, { from: `C_YL${s}.p1`, to: [xYL, yPE] })
+    wires.push({ from: `C_YN${s}.p0`, to: [xYN, yN] }, { from: `C_YN${s}.p1`, to: [xYN, yPE] })
+  }
+  wires.push({ from: `CMC${stages}.P2`, to: '@port.line_out' }, { from: `CMC${stages}.S2`, to: '@port.neutral_out' })
+  wires.push({ from: '@port.pe', to: [xPort + (stages - 1) * stageW + 300, yPE] })
+  return {
+    size: [xR + 70, yPE + 30],
+    place,
+    wires,
+    synth: () => [
+      port(xPort, yL, lab.line_in, 'end'), port(xPort, yN, lab.neutral_in, 'end'), port(xPort, yPE, lab.pe, 'end'),
+      port(xR, yL, lab.line_out), port(xR, yN, lab.neutral_out),
+    ],
+    portOf: Object.fromEntries(Object.entries(lab).map(([p, l]) => [l, p])),
+  }
+}
+
+function buildEmiFilter(cias, bomRows) {
+  const { stages, topology, slots } = parseEmiFilterCias(cias)
+  const rows = bomRows ?? emiFilterBom(cias)
+  const bom = new Map(rows.map((r) => [r.ref, r]))
+  for (const s of slots) if (!bom.has(s.ref)) throw new Error(`EMI filter schematic: the BOM has no row for '${s.ref}'`)
+  const layout = emiLayout(stages, topology)
+  const id = EMI_FILTER_SCHEMATIC
+  const parts = []
+  const pins = withPinRecording(() => {
+    for (const s of slots) parts.push(layout.place[s.ref].draw(bom))
+    parts.push(...layout.synth())
+  }).pins
+  // '@port.line_in' names the port glyph by its CIAS port, whatever label it prints
+  const at = (spec) => {
+    if (Array.isArray(spec)) return spec
+    const [ref, pin] = String(spec).split('.')
+    const want = ref === '@port' ? Object.entries(layout.portOf).find(([, p]) => p === pin)?.[0] : pin
+    const p = pins.find((q) => q.ref === ref && q.pin === want)
+    if (!p) throw new Error(`ciasSchematic '${id}': wire end '${spec}' names a terminal no drawn symbol registered`)
+    return [p.x, p.y]
+  }
+  const routes = layout.wires.map((w) => resolveRoute(id, w, at)).filter(Boolean)
+  for (const pts of routes) parts.push(poly(pts))
+  const conductor = (p) => p.ref !== '@port'
+  for (const [x, y] of deriveDots(parts.join(''), pins.filter(conductor))) parts.push(dot(x, y))
+  const [w, h] = layout.size
+  const title = `${topology === 'dc' ? 'DC supply' : 'Single-phase line'} EMI filter, ${stages} stage${stages > 1 ? 's' : ''} — schematic, ${slots.length} components`
+  const svgStr = svg(w, h, parts.join(''), title)
+
+  const drawn = new Set([...svgStr.matchAll(/data-ref="([^"]+)"/g)].map((m) => m[1]))
+  const missing = slots.map((s) => s.ref).filter((r) => !drawn.has(r))
+  if (missing.length) throw new Error(`ciasSchematic '${id}': CIAS components not drawn: ${missing.join(', ')}`)
+
+  // (1) the shared rules, over the brick's own nets
+  const pinNet = new Map()
+  for (const net of cias.connections) for (const e of net.endpoints) if (e.component !== undefined) pinNet.set(`${e.component}|${e.pin}`, net.name)
+  const magRefs = new Set(slots.filter((s) => s.kind === 'cmc').map((s) => s.ref))
+  const problems = checkSchematic({ svg: svgStr, pins, pinNet, magRefs })
+  // (2) exact partition: every drawn terminal, by the wire piece it sits on, grouped — must equal the
+  // brick's connections endpoint for endpoint (ports included, by their CIAS name)
+  const g = wireGraph(svgStr)
+  const kindOf = new Map(slots.map((s) => [s.ref, s.kind]))
+  const groups = new Map()
+  const seen = new Set()
+  for (const p of pins) {
+    let key
+    if (p.ref === '@port') key = `port:${layout.portOf[p.pin]}`
+    else {
+      const cp = EMI_PIN[kindOf.get(p.ref)]?.[p.pin]
+      if (!cp) { problems.push(`${p.ref}.${p.pin}: a drawn terminal that is no CIAS pin`); continue }
+      key = `${p.ref}|${cp}`
+    }
+    if (seen.has(key)) { problems.push(`${key} drawn twice`); continue }
+    seen.add(key)
+    const r = g.rootAt([p.x, p.y], 4)
+    if (r === null) { problems.push(`${key} touches no wire`); continue }
+    ;(groups.get(r) || groups.set(r, []).get(r)).push(key)
+  }
+  const canon = (sets) => sets.map((x) => [...x].sort().join(',')).sort().join(';')
+  const drawnNets = canon([...groups.values()])
+  const brickNets = canon(cias.connections.map((n) => n.endpoints.map((e) => (e.port !== undefined ? `port:${e.port}` : `${e.component}|${e.pin}`))))
+  if (drawnNets !== brickNets) problems.push(`drawn connectivity ≠ CIAS connections (drawn ${drawnNets} | brick ${brickNets})`)
+  if (problems.length) throw new Error(`ciasSchematic '${id}' netlist mismatch: ${problems.join(' | ')}`)
+  return { svg: svgStr, pins }
+}
+
+// renderVerifiedEmiFilterSchematic(cias, bomRows?) -> SVG string. `cias` is an EMI filter brick
+// (buildEmiFilterCias); `bomRows` defaults to emiFilterBom(cias) — pass your own (emiFilterBom(cias,
+// { values })) to print values. Throws rather than return a drawing that disagrees with the brick.
+export function renderVerifiedEmiFilterSchematic(cias, bomRows = null) {
+  return buildEmiFilter(cias, bomRows).svg
+}
+
+// Same drawing plus the recorded terminals, for the offline checks.
+export function renderEmiFilterSchematicWithPins(cias, bomRows = null) {
+  return buildEmiFilter(cias, bomRows)
 }
