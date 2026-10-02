@@ -455,8 +455,7 @@ static json build_pfc_totempole_tas(const PfcDesign& d) {
     const MAS::OperatingPoint aopPfc = AN::analytical_pfc(d.inputVoltageRms, d.outputVoltage, d.outputPower,
                                                           d.lineFrequency, d.switchingFrequency,
                                                           d.boostInductance, d.efficiency,
-                                                          req::analytical_rectifier_drop(d.config), /*numberOfPeriods*/ 2,
-                                                          /*bipolar*/ true);
+                                                          req::analytical_rectifier_drop(d.config), /*bipolar*/ true);
     const double IpkL  = AN::winding_current(aopPfc, 0, "peak");
     cfg::check_maximum_switch_current(d.config, IpkL, "build_pfc_tas");
     const double IrmsL = AN::winding_current(aopPfc, 0, "rms");

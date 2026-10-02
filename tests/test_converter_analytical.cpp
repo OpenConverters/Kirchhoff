@@ -12,11 +12,16 @@
 #include "Zeta.hpp"    // design_zeta
 #include "Pshb.hpp"
 #include "PushPull.hpp" // design_push_pull — pinned turns-ratio feasibility    // design_pshb / build_pshb_tas — CURRENT_DOUBLER output-inductor split
+#include "DimensionJson.hpp"   // PEAS::resolve_dimensional_values on raw json (ABT #1586 api test)
 #include "KirchhoffApi.hpp"  // design_tas_full — ABT #102 AHB RMS repro
 
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <cmath>
+#include <limits>
 #include <cctype>
+#include <chrono>
+#include <iostream>
 #include <sstream>
 #include <vector>
 #include <functional>
@@ -995,12 +1000,8 @@ TEST_CASE("analytical_pfc: 1 winding, rectified-sine envelope peak = I_pk, non-z
     CHECK(*cur.get_average() > 5.0);
 
     // Inductor voltage present: ON-time reaches +Vin_peak (√2·Vrms); OFF-time swings strongly negative
-    // (Vin−Vout, the inductor discharging into the boost bus). NOTE: we do NOT assert a zero (volt-second-
-    // balanced) mean — MKF synthesises the ON/OFF voltage with only 4 samples per switching cycle
-    // (the discrete `switchPhase < D` threshold, PowerFactorCorrection.cpp:570-585), so that coarse
-    // quantization biases the discrete voltage mean away from zero (≈ +44 V at this design point) even
-    // though the physical inductor voltage is volt-second balanced. The CURRENT ripple uses the
-    // continuous duty and is correct; this bias is a faithful artifact of MKF's voltage synthesis.
+    // (Vin−Vout, the inductor discharging into the boost bus). Volt-second balance (per switching cycle and
+    // over the period) is asserted by the [voltsecond] tests below.
     REQUIRE(exc.get_voltage().has_value());
     REQUIRE(exc.get_voltage()->get_processed().has_value());
     const auto vlt = *exc.get_voltage()->get_processed();
@@ -1017,8 +1018,7 @@ TEST_CASE("analytical_pfc bipolar (totem-pole): TRUE sine inductor current, zero
     // instead of the bridged boost's rectified-sine (unipolar, (2/π)·I_pk mean). Same design point.
     using Kirchhoff::analytical::analytical_pfc;
     MAS::OperatingPoint op = analytical_pfc(kPfcVrms, kPfcVout, kPfcPo, kPfcFline, kPfcFsw, kPfcL,
-                                            /*efficiency*/1.0, /*Vd*/0.0, /*numberOfPeriods*/2,
-                                            /*bipolar*/true);
+                                            /*efficiency*/1.0, /*Vd*/0.0, /*bipolar*/true);
     REQUIRE(op.get_excitations_per_winding().size() == 1);
     const auto cur = processed_current(op, 0);
     REQUIRE(cur.get_peak().has_value());
@@ -1046,6 +1046,321 @@ TEST_CASE("analytical_pfc rejects non-positive line/bus/power/fsw/L and infeasib
     // efficiency out of (0,1].
     CHECK_THROWS(analytical_pfc(kPfcVrms, kPfcVout, kPfcPo, kPfcFline, kPfcFsw, kPfcL, 1.5));
     CHECK_THROWS(analytical_pfc(kPfcVrms, kPfcVout, kPfcPo, kPfcFline, kPfcFsw, kPfcL, 0.0));
+}
+
+// ─── Volt-second balance of the line-cycle boost-inductor waveforms (ABT #1586) ─────────────────────────
+// In steady state an inductor's voltage averages to zero over every switching cycle; a consumer that
+// integrates it (MKF derives the magnetizing current as ∫v/L) otherwise drifts. analytical_pfc used to
+// sample 4 points per switching cycle (the duty rounded up to the next quarter: +35.7 V mean on the
+// 85 V → 370 V, 650 W, 65 kHz, 60 Hz design, two line periods stamped at the line frequency), and the
+// Vienna full-line-cycle waveform held V_on for half of every switching period at 4096 points per period.
+//
+// These tests read the waveform the excitation STORES (what consumers receive) and integrate it the way
+// MKF does: each sample held until the next (Inputs::calculate_integral_waveform's left-Riemann rule), the
+// last held to the period end. The voltage samples are cell averages of exact-edge switching cycles, so
+// with h the sample spacing and Vspan = max(v) − min(v) the held integral departs from the exact
+// volt-seconds by at most h·Vspan/4 at any instant. Hence the stated tolerances:
+//   * every switching cycle  |mean v| ≤ h·Vspan/(2·Tsw)   (h·Vspan/4 at each of its two boundaries);
+//   * the emitted period     |mean v| ≤ (max ON volt-seconds + h·Vspan/4)/T   (fsw/fLine is not an
+//     integer, so the period end cuts one switching cycle);
+//   * the running integral   |∫v| ≤ max ON volt-seconds + h·Vspan/4   (bounded: no drift);
+//   * the current minus its line envelope minus ∫v/L is constant within each switching cycle to h·Vspan/L
+//     (the ripple IS the integral of the stored voltage).
+namespace {
+struct HeldSignal {
+    std::vector<double> time, data, integral;   // integral[i] = held integral from 0 to time[i]; one extra at the period end
+    double h = 0.0, period = 0.0, span = 0.0;
+    double at(double t) const {
+        size_t i = static_cast<size_t>(std::upper_bound(time.begin(), time.end(), t) - time.begin());
+        i = (i == 0) ? 0 : i - 1;
+        return integral[i] + data[i] * (t - time[i]);
+    }
+};
+
+HeldSignal held_signal(const MAS::SignalDescriptor& signal) {
+    REQUIRE(signal.get_waveform().has_value());
+    const MAS::Waveform w = *signal.get_waveform();
+    REQUIRE(w.get_time().has_value());
+    HeldSignal s;
+    s.time = *w.get_time();
+    s.data = w.get_data();
+    REQUIRE(s.time.size() == s.data.size());
+    REQUIRE(s.data.size() >= 2);
+    s.h = s.time[1] - s.time[0];
+    s.period = s.time.back() + s.h;   // the stored sampled waveform excludes its period end
+    s.integral.assign(1, 0.0);
+    for (size_t i = 0; i < s.data.size(); ++i) {
+        const double tNext = (i + 1 < s.time.size()) ? s.time[i + 1] : s.period;
+        s.integral.push_back(s.integral.back() + s.data[i] * (tNext - s.time[i]));
+    }
+    s.span = *std::max_element(s.data.begin(), s.data.end()) - *std::min_element(s.data.begin(), s.data.end());
+    return s;
+}
+
+// Largest ON volt-seconds of one switching cycle of a boost cell: x·(1 − x/Vbus)·Tsw over the line-voltage
+// range x ∈ [0, Vpk] (maximum Vbus/4 at x = Vbus/2).
+double max_on_volt_seconds(double vPeak, double vBus, double tsw) {
+    const double x = std::min(vPeak, vBus / 2.0);
+    return x * (1.0 - x / vBus) * tsw;
+}
+
+struct LineCycleBalance {
+    double periodMean = 0.0;
+    double worstCycleMean = 0.0;
+    double worstCycleAngleDeg = 0.0;
+    double maxRunning = 0.0;
+    double worstRippleMismatch = 0.0;
+};
+
+// Checks one stored line-cycle excitation (one winding) against the tolerances above. `probeAnglesDeg` are
+// line angles whose switching cycle is reported individually (near the zero crossings and elsewhere).
+LineCycleBalance check_line_cycle_balance(const MAS::OperatingPointExcitation& excitation, double lineFrequency,
+                                          double switchingFrequency, double L, double maxOnVoltSeconds,
+                                          const std::function<double(double)>& envelope,
+                                          const std::vector<double>& probeAnglesDeg) {
+    REQUIRE(excitation.get_voltage().has_value());
+    REQUIRE(excitation.get_current().has_value());
+    const HeldSignal v = held_signal(*excitation.get_voltage());
+    const HeldSignal i = held_signal(*excitation.get_current());
+    const double T = 1.0 / lineFrequency, Tsw = 1.0 / switchingFrequency;
+
+    // Exactly one line period, stamped at the line frequency.
+    CHECK(excitation.get_frequency() == Catch::Approx(lineFrequency).epsilon(1e-12));
+    CHECK(v.period == Catch::Approx(T).epsilon(1e-9));
+    REQUIRE(i.time.size() == v.time.size());
+
+    const double edge = v.h * v.span / 4.0;
+    const double tolCycle = 2.0 * edge / Tsw;
+    LineCycleBalance r;
+    r.periodMean = v.integral.back() / v.period;
+    const size_t fullCycles = static_cast<size_t>(std::floor(T / Tsw));
+    auto cycle_mean = [&](size_t k) {
+        return (v.at(static_cast<double>(k + 1) * Tsw) - v.at(static_cast<double>(k) * Tsw)) / Tsw;
+    };
+    for (size_t k = 0; k < fullCycles; ++k) {
+        const double m = cycle_mean(k);
+        if (std::abs(m) > std::abs(r.worstCycleMean)) {
+            r.worstCycleMean = m;
+            r.worstCycleAngleDeg = 360.0 * (static_cast<double>(k) + 0.5) * Tsw / T;
+        }
+    }
+    for (double x : v.integral) r.maxRunning = std::max(r.maxRunning, std::abs(x));
+
+    INFO("samples=" << v.data.size() << " h=" << v.h << " s, Vspan=" << v.span << " V, per-cycle tolerance="
+                    << tolCycle << " V");
+    INFO("worst switching-cycle mean " << r.worstCycleMean << " V at line angle " << r.worstCycleAngleDeg << " deg");
+    CHECK(std::abs(r.worstCycleMean) <= tolCycle);
+    for (double a : probeAnglesDeg) {
+        const size_t k = static_cast<size_t>(std::floor(a / 360.0 * T / Tsw));
+        INFO("switching cycle at line angle " << a << " deg (k=" << k << "): mean " << cycle_mean(k) << " V");
+        CHECK(std::abs(cycle_mean(k)) <= tolCycle);
+    }
+    INFO("period mean " << r.periodMean << " V, max running volt-seconds " << r.maxRunning << " V*s (bound "
+                        << maxOnVoltSeconds + edge << ")");
+    CHECK(std::abs(r.periodMean) <= (maxOnVoltSeconds + edge) / T);
+    CHECK(r.maxRunning <= maxOnVoltSeconds + edge);
+
+    // Current = line envelope + ∫v/L (+ a constant per switching cycle that centres the ripple).
+    std::vector<double> lo(fullCycles, std::numeric_limits<double>::max());
+    std::vector<double> hi(fullCycles, std::numeric_limits<double>::lowest());
+    for (size_t n = 0; n < i.time.size(); ++n) {
+        const size_t k = static_cast<size_t>(std::floor(i.time[n] / Tsw));
+        if (k >= fullCycles) continue;
+        const double residual = i.data[n] - envelope(i.time[n]) - v.integral[n] / L;
+        lo[k] = std::min(lo[k], residual);
+        hi[k] = std::max(hi[k], residual);
+    }
+    for (size_t k = 0; k < fullCycles; ++k)
+        if (hi[k] >= lo[k]) r.worstRippleMismatch = std::max(r.worstRippleMismatch, hi[k] - lo[k]);
+    INFO("worst within-cycle spread of (i − envelope − ∫v/L) " << r.worstRippleMismatch << " A (tolerance "
+                                                             << v.h * v.span / L << " A)");
+    CHECK(r.worstRippleMismatch <= v.h * v.span / L);
+    return r;
+}
+
+// pfc-650w-370v (Henry corpus): 85 V rms → 370 V, 650 W, 60 Hz line, 65 kHz, η = 0.95, L = 536 µH.
+constexpr double kVsVrms = 85.0, kVsVout = 370.0, kVsPo = 650.0, kVsFline = 60.0, kVsFsw = 65000.0;
+constexpr double kVsL = 536e-6, kVsEff = 0.95;
+}  // namespace
+
+TEST_CASE("analytical_pfc: inductor voltage volt-second balanced per switching cycle and over the line period",
+          "[analytical][solver][pfc][voltsecond]") {
+    using Kirchhoff::analytical::analytical_pfc;
+    const double vd = 0.8;   // a diode drop, so the OFF level is Vin − (Vout + Vd)
+    const MAS::OperatingPoint op = analytical_pfc(kVsVrms, kVsVout, kVsPo, kVsFline, kVsFsw, kVsL, kVsEff, vd);
+    REQUIRE(op.get_excitations_per_winding().size() == 1);
+    const double vPeak = std::sqrt(2.0) * kVsVrms;
+    const double iPeak = std::sqrt(2.0) * kVsPo / kVsEff / kVsVrms;
+    auto envelope = [&](double t) { return iPeak * std::abs(std::sin(2.0 * M_PI * kVsFline * t)); };
+    // Line angles: just past each zero crossing (D → 1, Vin → 0), small angle, peak, just before the
+    // next zero crossing.
+    const LineCycleBalance r = check_line_cycle_balance(
+        op.get_excitations_per_winding()[0], kVsFline, kVsFsw, kVsL,
+        max_on_volt_seconds(vPeak, kVsVout + vd, 1.0 / kVsFsw), envelope, {0.1, 2.0, 30.0, 90.0, 178.0, 180.1, 270.0, 359.0});
+    CHECK(std::abs(r.periodMean) < 0.1);   // the old 4-sample synthesis gave +35.7 V here
+}
+
+TEST_CASE("analytical_pfc bipolar (totem-pole): volt-second balanced in both half-cycles, diode drop included",
+          "[analytical][solver][pfc][voltsecond]") {
+    using Kirchhoff::analytical::analytical_pfc;
+    const double vd = 1.0;   // must take the half-cycle's polarity, like the bus
+    const MAS::OperatingPoint op = analytical_pfc(kPfcVrms, kPfcVout, kPfcPo, kPfcFline, kPfcFsw, kPfcL,
+                                                  /*efficiency*/1.0, vd, /*bipolar*/true);
+    REQUIRE(op.get_excitations_per_winding().size() == 1);
+    const double vPeak = std::sqrt(2.0) * kPfcVrms;
+    auto envelope = [&](double t) { return kPfcIpk * std::sin(2.0 * M_PI * kPfcFline * t); };
+    check_line_cycle_balance(op.get_excitations_per_winding()[0], kPfcFline, kPfcFsw, kPfcL,
+                             max_on_volt_seconds(vPeak, kPfcVout + vd, 1.0 / kPfcFsw), envelope,
+                             {0.1, 1.0, 45.0, 90.0, 179.0, 180.5, 181.0, 270.0, 359.5});
+}
+
+TEST_CASE("analytical_vienna fullLineCycle: every phase volt-second balanced, switching edges resolved",
+          "[analytical][solver][vienna][voltsecond]") {
+    using Kirchhoff::analytical::analytical_vienna;
+    const MAS::OperatingPoint op = analytical_vienna(kVienVph, kVienVdc, kVienPo, kVienFline, kVienFsw, kVienL);
+    REQUIRE(op.get_excitations_per_winding().size() == 3);
+    const double offsets[3] = {0.0, -2.0 * M_PI / 3.0, +2.0 * M_PI / 3.0};
+    for (size_t ph = 0; ph < 3; ++ph) {
+        INFO("phase " << ph);
+        auto envelope = [&](double t) { return kVienIpk * std::sin(2.0 * M_PI * kVienFline * t + offsets[ph]); };
+        const LineCycleBalance r = check_line_cycle_balance(
+            op.get_excitations_per_winding()[ph], kVienFline, kVienFsw, kVienL,
+            max_on_volt_seconds(kVienVpk, kVienVdc / 2.0, 1.0 / kVienFsw), envelope,
+            {0.1, 1.0, 60.0, 120.0, 179.5, 180.5, 240.0, 300.0, 359.5});
+        CHECK(std::abs(r.periodMean) < 0.1);
+        // The edges are resolved: at least 8 samples per switching period.
+        const auto w = *op.get_excitations_per_winding()[ph].get_voltage()->get_waveform();
+        CHECK(static_cast<double>(w.get_data().size()) >= 8.0 * kVienFsw / kVienFline);
+    }
+}
+
+namespace {
+// MKF's single-winding magnetizing current from a stored voltage (Inputs::calculate_magnetizing_current
+// without the label shortcuts): resample to the power-of-two grid over the waveform's own span
+// (WaveformProcessor::calculate_sampled_waveform), integrate holding each sample, subtract the trapezoid
+// average, divide by L. Returns the peak |i_mag|.
+double mkf_style_magnetizing_peak(const nlohmann::json& waveform, double L) {
+    const auto data = waveform.at("data").get<std::vector<double>>();
+    const auto time = waveform.at("time").get<std::vector<double>>();
+    size_t n = 128;
+    if (data.size() > n) { n = 1; while (n < data.size()) n *= 2; }
+    const double span = time.back() - time.front();
+    std::vector<double> ts(n), vs(n);
+    size_t seg = 0;
+    for (size_t i = 0; i < n; ++i) {
+        ts[i] = span * static_cast<double>(i) / static_cast<double>(n);
+        while (seg + 2 < time.size() && time[seg + 1] < ts[i]) ++seg;
+        const double dt = time[seg + 1] - time[seg];
+        const double p = (dt > 0.0) ? (ts[i] - time[seg]) / dt : 0.0;
+        vs[i] = data[seg] + p * (data[seg + 1] - data[seg]);
+    }
+    std::vector<double> integral(n, 0.0);
+    for (size_t i = 0; i + 1 < n; ++i) integral[i + 1] = integral[i] + vs[i] * (ts[i + 1] - ts[i]);
+    double area = 0.0;
+    for (size_t i = 0; i + 1 < n; ++i) area += 0.5 * (integral[i] + integral[i + 1]) * (ts[i + 1] - ts[i]);
+    const double average = area / (ts.back() - ts.front());
+    double peak = 0.0;
+    for (double x : integral) peak = std::max(peak, std::abs((x - average) / L));
+    return peak;
+}
+
+// The pfc-650w-370v job as Henry hands it to Kirchhoff (legacy_spec_to_tas_inputs of
+// runs/corpus36b/adviser/pfc-650w-370v/job.json): Kirchhoff sizes L from the 40 % ripple ratio.
+const char* kHenryPfcSpec = R"KH({"designRequirements":{"inputVoltage":{"minimum":85,"nominal":85,"maximum":260},"switchingFrequency":{"nominal":65000.0},"efficiency":0.95,"lineFrequency":{"nominal":60},"outputs":[{"name":"output 0","voltage":{"nominal":370},"power":{"nominal":650.0}}]},"operatingPoints":[{"name":"operating point 0","inputVoltage":85.0,"ambientTemperature":25,"outputs":[{"voltage":370,"power":650.0}]}],"config":{"rippleRatio":0.4}})KH";
+}  // namespace
+
+TEST_CASE("PFC magnetic inputs (Henry pfc-650w-370v): MKF-style magnetizing current stays at the switching ripple",
+          "[analytical][pfc][voltsecond][api]") {
+    const std::string out = Kirchhoff::api::design_magnetic_inputs("pfc", kHenryPfcSpec);
+    INFO(out.substr(0, 300));
+    REQUIRE(out.rfind("Exception:", 0) != 0);
+    const nlohmann::json inputs = nlohmann::json::parse(out);
+    const double L = PEAS::resolve_dimensional_values(inputs.at("designRequirements").at("magnetizingInductance"));
+    const nlohmann::json& exc = inputs.at("operatingPoints").at(0).at("excitationsPerWinding").at(0);
+    const double vBus = 370.0;   // the spec sets no fixed diode drop, so the OFF level is Vin − Vout
+    const double fsw = 65000.0;
+    const auto vData = exc.at("voltage").at("waveform").at("data").get<std::vector<double>>();
+    const double vSpan = *std::max_element(vData.begin(), vData.end()) - *std::min_element(vData.begin(), vData.end());
+    const double iMag = mkf_style_magnetizing_peak(exc.at("voltage").at("waveform"), L);
+    const double windingPeak = exc.at("current").at("processed").at("peak").get<double>();
+    // ∫v/L of a balanced voltage is the switching ripple: |i_mag| ≤ max ON volt-seconds / L, plus the
+    // sampling slack h·Vspan/2 (two resamplings, h·Vspan/4 each). The unbalanced waveform gave 1635 A here
+    // against a 12.3 A winding peak.
+    const double h = 1.0 / 60.0 / static_cast<double>(vData.size());
+    const double bound = (max_on_volt_seconds(std::sqrt(2.0) * 85.0, vBus, 1.0 / fsw) + h * vSpan / 2.0) / L;
+    INFO("L=" << L << " H, MKF-style |i_mag| peak=" << iMag << " A, bound=" << bound << " A, winding peak=" << windingPeak << " A");
+    CHECK(iMag <= bound);
+    CHECK(iMag < windingPeak);
+}
+
+// Hidden: prints the balance, sample counts and timings quoted in ABT #1586 (run with "[voltsecond-report]").
+// Written to compile against the pre-fix solver too, so the same numbers can be taken before and after.
+TEST_CASE("line-cycle volt-second report (ABT #1586)", "[.][voltsecond-report]") {
+    using Kirchhoff::analytical::analytical_pfc;
+    using Kirchhoff::analytical::analytical_vienna;
+    using Clock = std::chrono::steady_clock;
+    auto ms_since = [](Clock::time_point t0) {
+        return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+    };
+    auto report = [&](const char* name, const MAS::OperatingPointExcitation& e, double fsw, double L) {
+        const HeldSignal v = held_signal(*e.get_voltage());
+        const double Tsw = 1.0 / fsw;
+        const size_t cycles = static_cast<size_t>(std::floor(v.period / Tsw));
+        double worst = 0.0, worstAngle = 0.0, sum = 0.0;
+        for (size_t k = 0; k < cycles; ++k) {
+            const double m = (v.at(static_cast<double>(k + 1) * Tsw) - v.at(static_cast<double>(k) * Tsw)) / Tsw;
+            sum += std::abs(m);
+            if (std::abs(m) > std::abs(worst)) { worst = m; worstAngle = 360.0 * (static_cast<double>(k) + 0.5) * Tsw * e.get_frequency(); }
+        }
+        double maxRunning = 0.0;
+        for (double x : v.integral) maxRunning = std::max(maxRunning, std::abs(x));
+        nlohmann::json w;
+        w["data"] = v.data;
+        w["time"] = v.time;
+        const auto t0 = Clock::now();
+        const double iMag = mkf_style_magnetizing_peak(w, L);
+        const double tMkf = ms_since(t0);
+        std::cout << name << ": stored samples=" << v.data.size() << " span=" << v.period << " s (f=" << e.get_frequency()
+                  << " Hz), period mean=" << v.integral.back() / v.period << " V, switching cycles=" << cycles
+                  << ", worst cycle mean=" << worst << " V at " << worstAngle << " deg, mean |cycle mean|="
+                  << sum / static_cast<double>(cycles) << " V, max |running V*s|=" << maxRunning
+                  << ", end-of-span V*s=" << v.integral.back() << " (" << v.integral.back() / L
+                  << " A), MKF-style |i_mag| peak=" << iMag << " A (" << tMkf << " ms)\n";
+    };
+    {
+        const auto t0 = Clock::now();
+        const int reps = 20;
+        MAS::OperatingPoint op;
+        for (int r = 0; r < reps; ++r) op = analytical_pfc(kVsVrms, kVsVout, kVsPo, kVsFline, kVsFsw, kVsL, kVsEff, 0.0);
+        std::cout << "analytical_pfc pfc-650w-370v: " << ms_since(t0) / reps << " ms per call\n";
+        report("  pfc-650w-370v", op.get_excitations_per_winding()[0], kVsFsw, kVsL);
+    }
+    {
+        const auto t0 = Clock::now();
+        const int reps = 5;
+        MAS::OperatingPoint op;
+        for (int r = 0; r < reps; ++r) op = analytical_vienna(kVienVph, kVienVdc, kVienPo, kVienFline, kVienFsw, kVienL);
+        std::cout << "analytical_vienna fullLineCycle (3 windings): " << ms_since(t0) / reps << " ms per call\n";
+        for (size_t ph = 0; ph < 3; ++ph) report(ph == 0 ? "  vienna A" : (ph == 1 ? "  vienna B" : "  vienna C"),
+                                                 op.get_excitations_per_winding()[ph], kVienFsw, kVienL);
+    }
+    {
+        const auto t0 = Clock::now();
+        const std::string out = Kirchhoff::api::design_magnetic_inputs("pfc", kHenryPfcSpec);
+        const double tApi = ms_since(t0);
+        REQUIRE(out.rfind("Exception:", 0) != 0);
+        const nlohmann::json inputs = nlohmann::json::parse(out);
+        const double L = PEAS::resolve_dimensional_values(inputs.at("designRequirements").at("magnetizingInductance"));
+        const nlohmann::json& exc = inputs.at("operatingPoints").at(0).at("excitationsPerWinding").at(0);
+        const auto vData = exc.at("voltage").at("waveform").at("data").get<std::vector<double>>();
+        double mean = 0.0;
+        for (double x : vData) mean += x;
+        mean /= static_cast<double>(vData.size());
+        std::cout << "design_magnetic_inputs(pfc, Henry pfc-650w-370v): " << tApi << " ms, L=" << L << " H, "
+                  << vData.size() << " voltage samples, sample mean=" << mean << " V, MKF-style |i_mag| peak="
+                  << mkf_style_magnetizing_peak(exc.at("voltage").at("waveform"), L) << " A, winding peak="
+                  << exc.at("current").at("processed").at("peak").get<double>() << " A, json bytes=" << out.size() << "\n";
+    }
 }
 
 // ─── Phase 8: magnetic-COMPONENT operating-point models (CT / DMC / CMC) ────────

@@ -593,8 +593,11 @@ MAS::OperatingPoint analytical_clllc(double inputVoltage,
 // `peakOfLinePlusSectors`):
 //   fullLineCycle = true  (DEFAULT): each winding carries the full 50/60 Hz line cycle (MKF
 //     build_line_cycle_waveform) — a bipolar full-sine current envelope of amplitude I_pk, shifted ±120°
-//     per phase, with the per-angle switching-ripple triangle superimposed. complete_excitation runs at
-//     the LINE frequency. This is the "rectified-sine envelope with HF ripple" KH's build_vienna_tas uses.
+//     per phase, with the per-angle switching ripple superimposed. complete_excitation runs at the LINE
+//     frequency. Every switching cycle is built from exact edge times (ON for D = 1 − |V_phase|/(Vdc/2) at
+//     V_phase, OFF at V_phase ∓ Vdc/2), so the voltage is volt-second balanced cycle by cycle and the ripple
+//     is the integral of that voltage; >= 8 samples per switching period, rounded up to a power of two
+//     (MKF's version held V_on for half of each period and point-sampled 4096 points, aliasing the edges).
 //   fullLineCycle = false, peakOfLinePlusSectors = false (MKF peakOfLineOnly default): the switching-period
 //     snapshot at peak-of-line — TRIANGULAR current about I_pk (ΔI_pp = V_phase_peak·(1−M)·Tsw/L) +
 //     RECTANGULAR ±(V_phase_peak / V_phase_peak−Vdc/2) voltage, at the SWITCHING frequency.
@@ -634,8 +637,12 @@ MAS::OperatingPoint analytical_vienna(double linePhaseVoltageRms,
 // (rectified-sine envelope of amplitude iLinePeak = √2·Pin/Vrms, Pin = outputPower/efficiency, plus the
 // triangular switching ripple) and a CUSTOM voltage (ON: +Vin; OFF: Vin−Vout−Vd; volt-second balanced,
 // zero mean), completed at the LINE frequency (mirroring MKF's excitation.set_frequency(lineFrequency) +
-// calculate_processed_data(..., lineFrequency)). The time grid is MKF's exact one: timeStep = Tsw/4 over
-// `numberOfPeriods` mains periods.
+// calculate_processed_data(..., lineFrequency)) over exactly ONE line period. Unlike MKF's Tsw/4 grid (which
+// rounds the duty up to the next quarter of a switching period and leaves the voltage tens of volts off zero
+// mean), every switching cycle is built from its exact on/off edge times: the voltage samples are exact
+// cell averages (volt-second balanced cycle by cycle), the current is the line envelope plus the ripple
+// integrated from that voltage. N = the smallest power of two giving >= 8 samples per switching period
+// (16384 for 60 Hz / 65 kHz).
 //
 // OMITTED (mirroring the KH-family policy): MKF's diagnostic-only per-OP members (lastDutyCyclePeak /
 // lastPeakInductorCurrent / lastInductorRipple / lastLineRmsCurrent / lastInputPower / perOp* :474-498)
@@ -661,7 +668,6 @@ MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
                                    double boostInductance,
                                    double efficiency = 1.0,
                                    double diodeVoltageDrop = 0.0,
-                                   int numberOfPeriods = 2,
                                    bool bipolar = false);
 
 // ── Phase 8: magnetic-COMPONENT operating-point models ───────────────────────

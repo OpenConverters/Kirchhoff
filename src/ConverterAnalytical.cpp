@@ -5,11 +5,13 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace Kirchhoff {
@@ -2929,67 +2931,115 @@ static double vienna_line_peak_current(double power, double vPhaseRms, double ef
     return std::sqrt(2.0) * power / (3.0 * vPhaseRms * eff * pf);
 }
 
-// MKF Vienna::LineCycleKind (Vienna.h) — selects the current vs. inductor-voltage envelope build.
-enum class ViennaLineCycleKind { CURRENT, VOLTAGE };
+// ── Line-cycle switched boost-inductor waveforms (single-phase PFC, Vienna fullLineCycle) ─────────────
+// One switching cycle of a line-modulated two-level boost cell: the inductor sees `vOn` for duty·Tsw, then
+// `vOff` for the rest of the cycle. The converter equations pick the duty so that
+// vOn·duty + vOff·(1 − duty) = 0 (steady-state volt-second balance of every switching cycle).
+struct SwitchingCycleLevels {
+    double vOn;
+    double vOff;
+    double duty;
+};
 
-// MKF Vienna::build_line_cycle_waveform (Vienna.cpp:282), transcribed exactly. Builds the full 50/60 Hz
-// line-cycle envelope for ONE phase (shifted by phaseOffsetRad), with the per-angle switching-ripple
-// triangle superimposed. numSamples default 4096 matches MKF's header default (Vienna.h:242).
-static MAS::Waveform vienna_build_line_cycle_waveform(
-    ViennaLineCycleKind kind,
-    double iPk, double vPhasePeak, double vdc,
-    double L, double fsw, double fLine,
-    double phaseOffsetRad,
-    size_t numSamples = 4096) {
-    if (numSamples < 2)
-        throw std::invalid_argument("analytical_vienna: numSamples must be >= 2");
-    if (fLine <= 0)
-        throw std::invalid_argument("analytical_vienna: lineFrequency must be > 0");
-    if (fsw <= fLine)
-        throw std::invalid_argument("analytical_vienna: switchingFrequency must be > lineFrequency");
+// Lower bound on the emitted samples per switching period. The voltage samples are exact cell averages,
+// so the volt-seconds they carry do not depend on it; it sets how finely the current ripple (and its peak)
+// is resolved. The sample count is rounded up to a power of two, which MKF's WaveformProcessor keeps
+// as-is (it resamples any other count up to the next power of two).
+constexpr double kLineCycleMinimumSamplesPerSwitchingPeriod = 8.0;
+
+// Builds ONE line period [0, 1/lineFrequency] of the boost-inductor current and voltage on a uniform grid
+// of N points (N a power of two, endpoint included, h = T/(N−1)).
+//
+// Switching cycle k spans [k·Tsw, (k+1)·Tsw) with Tsw = 1/switchingFrequency (exact, not rounded to the
+// grid) and holds the levels `levelsAtCycleMidpoint((k+½)·Tsw)`: the line voltage is taken constant over
+// one switching cycle. Its edges are exact times (k·Tsw and k·Tsw + duty·Tsw), never snapped to the grid.
+//
+// VOLTAGE sample j = the exact average of that switched voltage over [t_j, t_j + h) (a cell average), so the
+// running volt-second integral of the samples equals the exact one at every grid point and every switching
+// cycle is volt-second balanced to rounding. The emitted period holds fsw/fLine switching cycles; when that
+// ratio is not an integer the last cycle is cut by the line period, so the period mean is the cut cycle's
+// volt-seconds over T (bounded by one switching cycle's ON volt-seconds, not growing with the line period).
+//
+// CURRENT sample j = envelopeAt(t_j) + ripple(t_j), where ripple is the running volt-second integral of the
+// SAME switched voltage divided by L, shifted to zero mean over its switching cycle (it ramps between
+// −ΔI/2 and +ΔI/2, ΔI = vOn·duty·Tsw/L). The envelope is the line-frequency current the control imposes; the
+// L·di/dt it needs (≤ ω·L·I_pk, a few volts) is not added to the switched voltage, which stays balanced
+// cycle by cycle.
+//
+// THROWS on lineFrequency ≤ 0, switchingFrequency ≤ lineFrequency, L ≤ 0, a duty outside [0, 1], or a
+// cycle whose levels are not volt-second balanced (|vOn·duty + vOff·(1−duty)| > 1e-9·(|vOn| + |vOff|), a
+// rounding-level bound: the converter equations make the balance exact, so a larger residual means the
+// caller's equations are wrong).
+static std::pair<MAS::Waveform, MAS::Waveform> build_line_cycle_switched_waveforms(
+    const std::string& who, double lineFrequency, double switchingFrequency, double L,
+    const std::function<SwitchingCycleLevels(double)>& levelsAtCycleMidpoint,
+    const std::function<double(double)>& envelopeAt) {
+    if (lineFrequency <= 0)
+        throw std::invalid_argument(who + ": lineFrequency must be > 0");
+    if (switchingFrequency <= lineFrequency)
+        throw std::invalid_argument(who + ": switchingFrequency must be > lineFrequency");
     if (L <= 0)
-        throw std::invalid_argument("analytical_vienna: boostInductance must be > 0");
+        throw std::invalid_argument(who + ": boostInductance must be > 0");
 
-    const double T_line = 1.0 / fLine;
-    const double T_sw   = 1.0 / fsw;
-    const double omega  = 2.0 * M_PI * fLine;
-    const double Vhalf  = vdc / 2.0;
+    const double T   = 1.0 / lineFrequency;
+    const double Tsw = 1.0 / switchingFrequency;
+    const double minimumIntervals = kLineCycleMinimumSamplesPerSwitchingPeriod * T / Tsw;
+    size_t N = 2;
+    while (static_cast<double>(N - 1) < minimumIntervals) N *= 2;
+    const double h = T / static_cast<double>(N - 1);
 
-    std::vector<double> time(numSamples), data(numSamples);
-    for (size_t i = 0; i < numSamples; ++i) {
-        double t = static_cast<double>(i) / static_cast<double>(numSamples - 1) * T_line;
-        time[i]  = t;
+    // The checked levels of every switching cycle the grid touches (the last cell ends at T + h).
+    const size_t cycleCount = static_cast<size_t>(std::floor((T + h) / Tsw)) + 2;
+    std::vector<SwitchingCycleLevels> cycles;
+    cycles.reserve(cycleCount);
+    for (size_t k = 0; k < cycleCount; ++k) {
+        const double tMid = (static_cast<double>(k) + 0.5) * Tsw;
+        const SwitchingCycleLevels lv = levelsAtCycleMidpoint(tMid);
+        if (!(lv.duty >= 0.0 && lv.duty <= 1.0))
+            throw std::logic_error(who + ": switching-cycle duty " + std::to_string(lv.duty) +
+                                   " outside [0, 1] at t = " + std::to_string(tMid) + " s");
+        const double imbalance = lv.vOn * lv.duty + lv.vOff * (1.0 - lv.duty);
+        if (std::abs(imbalance) > 1e-9 * (std::abs(lv.vOn) + std::abs(lv.vOff)))
+            throw std::logic_error(who + ": switching cycle at t = " + std::to_string(tMid) +
+                                   " s is not volt-second balanced (vOn=" + std::to_string(lv.vOn) +
+                                   " V, vOff=" + std::to_string(lv.vOff) + " V, duty=" + std::to_string(lv.duty) +
+                                   ", mean " + std::to_string(imbalance) + " V)");
+        cycles.push_back(lv);
+    }
+    // The levels of the switching cycle holding t, and t's offset `tau` into that cycle.
+    auto cycle_at = [&](double t, double& tau) -> const SwitchingCycleLevels& {
+        const double k = std::floor(t / Tsw);
+        tau = t - k * Tsw;
+        const size_t index = static_cast<size_t>(k);
+        if (k < 0.0 || index >= cycles.size())
+            throw std::logic_error(who + ": t = " + std::to_string(t) + " s is outside the built switching cycles");
+        return cycles[index];
+    };
+    // Volt-seconds from the start of the cycle to `tau` into it. Every cycle is balanced, so this is zero at
+    // each cycle boundary and therefore IS the running volt-second integral from t = 0.
+    auto volt_seconds = [&](const SwitchingCycleLevels& lv, double tau) {
+        const double tOn = lv.duty * Tsw;
+        return (tau <= tOn) ? lv.vOn * tau : lv.vOn * tOn + lv.vOff * (tau - tOn);
+    };
 
-        double theta    = omega * t + phaseOffsetRad;
-        double sinTheta = std::sin(theta);
-        double Vphase_t = vPhasePeak * sinTheta;
-        double Iavg_t   = iPk * sinTheta;
-
-        double dutyAbs = 1.0 - std::abs(Vphase_t) / Vhalf;   // per-angle boost duty (1 − |Vphase|/Vhalf)
-        if (dutyAbs < 0.0) dutyAbs = 0.0;
-        if (dutyAbs > 1.0) dutyAbs = 1.0;
-
-        double dI_pp = std::abs(Vphase_t) * dutyAbs * T_sw / L;   // local switching-period ripple pk-pk
-
-        double tri = 0.0;   // sub-sampled triangular ripple tri(2π·Fsw·t) ∈ [−1,+1]
-        {
-            double swPhase = std::fmod(fsw * t, 1.0);
-            tri = (swPhase < 0.5) ? (4.0 * swPhase - 1.0) : (3.0 - 4.0 * swPhase);
-        }
-
-        if (kind == ViennaLineCycleKind::CURRENT) {
-            data[i] = Iavg_t + 0.5 * dI_pp * tri;
-        } else {
-            double V_on  = Vphase_t;
-            double V_off = Vphase_t - ((Vphase_t >= 0) ? Vhalf : -Vhalf);
-            data[i] = (tri >= 0) ? V_on : V_off;
-        }
+    std::vector<double> time(N), current(N), voltage(N);
+    for (size_t j = 0; j < N; ++j) {
+        const double t = static_cast<double>(j) * h;
+        double tau = 0.0, tauNext = 0.0;
+        const SwitchingCycleLevels& lv     = cycle_at(t, tau);
+        const SwitchingCycleLevels& lvNext = cycle_at(t + h, tauNext);
+        const double phi = volt_seconds(lv, tau);
+        time[j]    = t;
+        voltage[j] = (volt_seconds(lvNext, tauNext) - phi) / h;
+        current[j] = envelopeAt(t) + (phi - 0.5 * lv.vOn * lv.duty * Tsw) / L;
     }
 
-    MAS::Waveform wf;
-    wf.set_data(data);
-    wf.set_time(time);
-    return wf;
+    MAS::Waveform currentWaveform, voltageWaveform;
+    currentWaveform.set_data(current);
+    currentWaveform.set_time(time);
+    voltageWaveform.set_data(voltage);
+    voltageWaveform.set_time(time);
+    return {currentWaveform, voltageWaveform};
 }
 
 // Ported from MKF converter_models/Vienna.cpp:556 (process_operating_point_for_input_voltage).
@@ -3063,11 +3113,25 @@ MAS::OperatingPoint analytical_vienna(double linePhaseVoltageRms,
             double opFreq = Fsw;
 
             if (fullLineCycle) {
-                // MKF Vienna.cpp:677-685: full line-cycle envelope, complete_excitation at the LINE frequency.
-                currentWaveform = vienna_build_line_cycle_waveform(
-                    ViennaLineCycleKind::CURRENT, I_pk_ch, V_phase_peak, Vdc, L, Fsw, lineFrequency, phaseOffsets[ph]);
-                voltageWaveform = vienna_build_line_cycle_waveform(
-                    ViennaLineCycleKind::VOLTAGE, I_pk_ch, V_phase_peak, Vdc, L, Fsw, lineFrequency, phaseOffsets[ph]);
+                // Full line-cycle envelope (MKF Vienna.cpp:677-685), complete_excitation at the LINE frequency.
+                // Each switching cycle holds the phase voltage at its midpoint angle: switch closed (duty
+                // D = 1 − |V_phase|/(Vdc/2)) the inductor sees V_phase, open it sees V_phase ∓ Vdc/2 (the
+                // half-bus of the phase's polarity) — volt-second balanced cycle by cycle. The current is the
+                // phase's sine envelope plus the ripple integrated from that same voltage. (MKF's
+                // build_line_cycle_waveform held V_on for half of every switching period whatever the duty and
+                // point-sampled 4096 points per line period, aliasing the switching edges.)
+                const double phaseOffset = phaseOffsets[ph];
+                const double omegaLine   = 2.0 * M_PI * lineFrequency;
+                auto waveforms = build_line_cycle_switched_waveforms(
+                    "analytical_vienna", lineFrequency, Fsw, L,
+                    [&](double tc) {
+                        const double vPhase = V_phase_peak * std::sin(omegaLine * tc + phaseOffset);
+                        const double halfBus = (vPhase >= 0.0) ? Vhalf : -Vhalf;
+                        return SwitchingCycleLevels{vPhase, vPhase - halfBus, 1.0 - std::abs(vPhase) / Vhalf};
+                    },
+                    [&](double t) { return I_pk_ch * std::sin(omegaLine * t + phaseOffset); });
+                currentWaveform = waveforms.first;
+                voltageWaveform = waveforms.second;
                 opFreq = lineFrequency;
             } else {
                 // MKF Vienna.cpp:687-703: peak-of-line switching-period snapshot. RECTANGULAR voltage with
@@ -3125,7 +3189,6 @@ MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
                                    double boostInductance,
                                    double efficiency,
                                    double diodeVoltageDrop,
-                                   int numberOfPeriods,
                                    bool bipolar) {
     using Lbl = MAS::WaveformLabel;
 
@@ -3160,80 +3223,52 @@ MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
     const double iinRmsAvg  = pinAvg / vinRmsMin;
     const double iLinePeak  = iinRmsAvg * std::sqrt(2.0);
 
-    // MKF :500-513 — time grid: Tsw/4 step over `numberOfPeriods` mains periods.
-    const double mainsPeriod     = 1.0 / lineFrequency;
-    const double switchingPeriod = 1.0 / switchingFrequency;
-    const int    actualPeriods   = (numberOfPeriods > 0) ? numberOfPeriods : 2;
-    const double totalTime       = mainsPeriod * actualPeriods;
-    const double timeStep        = switchingPeriod / 4.0;
-    const size_t numPoints       = static_cast<size_t>(totalTime / timeStep) + 1;
-
-    std::vector<double> currentData, voltageData, timeData;
-    currentData.reserve(numPoints);
-    voltageData.reserve(numPoints);
-    timeData.reserve(numPoints);
-
-    // MKF :515-586 — the boost branch (bipolar=false, buckBoostClass=false).
-    for (size_t i = 0; i < numPoints; ++i) {
-        const double t = i * timeStep;
-        timeData.push_back(t);
-
-        const double theta = 2.0 * M_PI * t / mainsPeriod;
-        // Bridged boost → rectified |sin| (unipolar inductor current/voltage).  MKF :523-526
-        // Bridgeless TOTEM-POLE (bipolar=true) → the inductor sits on the AC line with no rectifier, so it
-        // sees a TRUE bipolar sine: signed current envelope and signed off-time bus polarity.  MKF :393-432
-        const double vinShape   = bipolar ? std::sin(theta) : std::abs(std::sin(theta));
-        double vinInst          = vinPeakMin * vinShape;
-        double vinAbsInst       = vinPeakMin * std::abs(vinShape);
+    // ONE line period, each switching cycle built from its exact on/off edge times (see
+    // build_line_cycle_switched_waveforms). MKF :500-586 sampled 4 points per switching period (timeStep =
+    // Tsw/4, ON while the integer phase i%4/4 < D), which rounds the duty UP to the next quarter: the
+    // inductor voltage then averaged tens of volts away from zero (+35.7 V on an 85 V / 370 V / 65 kHz
+    // design), and anything integrating it drifted by amperes per line cycle. It also emitted two line
+    // periods stamped with the line frequency.
+    const double vOutPlusDrop = outputVoltage + diodeVoltageDrop;
+    const double omegaLine    = 2.0 * M_PI * lineFrequency;
+    // Bridged boost → rectified |sin| (unipolar inductor current/voltage).  MKF :523-526
+    // Bridgeless TOTEM-POLE (bipolar=true) → the inductor sits on the AC line with no rectifier, so it
+    // sees a TRUE bipolar sine: signed current envelope and signed off-time bus polarity.  MKF :393-432
+    auto lineShape = [&](double t) {
+        const double s = std::sin(omegaLine * t);
+        return bipolar ? s : std::abs(s);
+    };
+    auto levelsAt = [&](double tc) {
+        const double vinShape = lineShape(tc);
+        double vinInst    = vinPeakMin * vinShape;
+        double vinAbsInst = vinPeakMin * std::abs(vinShape);
         // Floor |Vin| near the line zero-crossing so the boost duty stays bounded.  MKF :399-404
         if (bipolar && vinAbsInst < vinPeakMin * 0.05) {
             vinAbsInst = vinPeakMin * 0.05;
             vinInst    = std::copysign(vinAbsInst, vinShape);
         }
+        // Boost duty D = 1 − |Vin|/(Vout+Vd)  (MKF :543-547). It lies in (0, 1] without clipping: the
+        // step-up guard above makes Vout+Vd exceed every |Vin|.
+        const double D = 1.0 - vinAbsInst / vOutPlusDrop;
+        // ON: L sees +Vin (MKF :570-572). OFF: L discharges into the bus through the diode, Vin − (Vout+Vd);
+        // for totem-pole the bus AND the diode drop take the half-cycle's polarity (MKF :579-585 signed only
+        // Vout, leaving the drop unsigned, which unbalances the negative half-cycle by 2·Vd·(1−D)).
+        const double busSigned = bipolar ? std::copysign(vOutPlusDrop, vinInst) : vOutPlusDrop;
+        return SwitchingCycleLevels{vinInst, vinInst - busSigned, D};
+    };
+    // Current envelope: the line current the PFC control imposes, signed for totem-pole.  MKF :549
+    auto envelopeAt = [&](double t) { return iLinePeak * lineShape(t); };
 
-        // Boost duty D = 1 − |Vin|/(Vout+Vd), clipped to the physical [0, 1].  MKF :543-547
-        double D = 1.0 - vinAbsInst / (outputVoltage + diodeVoltageDrop);
-        if (D < 0.0) D = 0.0;
-        if (D > 1.0) D = 1.0;
-
-        const double iAvgInst = iLinePeak * vinShape;                       // signed for totem-pole  MKF :549
-        const double deltaI   = vinAbsInst * D / (L * switchingFrequency);  // MKF :550
-
-        // Integer switching-cycle phase (4 samples/period since timeStep = Tsw/4).  MKF :557-559
-        constexpr size_t samplesPerSwCycle = 4;
-        const double switchPhase = static_cast<double>(i % samplesPerSwCycle)
-                                   / static_cast<double>(samplesPerSwCycle);
-
-        double ripple;   // MKF :561-566
-        if (switchPhase < D) {
-            ripple = -deltaI / 2 + deltaI * (switchPhase / D);
-        } else {
-            ripple = deltaI / 2 - deltaI * ((switchPhase - D) / (1 - D));
-        }
-        currentData.push_back(iAvgInst + ripple);                           // MKF :568
-
-        if (switchPhase < D) {
-            voltageData.push_back(vinInst);                                 // ON: L sees +Vin.  MKF :570-572
-        } else {
-            // Boost-family OFF-time: inductor sees Vin − Vout − Vd. For totem-pole the bus polarity the
-            // inductor sees is also signed with the half-cycle (voutSigned).  MKF :579-585.
-            const double voutSigned = bipolar ? std::copysign(outputVoltage, vinShape) : outputVoltage;
-            voltageData.push_back(vinInst - voutSigned - diodeVoltageDrop);
-        }
-    }
+    auto waveforms = build_line_cycle_switched_waveforms("analytical_pfc", lineFrequency, switchingFrequency, L,
+                                                         levelsAt, envelopeAt);
 
     // MKF :588-624 — one CUSTOM current + voltage waveform (the single boost-inductor winding),
-    // completed at the LINE frequency. WP::complete_excitation supplies the DSP MKF runs inline
-    // (calculate_sampled_waveform / _harmonics_data / _processed_data).
-    MAS::Waveform currentWaveform;
+    // completed at the LINE frequency over exactly one line period. WP::complete_excitation supplies the DSP
+    // MKF runs inline (calculate_sampled_waveform / _harmonics_data / _processed_data).
+    MAS::Waveform currentWaveform = waveforms.first;
     currentWaveform.set_ancillary_label(Lbl::CUSTOM);
-    currentWaveform.set_data(currentData);
-    currentWaveform.set_time(timeData);
-
-    MAS::Waveform voltageWaveform;
+    MAS::Waveform voltageWaveform = waveforms.second;
     voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
-    voltageWaveform.set_data(voltageData);
-    voltageWaveform.set_time(timeData);
 
     MAS::OperatingPoint operatingPoint;
     operatingPoint.get_mutable_excitations_per_winding().push_back(
