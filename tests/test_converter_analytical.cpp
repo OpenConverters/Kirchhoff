@@ -1005,10 +1005,15 @@ TEST_CASE("analytical_pfc: 1 winding, rectified-sine envelope peak = I_pk, non-z
     REQUIRE(exc.get_voltage().has_value());
     REQUIRE(exc.get_voltage()->get_processed().has_value());
     const auto vlt = *exc.get_voltage()->get_processed();
-    REQUIRE(vlt.get_peak().has_value());
-    CHECK(*vlt.get_peak() == Catch::Approx(kPfcVpk).margin(1.0));   // ON-time = +Vin_peak
+    // The ON level is asserted on the POSITIVE peak: processed `peak` is max(|positive|, |negative|), and
+    // the negative side is the OFF level Vin−Vout, which near the line zero crossing approaches −Vout
+    // (≈ −363 V once the narrow zero-crossing OFF pulses are sampled as interval averages, ABT #1586).
+    REQUIRE(vlt.get_positive_peak().has_value());
+    CHECK(*vlt.get_positive_peak() == Catch::Approx(kPfcVpk).margin(1.0));   // ON-time = +Vin_peak
     REQUIRE(vlt.get_negative_peak().has_value());
-    CHECK(*vlt.get_negative_peak() < -100.0);                       // OFF-time = Vin−Vout (boost discharge)
+    CHECK(*vlt.get_negative_peak() < -(kPfcVout - kPfcVpk));                // OFF-time = Vin−Vout at the line peak, lower elsewhere
+    CHECK(*vlt.get_negative_peak() < -100.0);                                // and it swings well below that
+    CHECK(*vlt.get_negative_peak() >= -kPfcVout - 1.0);                      // never past −Vout (Vin ≥ 0 when OFF)
 }
 
 TEST_CASE("analytical_pfc bipolar (totem-pole): TRUE sine inductor current, zero mean, ±I_pk",
