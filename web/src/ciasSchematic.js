@@ -321,10 +321,13 @@ const srBridgeOutFrag = (nx, ny, ny2, refs) => {
   }
 }
 
-// CLLC and CLLLC share every coordinate; CLLLC only adds the SR current-sense shunt in the secondary
-// tank (and with it a separate SR controller block).
-const cllcLike = (present, hasSense) => {
-  const sr = srBridgeOutFrag(540, 150, 240, hasSense ? ['QE', 'QF', 'QG', 'QH'] : ['Qa', 'Qb', 'Qc', 'Qd'])
+// CLLC and CLLLC share every coordinate (and, since 8acee60, the SR current-sense shunt + SR controller).
+// Whether the secondary tank carries the SR current-sense shunt is read off the CIAS (Rsense present), not
+// off the topology name: since 8acee60 the CLLC receiving bridge also rectifies on the sensed tank-current
+// sign, and a layout keyed on the name kept drawing CLLC without its shunt and SR controller (ABT #1563).
+const cllcLike = (present, srRefs) => {
+  const hasSense = present.has('Rsense')
+  const sr = srBridgeOutFrag(540, 150, 240, srRefs)
   const flags = hasSense ? ['gA', 'gB'] : ['sa', 'sb', 'sc', 'sd']
   const frag = merge({
     place: {
@@ -1106,8 +1109,8 @@ const LAYOUTS = {
     return { size: [1300, 470], place: frag.place, wires: frag.wires, synth: (b) => frag.synthEls(b) }
   },
   // ── bridge: CLLC / CLLLC (bidirectional resonant, SR output bridge) ───────
-  cllc: (present) => cllcLike(present, false),
-  clllc: (present) => cllcLike(present, true),
+  cllc: (present) => cllcLike(present, ['Qa', 'Qb', 'Qc', 'Qd']),
+  clllc: (present) => cllcLike(present, ['QE', 'QF', 'QG', 'QH']),
   // ── PFC: single-phase boost power-factor corrector ────────────────────────
   pfc: {
     size: [880, 520],
