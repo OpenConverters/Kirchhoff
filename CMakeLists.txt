@@ -91,7 +91,7 @@ if (NOT EXISTS "${MKF_WAVEFORM_PROCESSOR}")
         "-DMKF_DIR=<path-to-MKF-checkout> at a local MKF clone.")
 endif()
 
-add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/Dab.cpp src/IsolatedBuck.cpp src/IsolatedBuckBoost.cpp src/Weinberg.cpp src/Llc.cpp src/Src.cpp src/Cllc.cpp src/Clllc.cpp src/Pfc.cpp src/Vienna.cpp src/Cmc.cpp src/CmcSim.cpp src/Dmc.cpp src/DmcSim.cpp src/CurrentTransformer.cpp src/TasAssembler.cpp src/NgspiceRunner.cpp src/Analytical.cpp src/ConverterAnalytical.cpp src/ConverterExtract.cpp src/ComponentWaveforms.cpp src/DatasheetModels.cpp src/KelvinBridge.cpp "${MKF_WAVEFORM_PROCESSOR}")
+add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/InvertingBuckBoost.cpp src/Interleave.cpp src/TwoSwitchFlyback.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/Dab.cpp src/IsolatedBuck.cpp src/IsolatedBuckBoost.cpp src/Weinberg.cpp src/Llc.cpp src/Src.cpp src/Cllc.cpp src/Clllc.cpp src/Pfc.cpp src/Vienna.cpp src/Cmc.cpp src/CmcSim.cpp src/Dmc.cpp src/DmcSim.cpp src/CurrentTransformer.cpp src/TasAssembler.cpp src/NgspiceRunner.cpp src/Analytical.cpp src/ConverterAnalytical.cpp src/ConverterExtract.cpp src/ComponentWaveforms.cpp src/DatasheetModels.cpp src/KelvinBridge.cpp "${MKF_WAVEFORM_PROCESSOR}")
 target_include_directories(kirchhoff PUBLIC src)
 # The PSMA/MAS/json dependency headers are marked SYSTEM so the -Wall/-Wextra enabled below reports only
 # Kirchhoff's OWN code, not warnings inside generated/vendored dependency headers (e.g. MAS.hpp).
@@ -332,6 +332,14 @@ target_link_libraries(vienna_demo PRIVATE kirchhoff)
 add_executable(test_vienna tests/test_vienna.cpp)
 target_link_libraries(test_vienna PRIVATE kirchhoff Catch2::Catch2WithMain)
 target_compile_definitions(test_vienna PRIVATE KIRCHHOFF_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests")
+
+# New topologies without an MKF reference (ABT #1432-#1440): standalone design + analytical-vs-ngspice gates.
+add_executable(test_inverting_buck_boost tests/test_inverting_buck_boost.cpp)
+target_link_libraries(test_inverting_buck_boost PRIVATE kirchhoff Catch2::Catch2WithMain)
+add_executable(test_interleaved tests/test_interleaved.cpp)
+target_link_libraries(test_interleaved PRIVATE kirchhoff Catch2::Catch2WithMain)
+add_executable(test_two_switch_flyback tests/test_two_switch_flyback.cpp)
+target_link_libraries(test_two_switch_flyback PRIVATE kirchhoff Catch2::Catch2WithMain)
 
 # Second-backend (#2): CIAS -> LTspice dialect, structural + (Wine-gated) execution cross-check.
 add_executable(test_ltspice_backend tests/test_ltspice_backend.cpp)

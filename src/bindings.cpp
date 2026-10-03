@@ -66,6 +66,8 @@ assembly/simulate steps (tas_to_ngspice / tas_to_ltspice) are topology-agnostic.
     BIND_DESIGN(two_switch_forward);
     BIND_DESIGN(sepic);
     BIND_DESIGN(cuk);
+    BIND_DESIGN(inverting_buck_boost);
+    BIND_DESIGN(two_switch_flyback);
     BIND_DESIGN(zeta);
     BIND_DESIGN(push_pull);
     BIND_DESIGN(psfb);

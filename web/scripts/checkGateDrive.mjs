@@ -21,7 +21,7 @@
 //                                    control wire straight across the safety barrier.
 // Plus the floor: every drawn gate terminal must actually have a drive stub on it.
 import init from '../../build-wasm-ng/kirchhoff.js'
-import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
+import { TOPOLOGIES, VARIANTS, buildSpec, auditOptions, applyAuditOption } from '../src/topologies.js'
 import { renderForAudit, hasCiasSchematic } from '../src/ciasSchematic.js'
 import { flattenNets } from '../src/cias.js'
 import { fileURLToPath } from 'node:url'
@@ -56,11 +56,11 @@ let checked = 0, gates = 0, flagged = 0
 if (isMain) for (const t of TOPOLOGIES) {
   if (!hasCiasSchematic(t.id)) continue
   const v = VARIANTS[t.id]
-  for (const opt of (v ? v.options.map((o) => o.id) : [null])) {
+  for (const opt of auditOptions(t.id)) {
     const key = `${t.id}${opt ? '/' + opt : ''}`
     if (only && only !== key && only !== t.id) continue
     const spec = buildSpec({ ...t.preset, variant: opt ?? 'standard' }, t.id)
-    if (opt && v) spec.config = { ...(spec.config ?? {}), [v.key]: opt }
+    applyAuditOption(spec, t.id, opt)
     const out = M.design_tas_full(t.id, JSON.stringify(spec))
     if (out.startsWith('Exception')) throw new Error(`${key}: design failed: ${out.slice(0, 200)}`)
     const tas = JSON.parse(out).tas

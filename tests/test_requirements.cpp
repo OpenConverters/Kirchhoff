@@ -20,6 +20,8 @@
 #include "TwoSwitchForward.hpp"
 #include "Sepic.hpp"
 #include "Cuk.hpp"
+#include "InvertingBuckBoost.hpp"
+#include "TwoSwitchFlyback.hpp"
 #include "Zeta.hpp"
 #include "PushPull.hpp"
 #include "Psfb.hpp"
@@ -48,6 +50,7 @@
 #include <functional>
 #include <iostream>
 #include <regex>
+#include <map>
 #include <set>
 #include <sstream>
 #include <string>
@@ -98,9 +101,29 @@ bool parse_meas(const std::string& out, const std::string& name, double& v) {
     if (!std::regex_search(out, m, re)) return false;
     v = std::stod(m[1].str()); return true;
 }
+// Topologies MKF never modelled (ABT #1432-#1440) have no .mkf.json to lift their requirement point from.
+// Their point is stated here instead, in the fixture's own `inputs` shape, so the per-topology gates below
+// read one source either way. A topology with NEITHER still throws: nothing is skipped for lack of data.
+const std::map<std::string, json>& standalone_inputs() {
+    static const std::map<std::string, json> k = {
+        // 24 V -> -12 V, 2 A, 200 kHz (synthetic; D = 1/3 at nominal).
+        // 375 V (a rectified-universal / PFC bus) -> 12 V, 5 A, 65 kHz: the two-switch flyback's home ground
+        // (synthetic; the high bus is what the Vin-clamped switches are for).
+        {"two_switch_flyback", {{"inputVoltage", 375.0}, {"outputVoltage", 12.0}, {"outputCurrent", 5.0},
+                                {"outputPower", 60.0}, {"switchingFrequency", 65000.0}, {"currentRippleRatio", 0.4}}},
+        {"inverting_buck_boost", {{"inputVoltage", 24.0}, {"outputVoltage", 12.0}, {"outputCurrent", 2.0},
+                                  {"outputPower", 24.0}, {"switchingFrequency", 200000.0}, {"currentRippleRatio", 0.4}}},
+    };
+    return k;
+}
+
 json load_fixture(const std::string& topo) {
     std::ifstream f(kRefDir + "/" + topo + ".mkf.json");
-    if (!f) throw std::runtime_error("missing fixture " + topo + ".mkf.json");
+    if (!f) {
+        const auto it = standalone_inputs().find(topo);
+        if (it == standalone_inputs().end()) throw std::runtime_error("missing fixture " + topo + ".mkf.json");
+        return json{{"inputs", it->second}};
+    }
     json fx; f >> fx; return fx;
 }
 // Build the Kirchhoff design-input doc from the fixture requirements (η=1 ideal, ±5 % Vin).
@@ -183,11 +206,13 @@ const std::vector<Topology>& topologies() {
         {"boost",   [](const json& di){ return build_topology(Kirchhoff::design_boost,   Kirchhoff::build_boost_tas,   di); }},
         {"buck",    [](const json& di){ return build_topology(Kirchhoff::design_buck,    Kirchhoff::build_buck_tas,    di); }},
         {"flyback", [](const json& di){ return build_topology(Kirchhoff::design_flyback, Kirchhoff::build_flyback_tas, di); }},
+        {"two_switch_flyback", [](const json& di){ return build_topology(Kirchhoff::design_two_switch_flyback, Kirchhoff::build_two_switch_flyback_tas, di); }},
         {"forward", [](const json& di){ return build_topology(Kirchhoff::design_forward, Kirchhoff::build_forward_tas, di); }},
         {"two_switch_forward", [](const json& di){ return build_topology(Kirchhoff::design_two_switch_forward, Kirchhoff::build_two_switch_forward_tas, di); }},
         {"sepic",   [](const json& di){ return build_topology(Kirchhoff::design_sepic,   Kirchhoff::build_sepic_tas,   di); }},
         {"cuk",     [](const json& di){ return build_topology(Kirchhoff::design_cuk,     Kirchhoff::build_cuk_tas,     di); }},
         {"zeta",    [](const json& di){ return build_topology(Kirchhoff::design_zeta,    Kirchhoff::build_zeta_tas,    di); }},
+        {"inverting_buck_boost", [](const json& di){ return build_topology(Kirchhoff::design_inverting_buck_boost, Kirchhoff::build_inverting_buck_boost_tas, di); }},
         {"push_pull",[](const json& di){ return build_topology(Kirchhoff::design_push_pull, Kirchhoff::build_push_pull_tas, di); }},
         {"psfb",    [](const json& di){ return build_topology(Kirchhoff::design_psfb,    Kirchhoff::build_psfb_tas,    di); }},
         {"ahb",     [](const json& di){ return build_topology(Kirchhoff::design_ahb,     Kirchhoff::build_ahb_tas,     di); }},
@@ -289,6 +314,9 @@ const std::vector<PtpPoint>& ptpPoints() {
         {"buck", 12.0, 5.0, 2.0, 500e3}, {"buck", 12.0, 5.0, 3.0, 400e3}, {"buck", 24.0, 12.0, 8.0, 400e3},
         {"boost", 5.0, 9.0, 2.0, 400e3}, {"boost", 7.2, 16.0, 2.0, 300e3}, {"boost", 12.0, 24.0, 4.5, 250e3},
         {"flyback", 24.0, 6.0, 0.2, 250e3}, {"flyback", 24.0, 15.0, 0.2, 200e3}, {"flyback", 120.0, 12.0, 2.75, 70e3},
+        // two-switch flyback — SYNTHETIC points (no MKF model): 48 V telecom, 120 V, 375 V bus.
+        {"two_switch_flyback", 48.0, 12.0, 2.0, 100e3}, {"two_switch_flyback", 120.0, 24.0, 2.0, 70e3},
+        {"two_switch_flyback", 375.0, 12.0, 5.0, 65e3},
         {"sepic", 5.0, 12.0, 0.5, 600e3}, {"sepic", 3.3, 5.0, 1.0, 250e3}, {"sepic", 12.0, 12.0, 1.0, 250e3},
         {"zeta", 12.0, 5.0, 1.0, 600e3}, {"zeta", 12.0, 12.0, 1.0, 300e3}, {"zeta", 5.0, 12.0, 0.5, 600e3},
         {"push_pull", 5.0, 3.3, 0.35, 410e3}, {"push_pull", 5.0, 3.3, 1.0, 420e3}, {"push_pull", 12.0, 5.0, 1.0, 200e3},
@@ -296,6 +324,10 @@ const std::vector<PtpPoint>& ptpPoints() {
         {"weinberg", 50.0, 150.0, 10.0, 50e3}, {"weinberg", 42.0, 100.0, 5.0, 100e3}, {"weinberg", 24.0, 50.0, 5.0, 100e3},
         // cuk (inverting; Vout is |Vo|) — Erickson §2.4, Bramble LT3757, synthetic 12->-24 V (skip the 1.4 MHz pt).
         {"cuk", 25.0, 25.0, 1.0, 100e3}, {"cuk", 10.0, 5.0, 1.0, 300e3}, {"cuk", 12.0, 24.0, 1.0, 200e3},
+        // inverting buck-boost (Vout is |Vo|) — SYNTHETIC points, no MKF model or EVM fixture behind them:
+        // step-down 12->-5 V, unity 12->-12 V, step-up 5->-12 V, spanning D < 0.5, = 0.5 and > 0.5.
+        {"inverting_buck_boost", 12.0, 5.0, 1.5, 300e3}, {"inverting_buck_boost", 12.0, 12.0, 1.0, 400e3},
+        {"inverting_buck_boost", 5.0, 12.0, 0.4, 500e3},
         // fsbb — TIDA-01411 buck, LM5176 boost, LM5176 buck-boost (4-switch buck-boost spans all 3 modes).
         {"fsbb", 24.0, 12.0, 8.0, 350e3}, {"fsbb", 12.0, 24.0, 5.0, 200e3}, {"fsbb", 24.0, 24.0, 5.0, 200e3},
         // forward (single-switch) — UC3845, NCP1252, Erickson §6.3.
@@ -566,11 +598,13 @@ void check_lm_minimum_only(const std::string& name, size_t nTurnsRatios, double 
 TEST_CASE("Boost meets requirements", "[requirements][boost]")                     { check_meets_requirements("boost"); }
 TEST_CASE("Buck meets requirements", "[requirements][buck]")                       { check_meets_requirements("buck"); }
 TEST_CASE("Flyback meets requirements", "[requirements][flyback]")                 { check_meets_requirements("flyback"); }
+TEST_CASE("Two-switch flyback meets requirements", "[requirements][two_switch_flyback]") { check_meets_requirements("two_switch_flyback"); }
 TEST_CASE("Forward meets requirements", "[requirements][forward]")                 { check_meets_requirements("forward"); }
 TEST_CASE("Two-switch forward meets requirements", "[requirements][tsf]")          { check_meets_requirements("two_switch_forward"); }
 TEST_CASE("SEPIC meets requirements", "[requirements][sepic]")                     { check_meets_requirements("sepic"); }
 TEST_CASE("Cuk meets requirements", "[requirements][cuk]")                         { check_meets_requirements("cuk"); }
 TEST_CASE("Zeta meets requirements", "[requirements][zeta]")                       { check_meets_requirements("zeta"); }
+TEST_CASE("Inverting buck-boost meets requirements", "[requirements][inverting_buck_boost]") { check_meets_requirements("inverting_buck_boost"); }
 TEST_CASE("Push-pull meets requirements", "[requirements][pushpull]")              { check_meets_requirements("push_pull"); }
 TEST_CASE("PSFB meets requirements", "[requirements][psfb]")                       { check_meets_requirements("psfb"); }
 TEST_CASE("AHB meets requirements", "[requirements][ahb]")                         { check_meets_requirements("ahb"); }
@@ -726,12 +760,14 @@ TEST_CASE("Boost synchronous rectifier regulates (abt #67)", "[requirements][boo
     CHECK(std::fabs(vS - vReq) / vReq <= kReqTol);
 }
 TEST_CASE("Flyback PtP reference designs deliver spec", "[requirements][ptp][flyback]")     { check_topo_points("flyback"); }
+TEST_CASE("Two-switch flyback points deliver spec", "[requirements][ptp][two_switch_flyback]") { check_topo_points("two_switch_flyback"); }
 TEST_CASE("SEPIC PtP reference designs deliver spec", "[requirements][ptp][sepic]")         { check_topo_points("sepic"); }
 TEST_CASE("Zeta PtP reference designs deliver spec", "[requirements][ptp][zeta]")           { check_topo_points("zeta"); }
 TEST_CASE("Push-pull PtP reference designs deliver spec", "[requirements][ptp][pushpull]")  { check_topo_points("push_pull"); }
 TEST_CASE("ACF PtP reference designs deliver spec", "[requirements][ptp][acf]")             { check_topo_points("acf"); }
 TEST_CASE("Weinberg PtP reference designs deliver spec", "[requirements][ptp][weinberg]")   { check_topo_points("weinberg"); }
 TEST_CASE("Cuk PtP reference designs deliver spec", "[requirements][ptp][cuk]")             { check_topo_points("cuk"); }
+TEST_CASE("Inverting buck-boost points deliver spec", "[requirements][ptp][inverting_buck_boost]") { check_topo_points("inverting_buck_boost"); }
 TEST_CASE("4SBB PtP reference designs deliver spec", "[requirements][ptp][fsbb]")           { check_topo_points("fsbb"); }
 TEST_CASE("Forward PtP reference designs deliver spec", "[requirements][ptp][forward]")     { check_topo_points("forward"); }
 TEST_CASE("Two-switch forward PtP reference designs deliver spec", "[requirements][ptp][tsf]") { check_topo_points("two_switch_forward"); }

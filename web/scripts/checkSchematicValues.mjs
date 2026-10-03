@@ -14,7 +14,7 @@
 //   RATIO     a transformer drawn with a turns ratio of zero (a winding that cannot transfer anything)
 //   NONFINITE NaN / Infinity reaching the ink
 import init from '../../build-wasm-ng/kirchhoff.js'
-import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
+import { TOPOLOGIES, VARIANTS, buildSpec, auditOptions, applyAuditOption } from '../src/topologies.js'
 import { renderForAudit } from '../src/ciasSchematic.js'
 
 import { fileURLToPath } from 'node:url'
@@ -63,10 +63,10 @@ export function valueProblems(svg) {
 let flagged = 0, checked = 0
 if (isMain) for (const t of TOPOLOGIES) {
   const v = VARIANTS[t.id]
-  for (const opt of (v ? v.options.map((o) => o.id) : [null])) {
+  for (const opt of auditOptions(t.id)) {
     const key = `${t.id}${opt ? '/' + opt : ''}`
     const spec = buildSpec({ ...t.preset, variant: opt ?? 'standard' }, t.id)
-    if (opt && v) spec.config = { ...(spec.config ?? {}), [v.key]: opt }
+    applyAuditOption(spec, t.id, opt)
     const out = M.design_tas_full(t.id, JSON.stringify(spec))
     // A design that throws is not a topology this gate may skip: skipping it silently is how a
     // sweep reports "clean" over a schematic it never rendered.

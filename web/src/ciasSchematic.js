@@ -484,6 +484,44 @@ const LAYOUTS = {
       sig(204, 150, 'g1', 'down'), ctrlIC(b, 680, 250, ['g1']),
     ],
   },
+  // ── non-isolated: inverting buck-boost (ABT #1433) ─────────────────────────
+  // Q1 high side into the switch node; L1 from the switch node DOWN to the return; the rectifier runs
+  // from the switch node to the NEGATIVE output rail (anode on the rail). The Vout side reads left→right
+  // like buck's, so the two cells compare at a glance: only where L and the rectifier sit differs.
+  inverting_buck_boost: {
+    // y=110 rail: Q2's ref and value sit ABOVE it (mosfetH), so the body diode D2 gets its own row at
+    // y=40, clear of them. With the rail at 80 the two shared one band and a click on "Q2" hit D2.
+    size: [760, 330],
+    place: {
+      Q1:   { draw: (b) => mosfetH('Q1', b, 180, 110) },
+      L1:   { draw: (b) => indV('L1', b, 260, 180) },
+      D1:   { draw: (b) => diode('D1', b, 340, 110, 'left', 'above') },          // diode variant: anode on −Vout
+      Q2:   { draw: (b) => mosfetH('Q2', b, 340, 110) },                         // synchronous variant
+      Cout: { draw: (b) => capV('Cout', b, 440, 180) },
+    },
+    wires: [
+      { from: '@src.p0', to: 'Q1.drain', via: [[70, 110]] },                  // Vin+ rail → high-side switch
+      { from: '@src.p1', to: [530, 250], via: [[70, 250]] },                  // return rail (L1 and Cout end here)
+      { from: 'Q1.source', to: [260, 110] },                                  // switch node
+      { from: 'L1.p0', to: [260, 110] },
+      { from: 'L1.p1', to: [260, 250] },
+      { from: 'D1.cathode', to: [260, 110], needs: ['D1'] },
+      { from: 'D1.anode', to: '@port.VOUT (−)', via: [[640, 110]], needs: ['D1'] },
+      { from: 'Q2.drain', to: [260, 110], needs: ['Q2'] },
+      { from: 'Q2.source', to: '@port.VOUT (−)', via: [[640, 110]], needs: ['Q2'] },
+      { from: 'D2.cathode', to: [280, 110], via: [[280, 40]], needs: ['Q2'] },   // 280: clear of Q2's value text
+      { from: 'D2.anode', to: [400, 110], via: [[400, 40]], needs: ['Q2'] },
+      { from: 'Cout.p0', to: [440, 110] },
+      { from: 'Cout.p1', to: [440, 250] },
+    ],
+    synth: (b, present) => [
+      srcDC(70, 180), loadR(530, 180, 110, 250), gnd(190, 250), port(640, 110, 'VOUT (−)'),
+      // Q2's body diode: a TAS component (role bodyDiode) filtered out of the BOM, drawn on its own row.
+      ...(present.has('Q2') ? [diode('D2', b, 345, 40, 'left', 'above', true), sig(340, 136, 'g2', 'down')] : []),
+      sig(180, 136, 'g1', 'down'),
+      ctrlIC(b, 660, 250, present.has('Q2') ? ['g1', 'g2'] : ['g1']),
+    ],
+  },
   // ── non-isolated: Zeta ────────────────────────────────────────────────────
   zeta: {
     size: [760, 300],
@@ -601,6 +639,54 @@ const LAYOUTS = {
       diode('DS1', b, 160, 125, 'up', 'left'), diode('DS2', b, 160, 235, 'up', 'left'),
       sig(204, 110, 'g1', 'down'), sig(204, 250, 'g2', 'down'),
       ctrlIC(b, 140, 350, ['g1', 'g2']),
+    ],
+  },
+  // ── isolated: two-switch flyback (ABT #1436) ─────────────────────────────
+  // Q1 above the primary (Vin → primary start), Q2 below it (primary end → GND); the clamp diodes Dc1
+  // (GND → primary start) and Dc2 (primary end → Vin) stand to the left, outside the switch column. The
+  // secondary is the flyback's: dot at the bottom (opposite phasing), rectifier D1 into Cout.
+  two_switch_flyback: {
+    // Columns: source 60 · Cin 120 · Dc1 200 · Dc2 270 · RC damper 380 · primary 460. Q1 sits clear above T1
+    // (hotspots must not overlap) and T1's label goes right of the secondary, away from Q1 and D1.
+    size: [900, 420],
+    place: {
+      Cin: { draw: (b) => capV('Cin', b, 120, 160) },
+      Dc1: { draw: (b) => diode('Dc1', b, 200, 230, 'up', 'left') },
+      Dc2: { draw: (b) => diode('Dc2', b, 270, 150, 'up', 'right') },
+      // RC damper across the primary itself (hi → sw), in series: cap from the primary start, resistor to its end.
+      Cclmp: { draw: (b) => capV('Cclmp', b, 380, 125) },
+      Rclmp: { draw: (b) => resV('Rclmp', b, 380, 175) },
+      Q1:  { draw: (b) => mosfetV('Q1', b, 460, 66, 'right', true) },
+      Q2:  { draw: (b) => mosfetV('Q2', b, 460, 236, 'right', true) },
+      T1:  { draw: (b) => xfmr('T1', b, 470, 150, { opp: true, labelDx: 130, labelDy: 54 }) },
+      D1:  { draw: (b) => diode('D1', b, 570, 70, 'right') },
+      Cout: { draw: (b) => capV('Cout', b, 670, 195) },
+    },
+    wires: [
+      { from: '@src.p0', to: 'Q1.drain', via: [[60, 40]] },                              // Vin+ rail → Q1
+      { from: '@src.p1', to: [460, 280], via: [[60, 280]] },                             // primary return rail
+      { from: 'Q2.source', to: [460, 280] },
+      { from: 'Cin.p0', to: [120, 40] },
+      { from: 'Cin.p1', to: [120, 280] },
+      { from: 'Q1.source', to: 'T1.p0' },                                                // high side → primary start
+      { from: 'T1.p1', to: 'Q2.drain' },                                                 // primary end → low side
+      { from: 'Dc1.cathode', to: [460, 100], via: [[200, 100]] },                        // clamp: GND → primary start
+      { from: 'Dc1.anode', to: [200, 280] },
+      { from: 'Dc2.anode', to: [460, 200], via: [[270, 200]] },                          // clamp: primary end → Vin
+      { from: 'Dc2.cathode', to: [270, 40] },
+      { from: 'Cclmp.p0', to: [380, 100] },                                              // damper: primary start
+      { from: 'Cclmp.p1', to: 'Rclmp.p0' },
+      { from: 'Rclmp.p1', to: [380, 200] },                                              // damper: primary end
+      { from: 'T1.s0', to: 'D1.anode', via: [[510, 110], [510, 70]] },
+      { from: 'D1.cathode', to: '@port.VOUT', via: [[850, 70]] },
+      { from: 'T1.s1', to: '@port.RTN', via: [[510, 190], [510, 330], [850, 330]] },
+      { from: 'Cout.p0', to: [670, 70] },
+      { from: 'Cout.p1', to: [670, 330] },
+    ],
+    synth: (b) => [
+      srcDC(60, 160), gnd(240, 280), loadR(760, 195, 70, 330),
+      port(850, 70, 'VOUT'), port(850, 330, 'RTN'),
+      sig(434, 66, 'g1'), sig(434, 236, 'g2'), ctrlIC(b, 600, 385, ['g1', 'g2']),
     ],
   },
   // ── isolated: buck-boost with an auxiliary isolated rail ──────────────────
@@ -1339,6 +1425,111 @@ const LAYOUTS = {
 
 // Can this topology be drawn? Every one can (ABT #684) — the test remains so that adding a topology
 // without a layout fails loudly at the call sites rather than rendering nothing.
+// ── interleaved buck / boost (ABT #1437) ─────────────────────────────────────
+// config.phaseCount = N replicates the switching cell as <ref>_<k>. One ROW per phase between a shared Vin
+// bus on the left and a shared Vout bus on the right; each phase returns to its own ground glyph (all @gnd
+// glyphs are one net), so no rail has to cross another phase's parts. The phase count is read off the
+// CIAS (how many Q1_<k> it carries), never off a config value.
+const phaseCountOf = (present) => { let n = 0; while (present.has(`Q1_${n + 1}`)) n++; return n }
+const ROW = 130, Y0 = 80
+
+const interleavedBuck = (present) => {
+  const N = phaseCountOf(present), sync = present.has('Q2_1')
+  const yLast = Y0 + (N - 1) * ROW
+  const place = { Cout: { draw: (b) => capV('Cout', b, 520, Y0 + 70) } }
+  const wires = [
+    { from: '@src.p0', to: [110, Y0], via: [[60, Y0]] },
+    { from: '@src.p1', to: [60, Y0 + 100] },
+    { from: [110, Y0], to: [110, yLast] },                                   // Vin bus
+    { from: [440, Y0], to: [440, yLast] },                                   // Vout bus
+    { from: [440, Y0], to: '@port.VOUT' },
+    { from: 'Cout.p0', to: [520, Y0] },
+    { from: 'Cout.p1', to: [520, Y0 + 130] },
+  ]
+  const synth = []
+  const gates = []
+  for (let k = 1; k <= N; k++) {
+    const y = Y0 + (k - 1) * ROW
+    place[`Q1_${k}`] = { draw: (b) => mosfetH(`Q1_${k}`, b, 180, y) }
+    place[`L1_${k}`] = { draw: (b) => indH(`L1_${k}`, b, 360, y) }
+    wires.push({ from: [110, y], to: `Q1_${k}.drain` }, { from: `Q1_${k}.source`, to: `L1_${k}.p0` },
+               { from: `L1_${k}.p1`, to: [440, y] })
+    if (sync) {
+      place[`Q2_${k}`] = { draw: (b) => mosfetV(`Q2_${k}`, b, 250, y + 50, 'right', true) }
+      wires.push({ from: `Q2_${k}.drain`, to: [250, y] }, { from: `Q2_${k}.source`, to: [250, y + 92] },
+                 { from: `D2_${k}.cathode`, to: [320, y] }, { from: `D2_${k}.anode`, to: [320, y + 92] },
+                 { from: [250, y + 92], to: [320, y + 92] })
+      synth.push((b) => diode(`D2_${k}`, b, 320, y + 50, 'up', 'right', true), () => sig(224, y + 50, `g${k}b`),   // D2 at 320: clear of Q2's ref
+                 () => gnd(250, y + 92))
+      gates.push(`g${k}`, `g${k}b`)
+    } else {
+      place[`D1_${k}`] = { draw: (b) => diode(`D1_${k}`, b, 250, y + 50, 'up', 'right') }
+      wires.push({ from: `D1_${k}.cathode`, to: [250, y] }, { from: `D1_${k}.anode`, to: [250, y + 92] })
+      synth.push(() => gnd(250, y + 92))
+      gates.push(`g${k}`)
+    }
+    synth.push(() => sig(180, y + 26, `g${k}`, 'down'))
+  }
+  return {
+    size: [760, Y0 + N * ROW + 40],
+    place, wires,
+    synth: (b) => [srcDC(60, Y0 + 70), gnd(60, Y0 + 100), loadR(600, Y0 + 70, Y0, Y0 + 130), gnd(520, Y0 + 130),
+                   gnd(600, Y0 + 130), port(680, Y0, 'VOUT'), ...synth.map((f) => f(b)),
+                   ctrlIC(b, 660, Y0 + 230, gates)],
+  }
+}
+
+// 150 px rows: Q2's ref sits BELOW it (y+70) and the next row's body diode D2 above ITS rail (y−40).
+const interleavedBoost = (present) => {
+  const ROW = 150
+  const N = phaseCountOf(present), sync = present.has('Q2_1')
+  const yLast = Y0 + (N - 1) * ROW
+  const place = { Cout: { draw: (b) => capV('Cout', b, 540, Y0 + 70) } }
+  const wires = [
+    { from: '@src.p0', to: [110, Y0], via: [[60, Y0]] },
+    { from: '@src.p1', to: [60, Y0 + 100] },
+    { from: [110, Y0], to: [110, yLast] },                                   // Vin bus
+    { from: [460, Y0], to: [460, yLast] },                                   // Vout bus
+    { from: [460, Y0], to: '@port.VOUT' },
+    { from: 'Cout.p0', to: [540, Y0] },
+    { from: 'Cout.p1', to: [540, Y0 + 130] },
+  ]
+  const synth = []
+  const gates = []
+  for (let k = 1; k <= N; k++) {
+    const y = Y0 + (k - 1) * ROW
+    place[`L1_${k}`] = { draw: (b) => indH(`L1_${k}`, b, 170, y) }
+    place[`Q1_${k}`] = { draw: (b) => mosfetV(`Q1_${k}`, b, 260, y + 50, 'right', true) }
+    wires.push({ from: [110, y], to: `L1_${k}.p0` }, { from: `Q1_${k}.drain`, to: [260, y] },
+               { from: `Q1_${k}.source`, to: [260, y + 92] })
+    if (sync) {
+      place[`Q2_${k}`] = { draw: (b) => mosfetH(`Q2_${k}`, b, 360, y, true, true, 'below') }
+      wires.push({ from: `L1_${k}.p1`, to: `Q2_${k}.source` }, { from: `Q2_${k}.drain`, to: [460, y] },
+                 { from: `D2_${k}.anode`, to: [334, y], via: [[334, y - 40]] },
+                 { from: `D2_${k}.cathode`, to: [386, y], via: [[386, y - 40]] })
+      synth.push((b) => diode(`D2_${k}`, b, 360, y - 40, 'right', 'above', true), () => sig(360, y + 26, `g${k}b`, 'down'))
+      gates.push(`g${k}`, `g${k}b`)
+    } else {
+      place[`D1_${k}`] = { draw: (b) => diode(`D1_${k}`, b, 360, y, 'right') }
+      wires.push({ from: `L1_${k}.p1`, to: `D1_${k}.anode` }, { from: `D1_${k}.cathode`, to: [460, y] })
+      gates.push(`g${k}`)
+    }
+    synth.push(() => gnd(260, y + 92), () => sig(234, y + 50, `g${k}`))
+  }
+  return {
+    size: [780, Y0 + N * ROW + 40],
+    place, wires,
+    synth: (b) => [srcDC(60, Y0 + 70), gnd(60, Y0 + 100), loadR(620, Y0 + 70, Y0, Y0 + 130), gnd(540, Y0 + 130),
+                   gnd(620, Y0 + 130), port(700, Y0, 'VOUT'), ...synth.map((f) => f(b)),
+                   ctrlIC(b, 680, Y0 + 230, gates)],
+  }
+}
+
+for (const [id, multi] of [['buck', interleavedBuck], ['boost', interleavedBoost]]) {
+  const single = LAYOUTS[id]
+  LAYOUTS[id] = (present) => (present.has('Q1_1') ? multi(present) : single)
+}
+
 export function hasCiasSchematic(topologyId) { return topologyId in LAYOUTS || topologyId === EMI_FILTER_SCHEMATIC }
 
 // EXACTLY what the app renders, plus the anchor pins the offline checkers need. Every gate must render

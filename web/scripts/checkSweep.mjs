@@ -16,7 +16,7 @@
 // A design that cannot be solved at a point (the engine throws) is skipped and counted — that is a
 // legitimate answer from the engine, not a drawing defect.
 import init from '../../build-wasm-ng/kirchhoff.js'
-import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
+import { TOPOLOGIES, VARIANTS, buildSpec, auditOptions, applyAuditOption } from '../src/topologies.js'
 import { extractBom } from '../src/bom.js'
 // Renders through the SAME entry point the app uses (renderForAudit). Every topology is generated from
 // CIAS now, but the rule stands: measure what the product draws, never a reconstruction of it.
@@ -67,7 +67,7 @@ for (const t of TOPOLOGIES) {
   if (!hasCiasSchematic(t.id)) continue
   if (only && t.id !== only) continue
   const v = VARIANTS[t.id]
-  for (const opt of (v ? v.options.map((o) => o.id) : [null])) {
+  for (const opt of auditOptions(t.id)) {
     for (const [pt, kVin, kVout, kP, fsw] of POINTS) {
       if (onlyPoint && pt !== onlyPoint) continue
       const preset = { ...t.preset, variant: opt ?? 'standard' }
@@ -82,7 +82,7 @@ for (const t of TOPOLOGIES) {
         .map((o) => ({ ...o, voltage: o.voltage * kVout, power: o.power * kP }))
       if (fsw) preset.fs = fsw          // buildSpec reads form.fs, not .fsw
       const spec = buildSpec(preset, t.id)
-      if (opt && v) spec.config = { ...(spec.config ?? {}), [v.key]: opt }
+      applyAuditOption(spec, t.id, opt)
       const out = M.design_tas_full(t.id, JSON.stringify(spec))
       const name = `${t.id}${opt ? '/' + opt : ''} @ ${pt}`
       if (out.startsWith('Exception')) { skipped++; skips.push(`${t.id}${opt ? '/' + opt : ''} @${pt}: ${out.slice(10, 120).trim()}`); continue }

@@ -22,7 +22,7 @@
 // Points are sampled along the real stroke geometry (getPointAtLength), not from bounding boxes: a
 // bounding box of a transformer arc is mostly empty space, and hit-testing empty space proves nothing.
 import init from '../../build-wasm-ng/kirchhoff.js'
-import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
+import { TOPOLOGIES, VARIANTS, buildSpec, auditOptions, applyAuditOption } from '../src/topologies.js'
 import { renderForAudit, hasCiasSchematic } from '../src/ciasSchematic.js'
 import { HARNESS_CSS as CSS } from './harnessCss.mjs'
 import { chromium } from '@playwright/test'
@@ -106,11 +106,11 @@ let flagged = 0, totalPts = 0, badPts = 0
 for (const t of TOPOLOGIES) {
   if (!hasCiasSchematic(t.id)) continue
   const v = VARIANTS[t.id]
-  for (const opt of (v ? v.options.map((o) => o.id) : [null])) {
+  for (const opt of auditOptions(t.id)) {
     const key = opt ? `${t.id}/${opt}` : t.id
     if (only && only !== key && only !== t.id) continue
     const spec = buildSpec({ ...t.preset, variant: opt ?? 'standard' }, t.id)
-    if (opt && v) spec.config = { ...(spec.config ?? {}), [v.key]: opt }
+    applyAuditOption(spec, t.id, opt)
     const out = M.design_tas_full(t.id, JSON.stringify(spec))
     // A design that throws is not a topology this gate may skip: skipping it silently is how a
     // sweep reports "clean" over a schematic it never rendered.

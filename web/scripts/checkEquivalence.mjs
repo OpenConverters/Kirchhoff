@@ -18,7 +18,7 @@
 // Rules 4-6 are what make this more than a drawing check: the deck and the transient come from the same
 // TAS the schematic was drawn from, so a divergence anywhere shows up here.
 import init from '../../build-wasm-ng/kirchhoff.js'
-import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
+import { TOPOLOGIES, VARIANTS, buildSpec, auditOptions, applyAuditOption } from '../src/topologies.js'
 // Renders through the SAME entry point the app uses (renderForAudit). Every topology is generated from
 // CIAS now, but the rule stands: measure what the product draws, never a reconstruction of it.
 import { renderForAudit, hasCiasSchematic } from '../src/ciasSchematic.js'
@@ -77,10 +77,10 @@ let failed = 0, checked = 0
 for (const t of TOPOLOGIES) {
   if (only && t.id !== only) continue
   const v = VARIANTS[t.id]
-  for (const opt of (v ? v.options.map((o) => o.id) : [null])) {
+  for (const opt of auditOptions(t.id)) {
     const name = `${t.id}${opt ? '/' + opt : ''}`
     const spec = buildSpec({ ...t.preset, variant: opt ?? 'standard' }, t.id)
-    if (opt && v) spec.config = { ...(spec.config ?? {}), [v.key]: opt }
+    applyAuditOption(spec, t.id, opt)
     const out = M.design_tas_full(t.id, JSON.stringify(spec))
     if (out.startsWith('Exception')) { console.error(`${name}: design failed: ${out.slice(0, 120)}`); failed++; continue }
     const tas = JSON.parse(out).tas

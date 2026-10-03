@@ -65,7 +65,8 @@ _CONTROL = {
 }
 _TOPO_CONTROL = {
     **{t: "duty" for t in ("boost", "buck", "flyback", "forward", "two_switch_forward", "sepic", "cuk",
-                           "zeta", "ahb", "acf", "fsbb", "weinberg", "isolated_buck", "isolated_buck_boost")},
+                           "zeta", "ahb", "acf", "fsbb", "weinberg", "isolated_buck", "isolated_buck_boost",
+                           "inverting_buck_boost", "two_switch_flyback")},
     "push_pull": "ppDuty",   # buck-derived center-tapped: per-switch duty < 0.5 (overlap shorts the primary)
     **{t: "phase" for t in ("psfb", "dab")},
     "pshb": "pshbDuty",   # 3-level NPC: control the outer-pair width, not a leg phase (abt #66)

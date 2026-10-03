@@ -15,6 +15,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace Kirchhoff {
@@ -210,6 +211,28 @@ MAS::OperatingPoint analytical_zeta(double inputVoltage, double outputVoltage,
                                     double outputCurrent, double switchingFrequency,
                                     double inductanceL1, double diodeVoltageDrop = 0.0,
                                     double efficiency = 1.0, double maximumDutyCycle = 0.95);
+
+// One winding's current over one period as (time, value) samples, COPIED out of the operating point (the
+// MAS accessors return optionals by value, so a reference into them dangles). A waveform stored without a
+// time vector is taken as uniformly spaced over [0, period]. Throws when the winding has no current waveform.
+std::pair<std::vector<double>, std::vector<double>> winding_current_samples(const MAS::OperatingPoint& op,
+                                                                            std::size_t winding, double period);
+
+// Inverting buck-boost (ABT #1433): single switch, single inductor L1 (sw -> gnd), output rail −|Vo|.
+// Not an MKF port (MKF never had this topology): its own closed form, validated against ngspice.
+// The operating mode follows from the inductance — CCM when the CCM valley current stays >= 0, DCM otherwise.
+//   CCM: D = (|Vo|+Vd)/(Vin·η + |Vo|+Vd),  iL_avg = Iout/(1−D),  ΔiL = Vin·D/(L·fsw)
+//   DCM: ½·L·Ipk²·fsw = Iout·(|Vo|+Vd)/η  ->  tOn = √(2·L·Iout·(|Vo|+Vd)/(η·fsw·Vin²)),  tOff = L·Ipk/(|Vo|+Vd)
+// The winding voltage is taken sw -> gnd: +Vin while Q1 conducts, −(|Vo|+Vd) while D1 does, 0 when dry.
+struct InvertingBuckBoostTiming { double dutyCycle; double tOn, tOff, period; bool dcm; };
+InvertingBuckBoostTiming inverting_buck_boost_timing(double inputVoltage, double outputVoltage,
+                                                     double outputCurrent, double switchingFrequency,
+                                                     double inductance, double diodeVoltageDrop,
+                                                     double efficiency);
+MAS::OperatingPoint analytical_inverting_buck_boost(double inputVoltage, double outputVoltage,
+                                                    double outputCurrent, double switchingFrequency,
+                                                    double inductance, double diodeVoltageDrop = 0.0,
+                                                    double efficiency = 1.0, double maximumDutyCycle = 0.95);
 
 // Four-switch buck-boost mode selector. BUCK_BOOST_AUTO reproduces MKF's separate BUCK/BOOST
 // region models (throws in the Vo==Vin transition). SIMULTANEOUS is the 4-switch simultaneous

@@ -8,7 +8,7 @@
 // two collinear spans overlapping (a wire drawn through a part). This script just makes that proof
 // repeatable outside the browser, like checkSchematicNets.mjs does for the SVG.
 import init from '../../build-wasm-ng/kirchhoff.js'
-import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
+import { TOPOLOGIES, VARIANTS, buildSpec, auditOptions, applyAuditOption } from '../src/topologies.js'
 import { falstadExport, hasVisualSim } from '../src/falstad.js'
 
 const M = await init()
@@ -16,9 +16,9 @@ let checked = 0, failed = 0, skipped = 0
 for (const t of TOPOLOGIES) {
   if (!hasVisualSim(t.id)) continue
   const v = VARIANTS[t.id]
-  for (const opt of (v ? v.options.map((o) => o.id) : [null])) {
+  for (const opt of auditOptions(t.id)) {
     const spec = buildSpec({ ...t.preset, variant: opt ?? 'standard' }, t.id)
-    if (opt && v) spec.config = { ...(spec.config ?? {}), [v.key]: opt }
+    applyAuditOption(spec, t.id, opt)
     const out = M.design_tas_full(t.id, JSON.stringify(spec))
     if (out.startsWith('Exception')) { console.error(`${t.id}/${opt}: design failed: ${out.slice(0, 160)}`); failed++; continue }
     try {

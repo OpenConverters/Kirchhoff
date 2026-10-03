@@ -9,7 +9,7 @@
 // purpose, to clear the secondary). The threshold-free question is the one that actually misleads:
 // is the label closer to a DIFFERENT component than to the one it names?
 import init from '../../build-wasm-ng/kirchhoff.js'
-import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
+import { TOPOLOGIES, VARIANTS, buildSpec, auditOptions, applyAuditOption } from '../src/topologies.js'
 import { extractBom } from '../src/bom.js'
 // Renders through the SAME entry point the app uses (renderForAudit). Every topology is generated from
 // CIAS now, but the rule stands: measure what the product draws, never a reconstruction of it.
@@ -31,11 +31,11 @@ let flagged = 0, checked = 0, worst = []
 for (const t of TOPOLOGIES) {
   if (!hasCiasSchematic(t.id)) continue
   const v = VARIANTS[t.id]
-  for (const opt of (v ? v.options.map((o) => o.id) : [null])) {
+  for (const opt of auditOptions(t.id)) {
     const key = opt ? `${t.id}/${opt}` : t.id
     if (only && only !== key && only !== t.id) continue
     const spec = buildSpec({ ...t.preset, variant: opt ?? 'standard' }, t.id)
-    if (opt && v) spec.config = { ...(spec.config ?? {}), [v.key]: opt }
+    applyAuditOption(spec, t.id, opt)
     const out = M.design_tas_full(t.id, JSON.stringify(spec))
     // A design that throws is not a topology this gate may skip: skipping it silently is how a
     // sweep reports "clean" over a schematic it never rendered.

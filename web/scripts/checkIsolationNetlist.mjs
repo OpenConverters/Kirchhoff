@@ -26,7 +26,7 @@
 //                absent from the BOM; a snubber the solver needs must not be able to define isolation
 //   gate pins    a gate is driven, not conducted through
 import init from '../../build-wasm-ng/kirchhoff.js'
-import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
+import { TOPOLOGIES, VARIANTS, buildSpec, auditOptions, applyAuditOption } from '../src/topologies.js'
 import { renderForAudit, hasCiasSchematic } from '../src/ciasSchematic.js'
 import { flattenNets } from '../src/cias.js'
 import { wireGraph } from '../src/schematicCheck.js'
@@ -138,11 +138,11 @@ const isMain = process.argv[1] && fileURLToPath(import.meta.url) === path.resolv
 let isolated = 0, breached = 0, checked = 0
 if (isMain) for (const t of TOPOLOGIES) {
   const v = VARIANTS[t.id]
-  for (const opt of (v ? v.options.map((o) => o.id) : [null])) {
+  for (const opt of auditOptions(t.id)) {
     const key = `${t.id}${opt ? '/' + opt : ''}`
     if (only && only !== key && only !== t.id) continue
     const spec = buildSpec({ ...t.preset, variant: opt ?? 'standard' }, t.id)
-    if (opt && v) spec.config = { ...(spec.config ?? {}), [v.key]: opt }
+    applyAuditOption(spec, t.id, opt)
     const out = M.design_tas_full(t.id, JSON.stringify(spec))
     // A design that throws is not a combo this gate may pass over in silence.
     if (out.startsWith('Exception')) throw new Error(`${key}: design failed: ${out.slice(0, 200)}`)

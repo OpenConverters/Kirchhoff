@@ -5,18 +5,21 @@ design math + TAS assembly + runnable SPICE deck, exportable and usable independ
 magnetics design. (Historically these models lived in OpenMagnetics/MKF; they are migrating
 here as MKF returns to being a pure magnetics library — see `docs/MKF_MIGRATION.md`.)
 
-## Implemented today (24 topologies)
+## Implemented today (26 topologies)
 
 | Family | Topologies | Verification |
 |---|---|---|
 | Non-isolated DC-DC | Buck, Boost, Ćuk, SEPIC, Zeta, FSBB (4-switch buck-boost) | MKF-equivalence |
+| Non-isolated DC-DC | Inverting buck-boost (CCM/DCM, diode/synchronous) | standalone (closed form vs ngspice) |
 | Isolated single/two-switch | Flyback, Forward, Two-switch forward, Active-clamp forward, Push-pull, AHB, Isolated-buck (Flybuck), Isolated-buck-boost, Weinberg | MKF-equivalence |
+| Isolated single/two-switch | Two-switch flyback (CCM/DCM/BCM; clamp diodes return the leakage energy to Vin) | standalone (vs the single-switch flyback deck) |
 | Isolated bridge / phase-shift | PSFB, PSHB (3-level NPC), DAB (bidirectional) | MKF-equivalence |
 | Resonant | LLC, SRC, CLLC, CLLLC | LLC/SRC/CLLC vs MKF; CLLLC standalone |
 | AC-input PFC | PFC (1-φ boost), Vienna (3-φ 3-level) | standalone |
 
 21 are gated by the MKF-equivalence suite; CLLLC/PFC/Vienna diverge from MKF by design
-(AC input and/or closed-loop control expressed in CIAS) and are validated standalone.
+(AC input and/or closed-loop control expressed in CIAS) and are validated standalone, as is every
+topology MKF never modelled (the inverting buck-boost onwards).
 
 ## Variants already implemented (formerly listed as gaps)
 
@@ -25,7 +28,8 @@ here as MKF returns to being a pure magnetics library — see `docs/MKF_MIGRATIO
 - **Flyback conduction modes** — CCM / DCM / BCM / QRM valley switching (ABT #80).
 - **LLC/SRC full-bridge primary** + above/below-resonance operation (ABT #91).
 - **PFC variants** — totem-pole, interleaved, SEPIC, Ćuk; DCM / CrM / transition modes (ABT #92).
-- **Interleaving** — FSBB (ABT #94), Vienna (ABT #93), PFC (ABT #92) via `config.phaseCount`.
+- **Interleaving** — FSBB (ABT #94), Vienna (ABT #93), PFC (ABT #92), and buck / boost (2–6 phases,
+  ABT #1437) via `config.phaseCount`; buck/boost by the generic `interleave_stage` transform (`Interleave.hpp`).
 - **AHB flyback** — the asymmetric-half-bridge flyback rectifier variant of AHB (ABT #87). Not the
   same circuit as the active-clamp flyback below (clamp cap in series with the primary, not across it).
 - **CLLC/CLLLC bidirectional** reverse power flow (ABT #85).
@@ -33,29 +37,27 @@ here as MKF returns to being a pure magnetics library — see `docs/MKF_MIGRATIO
 ## Remaining gaps — prioritized (each tracked in ABT)
 
 ### Tier 1 — fundamental gaps
-- **Inverting buck-boost** (ABT #1433) — textbook parent of Ćuk/SEPIC/Zeta/FSBB. Cheapest add.
 - **Symmetric (hard-switched) half-bridge PWM** (ABT #1434) — split-cap two-switch isolated converter.
 - **Hard-switched full-bridge PWM** (ABT #1435) — the plain bridge PSFB and AHB are variants of.
-- **Two-switch (double-ended) flyback** (ABT #1436) — clamp diodes return leakage energy to Vin.
 
 ### Tier 2 — high-value modern variants
 - **Active-clamp flyback** (ABT #1432) — clamp switch + clamp cap across the primary (high-/low-side),
   ZVS, complementary / non-complementary modes. Dominant USB-PD / GaN adapter topology.
 - **LCC resonant** (ABT #1438) — series-parallel tank, HV outputs where winding capacitance is Cp.
 
-### Tier 3 — interleaving & multilevel
-- **Interleaved (multiphase) buck / boost** (ABT #1437) — reuse `config.phaseCount`.
+### Tier 3 — multilevel
 - **Flying-capacitor multilevel (FCML) buck/boost** (ABT #1439).
 
-### Tier 4 — scope expansion (deliberate yes/no, not drift)
-- **DC-AC inverters** (ABT #1440) — 1-φ full-bridge, 3-φ 2-level VSI, NPC. Decide explicitly whether
-  "any power-converter topology" includes inverters.
+### Tier 4 — scope expansion (decided 2026-10-03: in scope)
+- **DC-AC inverters** (ABT #1440) — 1-φ full-bridge SPWM + LC filter first, then 3-φ 2-level VSI, then NPC
+  (PEAS topology values singlePhaseInverter / threePhaseInverter).
+- **DAB variants** (ABT #1664) — modulation (SPS/EPS/DPS/TPS, already in the engine) as a selectable
+  variant, dual-active half-bridge, three-phase DAB.
 
 ### PSFB practical refinements (not new topologies)
 - ZVS-aware Lr sizing + ZVS load boundary (ABT #1428), primary clamp diodes (ABT #1429),
   DC-blocking cap + flux-walk test (ABT #1430), current-transformer flux / reset / placement (ABT #1431).
 
-### Suggested next three
-1. Active-clamp flyback (highest real-world relevance).
-2. Inverting buck-boost (trivial; closes the textbook hole).
-3. Hard-switched half-bridge + full-bridge (the PWM-bridge family the phase-shift variants imply).
+### Order being worked (2026-10-03)
+Interleaved buck/boost → two-switch flyback → active-clamp flyback → hard-switched half-bridge →
+hard-switched full-bridge → LCC → FCML → inverters (in scope, decided 2026-10-03). Tracked per ABT ticket.

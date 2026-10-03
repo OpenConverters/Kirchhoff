@@ -3,6 +3,7 @@
 #include "ComponentRequirements.hpp"
 #include "ConverterAnalytical.hpp"   // single FHA source: analytical_buck + excitations_processed/winding_current
 #include "KirchhoffConfig.hpp"
+#include "Interleave.hpp"
 #include <cmath>
 #include <string>
 #include <vector>
@@ -12,6 +13,17 @@ using nlohmann::json;
 
 namespace {
 double nominal(const json& j) { return PEAS::resolve_dimensional_values(j); }
+
+// The output capacitor's charge ripple for an interleaved buck at one input voltage: N staggered copies of
+// the per-phase inductor current (from the analytical solver, CCM or DCM as the inductance dictates).
+InterleavedRipple buck_interleaved_cap_ripple(const BuckDesign& d, double vin) {
+    const double T = 1.0 / d.switchingFrequency;
+    const double iPhase = d.outputPower / d.outputVoltage / d.phaseCount;
+    const MAS::OperatingPoint op = analytical::analytical_buck(vin, d.outputVoltage, iPhase, d.switchingFrequency,
+                                                               d.inductance, d.diodeDrop, d.efficiency);
+    const auto [t, i] = analytical::winding_current_samples(op, 0, T);
+    return interleaved_capacitor_ripple(t, i, T, d.phaseCount);
+}
 } // namespace
 
 BuckDesign design_buck(const json& tasInputs) {
@@ -48,9 +60,13 @@ BuckDesign design_buck(const json& tasInputs) {
     // loss (I^2*Rds vs I*Vf) -> higher efficiency.
     d.synchronousRectifier = (cfg::get_str(d.config, "rectifier", "diode") == std::string("synchronous"));
     d.deadFraction = cfg::get(d.config, "deadTimeFraction", 0.01);   // 1% of the period per dead band
+    // Interleaving (ABT #1437): N cells share the rails, each carrying Iout/N. Everything a CELL is sized
+    // for below uses the per-phase current; N = 1 is the ordinary single-phase buck, unchanged.
+    d.phaseCount = phase_count(d.config, "design_buck");
+    const double N = static_cast<double>(d.phaseCount);
 
     // Buck duty (MKF): D = (Vout+Vd) / ((Vin+Vd)*eff). Ideal -> Vout/Vin.
-    d.diodeDrop = req::rectifier_drop(d.config, d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
+    d.diodeDrop = req::rectifier_drop(d.config, d.outputPower / d.outputVoltage / N);  // DIDEAL Vf at the operating rectifier current
     const double Vo = d.outputVoltage + d.diodeDrop;
     // With a synchronous rectifier the freewheel path is a near-ideal MOSFET (no Vf), so NO diode-drop
     // compensation: D = Vout/(Vin*eff). With a diode, compensate for its forward drop as MKF does.
@@ -62,19 +78,70 @@ BuckDesign design_buck(const json& tasInputs) {
     //   maximumCurrentRiple = currentRippleRatio * Iout
     //   L = Vout*(Vin_max - Vout) / (maximumCurrentRiple * fsw * Vin_max)
     const double rippleRatio = cfg::ripple_ratio(d.config, 0.4);
-    const double iout = d.outputPower / d.outputVoltage;
+    const double iout = d.outputPower / d.outputVoltage / N;   // per phase
     // Ripple-ratio rule by default; config "maximumSwitchCurrent" instead sizes L so the peak inductor/
     // switch current (Iout + ΔIL/2) lands exactly on the cap (ABT #95). The buck inductor average is Iout.
     const double maxCurrentRipple = cfg::max_current_ripple(d.config, rippleRatio, iout, iout, "design_buck", d.config.contains("rippleRatio"));
     d.inductance = req::provided_inductance(dr).value_or(
         d.outputVoltage * (vinMax - d.outputVoltage) / (maxCurrentRipple * d.switchingFrequency * vinMax));
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
-    // Buck output ripple ΔV = ΔIL / (8*fsw*Cout); size Cout for the configured ripple fraction (~1% default).
-    d.outputCapacitance = maxCurrentRipple / (8.0 * d.switchingFrequency * cfg::output_ripple_fraction(d.config) * d.outputVoltage);
+    if (d.phaseCount == 1) {
+        // Buck output ripple ΔV = ΔIL / (8*fsw*Cout); size Cout for the configured ripple fraction (~1% default).
+        d.outputCapacitance = maxCurrentRipple / (8.0 * d.switchingFrequency * cfg::output_ripple_fraction(d.config) * d.outputVoltage);
+    } else {
+        // Interleaved: Cout absorbs the SUM of N staggered inductor currents, whose ripple partly cancels
+        // (fully at D = k/N). Sized from that sum at every input corner, not from one phase's triangle.
+        d.outputCapacitance = 0;
+        for (double vin : {d.inputVoltageMin, d.inputVoltage, d.inputVoltageMax}) {
+            const auto r = buck_interleaved_cap_ripple(d, vin);
+            d.outputCapacitance = std::max(d.outputCapacitance,
+                r.chargePeakToPeak / (cfg::output_ripple_fraction(d.config) * d.outputVoltage));
+        }
+    }
     return d;
 }
 
+namespace {
+// The Cout requirements of the whole converter replace the per-phase ones the single-phase builder wrote:
+// the capacitance was sized for the interleaved sum, and so must its ripple-current rating be.
+void restamp_output_capacitor(json& tas, const json& capRequirements) {
+    for (auto& st : tas.at("topology").at("stages"))
+        if (st.at("name") == "filter")
+            for (auto& c : st.at("circuit").at("components"))
+                if (c.at("name") == "Cout") { c["data"]["inputs"]["designRequirements"] = capRequirements; return; }
+    throw std::logic_error("restamp_output_capacitor: the TAS has no filter-stage Cout");
+}
+} // namespace
+
+json build_buck_tas(const BuckDesign& d);
+
+// N-phase interleaved buck (ABT #1437): ONE phase is designed at Pout/N and assembled by the ordinary
+// single-phase builder, then replicated N times by interleave_stage (shared Vin/GND/Vout rails, gates
+// staggered 360/N). Only what belongs to the whole converter is re-stamped afterwards: the operating
+// point's output power and the output capacitor, which sees the summed (partly cancelled) ripple.
+static json build_buck_interleaved_tas(const BuckDesign& d) {
+    BuckDesign one = d;
+    one.phaseCount = 1;
+    one.outputPower = d.outputPower / d.phaseCount;
+    json tas = interleave_stage(build_buck_tas(one), "switchingCell", d.phaseCount, {"vin", "gnd", "vout"});
+    tas["inputs"]["operatingPoints"][0]["outputs"][0]["power"] = d.outputPower;
+
+    double rippleRms = 0, ipkPhase = 0;
+    for (double vin : {d.inputVoltageMin, d.inputVoltage, d.inputVoltageMax}) {
+        rippleRms = std::max(rippleRms, buck_interleaved_cap_ripple(d, vin).acCurrentRms);
+        const MAS::OperatingPoint op = analytical::analytical_buck(vin, d.outputVoltage, d.outputPower / d.outputVoltage / d.phaseCount,
+                                                                   d.switchingFrequency, d.inductance, d.diodeDrop, d.efficiency);
+        ipkPhase = std::max(ipkPhase, analytical::winding_current(op, 0, "peak"));
+    }
+    restamp_output_capacitor(tas, req::capacitor(
+        d.outputCapacitance, d.outputVoltage / cfg::v_derate_capacitor(d.config), rippleRms,
+        cfg::get(d.config, "esrRippleFraction", req::ESR_RIPPLE_FRACTION) * d.outputVoltage / (d.phaseCount * ipkPhase),
+        "outputFilter"));
+    return tas;
+}
+
 json build_buck_tas(const BuckDesign& d) {
+    if (d.phaseCount > 1) return build_buck_interleaved_tas(d);
     auto port = [](const char* n) { json p; p["name"] = n; return p; };
     auto pin  = [](const char* c, const char* p) { json e; e["component"] = c; e["pin"] = p; return e; };
     auto prt  = [](const char* p) { json e; e["port"] = p; return e; };

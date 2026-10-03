@@ -18,6 +18,7 @@ struct BoostDesign {
     double outputCapacitance;
     double deadFraction;    // sync-rectifier dead-time fraction of the period (synchronous only)
     bool synchronousRectifier;  // output rectifier = high-side MOSFET (config "rectifier"="synchronous")
+    int phaseCount = 1;         // config.phaseCount (ABT #1437): N interleaved cells, each carrying Iout/N
     nlohmann::json config;
 };
 

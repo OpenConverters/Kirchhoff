@@ -14,7 +14,7 @@
 // actually loads. The live half — that the browser really resolves them from those faces — is
 // tests/e2e/hotspot.spec.js; this one covers every topology, which the e2e cannot afford to.
 import init from '../../build-wasm-ng/kirchhoff.js'
-import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
+import { TOPOLOGIES, VARIANTS, buildSpec, auditOptions, applyAuditOption } from '../src/topologies.js'
 import { renderForAudit } from '../src/ciasSchematic.js'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -83,9 +83,9 @@ const M = isMain ? await init() : null
 const where = new Map()   // character -> where it is drawn (first sighting)
 if (isMain) for (const t of TOPOLOGIES) {
   const v = VARIANTS[t.id]
-  for (const opt of (v ? v.options.map((o) => o.id) : [null])) {
+  for (const opt of auditOptions(t.id)) {
     const spec = buildSpec({ ...t.preset, variant: opt ?? 'standard' }, t.id)
-    if (opt && v) spec.config = { ...(spec.config ?? {}), [v.key]: opt }
+    applyAuditOption(spec, t.id, opt)
     const out = M.design_tas_full(t.id, JSON.stringify(spec))
     // A design that throws is not a topology this gate may skip: skipping it silently is how a
     // sweep reports "clean" over a schematic it never rendered.

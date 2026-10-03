@@ -134,16 +134,16 @@ if (!failed) console.log('\nControl and power planes differ by more than colour 
 //   • every component that opens a drawer is exposed as a NAMED, FOCUSABLE button (WCAG 2.1.1 / 4.1.2).
 //     The root is role="group" for exactly this reason: children of a role="img" are presentational, so
 //     declaring the drawing an image would hide every one of those buttons.
-const { TOPOLOGIES, VARIANTS, buildSpec } = await import('../src/topologies.js')
+const { TOPOLOGIES, VARIANTS, buildSpec, auditOptions, applyAuditOption } = await import('../src/topologies.js')
 const { renderForAudit } = await import('../src/ciasSchematic.js')
 const init = (await import('../../build-wasm-ng/kirchhoff.js')).default
 const M = await init()
 let unnamed = 0, probed = 0
 for (const t of TOPOLOGIES) {
   const v = VARIANTS[t.id]
-  for (const opt of (v ? v.options.map((o) => o.id) : [null])) {
+  for (const opt of auditOptions(t.id)) {
     const spec = buildSpec({ ...t.preset, variant: opt ?? 'standard' }, t.id)
-    if (opt && v) spec.config = { ...(spec.config ?? {}), [v.key]: opt }
+    applyAuditOption(spec, t.id, opt)
     const out = M.design_tas_full(t.id, JSON.stringify(spec))
     if (out.startsWith('Exception')) throw new Error(`${t.id}: design failed: ${out.slice(0, 200)}`)
     const key = `${t.id}${opt ? '/' + opt : ''}`

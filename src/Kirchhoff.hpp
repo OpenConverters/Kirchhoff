@@ -69,8 +69,8 @@
  *
  * @section units Sign & polarity conventions
  *
- * Most topologies produce a positive output. Two exceptions:
- *  - **Cuk** is inverting: its output voltage/current are negative.
+ * Most topologies produce a positive output. The exceptions:
+ *  - **Cuk** and the **inverting buck-boost** are inverting: their output voltage/current are negative.
  *  - **Isolated buck-boost** (inverting Fly-Buck-Boost) has an inverting primary
  *    rail V_pri = -Vin*D/(1-D); it is compared on magnitude (like Cuk).
  * Component-terminal naming used inside the generated circuit: resistor/capacitor
@@ -147,6 +147,8 @@
  * | SEPIC                     | `design_sepic`          / `build_sepic_tas`               | non-isolated step up/down             |
  * | Cuk                       | `design_cuk`            / `build_cuk_tas`                 | non-isolated, **inverting**           |
  * | Zeta                      | `design_zeta`           / `build_zeta_tas`                | non-isolated step up/down             |
+ * | Inverting buck-boost      | `design_inverting_buck_boost` / `build_inverting_buck_boost_tas` | non-isolated, **inverting**, CCM/DCM |
+ * | Two-switch flyback        | `design_two_switch_flyback` / `build_two_switch_flyback_tas` | isolated, switches clamped at Vin, Vor < Vin,min |
  * | Push-pull                 | `design_push_pull`      / `build_push_pull_tas`           | isolated, center-tapped, 2 switches    |
  * | Phase-shifted full bridge | `design_psfb`           / `build_psfb_tas`                | isolated, 4 switches, phase-shift control |
  * | Asymmetric half-bridge    | `design_ahb`            / `build_ahb_tas`                 | isolated, 2 switches, complementary duty |
@@ -208,6 +210,8 @@
 #include "TwoSwitchForward.hpp"
 #include "Sepic.hpp"
 #include "Cuk.hpp"
+#include "InvertingBuckBoost.hpp"
+#include "TwoSwitchFlyback.hpp"
 #include "Zeta.hpp"
 #include "PushPull.hpp"
 #include "Psfb.hpp"

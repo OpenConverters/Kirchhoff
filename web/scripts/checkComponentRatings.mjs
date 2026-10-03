@@ -16,7 +16,7 @@
 //   • A semiconductor with no deviceType (diode/mosfet) that is not tagged role:"bodyDiode" — an
 //     un-orderable, mis-classifiable part.
 import init from '../../build-wasm-ng/kirchhoff.js'
-import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
+import { TOPOLOGIES, VARIANTS, buildSpec, auditOptions, applyAuditOption } from '../src/topologies.js'
 const M = await init()
 
 // rating leaves whose value must be ≥ 0 (schema minimum:0), searched recursively
@@ -37,9 +37,9 @@ function leaves(obj, path = '') {
 let flagged = 0, checked = 0
 for (const t of TOPOLOGIES) {
   const v = VARIANTS[t.id]
-  for (const opt of (v ? v.options.map((o) => o.id) : [null])) {
+  for (const opt of auditOptions(t.id)) {
     const spec = buildSpec({ ...t.preset, variant: opt ?? 'standard' }, t.id)
-    if (opt && v) spec.config = { ...(spec.config ?? {}), [v.key]: opt }
+    applyAuditOption(spec, t.id, opt)
     const out = M.design_tas_full(t.id, JSON.stringify(spec))
     // A design that throws is not a topology this gate may skip: skipping it silently is how a
     // sweep reports "clean" over a schematic it never rendered.

@@ -59,6 +59,7 @@ std::vector<Case> all_cases() {
         {"sepic",       []{ return build_sepic_tas(design_sepic(spec_for(12,12,12))); }, 12},
         {"cuk",         []{ return build_cuk_tas(design_cuk(spec_for(12,12,12))); }, 12},
         {"zeta",        []{ return build_zeta_tas(design_zeta(spec_for(12,12,12))); }, 12},
+        {"inverting_buck_boost", []{ return build_inverting_buck_boost_tas(design_inverting_buck_boost(spec_for(24,12,24))); }, 12},
         {"fsbb",        []{ return build_fsbb_tas(design_fsbb(spec_for(12,12,12))); }, 12},
         {"psfb",        []{ return build_psfb_tas(design_psfb(spec_for(48,12,24))); }, 12},
         {"ahb",         []{ return build_ahb_tas(design_ahb(spec_for(48,12,24))); }, 12},

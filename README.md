@@ -106,6 +106,18 @@ its active synchronous rectifier cannot start into a 0 V output — so it uses t
 with use-initial-conditions / UIC). Initial-condition support lives entirely in the Kirchhoff TAS
 assembler; CIAS, which only emits component cards, is untouched.
 
+Topologies MKF never modelled have no MKF reference to be equivalent to, and are verified **standalone**:
+their own closed form against the ngspice deck. The **inverting buck-boost** (single switch, single
+inductor, negative rail Vo = −Vin·D/(1−D); CCM or DCM, diode or synchronous rectifier) is checked in
+`test_inverting_buck_boost` — inductor-current NRMSE ≤ 0.006 against the analytical waveform, ripple within
+5 %, rail within 5 % of −|Vo| — and delivers its spec at three operating points in `test_requirements`.
+**Interleaved buck / boost** (`config.phaseCount` 2–6) is the single-phase cell replicated by
+`interleave_stage` with the drives staggered 360°/N; `test_interleaved` checks every phase's inductor current
+against the single-phase analytical waveform, the stagger, and the output-capacitor ripple against the
+summed-phase charge. The **two-switch flyback** (clamp diodes return the leakage energy to Vin, so each
+switch sees only Vin) is checked in `test_two_switch_flyback` against the single-switch flyback deck with the
+same transformer: Vout within 3 %, switch nodes inside the rails, primary peak and on-time ramp within 5 %.
+
 Current agreement: **boost** Vout/Iout 0.2 %, η 0.2 %; **flyback** Vout/Iout 1.9 %, η 2.5 %; **PSFB**
 Vout/Iout ~0.9 % (efficiency directional — Kirchhoff's ideal switches beat MKF's lossy rectifier diodes).
 

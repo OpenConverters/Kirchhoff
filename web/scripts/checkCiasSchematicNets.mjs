@@ -6,7 +6,7 @@
 // and THROWS on any drift. So "it rendered" IS the proof that every schematic — generated or hand-
 // drawn — agrees with the flattened CIAS netlist. Repeatable outside the browser.
 import init from '../../build-wasm-ng/kirchhoff.js'
-import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
+import { TOPOLOGIES, VARIANTS, buildSpec, auditOptions, applyAuditOption } from '../src/topologies.js'
 import { extractBom } from '../src/bom.js'
 import { renderForAudit, hasCiasSchematic } from '../src/ciasSchematic.js'
 import { renderVerifiedSchematic } from '../src/ciasSchematic.js'
@@ -16,9 +16,9 @@ let ok = 0, failed = 0
 for (const t of TOPOLOGIES) {
   if (!hasCiasSchematic(t.id)) continue
   const v = VARIANTS[t.id]
-  for (const opt of (v ? v.options.map((o) => o.id) : [null])) {
+  for (const opt of auditOptions(t.id)) {
     const spec = buildSpec({ ...t.preset, variant: opt ?? 'standard' }, t.id)
-    if (opt && v) spec.config = { ...(spec.config ?? {}), [v.key]: opt }
+    applyAuditOption(spec, t.id, opt)
     const out = M.design_tas_full(t.id, JSON.stringify(spec))
     if (out.startsWith('Exception')) { console.error(`${t.id}/${opt}: design failed`); failed++; continue }
     try {

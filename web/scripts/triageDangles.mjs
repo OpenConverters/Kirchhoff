@@ -2,7 +2,7 @@
 // to it (wire, registered pin, component hitbox) so a human can tell a real drawing artifact from a
 // symbol the checker doesn't know about.
 import init from '../../build-wasm-ng/kirchhoff.js'
-import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
+import { TOPOLOGIES, VARIANTS, buildSpec, auditOptions, applyAuditOption } from '../src/topologies.js'
 import { extractBom } from '../src/bom.js'
 // Renders through the SAME entry point the app uses (renderForAudit). Every topology is generated from
 // CIAS now, but the rule stands: measure what the product draws, never a reconstruction of it.
@@ -15,9 +15,9 @@ for (const t of TOPOLOGIES) {
   if (!hasCiasSchematic(t.id)) continue
   if (only && t.id !== only) continue
   const v = VARIANTS[t.id]
-  for (const opt of (v ? v.options.map((o) => o.id) : [null])) {
+  for (const opt of auditOptions(t.id)) {
     const spec = buildSpec({ ...t.preset, variant: opt ?? 'standard' }, t.id)
-    if (opt && v) spec.config = { ...(spec.config ?? {}), [v.key]: opt }
+    applyAuditOption(spec, t.id, opt)
     const out = M.design_tas_full(t.id, JSON.stringify(spec))
     if (out.startsWith('Exception')) continue
     const tas = JSON.parse(out).tas

@@ -8,7 +8,7 @@
 //
 // Two rules are HARD physics (a violation is a real bug, and this tool fails on it):
 //   • Flyback family (energy stored during on-time, released to the secondary during off-time) → the
-//     primary and secondary dots sit on OPPOSITE winding ends. [flyback, isolated_buck_boost]
+//     primary and secondary dots sit on OPPOSITE winding ends. [flyback, two_switch_flyback, isolated_buck_boost]
 //   • Forward family (energy transferred directly during on-time, secondary diode conducts in phase) →
 //     primary and secondary dots sit on the SAME end. [forward, two_switch_forward, acf, isolated_buck, ahb]
 //
@@ -20,12 +20,12 @@
 import init from '../../build-wasm-ng/kirchhoff.js'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
-import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
+import { TOPOLOGIES, VARIANTS, buildSpec, auditOptions, applyAuditOption } from '../src/topologies.js'
 import { extractBom } from '../src/bom.js'
 import { renderForAudit, hasCiasSchematic } from '../src/ciasSchematic.js'
 const M = await init()
 
-const OPPOSITE = new Set(['flyback', 'isolated_buck_boost'])                                   // energy-storage transfer
+const OPPOSITE = new Set(['flyback', 'two_switch_flyback', 'isolated_buck_boost'])                                   // energy-storage transfer
 const SAME = new Set(['forward', 'two_switch_forward', 'acf', 'isolated_buck', 'ahb'])         // direct (forward) transfer
 // everything else with a transformer: phase is a design choice → verify dots present, report, don't fail.
 
@@ -68,10 +68,10 @@ if (isMain) for (const t of TOPOLOGIES) {
   // does not: centre-tapped and current-doubler secondaries are different drawings from the full-bridge
   // one. Testing options[0] alone left 14 of the 29 isolated combos unexamined — including ahb's other
   // two variants, which are in the HARD-RULE set, so a physics rule went unenforced on them.
-  for (const opt of (v ? v.options.map((o) => o.id) : [null])) {
+  for (const opt of auditOptions(t.id)) {
     const key = `${t.id}${opt ? '/' + opt : ''}`
     const spec = buildSpec({ ...t.preset, variant: opt ?? 'standard' }, t.id)
-    if (opt && v) spec.config = { ...(spec.config ?? {}), [v.key]: opt }
+    applyAuditOption(spec, t.id, opt)
     const out = M.design_tas_full(t.id, JSON.stringify(spec))
     // A design that throws is not a topology this gate may skip: skipping it silently is how a
     // sweep reports "clean" over a schematic it never rendered.

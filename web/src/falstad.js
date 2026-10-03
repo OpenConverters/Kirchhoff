@@ -222,6 +222,54 @@ const LAYOUTS = {
     },
   },
 
+  // Two-switch flyback (ABT #1436): the flyback's transformer + rectifier, driven by Q1 (high side, floating
+  // gate drive referenced to the primary start) and Q2 (low side), with the clamp diodes Dc1 (GND → primary
+  // start) and Dc2 (primary end → Vin). Every tap point is a wire END: CircuitJS1 only joins at posts.
+  two_switch_flyback: {
+    place: {
+      Cin: { pins: { 1: [160, 64], 2: [160, 320] }, line: (q, c) => `c 160 64 160 320 0 ${c.C(q)} ${c.vin}` },
+      Dc2: { pins: { anode: [208, 208], cathode: [208, 64] }, line: () => 'd 208 208 208 64 2 default' },
+      Dc1: { pins: { anode: [288, 320], cathode: [288, 256] }, line: () => 'd 288 320 288 256 2 default' },
+      Q1: { pins: { gate: [256, 112], drain: [320, 96], source: [320, 128] }, line: () => 'f 256 112 320 112 32 1.5 50' },
+      T1: {
+        pins: { primary_start: [320, 160], primary_end: [320, 192], secondary1_end: [400, 160], secondary1_start: [400, 192] },
+        line: (q, c) => `T 320 160 400 160 4 ${c.Lm} ${1 / c.n} 0 0 0.999`, // flags 4: secondary dot at the bottom, as flyback
+      },
+      Q2: { pins: { gate: [256, 240], drain: [320, 224], source: [320, 256] }, line: () => 'f 256 240 320 240 32 1.5 50' },
+      // RC damper across the primary (hi → sw). Its cap averages the primary voltage, zero by volt-second balance.
+      Cclmp: { pins: { 1: [304, 144], 2: [304, 176] }, line: (q, c) => `c 304 144 304 176 0 ${c.C(q)} 0` },
+      Rclmp: { pins: { 1: [304, 176], 2: [304, 208] }, line: (q, c) => `r 304 176 304 208 0 ${c.R(q)}` },
+      D1: { pins: { anode: [448, 160], cathode: [512, 160] }, line: () => 'd 448 160 512 160 2 default' },
+      Cout: { pins: { 1: [560, 160], 2: [560, 320] }, line: (q, c) => `c 560 160 560 320 0 ${c.C(q)} ${c.vout}` },
+    },
+    wires: [
+      [128, 64, 160, 64], [160, 64, 208, 64], [208, 64, 320, 64], [320, 64, 320, 96],      // Vin rail -> Q1 drain
+      [320, 128, 320, 144], [320, 144, 320, 160],                                            // Q1 source -> primary start
+      [288, 256, 288, 144], [288, 144, 304, 144], [304, 144, 320, 144], [256, 144, 288, 144], // Dc1 + damper + Q1 gate ref
+      [320, 192, 320, 208], [320, 208, 320, 224], [208, 208, 304, 208], [304, 208, 320, 208], // primary end -> Q2, Dc2, damper
+      [320, 256, 320, 320],                                                                  // Q2 source -> ground
+      [128, 320, 160, 320], [160, 320, 256, 320], [256, 320, 288, 320], [288, 320, 320, 320],
+      [320, 320, 400, 320], [400, 320, 560, 320], [560, 320, 640, 320],                      // ground rail
+      [400, 160, 448, 160], [400, 192, 400, 320],                                            // secondary
+      [512, 160, 560, 160], [560, 160, 640, 160],                                            // Vout rail
+    ],
+    synth: (c) => [
+      { line: `v 128 320 128 64 0 0 40 ${c.vin} 0 0 0.5`, posts: [[128, 320], [128, 64]], attach: { '128,64': ['Cin', '1'], '128,320': ['Cin', '2'] } },
+      { line: 'g 128 320 128 336 0', posts: [[128, 320]] },
+      { line: `v 256 144 256 112 0 2 ${c.fVis} 5 5 0 ${c.dutyOf('Q1')}`, posts: [[256, 144], [256, 112]], attach: { '256,112': ['Q1', 'gate'], '256,144': ['Q1', 'source'] } },
+      { line: `v 256 320 256 240 0 2 ${c.fVis} 5 5 0 ${c.dutyOf('Q2')}`, posts: [[256, 320], [256, 240]], attach: { '256,240': ['Q2', 'gate'], '256,320': ['Cin', '2'] } },
+      { line: `r 640 160 640 320 0 ${c.rload}`, tag: 'Rload', posts: [[640, 160], [640, 320]], attach: { '640,160': ['Cout', '1'], '640,320': ['Cout', '2'] } },
+      { line: '207 640 160 688 160 0 vout', posts: [[640, 160]] },
+    ],
+    scopeSets: {
+      overview:  [['Q2', 'voltage'], ['D1', 'voltage'], ['Rload', 'voltage']],
+      magnetic:  [['D1', 'voltage'], { magI: [320, 192, 320, 208], magVtag: 'Q2' }, ['Rload', 'voltage']],
+      switch:    [['Q2', 'both'], ['Dc2', 'both'], ['Rload', 'voltage']],
+      rectifier: [['Q2', 'voltage'], ['D1', 'both'], ['Rload', 'voltage']],
+      output:    [['Q2', 'voltage'], ['D1', 'voltage'], ['Rload', 'both']],
+    },
+  },
+
   // Non-isolated buck: high-side switch (Vin→sw), freewheel diode, LC filter. The high-side gate drive
   // is a FLOATING gate-source PWM (its reference wires to the switching node) so Vgs toggles regardless
   // of the source swinging to Vin — the standard toy-sim idiom for a high-side FET.
@@ -300,6 +348,50 @@ const LAYOUTS = {
     scopeSets: {
       overview:  [['L1', 'current'], ['D1', 'voltage'], ['Q2', 'voltage'], ['Rload', 'voltage']],
       // L1 is a real inductor, so its own current + voltage both plot directly ('both').
+      magnetic:  [['L1', 'both'], ['D1', 'voltage'], ['Q2', 'voltage'], ['Rload', 'voltage']],
+      switch:    [['Q1', 'both'], ['L1', 'current'], ['Rload', 'voltage']],
+      rectifier: [['D1', 'both'], ['Q2', 'both'], ['L1', 'current'], ['Rload', 'voltage']],
+      output:    [['L1', 'current'], ['Rload', 'both']],
+    },
+    oneOf: [['D1', 'Q2']],   // rectifier: diode XOR synchronous FET
+  },
+
+  // Inverting buck-boost (ABT #1433): Q1 high side (floating Vgs off the switch node, as buck), L1 from
+  // the switch node DOWN to the ground rail, and the rectifier from the switch node DOWN to the NEGATIVE
+  // output rail at the bottom. CircuitJS1's FET is vertical with the drain on top, which is exactly the
+  // SR orientation needed (drain = sw, source = −Vout). The ground return runs round the far right and
+  // underneath, so the −Vout rail and the ground rail never cross the rectifier column.
+  inverting_buck_boost: {
+    place: {
+      Q1:   { pins: { drain: [272, 192], source: [272, 224], gate: [208, 208] }, line: () => 'f 208 208 272 208 32 1.5 50' },
+      D1:   { optional: true, pins: { anode: [336, 416], cathode: [336, 224] }, line: () => 'd 336 416 336 224 2 default' },
+      Q2:   { optional: true, pins: { gate: [272, 384], drain: [336, 368], source: [336, 400] }, line: () => 'f 272 384 336 384 32 1.5 50' },
+      L1:   { pins: { primary_start: [400, 224], primary_end: [400, 336] }, line: (q, c) => `l 400 224 400 336 0 ${c.Lm} 0` },
+      // pin 1 is the −Vout rail (bottom), pin 2 ground: initial V(post0)−V(post1) = Vout (negative).
+      Cout: { pins: { 1: [576, 416], 2: [576, 336] }, line: (q, c) => `c 576 416 576 336 0 ${c.C(q)} ${c.vout}` },
+    },
+    wires: [
+      [128, 144, 272, 144], [272, 144, 272, 192],                       // Vin rail -> Q1 drain
+      [272, 224, 336, 224], [336, 224, 400, 224],                       // sw rail: Q1 source -> rectifier -> L1
+      [272, 224, 272, 288], [272, 288, 208, 288],                       // sw -> Q1 gate-drive reference (floating Vgs)
+      [400, 336, 576, 336], [576, 336, 656, 336], [656, 336, 736, 336], // ground rail: L1 end -> Cout -> load
+      [736, 336, 736, 480], [736, 480, 128, 480], [128, 480, 128, 336], // ground return round the outside
+      [336, 416, 576, 416], [576, 416, 656, 416],                       // −Vout rail
+      { pts: [336, 224, 336, 368], needs: ['Q2'] },                     // SR: sw -> Q2 drain
+      { pts: [336, 400, 336, 416], needs: ['Q2'] },                     // SR: Q2 source -> −Vout
+    ],
+    synth: (c) => [
+      { line: `v 128 336 128 144 0 0 40 ${c.vin} 0 0 0.5`, posts: [[128, 336], [128, 144]], attach: { '128,144': ['Q1', 'drain'], '128,336': ['L1', 'primary_end'] } },
+      { line: 'g 128 480 128 496 0', posts: [[128, 480]] },
+      { line: `v 208 288 208 208 0 2 ${c.fVis} 5 5 0 ${c.duty}`, posts: [[208, 288], [208, 208]], attach: { '208,208': ['Q1', 'gate'], '208,288': ['Q1', 'source'] } },
+      // SR gate: complementary, referenced to Q2's own source (the −Vout rail). needs Q2.
+      { needs: ['Q2'], line: `v 272 416 272 384 0 2 ${c.fVis} 5 5 0 ${1 - c.duty}`, posts: [[272, 416], [272, 384]], attach: { '272,384': ['Q2', 'gate'], '272,416': ['Q2', 'source'] } },
+      { needs: ['Q2'], line: 'w 272 416 336 416 0', posts: [[272, 416], [336, 416]], wire: true },
+      { line: `r 656 416 656 336 0 ${c.rload}`, tag: 'Rload', posts: [[656, 416], [656, 336]], attach: { '656,416': ['Cout', '1'], '656,336': ['Cout', '2'] } },
+      { line: '207 656 416 704 416 0 vout', posts: [[656, 416]] },
+    ],
+    scopeSets: {
+      overview:  [['L1', 'current'], ['D1', 'voltage'], ['Q2', 'voltage'], ['Rload', 'voltage']],
       magnetic:  [['L1', 'both'], ['D1', 'voltage'], ['Q2', 'voltage'], ['Rload', 'voltage']],
       switch:    [['Q1', 'both'], ['L1', 'current'], ['Rload', 'voltage']],
       rectifier: [['D1', 'both'], ['Q2', 'both'], ['L1', 'current'], ['Rload', 'voltage']],

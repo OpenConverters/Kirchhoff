@@ -1114,6 +1114,80 @@ MAS::OperatingPoint analytical_zeta(double inputVoltage, double outputVoltage,
     return operatingPoint;
 }
 
+std::pair<std::vector<double>, std::vector<double>> winding_current_samples(const MAS::OperatingPoint& op,
+                                                                            std::size_t winding, double period) {
+    const auto& excs = op.get_excitations_per_winding();
+    if (winding >= excs.size()) throw std::out_of_range("winding_current_samples: winding index out of range");
+    const auto current = excs[winding].get_current();
+    if (!current) throw std::runtime_error("winding_current_samples: winding has no current excitation");
+    const auto waveform = current->get_waveform();
+    if (!waveform) throw std::runtime_error("winding_current_samples: winding current has no waveform");
+    std::vector<double> data = waveform->get_data();
+    if (data.size() < 2) throw std::runtime_error("winding_current_samples: waveform has fewer than 2 points");
+    std::vector<double> time;
+    if (waveform->get_time() && waveform->get_time()->size() == data.size()) time = *waveform->get_time();
+    else for (std::size_t i = 0; i < data.size(); ++i) time.push_back(period * static_cast<double>(i) / (data.size() - 1));
+    return {time, data};
+}
+
+InvertingBuckBoostTiming inverting_buck_boost_timing(double inputVoltage, double outputVoltage,
+                                                     double outputCurrent, double switchingFrequency,
+                                                     double inductance, double diodeVoltageDrop,
+                                                     double efficiency) {
+    const char* who = "analytical_inverting_buck_boost";
+    if (inductance <= 0) throw std::invalid_argument(std::string(who) + ": inductance must be > 0");
+    if (switchingFrequency <= 0) throw std::invalid_argument(std::string(who) + ": switching frequency must be > 0");
+    if (outputCurrent <= 0) throw std::invalid_argument(std::string(who) + ": output current must be > 0");
+    if (!(efficiency > 0 && efficiency <= 1)) throw std::invalid_argument(std::string(who) + ": efficiency must be in (0, 1]");
+    const double voMag = std::abs(outputVoltage);
+    // CCM duty from volt-second balance (throws on Vin<=0 / Vo<=0, never on the duty limit: that is the caller's).
+    const double dCcm = single_inductor_duty_cycle(inputVoltage, voMag, diodeVoltageDrop, efficiency, 1.0, 1.0, who);
+    const double period = 1.0 / switchingFrequency;
+    const double iAvg = outputCurrent / (1.0 - dCcm);
+    const double dI = inputVoltage * dCcm / (inductance * switchingFrequency);
+    if (iAvg - dI / 2.0 >= 0.0)
+        return {dCcm, dCcm * period, (1.0 - dCcm) * period, period, false};
+    const double vOff = voMag + diodeVoltageDrop;
+    const double tOn = std::sqrt(2.0 * inductance * outputCurrent * vOff / (efficiency * switchingFrequency))
+                       / inputVoltage;
+    const double tOff = inputVoltage * tOn / vOff;   // L·Ipk / vOff with Ipk = Vin·tOn/L
+    if (tOn + tOff > period)
+        throw std::logic_error(std::string(who) + ": DCM timing overruns the period although CCM was rejected");
+    return {tOn / period, tOn, tOff, period, true};
+}
+
+MAS::OperatingPoint analytical_inverting_buck_boost(double inputVoltage, double outputVoltage,
+                                                    double outputCurrent, double switchingFrequency,
+                                                    double inductance, double diodeVoltageDrop,
+                                                    double efficiency, double maximumDutyCycle) {
+    using Lbl = MAS::WaveformLabel;
+    const InvertingBuckBoostTiming tm = inverting_buck_boost_timing(inputVoltage, outputVoltage, outputCurrent,
+                                                                    switchingFrequency, inductance,
+                                                                    diodeVoltageDrop, efficiency);
+    if (tm.dutyCycle > maximumDutyCycle)
+        throw std::invalid_argument("analytical_inverting_buck_boost: required duty cycle " + std::to_string(tm.dutyCycle)
+                                    + " exceeds maximumDutyCycle " + std::to_string(maximumDutyCycle));
+    const double vOn = inputVoltage, vOff = -(std::abs(outputVoltage) + diodeVoltageDrop);
+    const double dI = inputVoltage * tm.tOn / inductance;
+    MAS::Waveform currentWaveform, voltageWaveform;
+    if (!tm.dcm) {
+        const double iAvg = outputCurrent / (1.0 - tm.dutyCycle);
+        currentWaveform = WP::create_waveform(Lbl::TRIANGULAR, dI, switchingFrequency, tm.dutyCycle, iAvg);
+        voltageWaveform = WP::create_waveform(Lbl::RECTANGULAR, vOn - vOff, switchingFrequency, tm.dutyCycle, 0.0);
+    } else {
+        const double deadTime = tm.period - tm.tOn - tm.tOff;
+        currentWaveform = WP::create_waveform(Lbl::TRIANGULAR_WITH_DEADTIME, dI, switchingFrequency,
+                                              tm.dutyCycle, dI / 2.0, deadTime);
+        voltageWaveform.set_data(std::vector<double>{vOn, vOn, vOff, vOff, 0, 0});
+        voltageWaveform.set_time(std::vector<double>{0, tm.tOn, tm.tOn, tm.tOn + tm.tOff, tm.tOn + tm.tOff, tm.period});
+        voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
+    }
+    MAS::OperatingPoint operatingPoint;
+    operatingPoint.get_mutable_excitations_per_winding().push_back(
+        WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Primary"));
+    return operatingPoint;
+}
+
 // Ported from MKF converter_models/FourSwitchBuckBoost.cpp (BUCK + BOOST branches of
 // process_operating_point_for_excitation; compute_buck_duty:56 / compute_boost_duty:76).
 MAS::OperatingPoint analytical_fsbb(double inputVoltage, double outputVoltage,

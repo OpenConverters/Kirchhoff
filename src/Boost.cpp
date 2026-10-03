@@ -3,6 +3,9 @@
 #include "ComponentRequirements.hpp"
 #include "ConverterAnalytical.hpp"   // single FHA source: analytical_boost + excitations_processed/winding_current
 #include "KirchhoffConfig.hpp"
+#include "Interleave.hpp"
+#include <algorithm>
+#include <cmath>
 #include <vector>
 #include <stdexcept>
 #include <string>
@@ -12,6 +15,29 @@ using nlohmann::json;
 
 namespace {
 double nominal(const json& j) { return PEAS::resolve_dimensional_values(j); }
+
+// Interleaved boost (ABT #1437): the output capacitor is fed by the N staggered DIODE currents — each phase's
+// inductor current while its switch is off — so the per-phase inductor waveform from the analytical solver is
+// gated to its off interval (in DCM the inductor is already at zero after tOn + tOff, so the gate stays exact).
+InterleavedRipple boost_interleaved_cap_ripple(const BoostDesign& d, double vin) {
+    const double T = 1.0 / d.switchingFrequency;
+    const double iPhase = d.outputPower / d.outputVoltage / d.phaseCount;
+    const MAS::OperatingPoint op = analytical::analytical_boost(vin, d.outputVoltage, iPhase, d.switchingFrequency,
+        d.inductance, req::analytical_rectifier_drop(d.config), d.efficiency);
+    const double tOn = analytical::winding_current(op, 0, "dutyCycle") * T;
+    auto [t, i] = analytical::winding_current_samples(op, 0, T);
+    // Insert the switch-off edge as a step so the gate is exact rather than smeared across a segment.
+    std::vector<double> tt, ii;
+    for (std::size_t k = 0; k < t.size(); ++k) {
+        if (k > 0 && t[k - 1] < tOn && t[k] > tOn) {
+            const double v = i[k - 1] + (tOn - t[k - 1]) / (t[k] - t[k - 1]) * (i[k] - i[k - 1]);
+            tt.push_back(tOn); ii.push_back(0.0); tt.push_back(tOn); ii.push_back(v);
+        }
+        tt.push_back(t[k]);
+        ii.push_back(t[k] < tOn ? 0.0 : (t[k] == tOn ? 0.0 : i[k]));
+    }
+    return interleaved_capacitor_ripple(tt, ii, T, d.phaseCount);
+}
 } // namespace
 
 BoostDesign design_boost(const json& tasInputs) {
@@ -44,8 +70,11 @@ BoostDesign design_boost(const json& tasInputs) {
     // conduction loss (I^2*Rds vs I*Vf) -> higher efficiency.
     d.synchronousRectifier = (cfg::get_str(d.config, "rectifier", "diode") == std::string("synchronous"));
     d.deadFraction = cfg::get(d.config, "deadTimeFraction", 0.01);   // 1% of the period per dead band
+    // Interleaving (ABT #1437): N cells share the rails, each carrying Iout/N; N = 1 is unchanged.
+    d.phaseCount = phase_count(d.config, "design_boost");
+    const double N = static_cast<double>(d.phaseCount);
 
-    d.diodeDrop = req::rectifier_drop(d.config, d.outputPower / d.outputVoltage);  // DIDEAL Vf at the operating rectifier current
+    d.diodeDrop = req::rectifier_drop(d.config, d.outputPower / d.outputVoltage / N);  // DIDEAL Vf at the operating rectifier current
     const double Vo = d.outputVoltage + d.diodeDrop;
     // With a synchronous rectifier the output path is a near-ideal MOSFET (no Vf), so NO diode-drop
     // compensation: D = 1 - Vin*eff/Vout. With a diode, compensate for its forward drop as MKF does.
@@ -72,20 +101,60 @@ BoostDesign design_boost(const json& tasInputs) {
     d.inputVoltageMin = vinMin;
     d.inputVoltageMax = vinMax;
     const double rippleRatio = cfg::ripple_ratio(d.config, 0.4);
-    const double iout = d.outputPower / d.outputVoltage;
+    const double iout = d.outputPower / d.outputVoltage / N;             // per phase
     // Ripple-ratio rule by default; config "maximumSwitchCurrent" instead sizes L so the peak inductor/
     // switch current (Iin + ΔIL/2) lands exactly on the cap (ABT #95). The boost inductor is the INPUT
     // inductor: its average at the vinMax sizing corner is Iin = Pout/(η·vinMax).
-    const double iLavg = d.outputPower / (d.efficiency * vinMax);
+    const double iLavg = d.outputPower / (d.efficiency * vinMax) / N;    // per phase
     const double maxCurrentRipple = cfg::max_current_ripple(d.config, rippleRatio, iout, iLavg, "design_boost", d.config.contains("rippleRatio"));
     d.inductance = req::provided_inductance(dr).value_or(
         vinMax * (d.outputVoltage - vinMax) / (maxCurrentRipple * d.switchingFrequency * d.outputVoltage));
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
-    d.outputCapacitance = iout * d.dutyCycle / (d.switchingFrequency * cfg::output_ripple_fraction(d.config) * d.outputVoltage);
+    if (d.phaseCount == 1) {
+        d.outputCapacitance = iout * d.dutyCycle / (d.switchingFrequency * cfg::output_ripple_fraction(d.config) * d.outputVoltage);
+    } else {
+        // Sized from the summed diode currents at every input corner (their ripple partly cancels).
+        d.outputCapacitance = 0;
+        for (double vin : {d.inputVoltageMin, d.inputVoltage, d.inputVoltageMax})
+            d.outputCapacitance = std::max(d.outputCapacitance,
+                boost_interleaved_cap_ripple(d, vin).chargePeakToPeak / (cfg::output_ripple_fraction(d.config) * d.outputVoltage));
+    }
     return d;
 }
 
+json build_boost_tas(const BoostDesign& d);
+
+// N-phase interleaved boost (ABT #1437): one phase designed at Pout/N, assembled by the single-phase builder,
+// replicated by interleave_stage; the operating point and the output capacitor are re-stamped for the whole
+// converter (see build_buck_interleaved_tas).
+static json build_boost_interleaved_tas(const BoostDesign& d) {
+    BoostDesign one = d;
+    one.phaseCount = 1;
+    one.outputPower = d.outputPower / d.phaseCount;
+    json tas = interleave_stage(build_boost_tas(one), "switchingCell", d.phaseCount, {"vin", "gnd", "vout"});
+    tas["inputs"]["operatingPoints"][0]["outputs"][0]["power"] = d.outputPower;
+
+    double rippleRms = 0, ipkPhase = 0;
+    for (double vin : {d.inputVoltageMin, d.inputVoltage, d.inputVoltageMax}) {
+        rippleRms = std::max(rippleRms, boost_interleaved_cap_ripple(d, vin).acCurrentRms);
+        const MAS::OperatingPoint op = analytical::analytical_boost(vin, d.outputVoltage, d.outputPower / d.outputVoltage / d.phaseCount,
+            d.switchingFrequency, d.inductance, req::analytical_rectifier_drop(d.config), d.efficiency);
+        ipkPhase = std::max(ipkPhase, analytical::winding_current(op, 0, "peak"));
+    }
+    const json capReq = req::capacitor(d.outputCapacitance, d.outputVoltage / cfg::v_derate_capacitor(d.config), rippleRms,
+        cfg::get(d.config, "esrRippleFraction", req::ESR_RIPPLE_FRACTION) * d.outputVoltage / (d.phaseCount * ipkPhase),
+        "outputFilter");
+    bool stamped = false;
+    for (auto& st : tas.at("topology").at("stages"))
+        if (st.at("name") == "filter")
+            for (auto& c : st.at("circuit").at("components"))
+                if (c.at("name") == "Cout") { c["data"]["inputs"]["designRequirements"] = capReq; stamped = true; }
+    if (!stamped) throw std::logic_error("build_boost_interleaved_tas: the TAS has no filter-stage Cout");
+    return tas;
+}
+
 json build_boost_tas(const BoostDesign& d) {
+    if (d.phaseCount > 1) return build_boost_interleaved_tas(d);
     auto port = [](const char* n) { json p; p["name"] = n; return p; };
     auto pin  = [](const char* c, const char* p) { json e; e["component"] = c; e["pin"] = p; return e; };
     auto prt  = [](const char* p) { json e; e["port"] = p; return e; };

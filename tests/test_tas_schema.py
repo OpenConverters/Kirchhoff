@@ -101,6 +101,20 @@ def check(label, tas):
 
 check("flyback", PyKirchhoff.design_flyback_tas(FLYBACK_IN))
 check("boost", PyKirchhoff.design_boost_tas(BOOST_IN))
+# Inverting buck-boost (ABT #1433): the negative rail, both rectifiers and DCM must all be schema-valid TAS.
+IBB_IN = {"designRequirements": {"efficiency": 0.95, "inputVoltage": {"minimum": 19.2, "nominal": 24, "maximum": 28.8},
+          "switchingFrequency": {"nominal": 200000}, "outputs": [{"name": "out", "voltage": {"nominal": -12}}]},
+          "operatingPoints": [{"inputVoltage": 24, "outputs": [{"power": 24}]}]}
+check("inverting_buck_boost", PyKirchhoff.design_inverting_buck_boost_tas(IBB_IN))
+check("inverting_buck_boost-SR", PyKirchhoff.design_inverting_buck_boost_tas({**IBB_IN, "config": {"rectifier": "synchronous"}}))
+check("inverting_buck_boost-dcm", PyKirchhoff.design_inverting_buck_boost_tas({**IBB_IN, "config": {"mode": "dcm"}}))
+# Two-switch flyback (ABT #1436): the swapped primary stage (two switches, clamp diodes, Coss aids, RC damper
+# across the primary) must be schema-valid TAS in each conduction mode it supports.
+TSFLY_IN = {"designRequirements": {"efficiency": 1.0, "inputVoltage": {"minimum": 320, "nominal": 375, "maximum": 400},
+            "switchingFrequency": {"nominal": 65000}, "outputs": [{"name": "out", "voltage": {"nominal": 12}}]},
+            "operatingPoints": [{"inputVoltage": 375, "outputs": [{"power": 60}]}]}
+for mode in ("ccm", "dcm", "bcm"):
+    check(f"two_switch_flyback-{mode}", PyKirchhoff.design_two_switch_flyback_tas({**TSFLY_IN, "config": {"mode": mode}}))
 
 # Multi-output (N isolated secondaries) — ABT #86. A 2-output forward-family spec must still emit a
 # schema-valid TAS (extra secondary windings, per-output rectifiers/filters, extra external output ports).

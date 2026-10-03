@@ -294,7 +294,7 @@ TEST_CASE("api: ngspice extract reconstructs winding voltage across topologies",
         {"buck", {48, 12}}, {"boost", {12, 48}}, {"fsbb", {24, 12}}, {"flyback", {48, 12}},
         {"forward", {48, 12}}, {"two_switch_forward", {48, 12}}, {"acf", {48, 12}},
         {"push_pull", {48, 12}}, {"ahb", {48, 12}}, {"psfb", {400, 24}}, {"pshb", {400, 24}},
-        {"dab", {48, 12}}, {"llc", {400, 12}}, {"src", {400, 12}},
+        {"dab", {48, 12}}, {"llc", {400, 12}}, {"src", {400, 12}}, {"inverting_buck_boost", {24, 12}},
     };
     for (const auto& [topo, vv] : topos) {
         const std::string out = Kirchhoff::api::process_converter(

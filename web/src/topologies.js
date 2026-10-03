@@ -54,6 +54,9 @@ export const TOPOLOGIES = [
     'Step-up/down, inverting; continuous input & output current.'),
   T('zeta', 'Zeta', 'Non-Isolated DC-DC',
     'Step-up/down, non-inverting; buck-like output.'),
+  T('inverting_buck_boost', 'Inverting buck-boost', 'Non-Isolated DC-DC',
+    'Single switch, single inductor; step-up/down to a negative rail.',
+    { vinNom: 24, outputs: [{ name: 'out', voltage: 12, power: 24 }], maxOutputs: 1 }),
   T('fsbb', '4-switch buck-boost', 'Non-Isolated DC-DC',
     'Full bridge over one inductor; seamless up/down.',
     { vinNom: 24, outputs: [{ name: 'out', voltage: 20, power: 60 }] }),
@@ -63,6 +66,10 @@ export const TOPOLOGIES = [
     'Isolated single-switch; energy stored in the transformer (CCM).',
     { vinMin: 36, vinNom: 48, vinMax: 60, isolation: 1500,
       outputs: [{ name: 'out', voltage: 12, power: 24 }] }),
+  T('two_switch_flyback', 'Two-switch flyback', 'Isolated Forward / Flyback',
+    'Double-ended flyback: both switches clamped at Vin by two diodes; Vor kept below Vin.',
+    { vinMin: 320, vinNom: 375, vinMax: 400, fs: 65e3, isolation: 3000,
+      outputs: [{ name: 'out', voltage: 12, power: 60 }] }),
   T('isolated_buck', 'Isolated buck (Fly-Buck)', 'Isolated Forward / Flyback',
     'Buck with a coupled secondary; needs primary + isolated outputs.',
     { isolation: 1500, minOutputs: 2,
@@ -161,7 +168,10 @@ const FLYBACK_MODE = [
 export const VARIANTS = {
   buck: { key: 'rectifier', label: 'Rectifier', default: 'diode', options: SYNC_RECT },
   boost: { key: 'rectifier', label: 'Rectifier', default: 'diode', options: SYNC_RECT },
+  inverting_buck_boost: { key: 'rectifier', label: 'Rectifier', default: 'diode', options: SYNC_RECT },
   flyback: { key: 'mode', label: 'Conduction mode', default: 'ccm', options: FLYBACK_MODE },
+  // No quasi-resonant mode: valley switching is not modelled for the diode-clamped two-switch cell.
+  two_switch_flyback: { key: 'mode', label: 'Conduction mode', default: 'ccm', options: FLYBACK_MODE.filter((m) => m.id !== 'qrm') },
   ahb: { key: 'rectifierType', label: 'Secondary rectifier', default: 'fullBridge', options: RECTIFIER_3 },
   psfb: { key: 'rectifierType', label: 'Secondary rectifier', default: 'fullBridge', options: RECTIFIER_3 },
   pshb: { key: 'rectifierType', label: 'Secondary rectifier', default: 'fullBridge', options: RECTIFIER_3 },
@@ -172,6 +182,35 @@ export const VARIANTS = {
 // The single fallback offered when a topology has no real variant axis.
 const STANDARD = { key: null, label: 'Build', default: 'standard',
   options: [{ id: 'standard', name: 'Standard', desc: 'The canonical build for this topology.' }] }
+
+// Structural cases the offline gates must ALSO draw and check, beyond the variant axis: settings that change
+// the CIRCUIT (not just its values) yet are knobs rather than variants. Interleaving (config.phaseCount)
+// replicates the whole switching cell, so a drawing that is right for one phase says nothing about three.
+// Each is "<variant>@<N>ph"; the gates enumerate them through auditOptions/applyAuditOption.
+const STRUCTURAL_CASES = {
+  buck: ['diode@2ph', 'synchronous@3ph'],
+  boost: ['diode@3ph', 'synchronous@2ph'],
+}
+
+// Every option an offline gate sweeps for a topology: each variant, then each structural case.
+export function auditOptions(topologyId) {
+  const v = VARIANTS[topologyId]
+  return [...(v ? v.options.map((o) => o.id) : [null]), ...(STRUCTURAL_CASES[topologyId] ?? [])]
+}
+
+// Write an audit option into a spec's config: the variant axis value, plus config.phaseCount for "@<N>ph".
+export function applyAuditOption(spec, topologyId, opt) {
+  if (!opt) return spec
+  const v = VARIANTS[topologyId]
+  const [variant, ph] = opt.split('@')
+  if (variant && v) spec.config = { ...(spec.config ?? {}), [v.key]: variant }
+  if (ph) {
+    const n = Number(ph.replace(/ph$/, ''))
+    if (!Number.isInteger(n) || n < 2) throw new Error(`audit option '${opt}': bad phase count`)
+    spec.config = { ...(spec.config ?? {}), phaseCount: n }
+  }
+  return spec
+}
 
 export function variantAxis(topologyId) {
   return VARIANTS[topologyId] ?? STANDARD
@@ -254,13 +293,19 @@ const coupledBlock = () => [
 export const KNOBS = {
   // ── Non-Isolated DC-DC ──────────────────────────────────────────────────────
   buck: [
+    num('phaseCount', 'Interleaved phases', 1, { tier: 1, sym: 'N', min: 1, max: 6, step: 1, int: true, tip: 'Number of interleaved phases (cells staggered by 360/N on shared rails).' }), 
     num('esrRippleFraction', 'ESR ripple budget', 0.005, { tier: 3, min: 0.0005, max: 0.05, step: 0.0005, tip: 'Filter-cap ESR budget as a fraction of the rail voltage (default 0.5%).' }),kPinL('Inductance', 'L', 'Pin the inductor value; the stage is sized around it.'),
     kRipple(0.4), kMaxIsw(), kMaxDuty(1.0), kDead(0.01), kOutRipple(0.01), kVderate()],
   boost: [
+    num('phaseCount', 'Interleaved phases', 1, { tier: 1, sym: 'N', min: 1, max: 6, step: 1, int: true, tip: 'Number of interleaved phases (cells staggered by 360/N on shared rails).' }), 
     num('esrRippleFraction', 'ESR ripple budget', 0.005, { tier: 3, min: 0.0005, max: 0.05, step: 0.0005, tip: 'Filter-cap ESR budget as a fraction of the rail voltage (default 0.5%).' }),kPinL('Inductance', 'L', 'Pin the inductor value; the stage is sized around it.'),
     kRipple(0.4), kMaxIsw(), kMaxDuty(1.0), kDead(0.01), kOutRipple(0.01), kVderate()],
   sepic: [kPinL('Inductance L1', 'L1'), ...coupledBlock()],
   zeta: [kPinL('Inductance L1', 'L1'), ...coupledBlock()],
+  inverting_buck_boost: [
+    enm('mode', 'Conduction mode', [{ id: 'ccm', name: 'CCM' }, { id: 'dcm', name: 'DCM' }], 'ccm', 1, 'CCM sizes L for the ripple ratio; DCM sizes it below the critical inductance at Vin,min (diode rectifier only).'),
+    kPinL('Inductance', 'L'), kRipple(0.4), kMaxIsw(), kMaxDuty(0.95), kDead(0.01), kOutRipple(0.01), kVderate(),
+  ],
   cuk: [
     boo('isolated', 'Isolated (transformer)', false, 1, 'Split the coupling cap and insert an isolation transformer.'),
     kPinN('Pin the turns ratio Np:Ns (isolated Ćuk only).'),
@@ -284,6 +329,9 @@ export const KNOBS = {
     num('esrRippleFraction', 'ESR ripple budget', 0.005, { tier: 3, min: 0.0005, max: 0.05, step: 0.0005, tip: 'Filter-cap ESR budget as a fraction of the rail voltage (default 0.5%).' }),kPinN(), kPinL('Magnetizing inductance', 'Lm'),
     num('resonantCapacitance', 'QR valley cap', 220e-12, { tier: 1, sym: 'Cres', unit: 'F', min: 0, tip: 'Quasi-resonant valley-switching capacitance (QRM mode only).' }),
     kVderate()],
+  two_switch_flyback: [kPinN(), kPinL('Magnetizing inductance', 'Lm'),
+    num('maxDutyCycle', 'Max duty cycle', 0.45, { tier: 1, sym: 'Dmax', min: 0.05, max: 0.49, step: 0.01, tip: 'Must stay below 0.5: it sets Vor below Vin,min so the clamp diodes stay off through the reset.' }),
+    num('inductorRippleRatio', 'Magnetizing ripple', 0.4, { sym: 'ΔIL', min: 0.01, max: 2, step: 0.05 }), kVderate()],
   isolated_buck: [kPinN(), kPinL('Magnetizing inductance', 'Lm'),
     num('inductorRippleRatio', 'Inductor ripple', 0.4, { sym: 'ΔIL', min: 0.01, max: 2, step: 0.05 }), kMaxIsw(), kVderate()],
   isolated_buck_boost: [kPinN(), kPinL('Magnetizing inductance', 'Lm'),

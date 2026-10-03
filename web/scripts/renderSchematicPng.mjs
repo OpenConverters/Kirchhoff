@@ -1,6 +1,6 @@
 // Offline schematic renderer for eyeballing: node scripts/renderSchematicPng.mjs <outdir> [topo[/variant] ...]
 import init from '../../build-wasm-ng/kirchhoff.js'
-import { TOPOLOGIES, VARIANTS, buildSpec } from '../src/topologies.js'
+import { TOPOLOGIES, VARIANTS, buildSpec, auditOptions, applyAuditOption } from '../src/topologies.js'
 // Draw what the PRODUCT draws: renderForAudit picks the CIAS layout where one exists (flyback), the
 // hand-authored art otherwise — exactly as renderVerifiedSchematic does in the app.
 import { renderForAudit, hasCiasSchematic } from '../src/ciasSchematic.js'
@@ -22,11 +22,11 @@ const b = await chromium.launch()
 for (const t of TOPOLOGIES) {
   if (!hasCiasSchematic(t.id)) continue
   const v = VARIANTS[t.id]
-  for (const opt of (v ? v.options.map((o) => o.id) : [null])) {
+  for (const opt of auditOptions(t.id)) {
     const key = opt ? `${t.id}/${opt}` : t.id
     if (want.length && !want.includes(key) && !want.includes(t.id)) continue
     const spec = buildSpec({ ...t.preset, variant: opt ?? 'standard' }, t.id)
-    if (opt && v) spec.config = { ...(spec.config ?? {}), [v.key]: opt }
+    applyAuditOption(spec, t.id, opt)
     const out = M.design_tas_full(t.id, JSON.stringify(spec))
     if (out.startsWith('Exception')) throw new Error(`${key}: design failed: ${out.slice(0, 200)}`)
     const { svg } = renderForAudit(t.id, JSON.parse(out).tas, opt ?? 'standard')
