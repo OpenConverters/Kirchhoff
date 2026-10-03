@@ -173,6 +173,85 @@ function LLC_LAYOUT() {
 // drawn with a 3-winding 406 Custom Transformer; a single ratio is one secondary (2-winding `T`).
 const isCTr = (q) => (q.req.turnsRatios?.length ?? 0) >= 2
 
+// Which side the active-clamp flyback's clamp leg is on, from the netlist: Cc pin 1 on the input rail (high)
+// or on the switch node (low).
+function acfClampSide(tas) {
+  const st = (tas?.topology?.stages ?? []).find((s) => s.name === 'inverter')
+  const net = (st?.circuit?.connections ?? []).find((c) => c.endpoints.some((e) => e.component === 'Cc' && e.pin === '1'))
+  if (net?.name === 'dc_pos') return 'high'
+  if (net?.name === 'sw') return 'low'
+  throw new Error(`active_clamp_flyback: cannot tell the clamp side (Cc pin 1 on net '${net?.name}')`)
+}
+
+// x: source 96 · Cin 128 · Qc drive 176 · clamp leg 240 · Csw 272 · Q1 drive 320 · primary / Q1 384 ·
+// secondary 464. y: Vin rail 64, switch-node bus 144, GND 320.
+function acfFlybackVisual(side) {
+  const high = side === 'high'
+  const xfmr = {
+    pins: { primary_start: [384, 96], primary_end: [384, 128], secondary1_end: [464, 96], secondary1_start: [464, 128] },
+    line: (q, c) => {
+      const lp = resolveDim(q.req.magnetizingInductance, 'T1 magnetizing inductance')
+      const lk = resolveDim(q.req.leakageInductance?.[0], 'T1 leakage inductance')
+      return `T 384 96 464 96 4 ${c.Lm} ${1 / c.n} 0 0 ${Math.sqrt(1 - lk / lp)}`   // flags 4: flyback dots
+    },
+  }
+  const clamp = high
+    ? {
+        Cc: { pins: { 1: [240, 64], 2: [240, 96] }, line: (q, c) => `c 240 64 240 96 0 ${c.C(q)} ${c.n * c.vout}` },
+        Qc: { pins: { gate: [176, 112], drain: [240, 96], source: [240, 128] }, line: () => 'f 176 112 240 112 32 1.5 50' },
+      }
+    : {
+        Cc: { pins: { 1: [240, 144], 2: [240, 208] }, line: (q, c) => `c 240 144 240 208 0 ${c.C(q)} ${c.vin + c.n * c.vout}` },
+        Qc: { pins: { gate: [176, 224], drain: [240, 240], source: [240, 208] }, line: () => 'f 176 224 240 224 40 1.5 50' },
+      }
+  const clampWires = high
+    ? [[96, 64, 128, 64], [128, 64, 240, 64], [240, 64, 384, 64],                            // Vin rail (Cc top on it)
+       [240, 128, 240, 144], [176, 144, 240, 144], [240, 144, 272, 144]]                     // Qc source → bus
+    : [[96, 64, 128, 64], [128, 64, 384, 64],                                                 // Vin rail
+       [240, 144, 272, 144], [176, 208, 240, 208], [240, 240, 240, 320]]                    // Cc on the bus; Qc drain → GND
+  const qcDrive = high
+    ? (c) => ({ line: `v 176 144 176 112 0 2 ${c.fVis} 5 5 ${c.phaseShiftOf('Qc')} ${c.dutyOf('Qc')}`, posts: [[176, 144], [176, 112]],
+                attach: { '176,112': ['Qc', 'gate'], '176,144': ['Qc', 'source'] } })
+    : (c) => ({ line: `v 176 208 176 224 0 2 ${c.fVis} 5 5 ${c.phaseShiftOf('Qc')} ${c.dutyOf('Qc')}`, posts: [[176, 208], [176, 224]],
+                attach: { '176,224': ['Qc', 'gate'], '176,208': ['Qc', 'source'] } })
+  return {
+    place: {
+      Cin: { pins: { 1: [128, 64], 2: [128, 320] }, line: (q, c) => `c 128 64 128 320 0 ${c.C(q)} ${c.vin}` },
+      ...clamp,
+      Csw: { pins: { 1: [272, 144], 2: [272, 320] }, line: (q, c) => `c 272 144 272 320 0 ${c.C(q)} 0` },
+      Q1: { pins: { gate: [320, 192], drain: [384, 176], source: [384, 208] }, line: () => 'f 320 192 384 192 32 1.5 50' },
+      T1: xfmr,
+      D1: { pins: { anode: [512, 96], cathode: [576, 96] }, line: () => 'd 512 96 576 96 2 default' },
+      Cout: { pins: { 1: [624, 96], 2: [624, 320] }, line: (q, c) => `c 624 96 624 320 0 ${c.C(q)} ${c.vout}` },
+    },
+    wires: [
+      ...clampWires,
+      [384, 64, 384, 96],                                                                    // Vin → primary start
+      [384, 128, 384, 144], [384, 144, 384, 176], [272, 144, 384, 144],                      // primary end = drain = bus
+      [384, 208, 384, 320],                                                                  // Q1 source → GND
+      [96, 320, 128, 320], [128, 320, 240, 320], [240, 320, 272, 320], [272, 320, 320, 320],
+      [320, 320, 384, 320], [384, 320, 464, 320], [464, 320, 624, 320], [624, 320, 704, 320], // GND rail
+      [464, 96, 512, 96], [464, 128, 464, 320],                                              // secondary
+      [576, 96, 624, 96], [624, 96, 704, 96],                                                // Vout rail
+    ],
+    synth: (c) => [
+      { line: `v 96 320 96 64 0 0 40 ${c.vin} 0 0 0.5`, posts: [[96, 320], [96, 64]], attach: { '96,64': ['Cin', '1'], '96,320': ['Cin', '2'] } },
+      { line: 'g 96 320 96 336 0', posts: [[96, 320]] },
+      { line: `v 320 320 320 192 0 2 ${c.fVis} 5 5 0 ${c.dutyOf('Q1')}`, posts: [[320, 320], [320, 192]], attach: { '320,192': ['Q1', 'gate'], '320,320': ['Cin', '2'] } },
+      qcDrive(c),
+      { line: `r 704 96 704 320 0 ${c.rload}`, tag: 'Rload', posts: [[704, 96], [704, 320]], attach: { '704,96': ['Cout', '1'], '704,320': ['Cout', '2'] } },
+      { line: '207 704 96 752 96 0 vout', posts: [[704, 96]] },
+    ],
+    scopeSets: {
+      overview:  [['Q1', 'voltage'], ['D1', 'voltage'], ['Rload', 'voltage']],
+      magnetic:  [['D1', 'voltage'], { magI: [384, 128, 384, 144], magVtag: 'Q1' }, ['Rload', 'voltage']],
+      switch:    [['Q1', 'both'], ['Qc', 'both'], ['Rload', 'voltage']],
+      rectifier: [['Q1', 'voltage'], ['D1', 'both'], ['Rload', 'voltage']],
+      output:    [['Q1', 'voltage'], ['Qc', 'voltage'], ['Rload', 'both']],
+    },
+  }
+}
+
 const LAYOUTS = {
   flyback: {
     place: {
@@ -269,6 +348,13 @@ const LAYOUTS = {
       output:    [['Q2', 'voltage'], ['D1', 'voltage'], ['Rload', 'both']],
     },
   },
+
+  // Active-clamp flyback: Q1 low side, the clamp leg (Qc + Cc) high-side (Cc from Vin, Qc to the drain) or
+  // low-side (Cc from the drain, Qc to GND — drawn flipped, flags 40, so its body diode points the CIAS way).
+  // The designed leakage rides on the transformer's coupling, k = sqrt(1 − Lk/Lp); Csw is the drain node.
+  // Qc's floating gate drive is referenced to its own source and carries the stimulus phase, so the clamp
+  // runs complementary (or as the NC pulse) exactly as the deck does.
+  active_clamp_flyback: (tas) => acfFlybackVisual(acfClampSide(tas)),
 
   // Non-isolated buck: high-side switch (Vin→sw), freewheel diode, LC filter. The high-side gate drive
   // is a FLOATING gate-source PWM (its reference wires to the switching node) so Vgs toggles regardless
@@ -1650,8 +1736,10 @@ export function hasVisualSim(topoId) { return topoId in LAYOUTS }
 // Build the circuitjs1 circuit text + URL for a solved TAS. Throws (loudly, with the reason) on
 // anything the layout cannot faithfully represent — never draws an approximation silently.
 export function falstadExport(topoId, tas, scopeSet = 'overview') {
-  const layout = LAYOUTS[topoId]
-  if (!layout) throw new Error(`no visual-sim layout for topology '${topoId}' yet`)
+  // A layout may be a function of the TAS, for a circuit whose wiring (not just its values) follows a knob.
+  const layoutSpec = LAYOUTS[topoId]
+  if (!layoutSpec) throw new Error(`no visual-sim layout for topology '${topoId}' yet`)
+  const layout = typeof layoutSpec === 'function' ? layoutSpec(tas) : layoutSpec
 
   const dr = tas?.inputs?.designRequirements
   if (!dr) throw new Error('TAS has no inputs.designRequirements')
@@ -1667,9 +1755,10 @@ export function falstadExport(topoId, tas, scopeSet = 'overview') {
   const duty = stim.waveform.dutyCycle
   if (typeof fsw !== 'number' || typeof duty !== 'number') throw new Error('pwm stimulus lacks frequency/dutyCycle')
   // Per-switch duty map: a multi-switch bridge drives each FET off its OWN stimulus duty, not stim[0]'s.
-  const dutyByComp = new Map()
+  const dutyByComp = new Map(), phaseByComp = new Map()
   for (const s of tas.simulation?.stimulus ?? []) {
     if (s?.waveform?.type === 'pwm' && typeof s.waveform.dutyCycle === 'number') dutyByComp.set(s.component, s.waveform.dutyCycle)
+    if (s?.waveform?.type === 'pwm') phaseByComp.set(s.component, s.waveform.phase ?? 0)
   }
 
   // CIAS components (the same set the ngspice deck instantiates)
@@ -1698,6 +1787,14 @@ export function falstadExport(topoId, tas, scopeSet = 'overview') {
     L: (q) => resolveDim(q.req.magnetizingInductance ?? q.req.inductance, `${q.ref} inductance`) * k,
     // A specific switch's own PWM duty (from tas.simulation.stimulus); falls back to stim[0]'s duty.
     dutyOf: (ref) => (dutyByComp.has(ref) ? dutyByComp.get(ref) : duty),
+    // A switch's PWM delay as CircuitJS1's square-wave phase shift (radians): its square is high while
+    // (2π·f·t + φ) mod 2π < 2π·duty, so a pulse that starts `phase` degrees into the period needs
+    // φ = 2π·(1 − phase/360).
+    phaseShiftOf: (ref) => {
+      if (!phaseByComp.has(ref)) throw new Error(`no pwm stimulus for '${ref}'`)
+      const p = phaseByComp.get(ref)
+      return p === 0 ? 0 : 2 * Math.PI * (1 - p / 360)
+    },
     // Is a component present in THIS design? Lets a `place` entry pick its pins/orientation by variant
     // (e.g. an LLC diode D1 rectifies to Vout in center-tapped but freewheels to gnd in current-doubler,
     // distinguished by whether the doubler inductor Lo1 is present).

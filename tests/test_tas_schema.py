@@ -115,6 +115,15 @@ TSFLY_IN = {"designRequirements": {"efficiency": 1.0, "inputVoltage": {"minimum"
             "operatingPoints": [{"inputVoltage": 375, "outputs": [{"power": 60}]}]}
 for mode in ("ccm", "dcm", "bcm"):
     check(f"two_switch_flyback-{mode}", PyKirchhoff.design_two_switch_flyback_tas({**TSFLY_IN, "config": {"mode": mode}}))
+# Active-clamp flyback (ABT #1432): both drives x both clamp sides (body diodes, Csw, the designed or capped
+# leakage requirement on T1).
+ACFLY_IN = {"designRequirements": {"efficiency": 1.0, "inputVoltage": {"minimum": 170, "nominal": 200, "maximum": 230},
+            "switchingFrequency": {"nominal": 150000}, "outputs": [{"name": "out", "voltage": {"nominal": 20}}]},
+            "operatingPoints": [{"inputVoltage": 200, "outputs": [{"power": 65}]}]}
+for mode in ("complementary", "nonComplementary"):
+    for side in ("high", "low"):
+        check(f"active_clamp_flyback-{mode}-{side}",
+              PyKirchhoff.design_active_clamp_flyback_tas({**ACFLY_IN, "config": {"mode": mode, "clampSide": side}}))
 
 # Multi-output (N isolated secondaries) — ABT #86. A 2-output forward-family spec must still emit a
 # schema-valid TAS (extra secondary windings, per-output rectifiers/filters, extra external output ports).

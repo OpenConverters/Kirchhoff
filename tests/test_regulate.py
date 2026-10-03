@@ -9,6 +9,8 @@ Run:  python3 -m pytest tests/test_regulate.py -v     (needs the built PyKirchho
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "build"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 import PyKirchhoff  # noqa: E402
@@ -85,6 +87,21 @@ def test_regulate_duty_boost():       # ABT #28's example topology
     # A clean physical peak is a small multiple of the ripple rms; the displacement artifact was ~140x it.
     assert ic["peak"] <= 8.0 * ic["rms"] and ic["peak"] < 40.0, \
         f"boost Cout current peak {ic['peak']:.1f} A is a switching-displacement artifact, not the real ripple"
+
+
+@pytest.mark.parametrize("mode", ["complementary", "nonComplementary"])
+def test_regulate_duty_active_clamp_flyback(mode):
+    # Complementary: Q1 at D, the clamp switch re-derived to (1−D)−2·dt from (D+dt)·360. NC-ACF: only Q1 moves,
+    # the clamp pulse keeps its designed place before Q1's next turn-on (scripts/regulate.py).
+    spec = _spec(200, 20, 65, 150000)
+    spec["config"] = {"mode": mode}
+    tas = PyKirchhoff.design_active_clamp_flyback_tas(spec)
+    R.bind_datasheet_semis(tas)
+    r = R.simulate_regulated(tas, 20, "active_clamp_flyback", fidelity={"origin": "DATASHEET"})
+    assert r["regulated"], f"active_clamp_flyback/{mode} did not regulate (vout={r.get('vout')})"
+    assert r["steady_state"]
+    assert abs(r["vout"] - 20) <= 0.02 * 20
+    assert 0.5 < r["efficiency"] <= 1.0
 
 
 def test_regulate_phase_psfb():

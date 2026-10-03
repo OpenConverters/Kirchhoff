@@ -5,7 +5,7 @@ design math + TAS assembly + runnable SPICE deck, exportable and usable independ
 magnetics design. (Historically these models lived in OpenMagnetics/MKF; they are migrating
 here as MKF returns to being a pure magnetics library — see `docs/MKF_MIGRATION.md`.)
 
-## Implemented today (26 topologies)
+## Implemented today (27 topologies)
 
 | Family | Topologies | Verification |
 |---|---|---|
@@ -13,6 +13,7 @@ here as MKF returns to being a pure magnetics library — see `docs/MKF_MIGRATIO
 | Non-isolated DC-DC | Inverting buck-boost (CCM/DCM, diode/synchronous) | standalone (closed form vs ngspice) |
 | Isolated single/two-switch | Flyback, Forward, Two-switch forward, Active-clamp forward, Push-pull, AHB, Isolated-buck (Flybuck), Isolated-buck-boost, Weinberg | MKF-equivalence |
 | Isolated single/two-switch | Two-switch flyback (CCM/DCM/BCM; clamp diodes return the leakage energy to Vin) | standalone (vs the single-switch flyback deck) |
+| Isolated single/two-switch | Active-clamp flyback (complementary / NC-ACF drive × high-/low-side clamp; ZVS) | standalone (steady-state solver vs ngspice) |
 | Isolated bridge / phase-shift | PSFB, PSHB (3-level NPC), DAB (bidirectional) | MKF-equivalence |
 | Resonant | LLC, SRC, CLLC, CLLLC | LLC/SRC/CLLC vs MKF; CLLLC standalone |
 | AC-input PFC | PFC (1-φ boost), Vienna (3-φ 3-level) | standalone |
@@ -41,8 +42,6 @@ topology MKF never modelled (the inverting buck-boost onwards).
 - **Hard-switched full-bridge PWM** (ABT #1435) — the plain bridge PSFB and AHB are variants of.
 
 ### Tier 2 — high-value modern variants
-- **Active-clamp flyback** (ABT #1432) — clamp switch + clamp cap across the primary (high-/low-side),
-  ZVS, complementary / non-complementary modes. Dominant USB-PD / GaN adapter topology.
 - **LCC resonant** (ABT #1438) — series-parallel tank, HV outputs where winding capacitance is Cp.
 
 ### Tier 3 — multilevel
@@ -59,5 +58,5 @@ topology MKF never modelled (the inverting buck-boost onwards).
   DC-blocking cap + flux-walk test (ABT #1430), current-transformer flux / reset / placement (ABT #1431).
 
 ### Order being worked (2026-10-03)
-Interleaved buck/boost → two-switch flyback → active-clamp flyback → hard-switched half-bridge →
+Interleaved buck/boost → two-switch flyback → active-clamp flyback (done) → hard-switched half-bridge →
 hard-switched full-bridge → LCC → FCML → inverters (in scope, decided 2026-10-03). Tracked per ABT ticket.

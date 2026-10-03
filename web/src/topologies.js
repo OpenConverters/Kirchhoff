@@ -70,6 +70,10 @@ export const TOPOLOGIES = [
     'Double-ended flyback: both switches clamped at Vin by two diodes; Vor kept below Vin.',
     { vinMin: 320, vinNom: 375, vinMax: 400, fs: 65e3, isolation: 3000,
       outputs: [{ name: 'out', voltage: 12, power: 60 }] }),
+  T('active_clamp_flyback', 'Active-clamp flyback', 'Isolated Forward / Flyback',
+    'Clamp switch + capacitor across the primary recycle the leakage energy; the main switch turns on at zero voltage.',
+    { vinMin: 170, vinNom: 200, vinMax: 230, fs: 150e3, isolation: 3000,
+      outputs: [{ name: 'out', voltage: 20, power: 65 }] }),
   T('isolated_buck', 'Isolated buck (Fly-Buck)', 'Isolated Forward / Flyback',
     'Buck with a coupled secondary; needs primary + isolated outputs.',
     { isolation: 1500, minOutputs: 2,
@@ -165,6 +169,11 @@ const FLYBACK_MODE = [
   { id: 'qrm', name: 'Quasi-resonant', desc: 'Boundary + valley switching: after diode cutoff the drain rings on Lm·Cres and the switch turns on at the first Vds valley (config.resonantCapacitance, default 220 pF).' },
 ]
 
+const ACF_DRIVE = [
+  { id: 'complementary', name: 'Complementary', desc: 'Clamp switch on for the whole off-time: the leakage inductance is designed as Cc\'s resonant partner and the bidirectional magnetizing current gives ZVS.' },
+  { id: 'nonComplementary', name: 'Non-complementary (NC-ACF)', desc: 'Discontinuous transformer; the clamp body diode absorbs the leakage energy and one short clamp pulse before turn-on buys ZVS. Leakage is a parasitic (≤ 2 % of Lp).' },
+]
+
 export const VARIANTS = {
   buck: { key: 'rectifier', label: 'Rectifier', default: 'diode', options: SYNC_RECT },
   boost: { key: 'rectifier', label: 'Rectifier', default: 'diode', options: SYNC_RECT },
@@ -172,6 +181,7 @@ export const VARIANTS = {
   flyback: { key: 'mode', label: 'Conduction mode', default: 'ccm', options: FLYBACK_MODE },
   // No quasi-resonant mode: valley switching is not modelled for the diode-clamped two-switch cell.
   two_switch_flyback: { key: 'mode', label: 'Conduction mode', default: 'ccm', options: FLYBACK_MODE.filter((m) => m.id !== 'qrm') },
+  active_clamp_flyback: { key: 'mode', label: 'Clamp drive', default: 'complementary', options: ACF_DRIVE },
   ahb: { key: 'rectifierType', label: 'Secondary rectifier', default: 'fullBridge', options: RECTIFIER_3 },
   psfb: { key: 'rectifierType', label: 'Secondary rectifier', default: 'fullBridge', options: RECTIFIER_3 },
   pshb: { key: 'rectifierType', label: 'Secondary rectifier', default: 'fullBridge', options: RECTIFIER_3 },
@@ -190,7 +200,11 @@ const STANDARD = { key: null, label: 'Build', default: 'standard',
 const STRUCTURAL_CASES = {
   buck: ['diode@2ph', 'synchronous@3ph'],
   boost: ['diode@3ph', 'synchronous@2ph'],
+  // The clamp side moves Cc and Qc (Cc to Vin vs Cc to the drain, Qc to GND): a different circuit per side.
+  active_clamp_flyback: ['complementary@lowClamp', 'nonComplementary@lowClamp'],
 }
+// Non-phase "@" suffixes: the config each one writes.
+const STRUCTURAL_SUFFIX = { lowClamp: { clampSide: 'low' } }
 
 // Every option an offline gate sweeps for a topology: each variant, then each structural case.
 export function auditOptions(topologyId) {
@@ -204,9 +218,11 @@ export function applyAuditOption(spec, topologyId, opt) {
   const v = VARIANTS[topologyId]
   const [variant, ph] = opt.split('@')
   if (variant && v) spec.config = { ...(spec.config ?? {}), [v.key]: variant }
-  if (ph) {
+  if (ph && STRUCTURAL_SUFFIX[ph]) {
+    spec.config = { ...(spec.config ?? {}), ...STRUCTURAL_SUFFIX[ph] }
+  } else if (ph) {
     const n = Number(ph.replace(/ph$/, ''))
-    if (!Number.isInteger(n) || n < 2) throw new Error(`audit option '${opt}': bad phase count`)
+    if (!/^\d+ph$/.test(ph) || !Number.isInteger(n) || n < 2) throw new Error(`audit option '${opt}': bad structural suffix`)
     spec.config = { ...(spec.config ?? {}), phaseCount: n }
   }
   return spec
@@ -332,6 +348,15 @@ export const KNOBS = {
   two_switch_flyback: [kPinN(), kPinL('Magnetizing inductance', 'Lm'),
     num('maxDutyCycle', 'Max duty cycle', 0.45, { tier: 1, sym: 'Dmax', min: 0.05, max: 0.49, step: 0.01, tip: 'Must stay below 0.5: it sets Vor below Vin,min so the clamp diodes stay off through the reset.' }),
     num('inductorRippleRatio', 'Magnetizing ripple', 0.4, { sym: 'ΔIL', min: 0.01, max: 2, step: 0.05 }), kVderate()],
+  active_clamp_flyback: [kPinN(),
+    enm('clampSide', 'Clamp side', [{ id: 'high', name: 'High-side (Cc to Vin)' }, { id: 'low', name: 'Low-side (Cc to GND)' }], 'high', 1,
+      'High-side: Cc from Vin, clamp FET to the drain (Cc holds the reflected voltage). Low-side: Cc from the drain, clamp FET to GND (Cc holds Vin + the reflected voltage; ground-referenced clamp drive).'),
+    num('maxDutyCycle', 'Max duty cycle', 0.5, { tier: 1, sym: 'Dmax', min: 0.1, max: 0.7, step: 0.01, tip: 'Duty at Vin,min: sets the turns ratio.' }),
+    num('clampOvershoot', 'Clamp overshoot', 0.15, { tier: 1, min: 0.01, max: 1, step: 0.01, tip: 'Clamp peak above the reflected voltage, as a fraction of it. Complementary: sets the Lk–Cc characteristic impedance (with π√(LkCc) = off-time at Vin,min).' }),
+    num('deadTime', 'Dead time', 100e-9, { tier: 1, sym: 'td', unit: 's', min: 1e-9, tip: 'Between the two gates; the switch node must reach GND in half of it (the ZVS margin).' }),
+    num('resonantCapacitance', 'Switch-node capacitance', 220e-12, { tier: 2, sym: 'Csw', unit: 'F', min: 1e-12, tip: 'Coss + winding capacitance at the drain: what the dead time has to slew.' }),
+    num('leakageRatio', 'Leakage ratio (NC)', 0.02, { tier: 2, min: 0.001, max: 0.19, step: 0.001, tip: 'NC-ACF only: the leakage inductance\'s cap as a fraction of Lp (a parasitic there).' }),
+    kVderate()],
   isolated_buck: [kPinN(), kPinL('Magnetizing inductance', 'Lm'),
     num('inductorRippleRatio', 'Inductor ripple', 0.4, { sym: 'ΔIL', min: 0.01, max: 2, step: 0.05 }), kMaxIsw(), kVderate()],
   isolated_buck_boost: [kPinN(), kPinL('Magnetizing inductance', 'Lm'),

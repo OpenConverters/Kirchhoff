@@ -386,6 +386,79 @@ const cllcLike = (present, srRefs) => {
   return { size: [1040, 430], place: frag.place, wires: frag.wires, synth: (b) => frag.synthEls(b) }
 }
 
+// Which side the active-clamp flyback's clamp leg is on, from the netlist (not the form): Cc's pin 1 sits on
+// the input rail (high-side: Cc to Vin, Qc to the drain) or on the switch node (low-side: Cc to the drain,
+// Qc to GND).
+function acfClampSide(tas) {
+  const st = (tas?.topology?.stages ?? []).find((s) => s.name === 'inverter')
+  const net = (st?.circuit?.connections ?? []).find((c) => c.endpoints.some((e) => e.component === 'Cc' && e.pin === '1'))
+  if (net?.name === 'dc_pos') return 'high'
+  if (net?.name === 'sw') return 'low'
+  throw new Error(`active_clamp_flyback: cannot tell the clamp side (Cc pin 1 on net '${net?.name}')`)
+}
+
+// Active-clamp flyback. Columns: source 60 · Cin 120 · clamp leg 200 · Csw 380 · Q1 / primary 540 (the body
+// diodes Dq1/Dqc are the FETs' own and are not drawn). Vin rail y=40, switch-node bus y=210, GND y=330, secondary return y=380.
+function activeClampFlyback(side) {
+  const high = side === 'high'
+  const clampPlace = high
+    ? {
+        Cc:  { draw: (b) => capV('Cc', b, 200, 95, 'left') },
+        Qc:  { draw: (b) => mosfetV('Qc', b, 200, 160, 'right', true) },
+      }
+    : {
+        Cc:  { draw: (b) => capV('Cc', b, 200, 240, 'left') },
+        Qc:  { draw: (b) => mosfetV('Qc', b, 200, 300, 'right', true, true) },
+      }
+  const clampWires = high
+    ? [
+        { from: 'Cc.p0', to: [200, 40] },                                    // Cc from Vin…
+        { from: 'Cc.p1', to: 'Qc.drain' },                                   // …to the clamp node…
+        { from: 'Qc.source', to: [200, 210] },                               // …through Qc to the drain
+      ]
+    : [
+        { from: 'Cc.p0', to: [200, 210] },                                   // Cc from the drain…
+        { from: 'Cc.p1', to: 'Qc.source' },                                  // …to the clamp node…
+        { from: 'Qc.drain', to: [200, 330] },                                // …through Qc to GND
+      ]
+  return {
+    size: [1030, 500],
+    place: {
+      Cin: { draw: (b) => capV('Cin', b, 120, 185) },
+      ...clampPlace,
+      Csw: { draw: (b) => capV('Csw', b, 380, 260, 'left') },
+      Q1:  { draw: (b) => mosfetV('Q1', b, 540, 250, 'right', true) },
+      T1:  { draw: (b) => xfmr('T1', b, 550, 140, { opp: true, labelDx: 130, labelDy: 64 }) },
+      D1:  { draw: (b) => diode('D1', b, 670, 70, 'right') },
+      Cout: { draw: (b) => capV('Cout', b, 780, 225) },
+    },
+    wires: [
+      { from: '@src.p0', to: [540, 40], via: [[60, 40]] },                   // Vin rail → primary start
+      { from: '@src.p1', to: [540, 330], via: [[60, 330]] },                 // primary return rail
+      { from: 'Cin.p0', to: [120, 40] },
+      { from: 'Cin.p1', to: [120, 330] },
+      { from: 'T1.p0', to: [540, 40] },
+      { from: 'T1.p1', to: 'Q1.drain' },                                     // primary end → drain
+      { from: 'Q1.source', to: [540, 330] },
+      { from: [200, 210], to: [380, 210] },                                  // switch-node bus
+      { from: 'Csw.p0', to: [380, 210] },
+      { from: 'Csw.p1', to: [380, 330] },
+      { from: [380, 210], to: [540, 210] },
+      ...clampWires,
+      { from: 'T1.s0', to: 'D1.anode', via: [[600, 100], [600, 70]] },
+      { from: 'D1.cathode', to: '@port.VOUT', via: [[980, 70]] },
+      { from: 'T1.s1', to: '@port.RTN', via: [[600, 180], [600, 380], [980, 380]] },
+      { from: 'Cout.p0', to: [780, 70] },
+      { from: 'Cout.p1', to: [780, 380] },
+    ],
+    synth: (b) => [
+      srcDC(60, 185), gnd(320, 330), loadR(890, 225, 70, 380),
+      port(980, 70, 'VOUT'), port(980, 380, 'RTN'),
+      sig(514, 250, 'g1'), sig(174, high ? 160 : 300, 'gc'), ctrlIC(b, 720, 440, ['g1', 'gc']),
+    ],
+  }
+}
+
 const LAYOUTS = {
   // ── non-isolated: boost ───────────────────────────────────────────────────
   boost: {
@@ -689,6 +762,8 @@ const LAYOUTS = {
       sig(434, 66, 'g1'), sig(434, 236, 'g2'), ctrlIC(b, 600, 385, ['g1', 'g2']),
     ],
   },
+  // ── isolated: active-clamp flyback (clamp leg high- or low-side, read off the netlist) ──
+  active_clamp_flyback: (present, tas) => activeClampFlyback(acfClampSide(tas)),
   // ── isolated: buck-boost with an auxiliary isolated rail ──────────────────
   isolated_buck_boost: {
     size: [860, 360],
@@ -1555,7 +1630,7 @@ function buildCias(topologyId, tas) {
   const present = new Set(ciasComponents(tas).map((c) => c.ref))
   // A layout may be a function of the present refs: that is how a bridge picks its rectifier — from
   // what the netlist actually carries, not from the variant string the form happened to send.
-  const layout = typeof spec === 'function' ? spec(present) : spec
+  const layout = typeof spec === 'function' ? spec(present, tas) : spec
 
   // every CIAS power component must have a placement (loud gap, mirrors the falstad exporter)
   for (const ref of present) if (!layout.place[ref]) throw new Error(`ciasSchematic '${topologyId}': no placement for CIAS component '${ref}'`)

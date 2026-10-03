@@ -66,7 +66,7 @@ _CONTROL = {
 _TOPO_CONTROL = {
     **{t: "duty" for t in ("boost", "buck", "flyback", "forward", "two_switch_forward", "sepic", "cuk",
                            "zeta", "ahb", "acf", "fsbb", "weinberg", "isolated_buck", "isolated_buck_boost",
-                           "inverting_buck_boost", "two_switch_flyback")},
+                           "inverting_buck_boost", "two_switch_flyback", "active_clamp_flyback")},
     "push_pull": "ppDuty",   # buck-derived center-tapped: per-switch duty < 0.5 (overlap shorts the primary)
     **{t: "phase" for t in ("psfb", "dab")},
     "pshb": "pshbDuty",   # 3-level NPC: control the outer-pair width, not a leg phase (abt #66)
@@ -168,7 +168,20 @@ def _set_control(tas, field, value, topology=None):
             if wf.get("type") == "pwm" and st.get("component") in outer:
                 wf["dutyCycle"] = value
         return
-    if topology in ("fsbb", "ahb", "buck", "boost") and field == "dutyCycle":
+    if topology == "active_clamp_flyback" and field == "dutyCycle" and not tas.get("_acfComplementary", True):
+        # NC-ACF: the clamp pulse sits at its designed place just before Q1's next turn-on; only Q1 moves, and
+        # never into the pulse (Q1 and Qc on together short the clamp capacitor).
+        pulse_start = float(tas["_acfPulseStart"])
+        dt = float(tas["_fsbbDeadFraction"])
+        if value + dt > pulse_start:
+            raise ValueError(f"active_clamp_flyback: duty {value} runs into the clamp pulse at {pulse_start} of the period")
+        for st in tas.get("simulation", {}).get("stimulus", []):
+            wf = st.get("waveform", {})
+            if wf.get("type") == "pwm" and float(wf.get("phase", 0.0)) == 0.0:
+                wf["dutyCycle"] = value
+        return
+    if topology in ("fsbb", "ahb", "buck", "boost", "active_clamp_flyback") and field == "dutyCycle":
+        # active_clamp_flyback (complementary drive): Q1 at D, the clamp switch on for the rest (1−D)−2·dt.
         # fsbb/ahb: coordinated 4-/2-switch complementary modulation. SYNCHRONOUS buck/boost (abt #67): the
         # phase-0 main switch (buck high-side Q1 / boost low-side Q1) runs at the bisected duty D=value while
         # the sync rectifier Q2 (phase (D+dt)·360 ≠ 0; buck low-side / boost high-side) runs the COMPLEMENT
@@ -225,6 +238,29 @@ def _stash_fsbb_modulation(tas):
         d0 = float(charge[0]["waveform"].get("dutyCycle", 0.5))
         ph0 = float(disch[0]["waveform"].get("phase", 0.0)) / 360.0
         tas["_fsbbDeadFraction"] = max(0.0, ph0 - d0)
+
+
+def _stash_acf_flyback_modulation(tas):
+    """Active-clamp flyback: which drive the design uses, from the pristine stimulus. Complementary: the clamp
+    switch runs (1−D0)−2·dt from (D0+dt)·360 (the fsbb modulation applies). NC-ACF: it is a short pulse ending
+    dt before Q1's turn-on; record where it starts and the dead time (its end to the period end)."""
+    stims = [st for st in tas.get("simulation", {}).get("stimulus", [])
+             if st.get("waveform", {}).get("type") == "pwm"]
+    q1 = [st for st in stims if float(st["waveform"].get("phase", 0.0)) == 0.0]
+    qc = [st for st in stims if float(st["waveform"].get("phase", 0.0)) != 0.0]
+    if len(q1) != 1 or len(qc) != 1:
+        raise ValueError("active_clamp_flyback: expected one phase-0 main-switch drive and one clamp drive")
+    d0 = float(q1[0]["waveform"]["dutyCycle"])
+    ph = float(qc[0]["waveform"]["phase"]) / 360.0
+    dc = float(qc[0]["waveform"]["dutyCycle"])
+    dt = ph - d0
+    if abs(dc - ((1.0 - d0) - 2.0 * dt)) < 1e-9:
+        tas["_acfComplementary"] = True
+        tas["_fsbbDeadFraction"] = max(0.0, dt)
+    else:
+        tas["_acfComplementary"] = False
+        tas["_acfPulseStart"] = ph
+        tas["_fsbbDeadFraction"] = 1.0 - (ph + dc)
 
 
 _GND = {"0", "gnd", "GND", "Gnd"}
@@ -995,6 +1031,13 @@ def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_
     if topology in ("fsbb", "ahb", "buck", "boost"):
         _stash_fsbb_modulation(tas)   # capture dead-time before the bisection overwrites duties (complementary;
                                        # buck/boost = synchronous-rectifier variant, no-op for the diode default)
+    elif topology == "active_clamp_flyback":
+        _stash_acf_flyback_modulation(tas)
+        # The duty bracket must respect the drive: complementary leaves 2·dt for the clamp's two dead times;
+        # NC-ACF must end Q1 a dead time before the clamp pulse starts.
+        dt = float(tas["_fsbbDeadFraction"])
+        top = (1.0 - 2.0 * dt) if tas["_acfComplementary"] else (float(tas["_acfPulseStart"]) - dt)
+        bracket = (bracket[0], min(bracket[1], top - 1e-6))
     elif topology == "pshb":
         _stash_pshb_modulation(tas)   # capture the NPC outer pair before the bisection overwrites duties (abt #66)
     # A magnetic that can't give a valid regulated point (the deck collapses across the whole bracket): either

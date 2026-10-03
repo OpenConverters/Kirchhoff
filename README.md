@@ -117,6 +117,12 @@ against the single-phase analytical waveform, the stagger, and the output-capaci
 summed-phase charge. The **two-switch flyback** (clamp diodes return the leakage energy to Vin, so each
 switch sees only Vin) is checked in `test_two_switch_flyback` against the single-switch flyback deck with the
 same transformer: Vout within 3 %, switch nodes inside the rails, primary peak and on-time ramp within 5 %.
+The **active-clamp flyback** has its own steady-state solver (closed-form segments — linear ramps, the Lk–Cc
+clamp resonance, the Lk/Lp–Csw ring of a floating drain — with the periodic state and duty solved together).
+Complementary drive: Lk is designed as Cc's resonant partner (π·√(Lk·Cc) = off-time at Vin,min) and emitted as
+a nominal leakage requirement. NC-ACF: Lk is a capped parasitic and one clamp pulse before turn-on buys ZVS.
+`test_active_clamp_flyback` runs all four drive × clamp-side variants in ngspice: Vout within 3 %, primary-current
+NRMSE 0.028 (complementary) / 0.074 (NC), drain at the body-diode drop before Q1 turns on (ZVS).
 
 Current agreement: **boost** Vout/Iout 0.2 %, η 0.2 %; **flyback** Vout/Iout 1.9 %, η 2.5 %; **PSFB**
 Vout/Iout ~0.9 % (efficiency directional — Kirchhoff's ideal switches beat MKF's lossy rectifier diodes).

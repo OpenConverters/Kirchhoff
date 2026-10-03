@@ -92,7 +92,7 @@ TOPOLOGIES = (
     "buck", "boost", "flyback", "forward", "two_switch_forward", "sepic", "cuk", "zeta",
     "push_pull", "psfb", "pshb", "ahb", "acf", "fsbb", "llc", "cllc", "clllc", "src",
     "dab", "isolated_buck", "isolated_buck_boost", "weinberg", "pfc", "vienna",
-    "inverting_buck_boost", "two_switch_flyback",
+    "inverting_buck_boost", "two_switch_flyback", "active_clamp_flyback",
 )
 
 DEFAULT_FIDELITY = {"origin": "REQUIREMENTS"}
