@@ -157,7 +157,9 @@ const secFBFrag = (tx, ty, h, o) => {
       [ds[3]]: { draw: (b) => diode(ds[3], b, xB, (yN + yM) / 2, 'up', 'left', true) },
     },
     wires: [
-      { from: 'T1.s0', to: [xA, yM], via: [[tx + 10, yM]] },
+      // sec_a leaves the winding sideways at its END and only then drops to the mid-node: turning down at
+      // tx+10 put the drop on the coil's own axis, drawn straight through its turns.
+      { from: 'T1.s0', to: [xA, yM], via: [[tx + 30, yM - h / 2], [tx + 30, yM]] },
       // sec_b wraps under the bridge and climbs a lane that must stay CLEAR of Cout's column: with no
       // output inductor in the tail (llc/src) xB+44 lands exactly on it.
       { from: 'T1.s1', to: [xB, yM], via: [[tx + 40, ty + h / 2], [tx + 40, yN + 34], [wrapX, yN + 34], [wrapX, yM]] },
@@ -292,22 +294,23 @@ const srBridgeOutFrag = (nx, ny, ny2, refs) => {
   const xA = nx + 80, xB = nx + 190
   return {
     place: {
-      [refs[0]]: { draw: (b) => mosfetV(refs[0], b, xA, 130, 'right', true) },
+      // xA at ny+26 / xB at ny2+26: the tank nodes land ON the source / drain pins. At 130 / 250 the
+      // secondary return met refs[3]'s drain lead INSIDE its circle (a fourth terminal, to the eye).
+      [refs[0]]: { draw: (b) => mosfetV(refs[0], b, xA, ny - 26, 'right', true) },
       [refs[1]]: { draw: (b) => mosfetV(refs[1], b, xA, 250, 'right', true) },
       [refs[2]]: { draw: (b) => mosfetV(refs[2], b, xB, 130, 'right', true) },
-      [refs[3]]: { draw: (b) => mosfetV(refs[3], b, xB, 250, 'right', true, false, 0, 8) },   // +8y: the ref sat on the ny2 return
+      [refs[3]]: { draw: (b) => mosfetV(refs[3], b, xB, ny2 + 26, 'right', true) },
       Cout: { draw: (b) => capV('Cout', b, cx, 190) },
     },
     wires: [
       { from: [nx, ny], to: [xA, ny] },
-      { from: [nx, ny2], to: [xB, ny2], via: [[nx + 30, ny2], [nx + 30, 330], [xB + 48, 330], [xB + 48, ny2]] },
+      // drops at nx itself: at nx+30 it ran down through refs[1]'s gate flag
+      { from: [nx, ny2], to: [xB, ny2], via: [[nx, 330], [xB + 48, 330], [xB + 48, ny2]] },
       { from: `${refs[0]}.drain`, to: [xA, yP] },
-      { from: `${refs[0]}.source`, to: [xA, ny] },                          // the tank feeds this leg mid
       { from: `${refs[1]}.drain`, to: `${refs[0]}.source` },
       { from: `${refs[1]}.source`, to: [xA, yN] },
       { from: `${refs[2]}.drain`, to: [xB, yP] },
       { from: `${refs[2]}.source`, to: `${refs[3]}.drain` },
-      { from: `${refs[3]}.drain`, to: [xB, ny2] },
       { from: `${refs[3]}.source`, to: [xB, yN] },
       { from: [xA, yP], to: '@port.VOUT', via: [[lx + 60, yP]] },            // VOUT+ rail spans the bridge
       { from: [xA, yN], to: [lx, yN] },
@@ -369,11 +372,11 @@ const cllcLike = (present, hasSense) => {
     synthEls: (b) => [
       srcDC(60, 175), gnd(110, 320),
       sig(124, 128, 'g1'), sig(124, 250, 'g2'), sig(254, 128, 'g3'), sig(254, 250, 'g4'),
-      sig(594, 130, flags[0]), sig(594, 250, flags[1], 'left', -12),
-      ...(hasSense ? [sig(704, 130, 'gB'), sig(704, 250, 'gA'), sig(490, 150, 'sP', 'down'), sig(530, 150, 'sM', 'down'),
+      sig(594, 124, flags[0]), sig(594, 250, flags[1], 'left', -12),
+      ...(hasSense ? [sig(704, 130, 'gB'), sig(704, 266, 'gA'), sig(490, 150, 'sP', 'down'), sig(530, 150, 'sM', 'down'),
                       icBox('SR', b, 450, 390, 70, 64, ['sP', 'sM'], ['gA', 'gB'], 'SR CTRL'),
                       ctrlIC(b, 220, 380, ['g1', 'g2', 'g3', 'g4'])]
-                   : [sig(704, 130, flags[2]), sig(704, 250, flags[3]),
+                   : [sig(704, 130, flags[2]), sig(704, 266, flags[3]),
                       icBox('U1', b, 220, 380, 64, 80, ['g1', 'g2', 'g3', 'g4'], flags, 'PWM')]),
     ],
   }, sr)
@@ -448,7 +451,8 @@ const LAYOUTS = {
     size: [760, 300],
     place: {
       L1:      { draw: (b) => indH('L1', b, 150, 80) },
-      Q1:      { draw: (b) => mosfetV('Q1', b, 230, 150, 'left') },
+      // -8: the value line ended 3 px from the g1 stub and read as running into it
+      Q1:      { draw: (b) => mosfetV('Q1', b, 230, 150, 'left', false, false, -8) },
       C1:      { draw: (b) => capH('C1', b, 290, 80) },
       Rrc_sw:  { draw: (b) => resV('Rrc_sw', b, 320, 130, 'left') },   // snubber: node → R → C → gnd
       Crc_sw:  { draw: (b) => capV('Crc_sw', b, 320, 185, 'left') },
@@ -579,7 +583,8 @@ const LAYOUTS = {
       { from: 'Cpri.p1', to: [420, 300] },
       // isolated secondary: its own floating return, one rectifier, preload Rsec
       { from: 'T1.s0', to: '@sgnd.sgnd', via: [[370, 118]] },
-      { from: 'T1.s1', to: 'Dsec.anode', via: [[370, 215], [600, 215]] },
+      // out of the winding's END first: climbing to y=215 from the terminal ran up inside the last turn
+      { from: 'T1.s1', to: 'Dsec.anode', via: [[390, 230], [390, 215], [600, 215]] },
       { from: 'Dsec.cathode', to: '@port.VISO' },
       { from: 'Rsec.p0', to: [645, 118] },
       { from: 'Rsec.p1', to: [645, 258] },
@@ -724,7 +729,9 @@ const LAYOUTS = {
       Cc:    { draw: (b) => capV('Cc', b, 220, 170, 'left') },
       // centred (middle-anchored, so a wide value grows both ways and clears Q1's riser); offset right
       // it sat nearer SRfwd than T1
-      T1:    { draw: (b) => xfmr('T1', b, 380, 195, { h: 90, labelDy: -22 }) },
+      // y=235: the primary's dotted end lands on the switch-node row (y=190). At 195 the node entered the
+      // primary half-way up the coil and climbed through its turns to the terminal.
+      T1:    { draw: (b) => xfmr('T1', b, 380, 235, { h: 90, labelDy: -62 }) },   // -62: the label keeps its old place, clear of Q1
       SRfwd: { draw: (b) => mosfetH('SRfwd', b, 500, 120, true, true) },
       SRfw:  { draw: (b) => mosfetV('SRfw', b, 570, 195, 'right', true) },
       Lout:  { draw: (b) => indH('Lout', b, 640, 120) },
@@ -733,17 +740,17 @@ const LAYOUTS = {
     wires: [
       { from: '@src.p0', to: 'Q1.drain', via: [[60, 70], [320, 70]] },        // Vin+ rail (Sc taps it)
       { from: '@src.p1', to: [320, 300], via: [[60, 300]] },                  // primary return rail
-      { from: 'Q1.source', to: [320, 185] },                                  // sw node
-      { from: [320, 185], to: 'T1.p0', via: [[370, 185]] },
-      { from: 'T1.p1', to: [320, 300], via: [[320, 240]] },
+      { from: 'Q1.source', to: [320, 190] },                                  // sw node
+      { from: [320, 190], to: 'T1.p0' },
+      { from: 'T1.p1', to: [320, 300], via: [[320, 280]] },
       // active-clamp leg: Sc (Vin → clamp node) in series with Cc (clamp node → switch node)
       { from: 'Sc.drain', to: [220, 70] },
       { from: 'Sc.source', to: 'Cc.p0' },
-      { from: 'Cc.p1', to: [320, 185], via: [[260, 190], [260, 185]] },
+      { from: 'Cc.p1', to: [320, 190] },
       // secondary: synchronous forward + freewheel FETs into Lout / Cout, on their own isolated return
-      { from: 'T1.s0', to: 'SRfwd.source', via: [[440, 150], [440, 120]] },
+      { from: 'T1.s0', to: 'SRfwd.source', via: [[440, 190], [440, 120]] },
       { from: 'SRfwd.drain', to: [570, 120] },
-      { from: 'T1.s1', to: [770, 300], via: [[440, 240], [440, 300]] },
+      { from: 'T1.s1', to: [770, 300], via: [[440, 280], [440, 300]] },
       { from: 'SRfw.drain', to: [570, 120] },
       { from: 'SRfw.source', to: [570, 300] },
       { from: 'Lout.p0', to: [570, 120] },
@@ -815,7 +822,9 @@ const LAYOUTS = {
       // ON the top of the core it names — a 4-winding block is 200 px tall, so its label needs the room.
       T1:    { draw: (b) => xfmr4('T1', b, 560, 230, { labelDx: -29, labelDy: -18 }).el },
       S1:    { draw: (b) => mosfetV('S1', b, 470, 180, 'right', true) },
-      S2:    { draw: (b) => mosfetV('S2', b, 470, 330, 'right', true, false, 0, 8) },   // +8y: the ref sat on the y=320 rail
+      // y=346: the drain pin sits ON the y=320 row from T1.b1. At 330 that row ran into the circle and met
+      // the drain lead inside the symbol.
+      S2:    { draw: (b) => mosfetV('S2', b, 470, 346, 'right', true) },
       Dpos:  { draw: (b) => diode('Dpos', b, 660, 110, 'right', 'below') },
       Dneg:  { draw: (b) => diode('Dneg', b, 660, 350, 'right', 'below', false, 0, 25) },
       Cout:  { draw: (b) => capV('Cout', b, 820, 245) },
@@ -837,7 +846,7 @@ const LAYOUTS = {
       // symbol's column): straight down x=470 it ran through S2's body.
       { from: 'T1.a0', to: 'S1.drain', via: [[470, 140]] },
       { from: 'S1.source', to: [430, 380], via: [[430, 206]] },
-      { from: 'T1.b1', to: 'S2.drain', via: [[470, 320]] },
+      { from: 'T1.b1', to: 'S2.drain' },
       { from: 'S2.source', to: [470, 380] },
       // centre-tapped full-wave secondary: outer ends → Dpos / Dneg, inner ends → CT → isolated return
       { from: 'T1.c0', to: 'Dpos.anode', via: [[600, 140], [600, 110]] },
@@ -851,7 +860,7 @@ const LAYOUTS = {
     ],
     synth: (b) => [
       srcDC(60, 210), gnd(430, 380), isoGnd(700, 380), loadR(900, 245, 110, 380), port(960, 110, 'VOUT'),
-      sig(444, 180, 'g1'), sig(444, 330, 'g2'), ctrlIC(b, 620, 60, ['g1', 'g2']),
+      sig(444, 180, 'g1'), sig(444, 346, 'g2'), ctrlIC(b, 620, 60, ['g1', 'g2']),
     ],
   },
   // ── bridge: asymmetric half bridge ────────────────────────────────────────
@@ -892,7 +901,9 @@ const LAYOUTS = {
   },
   // ── bridge: phase-shifted full bridge ─────────────────────────────────────
   psfb: (present) => {
-    const tx = 330, ty = 195, h = 90
+    // tx=360: T1 stands 30 px clear of the leg-C column so QD's ref fits beside its own body. At 330 the
+    // lane was narrower than the ref and it was parked 60 px below the part, nearer nothing in particular.
+    const tx = 360, ty = 195, h = 90
     const sec = secondaryFrag(present, tx, ty, h,
       { fb: ['Dr1', 'Dr3', 'Dr2', 'Dr4'], d1: 'Dr1', d2: 'Dr2', lout: 'Lout', lo2: 'Lo2' })
     return {
@@ -903,9 +914,7 @@ const LAYOUTS = {
         QA: { draw: (b) => mosfetV('QA', b, 130, 128, 'right', true) },
         QB: { draw: (b) => mosfetV('QB', b, 130, 246, 'right', true) },
         QC: { draw: (b) => mosfetV('QC', b, 280, 128, 'right', true) },
-        // +8/+60: the lane between the re-entry column (295) and T1's body (308) is narrower than the
-        // ref itself, so the label drops clear of T1 instead.
-        QD: { draw: (b) => mosfetV('QD', b, 280, 246, 'right', true, false, 8, 60) },
+        QD: { draw: (b) => mosfetV('QD', b, 280, 246, 'right', true) },
         Lr: { draw: (b) => indH('Lr', b, 228, 200) },
         // Centred and raised: at a +130 offset the value parked over the rectifier, nearer Dr1 than T1.
         T1: { draw: (b) => xfmr('T1', b, tx, ty, { h, ct: present.has('Dr3') || present.has('Lo2') ? undefined : 'right', labelDy: -70 }) },
@@ -913,8 +922,8 @@ const LAYOUTS = {
         Rrc_pri: { draw: (b) => resH('Rrc_pri', b, 220, 300, 'below') },
         // Secondary bleeders, full-bridge only (Psfb.cpp adds them with Dr3/Dr4). Labelled left: on the
         // right the block had to clear Dr3's column and ended up across another part's wire.
-        Rbsa: { draw: (b) => resV('Rbsa', b, 380, 310, 'left') },
-        Rbsb: { draw: (b) => resV('Rbsb', b, 590, 310, 'left') },
+        Rbsa: { draw: (b) => resV('Rbsa', b, tx + 50, 310, 'left') },
+        Rbsb: { draw: (b) => resV('Rbsb', b, tx + 260, 310, 'left') },
         ...sec.place,
       },
       wires: [
@@ -932,17 +941,17 @@ const LAYOUTS = {
         { from: [130, 200], to: 'Lr.p0' },
         { from: 'Lr.p1', to: 'T1.p0', via: [[270, 200], [270, 175], [300, 175], [300, 150]] },
         // primary return enters midC from the right at its own y-band, clear of QD's source-to-gnd drop
-        { from: 'T1.p1', to: [280, 210], via: [[tx - 10, 270], [295, 270], [295, 210]] },
+        { from: 'T1.p1', to: [280, 210], via: [[tx - 10, 270], [tx - 40, 270], [tx - 40, 210]] },
         // real RC snubber between the two leg midpoints, its return entering midC from the left
         { from: 'Crc_pri.p0', to: [168, 200] },                               // taps the tank rail from below
         { from: 'Crc_pri.p1', to: 'Rrc_pri.p0', via: [[168, 300]] },
         { from: 'Rrc_pri.p1', to: [280, 210], via: [[240, 300], [240, 210]] },
         ...sec.wires,
         ...(present.has('Rbsa') ? [
-          { from: 'Rbsa.p0', to: [380, 195] },
-          { from: 'Rbsa.p1', to: [420, 330], via: [[380, 330]] },
-          { from: 'Rbsb.p0', to: [534, 240], via: [[590, 240]] },
-          { from: 'Rbsb.p1', to: [590, 330] },
+          { from: 'Rbsa.p0', to: [tx + 50, ty] },
+          { from: 'Rbsa.p1', to: [tx + 90, 330], via: [[tx + 50, 330]] },
+          { from: 'Rbsb.p0', to: [tx + 204, 240], via: [[tx + 260, 240]] },
+          { from: 'Rbsb.p1', to: [tx + 260, 330] },
         ] : []),
       ],
       synth: (b) => [

@@ -52,13 +52,35 @@ const dots = (svg) => [...svg.matchAll(/<circle class="sch-node" cx="([-\d.]+)" 
 // its rect.
 const bodies = (svg) => {
   const out = []
-  for (const g of svg.matchAll(/<g class="sch-hot" data-ref="([^"]+)">([\s\S]*?)<\/g>/g)) {
+  for (const g of svg.matchAll(/<g class="sch-hot" data-ref="([^"]+)"[^>]*>([\s\S]*?)<\/g>/g)) {
     const [, ref, inner] = g
     const c = inner.match(/<circle class="sch-sym" cx="([-\d.]+)" cy="([-\d.]+)" r="([\d.]+)"/)
     const r = inner.match(/<rect class="sch-hitbox" x="([-\d.]+)" y="([-\d.]+)" width="([\d.]+)" height="([\d.]+)"/)
     if (c && +c[3] > 8) out.push({ ref, kind: 'circle', cx: +c[1], cy: +c[2], r: +c[3] })
     else if (r) out.push({ ref, kind: 'rect', x: +r[1], y: +r[2], w: +r[3], h: +r[4] })
   }
+  return out
+}
+// Every coil glyph (inductor or transformer winding) as the box between its axis and its bump apex. The
+// symbols draw a coil as `M x y s …` relative arcs; the axis is the start point, the arcs' net
+// displacement its length, and the first arc's off-axis control point the side the bumps bulge to.
+const coils = (svg) => {
+  const out = []
+  for (const g of svg.matchAll(/<g class="sch-hot" data-ref="([^"]+)"[^>]*>([\s\S]*?)<\/g>/g))
+    for (const m of g[2].matchAll(/<path class="sch-sym" d="M (-?[\d.]+) (-?[\d.]+) s ([^"]+)"/g)) {
+      const [x, y] = [+m[1], +m[2]]
+      const n = [...m[3].matchAll(/-?[\d.]+/g)].map(Number)
+      let dx = 0, dy = 0, bulge = 0
+      for (let i = 0; i + 3 < n.length; i += 4) { dx += n[i + 2]; dy += n[i + 3] }
+      const vert = Math.abs(dy) > Math.abs(dx)
+      for (let i = 0; i + 3 < n.length; i += 4) {
+        const off = vert ? [n[i], n[i + 2]] : [n[i + 1], n[i + 3]]
+        for (const o of off) if (Math.abs(o) > Math.abs(bulge)) bulge = o
+      }
+      const [x0, x1] = vert ? [Math.min(x, x + bulge), Math.max(x, x + bulge)] : [Math.min(x, x + dx), Math.max(x, x + dx)]
+      const [y0, y1] = vert ? [Math.min(y, y + dy), Math.max(y, y + dy)] : [Math.min(y, y + bulge), Math.max(y, y + bulge)]
+      out.push({ ref: g[1], vert, x0, x1, y0, y1 })
+    }
   return out
 }
 // Length of the part of an axis-aligned segment that lies strictly INSIDE a drawn body (0 if none).
@@ -144,6 +166,37 @@ export function auditDrawing(svg, tasRefs, pins = []) {
         (k === 1 ? q.y : q.x) >= slo - 2 && (k === 1 ? q.y : q.x) <= shi + 2)
       if (reachesPin) continue
       problems.push(`OVER-BODY wire ${JSON.stringify(s)} is drawn over ${b.ref}'s body for ${run.toFixed(0)} px (on no pin lead)`)
+    }
+    // WINDING. OVER-BODY exempts a wire that reaches one of the part's own pins, and a winding's pin sits
+    // at the END of its coil — so a lead that left the pin and kept going ALONG the coil to a node
+    // halfway down was exempt by construction. Every full-bridge rectifier (psfb, pshb, ahb, llc, src)
+    // ran sec_a from the top of the winding down through its own turns to the bridge mid-node, isolated
+    // _buck climbed inside the last turn, acf joined the primary half-way up its coil — all clean here.
+    // A winding is the band between its axis and the apex of its bumps; no wire may run inside it.
+    for (const w of coils(svg)) for (const s of S) {
+      const k = s[0][0] === s[1][0] ? 1 : (s[0][1] === s[1][1] ? 0 : -1)
+      if (k < 0) continue
+      const fixed = k === 1 ? s[0][0] : s[0][1]
+      const [flo, fhi] = k === 1 ? [w.x0, w.x1] : [w.y0, w.y1]
+      // A wire ALONG the coil counts from the axis line out (the turns touch the axis, so a lead drawn on
+      // it is drawn over them). A wire ACROSS the coil counts only strictly between its end rows: one
+      // meeting the coil at an end row is the lead-in itself.
+      const along = (k === 1) === w.vert
+      if (along ? (fixed < flo - 0.5 || fixed > fhi + 0.5) : (fixed <= flo + 1.5 || fixed >= fhi - 1.5)) continue
+      const [blo, bhi] = k === 1 ? [w.y0, w.y1] : [w.x0, w.x1]
+      const run = Math.min(Math.max(s[0][k], s[1][k]), bhi - 1.5) - Math.max(Math.min(s[0][k], s[1][k]), blo + 1.5)
+      // ...except a tap's own lead, which leaves the coil sideways from the cusp between two turns.
+      if (!along && pins.some((q) => q.ref === w.ref && s.some((e) => near([q.x, q.y], e, 1)))) continue
+      if (run > 2) problems.push(`WINDING wire ${JSON.stringify(s)} runs ${run.toFixed(0)} px along ${w.ref}'s winding — a lead must leave the coil at its end`)
+    }
+    // JOIN-IN-BODY. A wire end or corner inside a round glyph (a switch) that is not one of that part's
+    // pins draws the junction INSIDE the device: cllc/clllc took the secondary return into Qd/QH's circle
+    // to meet the drain lead there, which reads as a fourth terminal. The overlap is only ~5 px of the
+    // circle's rim, under OVER-BODY's grazing tolerance, so it took a rule about the VERTEX, not the run.
+    for (const b of BODY) if (b.kind === 'circle') for (const s of S) for (const e of s) {
+      if (Math.hypot(e[0] - b.cx, e[1] - b.cy) >= b.r - 1) continue
+      if (pins.some((q) => q.ref === b.ref && near([q.x, q.y], e, 2))) continue
+      problems.push(`JOIN-IN-BODY wire vertex (${e}) lies inside ${b.ref}'s symbol and is none of its pins`)
     }
     for (const s of S) for (const e of s) {
       const tee = S.some((o) => o !== s && onSpan(e, o))
