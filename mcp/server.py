@@ -1604,20 +1604,26 @@ def design_cmc(spec: dict) -> CallToolResult:
     """
     result = kh.design_cmc_inputs(spec)
     d = result.get("cmcDiagnostics") or {}
-    # MAS Inputs for the adviser, with the sizing that drove them as diagnostics. The
-    # inductance and the frequency it was chosen at are the two numbers a reader checks, so
-    # they are stated rather than left inside a nested block.
-    return _document_result(
+    # THE DOCUMENT DOES NOT GO INLINE, for the reason design_dmc gives: the excitation
+    # waveforms are physics and stay, and with them the MAS Inputs for the conformance spec
+    # (4.7 mH, 230 V, 2 A) measured 111,970 characters on 2026-10-03 — over the 100,000 a
+    # client accepts. It had passed inline until then, a few thousand characters under, so
+    # inline was never a margin to rely on. The inductance and the frequency it was chosen
+    # at are the numbers a reader checks; they are stated here, the document is one
+    # fetch_document away.
+    inputs = {k: v for k, v in result.items() if k != "cmcDiagnostics"}
+    return _designs_result(
         f"CMC sized: L = {_eng(d.get('computedInductance'), 'H')} at the dominant "
         f"frequency {_eng(d.get('dominantFrequency'), 'Hz')} "
-        f"(|Z| {_eng(d.get('dominantImpedance'), 'Ω')}). MAS Inputs are in the "
-        f"structured output for the magnetic adviser.",
-        schema="MAS Inputs", operation="produced",
-        document={k: v for k, v in result.items() if k != "cmcDiagnostics"},
-        derived_from="a common-mode filter spec",
-        diagnostics=[f"computed inductance {_eng(d.get('computedInductance'), 'H')}",
-                     f"dominant frequency {_eng(d.get('dominantFrequency'), 'Hz')}",
-                     f"|Z| at the dominant frequency {_eng(d.get('dominantImpedance'), 'Ω')}"])
+        f"(|Z| {_eng(d.get('dominantImpedance'), 'Ω')}). The MAS Inputs for the magnetic "
+        f"adviser are behind the handle below; fetch_document reads any part of them.",
+        [{"label": "common-mode choke",
+          "properties": {
+              "inductance_H": d.get("computedInductance"),
+              "dominant_frequency_Hz": d.get("dominantFrequency"),
+              "impedance_at_dominant_frequency_ohm": d.get("dominantImpedance")},
+          "ref": _register_doc(inputs, "mas")}],
+        "filter")
 
 
 @mcp.tool(

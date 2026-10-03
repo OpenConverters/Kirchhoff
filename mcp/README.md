@@ -90,7 +90,8 @@ picking the wrong one). All 24 topologies sit behind one `design_converter`.
 | Group | Tools | Result |
 |---|---|---|
 | Design | `list_topologies` | catalogue |
-| | `design_converter`, `realize_tas`, `magnetic_inputs`, `topology_waveforms`, `operating_point`, `design_magnetic_inputs`, `design_current_transformer`, `design_cmc`, `design_dmc`, `export_netlist`, `bind_part`, `run_deck` | document |
+| | `design_converter`, `realize_tas`, `magnetic_inputs`, `topology_waveforms`, `operating_point`, `design_magnetic_inputs`, `design_current_transformer`, `export_netlist`, `bind_part`, `run_deck` | document |
+| | `design_cmc`, `design_dmc` — the MAS Inputs behind a `mas://` handle, read with `fetch_document` | design |
 | Compute | `converter_diagnostics`, `simulate`, `pfc_mode`, `propose_dmc` | quantity |
 | Chart | `component_waveforms`, `simulate_ac` | curves |
 | Judge | `verify_dmc` | verdict |
