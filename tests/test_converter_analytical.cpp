@@ -52,7 +52,8 @@ TEST_CASE("analytical_buck CCM inductor excitation matches closed form", "[analy
     const auto& exc = op.get_excitations_per_winding()[0];
     REQUIRE(exc.get_current().has_value());
     REQUIRE(exc.get_current()->get_processed().has_value());
-    const auto& cur = *exc.get_current()->get_processed();
+    // Copies: get_current()/get_processed() return optionals BY VALUE — a reference into them dangles.
+    const auto cur = *exc.get_current()->get_processed();
 
     // Closed form: D = Vout/Vin = 0.4167; tOn = D/fsw; ripple ΔIL = (Vin-Vout)·tOn/L.
     const double D = vout / vin;
@@ -77,7 +78,7 @@ TEST_CASE("analytical_buck enters DCM at light load", "[analytical][solver][buck
     const double vin = 12, vout = 5, iout = 0.1, fsw = 100000, L = 47e-6;
     MAS::OperatingPoint op = analytical_buck(vin, vout, iout, fsw, L);
     REQUIRE(op.get_excitations_per_winding().size() == 1);
-    const auto& cur = *op.get_excitations_per_winding()[0].get_current()->get_processed();
+    const auto cur = *op.get_excitations_per_winding()[0].get_current()->get_processed();
     // In DCM the current returns to zero each cycle: average stays ~the load current, min ~0.
     REQUIRE(cur.get_average().has_value());
     CHECK(*cur.get_average() == Catch::Approx(iout).margin(0.03));
@@ -95,7 +96,7 @@ TEST_CASE("analytical_boost CCM inductor excitation matches closed form", "[anal
     const double vin = 12, vout = 24, iout = 1, fsw = 100000, L = 20e-6;
     MAS::OperatingPoint op = analytical_boost(vin, vout, iout, fsw, L);
     REQUIRE(op.get_excitations_per_winding().size() == 1);
-    const auto& cur = *op.get_excitations_per_winding()[0].get_current()->get_processed();
+    const auto cur = *op.get_excitations_per_winding()[0].get_current()->get_processed();
 
     const double D = 1 - vin / vout;                            // 0.5
     const double ripple = vin * (D / fsw) / L;                  // 3 A
