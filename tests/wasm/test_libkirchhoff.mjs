@@ -32,11 +32,12 @@ check("diagnostics has computed.resonantCapacitance", diag.computed?.resonantCap
 check("diagnostics has magnetics[]", Array.isArray(diag.magnetics) && diag.magnetics.length === 2);
 
 // 3. extract_operating_point (analytical)
-const op = JSON.parse(M.extract_operating_point(tas, "analytical", ""));
+// The binding takes the fidelity directive explicitly: embind cannot apply the C++ default.
+const op = JSON.parse(M.extract_operating_point(tas, "analytical", "", JSON.stringify({ origin: "REQUIREMENTS" })));
 check("extract op has 3 windings", op.excitationsPerWinding?.length === 3);
 
 // 4. main_magnetic_inputs
-const mi = JSON.parse(M.main_magnetic_inputs(tas));
+const mi = JSON.parse(M.main_magnetic_inputs(tas, ""));   // "" = the main magnetic
 check("main_magnetic_inputs has designRequirements", !!mi.designRequirements);
 
 // 6. generate_ngspice_circuit
