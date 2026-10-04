@@ -89,6 +89,27 @@ def test_regulate_duty_boost():       # ABT #28's example topology
         f"boost Cout current peak {ic['peak']:.1f} A is a switching-displacement artifact, not the real ripple"
 
 
+@pytest.mark.parametrize("topo,vin,vout,p,fsw,config", [
+    ("buck", 48, 12, 120, 200000, {"phaseCount": 3, "rectifier": "synchronous"}),
+    ("buck", 48, 12, 120, 200000, {"levels": 3}),
+    ("buck", 48, 12, 120, 200000, {"levels": 4}),
+    ("boost", 200, 500, 500, 100000, {"levels": 3}),
+])
+def test_regulate_duty_phase_shifted_buck_boost(topo, vin, vout, p, fsw, config):
+    # Interleaved phases and FCML pairs each keep their base phase; the bisected duty moves every main switch and
+    # re-derives its complement (scripts/regulate.py _stash_buck_boost_pairs). Treating "phase 0" as the only main
+    # switch would drive the other phases' mains as complements.
+    spec = _spec(vin, vout, p, fsw)
+    spec["config"] = config
+    tas = getattr(PyKirchhoff, f"design_{topo}_tas")(spec)
+    R.bind_datasheet_semis(tas)
+    r = R.simulate_regulated(tas, vout, topo, fidelity={"origin": "DATASHEET"})
+    assert r["regulated"], f"{topo} {config} did not regulate (vout={r.get('vout')})"
+    assert r["steady_state"]
+    assert abs(r["vout"] - vout) <= 0.02 * vout
+    assert 0.5 < r["efficiency"] <= 1.0
+
+
 @pytest.mark.parametrize("mode", ["complementary", "nonComplementary"])
 def test_regulate_duty_active_clamp_flyback(mode):
     # Complementary: Q1 at D, the clamp switch re-derived to (1−D)−2·dt from (D+dt)·360. NC-ACF: only Q1 moves,

@@ -101,6 +101,18 @@ def check(label, tas):
 
 check("flyback", PyKirchhoff.design_flyback_tas(FLYBACK_IN))
 check("boost", PyKirchhoff.design_boost_tas(BOOST_IN))
+# Interleaved (ABT #1437) and flying-capacitor multilevel (ABT #1439) buck / boost: replicated cells and stacked
+# pairs with flying capacitors (and the boost's initial conditions) must be schema-valid TAS.
+BUCK_IN = {"designRequirements": {"efficiency": 0.95, "inputVoltage": {"minimum": 43.2, "nominal": 48, "maximum": 52.8},
+           "switchingFrequency": {"nominal": 200000}, "outputs": [{"name": "out", "voltage": {"nominal": 12}}]},
+           "operatingPoints": [{"inputVoltage": 48, "outputs": [{"power": 120}]}]}
+HVBOOST_IN = {"designRequirements": {"efficiency": 0.98, "inputVoltage": {"minimum": 180, "nominal": 200, "maximum": 220},
+              "switchingFrequency": {"nominal": 100000}, "outputs": [{"name": "out", "voltage": {"nominal": 500}}]},
+              "operatingPoints": [{"inputVoltage": 200, "outputs": [{"power": 500}]}]}
+for cfg in ({"phaseCount": 3}, {"phaseCount": 2, "rectifier": "synchronous"}, {"levels": 3}, {"levels": 4}):
+    tag = "-".join(f"{k}{v}" for k, v in cfg.items())
+    check(f"buck-{tag}", PyKirchhoff.design_buck_tas({**BUCK_IN, "config": cfg}))
+    check(f"boost-{tag}", PyKirchhoff.design_boost_tas({**HVBOOST_IN, "config": cfg}))
 # Inverting buck-boost (ABT #1433): the negative rail, both rectifiers and DCM must all be schema-valid TAS.
 IBB_IN = {"designRequirements": {"efficiency": 0.95, "inputVoltage": {"minimum": 19.2, "nominal": 24, "maximum": 28.8},
           "switchingFrequency": {"nominal": 200000}, "outputs": [{"name": "out", "voltage": {"nominal": -12}}]},

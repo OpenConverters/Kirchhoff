@@ -4,6 +4,7 @@
 #include "ConverterAnalytical.hpp"   // single FHA source: analytical_boost + excitations_processed/winding_current
 #include "KirchhoffConfig.hpp"
 #include "Interleave.hpp"
+#include "Fcml.hpp"
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -73,6 +74,16 @@ BoostDesign design_boost(const json& tasInputs) {
     // Interleaving (ABT #1437): N cells share the rails, each carrying Iout/N; N = 1 is unchanged.
     d.phaseCount = phase_count(d.config, "design_boost");
     const double N = static_cast<double>(d.phaseCount);
+    // Flying-capacitor multilevel (ABT #1439): complementary pairs by construction, so always synchronous.
+    d.levels = fcml_levels(d.config, "design_boost");
+    if (d.levels > 2) {
+        if (d.phaseCount > 1)
+            throw std::invalid_argument("design_boost: an interleaved FCML (phaseCount > 1 with levels > 2) is not modelled");
+        if (d.config.contains("rectifier") && cfg::get_str(d.config, "rectifier", "") != std::string("synchronous"))
+            throw std::invalid_argument("design_boost: an FCML is synchronous by construction (complementary pairs); "
+                                        "rectifier '" + cfg::get_str(d.config, "rectifier", "") + "' contradicts levels > 2");
+        d.synchronousRectifier = true;
+    }
 
     d.diodeDrop = req::rectifier_drop(d.config, d.outputPower / d.outputVoltage / N);  // DIDEAL Vf at the operating rectifier current
     const double Vo = d.outputVoltage + d.diodeDrop;
@@ -110,7 +121,31 @@ BoostDesign design_boost(const json& tasInputs) {
     d.inductance = req::provided_inductance(dr).value_or(
         vinMax * (d.outputVoltage - vinMax) / (maxCurrentRipple * d.switchingFrequency * d.outputVoltage));
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
-    if (d.phaseCount == 1) {
+    if (d.levels > 2) {
+        // FCML: the inductor sees a Vout/(N−1) step at (N−1)·fs. L for the worst ripple over the input range; Cout as the
+        // plain boost (the output is fed by the top pair once per period); each flying capacitor for its charge at the
+        // largest inductor current (Vin_min).
+        // The cell runs the efficiency-compensated duty, i.e. the lossless cell's output at Vo/η (buck D·Vin, boost
+        // Vin/(1−D) — both Vo/η): size from that waveform, the one the deck switches.
+        const int M = d.levels - 1;
+        const double voCell = d.outputVoltage / d.efficiency;
+        double vsMax = 0, qMax = 0;
+        for (int i = 0; i <= 40; ++i) {
+            const double vin = d.inputVoltageMin + (d.inputVoltageMax - d.inputVoltageMin) * i / 40.0;
+            vsMax = std::max(vsMax, analytical::fcml_ripple_volt_seconds(true, d.levels, vin, voCell, d.switchingFrequency));
+            qMax = std::max(qMax, analytical::fcml_flying_charge_per_amp(true, d.levels, vin, voCell, d.switchingFrequency)
+                                  * d.outputPower / (d.efficiency * vin));
+        }
+        if (!req::provided_inductance(dr) && !(vsMax > 0))
+            throw std::invalid_argument("design_boost: the FCML inductor ripple vanishes over the whole input range (D·(N−1) is "
+                                        "a whole number there), so there is no ripple to size L from; pin the inductance "
+                                        "or widen the input range");
+        d.inductance = req::provided_inductance(dr).value_or(vsMax / maxCurrentRipple);
+        d.outputCapacitance = iout * d.dutyCycle / (d.switchingFrequency * cfg::output_ripple_fraction(d.config) * d.outputVoltage);
+        const double cfRipple = cfg::get(d.config, "flyingCapacitorRipple", 0.05);
+        if (!(cfRipple > 0)) throw std::invalid_argument("design_boost: flyingCapacitorRipple must be > 0");
+        d.flyingCapacitance = qMax / (cfRipple * d.outputVoltage / M);
+    } else if (d.phaseCount == 1) {
         d.outputCapacitance = iout * d.dutyCycle / (d.switchingFrequency * cfg::output_ripple_fraction(d.config) * d.outputVoltage);
     } else {
         // Sized from the summed diode currents at every input corner (their ripple partly cancels).
@@ -155,6 +190,16 @@ static json build_boost_interleaved_tas(const BoostDesign& d) {
 
 json build_boost_tas(const BoostDesign& d) {
     if (d.phaseCount > 1) return build_boost_interleaved_tas(d);
+    if (d.levels > 2) {
+        FcmlCell c;
+        c.boost = true; c.levels = d.levels;
+        c.inputVoltage = d.inputVoltage; c.inputVoltageMin = d.inputVoltageMin; c.inputVoltageMax = d.inputVoltageMax;
+        c.outputVoltage = d.outputVoltage; c.outputPower = d.outputPower; c.switchingFrequency = d.switchingFrequency;
+        c.efficiency = d.efficiency; c.dutyCycle = d.dutyCycle; c.deadFraction = d.deadFraction;
+        c.inductance = d.inductance; c.flyingCapacitance = d.flyingCapacitance; c.outputCapacitance = d.outputCapacitance;
+        c.config = d.config;
+        return build_fcml_tas(c);
+    }
     auto port = [](const char* n) { json p; p["name"] = n; return p; };
     auto pin  = [](const char* c, const char* p) { json e; e["component"] = c; e["pin"] = p; return e; };
     auto prt  = [](const char* p) { json e; e["port"] = p; return e; };

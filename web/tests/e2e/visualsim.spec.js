@@ -3,7 +3,7 @@
 // to falstad.com. The exporter re-verifies the drawn wiring against the flattened CIAS nets on
 // every call and throws on drift — so `url` existing means the netlist-consistency proof passed.
 import { test } from '@playwright/test'
-import { boot, selectTopology, solve, losslessTargetVout, expect } from './helpers.js'
+import { boot, selectTopology, solve, setKnob, losslessTargetVout, expect } from './helpers.js'
 
 test('flyback solve produces a CIAS-consistent falstad export', async ({ page }) => {
   await boot(page)
@@ -172,5 +172,65 @@ for (const [id, variant] of RECT3_CASES) {
     })
     expect(vLoad, `${id}/${variant} Vout collapsed (${vLoad} V vs lossless target ${target} V, design ${vout} V) — check posts/phase`).toBeGreaterThan(target * 0.7)
     expect(vLoad, `${id}/${variant} Vout ${vLoad} V vs lossless target ${target} V (design ${vout} V)`).toBeLessThan(target * 1.3)
+  })
+}
+
+// Flying-capacitor multilevel buck / boost (config.levels, ABT #1439): the stack is drawn with CircuitJS1
+// analog switches (dump 159) on ground-referenced square drives, the flying capacitors pre-charged to
+// k·Vtop/(N−1). A switch whose control post lands off its drive never closes and the output collapses, so
+// each case SIMULATES the export and holds Vout to the deck's own lossless target: the ideal converter at
+// the main switch's stimulus duty — D·Vin for the buck, Vin/(1−D) for the boost. (The preset designs for
+// 90 % efficiency, so its duty is not the one that reaches nominal Vout losslessly.)
+// At the export's own pace (speed 1.7, ~270 steps/s) the 6 s window other cases use covers ~4 switching
+// periods while the output LC rings for tens of seconds, so no reading would be within a few % of anything.
+// The test re-imports the SAME circuit text with only the header's speed field raised (50: ~30× more steps
+// per second — the physics, timestep and every element are untouched), runs 20 s, and judges the MEAN of the
+// last 10 s, which spans several output-ring cycles.
+const FCML_CASES = [['buck', 3], ['buck', 4], ['boost', 3]]
+for (const [id, levels] of FCML_CASES) {
+  test(`fcml ${id} ${levels}-level visual sim lands on the lossless Vout of its duty`, async ({ page }) => {
+    await boot(page)
+    await selectTopology(page, id)
+    await page.evaluate(() => { window.__bench.form.variant = 'synchronous' })
+    await setKnob(page, 'levels', levels)
+    const err = await solve(page, 'analytical')
+    expect(err, `solve error: ${err}`).toBeNull()
+    const { url, text, vout, vin, error, duty, pairs } = await page.evaluate((boost) => {
+      const vs = window.__bench.visualSim
+      const tas = window.__bench.result.tas
+      const main = boost ? 'QL1' : 'QH1'
+      const s = (tas.simulation?.stimulus ?? []).find((x) => x.component === main)
+      const cell = tas.topology.stages.find((st) => st.name === 'switchingCell')
+      const pairs = (cell?.circuit?.components ?? []).filter((c) => /^QH\d+$/.test(c.name)).length
+      return { url: vs?.url, text: vs?.text, vout: vs?.vout, vin: vs?.vin, error: vs?.error || null, duty: s?.waveform?.dutyCycle, pairs }
+    }, id === 'boost')
+    expect(error, `export error: ${error}`).toBeNull()
+    expect(pairs, `${id} at ${levels} levels must carry ${levels - 1} switch pairs`).toBe(levels - 1)
+    expect(typeof duty, 'main switch has no pwm duty').toBe('number')
+    const target = id === 'boost' ? vin / (1 - duty) : duty * vin
+    await page.goto(url)
+    await page.waitForFunction(
+      () => window.CircuitJS1?.getElements && window.CircuitJS1.getElements().length > 5,
+      null, { timeout: 30000 })
+    const fast = text.replace(/^\$ 1 (\S+) 1\.7 /, '$ 1 $1 50 ')
+    expect(fast, 'export header no longer carries speed 1.7 — update the re-import').not.toBe(text)
+    await page.evaluate((t) => window.CircuitJS1.importCircuit(t), fast)
+    await page.waitForFunction(() => window.CircuitJS1.getElements().length > 5, null, { timeout: 30000 })
+    const t0 = await page.evaluate(() => (window.CircuitJS1.getTime?.() ?? 0))
+    const samples = []
+    for (let i = 0; i < 20; i++) {
+      await page.waitForTimeout(1000)
+      samples.push(await page.evaluate(() => window.CircuitJS1.getNodeVoltage('vout')))
+    }
+    const { running, dt } = await page.evaluate((t0) => ({
+      running: !!window.CircuitJS1.isRunning?.(),
+      dt: (window.CircuitJS1.getTime?.() ?? 0) - t0,
+    }), t0)
+    expect(running, `${id} ${levels}L sim not running`).toBe(true)
+    expect(dt, `${id} ${levels}L sim time not advancing (frozen at t=0)`).toBeGreaterThan(0)
+    const tail = samples.slice(10)
+    const vLoad = tail.reduce((a, v) => a + v, 0) / tail.length
+    console.log(`fcml ${id} ${levels}L: mean Vout ${vLoad.toFixed(3)} V vs lossless target ${target.toFixed(3)} V (D ${duty.toFixed(4)}, Vin ${vin}, design ${vout})`)
+    expect(Math.abs(vLoad - target) / target, `${id} ${levels}L Vout ${vLoad} V vs lossless target ${target} V (D ${duty}, design ${vout} V)`).toBeLessThan(0.03)
   })
 }

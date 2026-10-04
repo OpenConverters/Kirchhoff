@@ -624,6 +624,7 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
     // Every PULSE transition (start time within the period, and the period): used below to keep the
     // transient's stop time out of a gate edge.
     std::vector<PulseEdge> pulseEdges;
+    const bool useIcDeck = !sim.value("initialConditions", json::array()).empty();   // .tran … uic (below)
     for (const auto& st : sim.value("stimulus", json::array())) {
         const json& wf = st.at("waveform");
         if (wf.value("type", "") != "pwm") continue;
@@ -651,7 +652,14 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
             // Optional phase shift (degrees) -> PULSE delay TD = phaseDeg/360 * period. Enables
             // interleaved / phase-shifted multi-switch drives (push-pull 180 deg, bridges, etc.).
             const double phaseDeg = wf.value("phase", 0.0);
-            const double td = (phaseDeg / 360.0) * period;
+            // Under uic a pulse that wraps the period end (phase + duty > 360°) starts one period early
+            // (ngspice takes a negative TD), else the first period lacks its wrapped head: the switch sits
+            // open where it should conduct, and an undamped mode (an FCML boost's flying capacitors, which
+            // start on their periodic orbit) keeps that kick for the whole run. Never without uic: the
+            // operating point is solved at t = 0, and a gate already on there shorts its inductor through
+            // the switch (12 V / 10 mΩ = 1.2 kA in an interleaved boost, 15 kV on Cout at turn-off).
+            double td = (phaseDeg / 360.0) * period;
+            if (useIcDeck && td + ton > period) td -= period;
             os << "Vstim_" << stage << "_" << comp << " " << stimNode << " 0 PULSE(0 5 "
                << td << " 1n 1n " << ton << " " << period << ")\n";
             pulseEdges.push_back({td, period});                          // rising edge

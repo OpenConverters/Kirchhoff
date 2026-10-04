@@ -91,7 +91,7 @@ if (NOT EXISTS "${MKF_WAVEFORM_PROCESSOR}")
         "-DMKF_DIR=<path-to-MKF-checkout> at a local MKF clone.")
 endif()
 
-add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/InvertingBuckBoost.cpp src/Interleave.cpp src/TwoSwitchFlyback.cpp src/ActiveClampFlyback.cpp src/HardSwitchedBridge.cpp src/Lcc.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/Dab.cpp src/IsolatedBuck.cpp src/IsolatedBuckBoost.cpp src/Weinberg.cpp src/Llc.cpp src/Src.cpp src/Cllc.cpp src/Clllc.cpp src/Pfc.cpp src/Vienna.cpp src/Cmc.cpp src/CmcSim.cpp src/Dmc.cpp src/DmcSim.cpp src/CurrentTransformer.cpp src/TasAssembler.cpp src/NgspiceRunner.cpp src/Analytical.cpp src/ConverterAnalytical.cpp src/ConverterExtract.cpp src/ComponentWaveforms.cpp src/DatasheetModels.cpp src/KelvinBridge.cpp "${MKF_WAVEFORM_PROCESSOR}")
+add_library(kirchhoff STATIC src/Flyback.cpp src/Boost.cpp src/Buck.cpp src/Forward.cpp src/TwoSwitchForward.cpp src/Sepic.cpp src/Cuk.cpp src/Zeta.cpp src/InvertingBuckBoost.cpp src/Interleave.cpp src/TwoSwitchFlyback.cpp src/ActiveClampFlyback.cpp src/HardSwitchedBridge.cpp src/Lcc.cpp src/Fcml.cpp src/PushPull.cpp src/Psfb.cpp src/Ahb.cpp src/Acf.cpp src/Fsbb.cpp src/Pshb.cpp src/Dab.cpp src/IsolatedBuck.cpp src/IsolatedBuckBoost.cpp src/Weinberg.cpp src/Llc.cpp src/Src.cpp src/Cllc.cpp src/Clllc.cpp src/Pfc.cpp src/Vienna.cpp src/Cmc.cpp src/CmcSim.cpp src/Dmc.cpp src/DmcSim.cpp src/CurrentTransformer.cpp src/TasAssembler.cpp src/NgspiceRunner.cpp src/Analytical.cpp src/ConverterAnalytical.cpp src/ConverterExtract.cpp src/ComponentWaveforms.cpp src/DatasheetModels.cpp src/KelvinBridge.cpp "${MKF_WAVEFORM_PROCESSOR}")
 target_include_directories(kirchhoff PUBLIC src)
 # The PSMA/MAS/json dependency headers are marked SYSTEM so the -Wall/-Wextra enabled below reports only
 # Kirchhoff's OWN code, not warnings inside generated/vendored dependency headers (e.g. MAS.hpp).
@@ -346,6 +346,8 @@ add_executable(test_hard_switched_bridge tests/test_hard_switched_bridge.cpp)
 target_link_libraries(test_hard_switched_bridge PRIVATE kirchhoff Catch2::Catch2WithMain)
 add_executable(test_lcc tests/test_lcc.cpp)
 target_link_libraries(test_lcc PRIVATE kirchhoff Catch2::Catch2WithMain)
+add_executable(test_fcml tests/test_fcml.cpp)
+target_link_libraries(test_fcml PRIVATE kirchhoff Catch2::Catch2WithMain)
 
 # Second-backend (#2): CIAS -> LTspice dialect, structural + (Wine-gated) execution cross-check.
 add_executable(test_ltspice_backend tests/test_ltspice_backend.cpp)

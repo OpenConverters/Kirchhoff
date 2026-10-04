@@ -381,6 +381,93 @@ function hardBridgeVisual(full) {
 // LCC (ABT #1438): ideal 50 % leg drive(s) as for the LLC (ABT#262), the tank Lr → Cs, Cp across the primary (x 720)
 // or the secondary (x 928), a 4-diode bridge and the capacitive tail. Which side Cp is on is read off the netlist.
 // x: source 176 · split caps 272 · bleeders 336 · leg B 400 (full) · leg A 448 · Lr 512 · Cs 576 · T1 800/880.
+// Flying-capacitor multilevel buck / boost (config.levels, ABT #1439). P = N−1 complementary pairs stack between the
+// top rail (Vin for a buck, Vout for a boost) and ground with the switch node in the middle; Cf k joins the k-th
+// inner nodes, nested to the left. A stacked pair has floating sources that CircuitJS1's `f` MOSFET cannot hold
+// (ABT#262), so each switch is an ANALOG switch (dump 159) — ground-referenced control, exactly ngspice's SW —
+// the body diodes are not in the drawn CIAS (cias.js folds them into their FET), but the deck drives each pair
+// with a dead time, and an analog switch has no body diode: with both switches of a pair open the inductor
+// current had nowhere to go but 10 GΩ, and Vout wandered tens of percent off. So each switch gets its TAS body
+// diode (DH k / DL k, source → drain) drawn beside it, exactly the path ngspice's deck carries through the dead time.
+// Every flying capacitor starts at k·Vtop/P, the output at Vout, the inductor at its
+// mean current: the deck's own start, so the picture opens balanced (a boost has no natural balancing).
+// x: left source/output column · Cf k at 384 − 64k · body diodes 416 · switches 448 (control +16, drive to +80) ·
+// right: L1 576–640, then Cout/Rload (buck) or Vin (boost). Rows 64 apart: top 112, sw 112 + 64P, gnd 112 + 128P.
+function fcmlPairs(tas) {
+  const st = (tas?.topology?.stages ?? []).find((s) => s.name === 'switchingCell')
+  return (st?.circuit?.components ?? []).filter((c) => /^QH\d+$/.test(c.name)).length
+}
+function fcmlVisual(tas, boost) {
+  const P = fcmlPairs(tas)
+  if (P < 2) throw new Error(`fcml visual: expected at least two switch pairs, found ${P}`)
+  const x0 = 448, xD = 416, xd = 384, xc = (k) => xd - 64 * k, xL = xd - 64 * P, Y0 = 112
+  const yh = (k) => Y0 + (P - k) * 64            // hnode(k): k = P is the top rail, k = 0 the switch node
+  const yl = (k) => Y0 + (P + k) * 64            // lnode(k): k = 0 the switch node, k = P ground
+  const ysw = yh(0), yg = yl(P)
+  const place = {}, wires = []
+  const sw = (y1, y2) => ({ pins: { source: [x0, y1], drain: [x0, y2], gate: [x0 + 16, (y1 + y2) / 2] },
+    line: () => `159 ${x0} ${y1} ${x0} ${y2} 0 0.01 1e10` })   // drawn upward: the control post lands at +16
+  for (let k = 1; k <= P; k++) {
+    place[`QH${k}`] = sw(yh(k - 1), yh(k))
+    place[`QL${k}`] = sw(yl(k), yl(k - 1))
+  }
+  for (let k = 1; k < P; k++) {
+    place[`Cf${k}`] = { pins: { 1: [xc(k), yh(k)], 2: [xc(k), yl(k)] },
+      line: (q, c) => `c ${xc(k)} ${yh(k)} ${xc(k)} ${yl(k)} 0 ${c.C(q)} ${(k * (boost ? c.vout : c.vin)) / P}` }
+    wires.push([xD, yh(k), xc(k), yh(k)], [xD, yl(k), xc(k), yl(k)])
+  }
+  // every node row reaches the body-diode column first (CircuitJS joins wires only at their ends)
+  for (let k = 0; k <= P; k++) wires.push([x0, yh(k), xD, yh(k)], ...(k > 0 ? [[x0, yl(k), xD, yl(k)]] : []))
+  wires.push([xD, Y0, xL, Y0], [xD, yg, xL, yg])                 // top rail and ground to the left column
+  wires.push([x0, ysw, 576, ysw], [x0, yg, 704, yg])             // switch node and ground to the right
+  const iL = (c) => (boost ? c.vout * c.vout / c.rload / c.vin : c.vout / c.rload)
+  if (boost) {
+    place.L1 = { pins: { primary_start: [640, ysw], primary_end: [576, ysw] }, line: (q, c) => `l 640 ${ysw} 576 ${ysw} 0 ${c.L(q)} ${iL(c)}` }
+    place.Cout = { pins: { 1: [xL, Y0], 2: [xL, yg] }, line: (q, c) => `c ${xL} ${Y0} ${xL} ${yg} 0 ${c.C(q)} ${c.vout}` }
+    wires.push([640, ysw, 704, ysw], [xL, Y0, xL - 64, Y0], [xL, yg, xL - 64, yg])
+  } else {
+    place.L1 = { pins: { primary_start: [576, ysw], primary_end: [640, ysw] }, line: (q, c) => `l 576 ${ysw} 640 ${ysw} 0 ${c.L(q)} ${iL(c)}` }
+    place.Cout = { pins: { 1: [704, ysw], 2: [704, yg] }, line: (q, c) => `c 704 ${ysw} 704 ${yg} 0 ${c.C(q)} ${c.vout}` }
+    wires.push([640, ysw, 704, ysw], [704, ysw, 768, ysw], [704, yg, 768, yg])
+  }
+  const top = `QH${P}`, bot = `QL${P}`
+  return {
+    place,
+    wires,
+    synth: (c) => {
+      const out = []
+      if (boost) {
+        out.push({ line: `v 704 ${yg} 704 ${ysw} 0 0 40 ${c.vin} 0 0 0.5`, posts: [[704, yg], [704, ysw]], attach: { [`704,${ysw}`]: ['L1', 'primary_start'], [`704,${yg}`]: [bot, 'source'] } })
+        out.push({ line: `g 704 ${yg} 704 ${yg + 16} 0`, posts: [[704, yg]] })
+        out.push({ line: `r ${xL - 64} ${Y0} ${xL - 64} ${yg} 0 ${c.rload}`, tag: 'Rload', posts: [[xL - 64, Y0], [xL - 64, yg]], attach: { [`${xL - 64},${Y0}`]: ['Cout', '1'], [`${xL - 64},${yg}`]: ['Cout', '2'] } })
+        out.push({ line: `207 ${xL - 64} ${Y0} ${xL - 112} ${Y0} 0 vout`, posts: [[xL - 64, Y0]] })
+      } else {
+        out.push({ line: `v ${xL} ${yg} ${xL} ${Y0} 0 0 40 ${c.vin} 0 0 0.5`, posts: [[xL, yg], [xL, Y0]], attach: { [`${xL},${Y0}`]: [top, 'drain'], [`${xL},${yg}`]: [bot, 'source'] } })
+        out.push({ line: `g ${xL} ${yg} ${xL} ${yg + 16} 0`, posts: [[xL, yg]] })
+        out.push({ line: `r 768 ${ysw} 768 ${yg} 0 ${c.rload}`, tag: 'Rload', posts: [[768, ysw], [768, yg]], attach: { [`768,${ysw}`]: ['Cout', '1'], [`768,${yg}`]: ['Cout', '2'] } })
+        out.push({ line: `207 768 ${ysw} 816 ${ysw} 0 vout`, posts: [[768, ysw]] })
+      }
+      // one ground-referenced square drive per switch, off its own stimulus (duty, phase), and its body diode
+      for (let k = 1; k <= P; k++) for (const [ref, y1, y2] of [[`QH${k}`, yh(k - 1), yh(k)], [`QL${k}`, yl(k), yl(k - 1)]]) {
+        const ym = (y1 + y2) / 2
+        out.push({ line: `d ${xD} ${y1} ${xD} ${y2} 2 default`, posts: [[xD, y1], [xD, y2]],
+          attach: { [`${xD},${y1}`]: [ref, 'source'], [`${xD},${y2}`]: [ref, 'drain'] } })
+        out.push({ line: `v ${x0 + 80} ${ym} ${x0 + 16} ${ym} 0 2 ${c.fVis} 5 5 ${c.phaseShiftOf(ref)} ${c.dutyOf(ref)}`,
+          posts: [[x0 + 80, ym], [x0 + 16, ym]], attach: { [`${x0 + 16},${ym}`]: [ref, 'gate'] } })
+        out.push({ line: `g ${x0 + 80} ${ym} ${x0 + 80} ${ym + 16} 0`, posts: [[x0 + 80, ym]] })
+      }
+      return out
+    },
+    scopeSets: {
+      overview:  [['L1', 'current'], ...(P > 1 ? [['Cf1', 'voltage']] : []), ['Rload', 'voltage']],
+      magnetic:  [['L1', 'both'], ['Rload', 'voltage']],
+      switch:    [['QH1', 'both'], ['QL1', 'both'], ['Rload', 'voltage']],
+      rectifier: [[boost ? 'QH1' : 'QL1', 'both'], ['L1', 'current'], ['Rload', 'voltage']],
+      output:    [['L1', 'current'], ['Rload', 'both']],
+    },
+  }
+}
+
 function lccParallelSide(tas) {
   const st = (tas?.topology?.stages ?? []).find((s) => s.name === 'lccCell')
   const net = (st?.circuit?.connections ?? []).find((c) => c.endpoints.some((e) => e.component === 'Cp' && e.pin === '1'))
@@ -1935,6 +2022,12 @@ const LAYOUTS = {
       output:    [['S1', 'voltage'], ['Rload', 'both']],
     },
   },
+}
+
+// config.levels > 2 replaces the buck / boost cell with the flying-capacitor stack (ABT #1439).
+for (const [id, boost] of [['buck', false], ['boost', true]]) {
+  const plain = LAYOUTS[id]
+  LAYOUTS[id] = (tas) => (fcmlPairs(tas) > 0 ? fcmlVisual(tas, boost) : plain)
 }
 
 export function hasVisualSim(topoId) { return topoId in LAYOUTS }

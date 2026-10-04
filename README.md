@@ -114,7 +114,14 @@ inductor, negative rail Vo = −Vin·D/(1−D); CCM or DCM, diode or synchronous
 **Interleaved buck / boost** (`config.phaseCount` 2–6) is the single-phase cell replicated by
 `interleave_stage` with the drives staggered 360°/N; `test_interleaved` checks every phase's inductor current
 against the single-phase analytical waveform, the stagger, and the output-capacitor ripple against the
-summed-phase charge. The **two-switch flyback** (clamp diodes return the leakage energy to Vin, so each
+summed-phase charge. The **flying-capacitor multilevel (FCML) buck / boost** (`config.levels` 3–6) stacks N−1
+complementary pairs with N−2 flying capacitors under phase-shifted PWM, so the inductor sees a Vtop/(N−1) step at
+(N−1)·fs; `analytical_fcml` is its exact piecewise-linear inductor waveform. `test_fcml` runs buck and boost at 3
+and 4 levels in ngspice: Vout within 0.5 % of the lossless output less the switches' on-resistance drop, inductor
+ripple shape NRMSE ≤ 0.06 and peak-to-peak within 8 %, every flying capacitor within 3 % of k·Vtop/(N−1). The buck's
+flying capacitors settle themselves; a boost's have no natural balancing (its inductor faces the stiff source), so
+its deck starts on the periodic orbit (`fcml_periodic_start`) and hardware needs a balancing controller.
+The **two-switch flyback** (clamp diodes return the leakage energy to Vin, so each
 switch sees only Vin) is checked in `test_two_switch_flyback` against the single-switch flyback deck with the
 same transformer: Vout within 3 %, switch nodes inside the rails, primary peak and on-time ramp within 5 %.
 The **active-clamp flyback** has its own steady-state solver (closed-form segments — linear ramps, the Lk–Cc

@@ -33,14 +33,13 @@ topology MKF never modelled (the inverting buck-boost onwards).
 - **PFC variants** — totem-pole, interleaved, SEPIC, Ćuk; DCM / CrM / transition modes (ABT #92).
 - **Interleaving** — FSBB (ABT #94), Vienna (ABT #93), PFC (ABT #92), and buck / boost (2–6 phases,
   ABT #1437) via `config.phaseCount`; buck/boost by the generic `interleave_stage` transform (`Interleave.hpp`).
+- **Flying-capacitor multilevel (FCML) buck / boost** (3–6 levels, ABT #1439) via `config.levels` (`Fcml.hpp`):
+  phase-shifted pairs; the boost deck starts its flying capacitors on the periodic orbit (no natural balancing).
 - **AHB flyback** — the asymmetric-half-bridge flyback rectifier variant of AHB (ABT #87). Not the
   same circuit as the active-clamp flyback below (clamp cap in series with the primary, not across it).
 - **CLLC/CLLLC bidirectional** reverse power flow (ABT #85).
 
 ## Remaining gaps — prioritized (each tracked in ABT)
-
-### Tier 3 — multilevel
-- **Flying-capacitor multilevel (FCML) buck/boost** (ABT #1439).
 
 ### Tier 4 — scope expansion (decided 2026-10-03: in scope)
 - **DC-AC inverters** (ABT #1440) — 1-φ full-bridge SPWM + LC filter first, then 3-φ 2-level VSI, then NPC
@@ -54,4 +53,4 @@ topology MKF never modelled (the inverting buck-boost onwards).
 
 ### Order being worked (2026-10-03)
 Interleaved buck/boost → two-switch flyback → active-clamp flyback → hard-switched half-bridge →
-hard-switched full-bridge → LCC (all done) → FCML → inverters (in scope, decided 2026-10-03). Tracked per ABT ticket.
+hard-switched full-bridge → LCC → FCML (all done) → inverters (in scope, decided 2026-10-03). Tracked per ABT ticket.

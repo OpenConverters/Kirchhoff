@@ -216,8 +216,10 @@ const STANDARD = { key: null, label: 'Build', default: 'standard',
 // replicates the whole switching cell, so a drawing that is right for one phase says nothing about three.
 // Each is "<variant>@<N>ph"; the gates enumerate them through auditOptions/applyAuditOption.
 const STRUCTURAL_CASES = {
-  buck: ['diode@2ph', 'synchronous@3ph'],
-  boost: ['diode@3ph', 'synchronous@2ph'],
+  // Flying-capacitor multilevel (config.levels, ABT #1439) stacks N−1 complementary pairs with N−2 flying
+  // capacitors: always synchronous, a different cell per level count. Each is "<variant>@<N>L".
+  buck: ['diode@2ph', 'synchronous@3ph', 'synchronous@3L', 'synchronous@4L'],
+  boost: ['diode@3ph', 'synchronous@2ph', 'synchronous@3L', 'synchronous@4L'],
   // The clamp side moves Cc and Qc (Cc to Vin vs Cc to the drain, Qc to GND): a different circuit per side.
   active_clamp_flyback: ['complementary@lowClamp', 'nonComplementary@lowClamp'],
   // The full bridge replaces the split bus with a second leg: a different circuit, a different drawing.
@@ -232,7 +234,8 @@ export function auditOptions(topologyId) {
   return [...(v ? v.options.map((o) => o.id) : [null]), ...(STRUCTURAL_CASES[topologyId] ?? [])]
 }
 
-// Write an audit option into a spec's config: the variant axis value, plus config.phaseCount for "@<N>ph".
+// Write an audit option into a spec's config: the variant axis value, plus config.phaseCount for "@<N>ph"
+// or config.levels for "@<N>L".
 export function applyAuditOption(spec, topologyId, opt) {
   if (!opt) return spec
   const v = VARIANTS[topologyId]
@@ -240,6 +243,10 @@ export function applyAuditOption(spec, topologyId, opt) {
   if (variant && v) spec.config = { ...(spec.config ?? {}), [v.key]: variant }
   if (ph && STRUCTURAL_SUFFIX[ph]) {
     spec.config = { ...(spec.config ?? {}), ...STRUCTURAL_SUFFIX[ph] }
+  } else if (ph && /^\d+L$/.test(ph)) {
+    const n = Number(ph.slice(0, -1))
+    if (n < 3) throw new Error(`audit option '${opt}': a multilevel case needs at least 3 levels`)
+    spec.config = { ...(spec.config ?? {}), levels: n }
   } else if (ph) {
     const n = Number(ph.replace(/ph$/, ''))
     if (!/^\d+ph$/.test(ph) || !Number.isInteger(n) || n < 2) throw new Error(`audit option '${opt}': bad structural suffix`)
@@ -330,10 +337,12 @@ export const KNOBS = {
   // ── Non-Isolated DC-DC ──────────────────────────────────────────────────────
   buck: [
     num('phaseCount', 'Interleaved phases', 1, { tier: 1, sym: 'N', min: 1, max: 6, step: 1, int: true, tip: 'Number of interleaved phases (cells staggered by 360/N on shared rails).' }), 
+    num('levels', 'Levels', 2, { tier: 1, sym: 'NL', min: 2, max: 6, step: 1, int: true, tip: 'Flying-capacitor multilevel: N−1 stacked switch pairs, N−2 flying capacitors; 2 = the plain converter. Always synchronous; not with interleaving.' }),
     num('esrRippleFraction', 'ESR ripple budget', 0.005, { tier: 3, min: 0.0005, max: 0.05, step: 0.0005, tip: 'Filter-cap ESR budget as a fraction of the rail voltage (default 0.5%).' }),kPinL('Inductance', 'L', 'Pin the inductor value; the stage is sized around it.'),
     kRipple(0.4), kMaxIsw(), kMaxDuty(1.0), kDead(0.01), kOutRipple(0.01), kVderate()],
   boost: [
     num('phaseCount', 'Interleaved phases', 1, { tier: 1, sym: 'N', min: 1, max: 6, step: 1, int: true, tip: 'Number of interleaved phases (cells staggered by 360/N on shared rails).' }), 
+    num('levels', 'Levels', 2, { tier: 1, sym: 'NL', min: 2, max: 6, step: 1, int: true, tip: 'Flying-capacitor multilevel: N−1 stacked switch pairs, N−2 flying capacitors; 2 = the plain converter. Always synchronous; not with interleaving.' }),
     num('esrRippleFraction', 'ESR ripple budget', 0.005, { tier: 3, min: 0.0005, max: 0.05, step: 0.0005, tip: 'Filter-cap ESR budget as a fraction of the rail voltage (default 0.5%).' }),kPinL('Inductance', 'L', 'Pin the inductor value; the stage is sized around it.'),
     kRipple(0.4), kMaxIsw(), kMaxDuty(1.0), kDead(0.01), kOutRipple(0.01), kVderate()],
   sepic: [kPinL('Inductance L1', 'L1'), ...coupledBlock()],

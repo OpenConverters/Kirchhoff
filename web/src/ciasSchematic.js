@@ -1802,9 +1802,82 @@ const interleavedBoost = (present) => {
   }
 }
 
-for (const [id, multi] of [['buck', interleavedBuck], ['boost', interleavedBoost]]) {
+// ── flying-capacitor multilevel buck / boost (ABT #1439) ─────────────────────
+// config.levels = N stacks P = N−1 complementary pairs in ONE vertical column: QH P … QH1 from the top rail
+// (Vin for a buck, Vout for a boost) down to the switch node, QL1 … QL P from the switch node to ground.
+// Every inner node is a horizontal ROW, 80 px apart; Cf k joins row nh k to row nl k, so the flying
+// capacitors nest around the switch node (Cf1 innermost) without a crossing. Body diodes DH k / DL k sit in
+// a column of their own beside the FETs (annotations, as the synchronous buck's D2), gate flags to the
+// left. The buck keeps the switch-node row free on the right for L1 → Vout, so its capacitors nest on the
+// LEFT, between the Vin source and the stack; the boost brings L1 in from Vin on the left, so its capacitors
+// nest on the RIGHT, before the Vout tail. The pair count is read off the CIAS (how many QH<k> it carries).
+const fcmlPairsOf = (present) => { let n = 0; while (present.has(`QH${n + 1}`)) n++; return n }
+
+const fcml = (present, boost) => {
+  const P = fcmlPairsOf(present)
+  if (P < 2 || !present.has(`QL${P}`)) throw new Error(`ciasSchematic fcml: expected matched QH/QL pairs, found ${P} QH and QL${P} ${present.has(`QL${P}`) ? 'present' : 'missing'}`)
+  const PITCH = 80, Y0 = 70
+  const yh = (k) => Y0 + (P - k) * PITCH          // row nh k: k = P is the top rail, k = 0 the switch node
+  const yl = (k) => Y0 + (P + k) * PITCH          // row nl k: k = 0 the switch node, k = P ground
+  const ysw = yh(0), yg = yl(P)
+  // columns: switches xs, body diodes xd; buck caps nest leftwards from xs − 80, boost caps rightwards from xd + 70
+  const xs = boost ? 290 : 230 + 70 * (P - 2), xd = xs + 60    // 60: a three-character FET ref ("QH1") overran a diode 50 px over
+  const xc = (k) => (boost ? xd + 70 * k : xs - 10 - 70 * k)
+  const place = {}, wires = [], synth = [], gates = []
+  for (let k = 1; k <= P; k++) {
+    const ych = yh(k - 1) - PITCH / 2, ycl = yl(k - 1) + PITCH / 2
+    place[`QH${k}`] = { draw: (b) => mosfetV(`QH${k}`, b, xs, ych, 'right', true) }
+    place[`QL${k}`] = { draw: (b) => mosfetV(`QL${k}`, b, xs, ycl, 'right', true) }
+    wires.push({ from: `QH${k}.drain`, to: [xs, yh(k)] }, { from: `QH${k}.source`, to: [xs, yh(k - 1)] },
+               { from: `QL${k}.drain`, to: [xs, yl(k - 1)] }, { from: `QL${k}.source`, to: [xs, yl(k)] },
+               { from: `DH${k}.cathode`, to: [xd, yh(k)] }, { from: `DH${k}.anode`, to: [xd, yh(k - 1)] },
+               { from: `DL${k}.cathode`, to: [xd, yl(k - 1)] }, { from: `DL${k}.anode`, to: [xd, yl(k)] })
+    synth.push((b) => diode(`DH${k}`, b, xd, ych, 'up', 'right', true), (b) => diode(`DL${k}`, b, xd, ycl, 'up', 'right', true),
+               () => sig(xs - 26, ych, `gh${k}`), () => sig(xs - 26, ycl, `gl${k}`))
+    gates.push(`gh${k}`, `gl${k}`)
+  }
+  for (let k = 1; k < P; k++) {
+    place[`Cf${k}`] = { draw: (b) => capV(`Cf${k}`, b, xc(k), ysw) }
+    wires.push({ from: `Cf${k}.p0`, to: [xc(k), yh(k)] }, { from: `Cf${k}.p1`, to: [xc(k), yl(k)] },
+               boost ? { from: [xs, yh(k)], to: [xc(k), yh(k)] } : { from: [xc(k), yh(k)], to: [xd, yh(k)] },
+               boost ? { from: [xs, yl(k)], to: [xc(k), yl(k)] } : { from: [xc(k), yl(k)], to: [xd, yl(k)] })
+  }
+  const yMid = (ysw + yg) / 2, icH = Math.max(44, gates.length * 16 + 16)
+  if (!boost) {
+    // Vin on the left, its rail along the top; the switch node runs right through L1 into the Vout tail
+    const xV = xc(P - 1) - 80, xL = xd + 100, xo = xL + 90, xR = xo + 80, xP = xR + 80
+    place.L1 = { draw: (b) => indH('L1', b, xL, ysw) }
+    place.Cout = { draw: (b) => capV('Cout', b, xo, yMid) }
+    wires.push({ from: '@src.p0', to: [xV, Y0] }, { from: [xV, Y0], to: [xd, Y0] },
+               { from: '@src.p1', to: [xV, yg] }, { from: [xV, yg], to: [xR, yg] },
+               { from: [xs, ysw], to: 'L1.p0' }, { from: 'L1.p1', to: '@port.VOUT' },
+               { from: 'Cout.p0', to: [xo, ysw] }, { from: 'Cout.p1', to: [xo, yg] })
+    return {
+      size: [xP + 160, yg + 50],
+      place, wires,
+      synth: (b) => [srcDC(xV, yMid), gnd(xs - 60, yg), loadR(xR, yMid, ysw, yg), port(xP, ysw, 'VOUT'),
+                     ...synth.map((f) => f(b)), ctrlIC(b, xP + 60, yMid + (yg - yMid) / 2, gates)],
+    }
+  }
+  // boost: Vin and L1 on the left into the switch node; the top rail is Vout, out to the right past the caps
+  const xV = 70, xL = xV + 100, xo = xc(P - 1) + 90, xR = xo + 80, xP = xR + 80
+  place.L1 = { draw: (b) => indH('L1', b, xL, ysw) }
+  place.Cout = { draw: (b) => capV('Cout', b, xo, (Y0 + yg) / 2) }
+  wires.push({ from: '@src.p0', to: 'L1.p0', via: [[xV, ysw]] }, { from: 'L1.p1', to: [xs, ysw] }, { from: [xs, ysw], to: [xd, ysw] },
+             { from: '@src.p1', to: [xV, yg] }, { from: [xV, yg], to: [xR, yg] },
+             { from: [xs, Y0], to: '@port.VOUT' },
+             { from: 'Cout.p0', to: [xo, Y0] }, { from: 'Cout.p1', to: [xo, yg] })
+  return {
+    size: [xP + 160, yg + 50],
+    place, wires,
+    synth: (b) => [srcDC(xV, yMid), gnd(xs - 60, yg), loadR(xR, (Y0 + yg) / 2, Y0, yg), port(xP, Y0, 'VOUT'),
+                   ...synth.map((f) => f(b)), ctrlIC(b, xP + 60, yMid, gates)],
+  }
+}
+
+for (const [id, multi, boost] of [['buck', interleavedBuck, false], ['boost', interleavedBoost, true]]) {
   const single = LAYOUTS[id]
-  LAYOUTS[id] = (present) => (present.has('Q1_1') ? multi(present) : single)
+  LAYOUTS[id] = (present) => (present.has('Q1_1') ? multi(present) : present.has('QH1') ? fcml(present, boost) : single)
 }
 
 export function hasCiasSchematic(topologyId) { return topologyId in LAYOUTS || topologyId === EMI_FILTER_SCHEMATIC }

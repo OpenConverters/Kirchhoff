@@ -19,6 +19,8 @@ struct BoostDesign {
     double deadFraction;    // sync-rectifier dead-time fraction of the period (synchronous only)
     bool synchronousRectifier;  // output rectifier = high-side MOSFET (config "rectifier"="synchronous")
     int phaseCount = 1;         // config.phaseCount (ABT #1437): N interleaved cells, each carrying Iout/N
+    int levels = 2;             // config.levels (ABT #1439): N-level flying-capacitor multilevel cell; 2 = plain
+    double flyingCapacitance = 0;   // FCML only: each flying capacitor
     nlohmann::json config;
 };
 

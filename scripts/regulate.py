@@ -181,6 +181,23 @@ def _set_control(tas, field, value, topology=None):
             if wf.get("type") == "pwm" and float(wf.get("phase", 0.0)) == 0.0:
                 wf["dutyCycle"] = value
         return
+    if topology in ("buck", "boost") and field == "dutyCycle" and "_buckBoostPairs" in tas:
+        # Plain, synchronous, interleaved or FCML: each pair's main at D from its base phase, the complement after
+        # a dead time for the rest of the period (see _stash_buck_boost_pairs).
+        dt = float(tas["_fsbbDeadFraction"])
+        pairs = tas["_buckBoostPairs"]
+        for st in tas.get("simulation", {}).get("stimulus", []):
+            wf = st.get("waveform", {})
+            if wf.get("type") != "pwm":
+                continue
+            role, phi = pairs[st["component"]]
+            if role == "main":
+                wf["dutyCycle"] = value
+                wf["phase"] = phi
+            else:
+                wf["dutyCycle"] = max(0.0, (1.0 - value) - 2.0 * dt)
+                wf["phase"] = (phi + (value + dt) * 360.0) % 360.0
+        return
     if topology in ("fsbb", "ahb", "buck", "boost", "active_clamp_flyback") and field == "dutyCycle":
         # active_clamp_flyback (complementary drive): Q1 at D, the clamp switch on for the rest (1−D)−2·dt.
         # fsbb/ahb: coordinated 4-/2-switch complementary modulation. SYNCHRONOUS buck/boost (abt #67): the
@@ -239,6 +256,45 @@ def _stash_fsbb_modulation(tas):
         d0 = float(charge[0]["waveform"].get("dutyCycle", 0.5))
         ph0 = float(disch[0]["waveform"].get("phase", 0.0)) / 360.0
         tas["_fsbbDeadFraction"] = max(0.0, ph0 - d0)
+
+
+_BUCK_BOOST_SWITCH = re.compile(r"^(Q1|Q2|QH|QL)(_?\d*)$")
+
+
+def _stash_buck_boost_pairs(tas, topology):
+    """Buck / boost: every (main, complement) switch pair and its base phase, from the PRISTINE stimulus. A
+    plain or interleaved cell names them Q1[_k] (main) / Q2[_k] (synchronous rectifier); an FCML (config.levels)
+    names its pairs QH k / QL k, the main being QH for a buck and QL for a boost. Interleaved phases and FCML pairs
+    sit at their own base phase ((k−1)·360/N), so "phase 0 = main" no longer partitions them: each pair keeps its
+    base phase, its main switch runs D at that phase and its complement (1−D)−2·dt after it. A diode cell has
+    mains only."""
+    stims = [st for st in tas.get("simulation", {}).get("stimulus", [])
+             if st.get("waveform", {}).get("type") == "pwm"]
+    roles, base = {}, {}
+    for st in stims:
+        m = _BUCK_BOOST_SWITCH.match(st.get("component", ""))
+        if not m:
+            raise ValueError(f"{topology}: unexpected drive '{st.get('component')}' (expected Q1/Q2[_k] or QH/QL k)")
+        kind, key = m.group(1), m.group(2)
+        main = kind == "Q1" or (kind == "QH" and topology == "buck") or (kind == "QL" and topology == "boost")
+        roles[st["component"]] = ("main" if main else "comp", key)
+        if main:
+            base[key] = float(st["waveform"].get("phase", 0.0))
+    d0, dt = None, None
+    for st in stims:
+        role, key = roles[st["component"]]
+        if key not in base:
+            raise ValueError(f"{topology}: complement '{st['component']}' has no main switch in its pair")
+        if role == "main":
+            d0 = float(st["waveform"]["dutyCycle"])
+    for st in stims:
+        role, key = roles[st["component"]]
+        if role == "comp":
+            lag = ((float(st["waveform"].get("phase", 0.0)) - base[key]) / 360.0) % 1.0
+            dt = lag - d0
+            break
+    tas["_buckBoostPairs"] = {c: [r, base[k]] for c, (r, k) in roles.items()}
+    tas["_fsbbDeadFraction"] = max(0.0, dt) if dt is not None else 0.0
 
 
 def _stash_acf_flyback_modulation(tas):
@@ -1031,7 +1087,9 @@ def simulate_regulated(tas, target_vout, topology, fidelity=None, tol=0.01, max_
         raise ValueError(f"no control-variable mapping for topology '{topology}'")
     if topology not in _SELF_REGULATED:
         field, bracket = _CONTROL[ctrl]
-    if topology in ("fsbb", "ahb", "buck", "boost"):
+    if topology in ("buck", "boost"):
+        _stash_buck_boost_pairs(tas, topology)
+    elif topology in ("fsbb", "ahb"):
         _stash_fsbb_modulation(tas)   # capture dead-time before the bisection overwrites duties (complementary;
                                        # buck/boost = synchronous-rectifier variant, no-op for the diode default)
     elif topology == "active_clamp_flyback":
