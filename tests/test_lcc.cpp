@@ -208,3 +208,46 @@ TEST_CASE("LCC in ngspice: Vout, tank current and Cp voltage as solved", "[lcc][
             CHECK_THAT(pkSim, WithinRel(pkAn, 0.015));
         }
 }
+
+TEST_CASE("LCC with a bound rectifier: its junction capacitance is folded out of Cp (ABT #1678)", "[lcc][ngspice][rectifierCj]") {
+    if (!Kirchhoff::ngspice_in_process_available()) {
+        WARN("Kirchhoff built without libngspice — the simulation half of this gate did not run");
+        return;
+    }
+    using Catch::Matchers::ContainsSubstring;
+    // A 2 kV bridge's diodes carry tens of pF each; with Cp on the secondary they sit across the same winding.
+    const double cj = 30e-12;
+    // The rectifier as bound: each Dr gets that capacitance as a constant junction cap (M = 0: a datasheet Cj, not
+    // the default grading, which would shrink it ~45x at 2 kV reverse bias).
+    auto run = [&](const json& config, double& cpPart) {
+        const auto d = Kirchhoff::design_lcc(spec(kVin, kVout, kPower, kFsw, config));
+        const json tas = Kirchhoff::build_lcc_tas(d);
+        cpPart = d.discreteParallelCapacitance;
+        PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
+        std::string deck = Kirchhoff::tas_to_ngspice(tas, ideal);
+        const std::regex dr(R"((\.model D_Dr[1-4] D\([^)]*)\))");
+        REQUIRE(std::distance(std::sregex_iterator(deck.begin(), deck.end(), dr), std::sregex_iterator()) == 4);
+        deck = std::regex_replace(deck, dr, "$1 CJO=" + num(cj) + " M=0)");
+        const double T = 1.0 / kFsw, tstop = 1500.0 * T, tstep = T / 400.0;
+        deck = std::regex_replace(deck, std::regex(R"(\.tran\s+\S+\s+\S+\s+\S+\s+\S+)"),
+                                  ".tran " + num(tstep) + " " + num(tstop) + " 0 " + num(tstep));
+        const Kirchhoff::NgspiceRunResult res = Kirchhoff::run_ngspice_in_process(deck);
+        INFO("ngspice error: " << res.error);
+        REQUIRE(res.success);
+        const auto vo = res.average("v(Vout)", tstop - 40.0 * T, tstop);
+        REQUIRE(vo.has_value());
+        return *vo;
+    };
+    double cpFolded = 0, cpPlain = 0;
+    const double voFolded = run({{"rectifierJunctionCapacitance", cj}}, cpFolded);
+    const double voPlain = run(json::object(), cpPlain);
+    std::cerr << "[lcc Cj] Cp part " << cpFolded << " (plain " << cpPlain << ")  Vout folded " << voFolded
+              << "  unfolded " << voPlain << "\n";
+    CHECK_THAT(cpPlain - cpFolded, WithinRel(cj, 1e-9));
+    CHECK_THAT(voFolded, WithinRel(kVout, 0.015));
+    // the same rectifier against the unfolded Cp detunes the tank (the defect the ticket was filed for)
+    CHECK(std::fabs(voPlain - kVout) / kVout > 0.03);
+    // a rectifier that alone reaches the tank's Cp is refused
+    CHECK_THROWS_WITH(Kirchhoff::design_lcc(spec(kVin, kVout, kPower, kFsw, {{"rectifierJunctionCapacitance", 1e-9}})),
+                      ContainsSubstring("alone reaches the tank's Cp"));
+}

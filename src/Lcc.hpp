@@ -65,7 +65,12 @@ struct LccDesign {
     double diodeDrop;
     double turnsRatio;                    // n = Np/Ns
     double seriesInductance, seriesCapacitance;
-    double parallelCapacitance;           // as placed (secondary: the secondary-side value)
+    double parallelCapacitance;           // the tank's parallel capacitance, on its side (secondary: secondary-side value)
+    // config.rectifierJunctionCapacitance (per diode, F; 0 when not given): the full-bridge rectifier's own capacitance
+    // (Cj across the winding while every diode blocks — exactly when Cp acts), referred to Cp's side. The discrete
+    // Cp part is parallelCapacitance − this, so the bound rectifier and the part together make the designed tank.
+    double rectifierCapacitance = 0;
+    double discreteParallelCapacitance;
     bool parallelOnSecondary = true;
     double magnetizingInductance;
     bool fullBridge = false;

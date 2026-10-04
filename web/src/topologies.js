@@ -473,6 +473,7 @@ export const KNOBS = {
     num('inductanceRatio', 'Lm / Lr', 10, { tier: 2, min: 1, max: 100, step: 1 }),
     num('deadTimeFraction', 'Dead time', 0.02, { tier: 2, min: 0.005, max: 0.09, step: 0.005 }),
     num('outputVoltageRipple', 'Output ripple', 0.01, { tier: 2, min: 0.001, max: 0.1, step: 0.001 }),
+    num('rectifierJunctionCapacitance', 'Rectifier Cj', 0, { tier: 2, sym: 'Cj', unit: 'F', min: 0, tip: 'Per rectifier diode: part of the tank, folded out of the Cp part.' }),
     kMaxIsw(), kVderate()],
   llc: [
     num('qualityFactor', 'Quality factor', 0.4, { tier: 1, sym: 'Q', min: 0.05, max: 2, step: 0.05, tip: '0.3–0.5 typical at full load (TI SLUP263).' }),

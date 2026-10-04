@@ -373,6 +373,25 @@ LccDesign design_lcc(const json& tasInputs) {
     d.magnetizingInductance = t.Lm * Reff;
     const double cpPrimary = t.Cp / Reff;
     d.parallelCapacitance = d.parallelOnSecondary ? cpPrimary * n * n : cpPrimary;
+    // The rectifier's junction capacitance is part of the tank (ABT #1678): a real 2 kV bridge's tens of pF are tens
+    // of percent of a 157 pF secondary Cp. Fold it out of the discrete part, or refuse a rectifier that alone
+    // exceeds the tank's Cp.
+    {
+        double cj = 0;
+        if (d.config.is_object() && d.config.contains("rectifierJunctionCapacitance")) {
+            const json& v = d.config.at("rectifierJunctionCapacitance");
+            if (!v.is_number() || !(v.get<double>() >= 0))
+                throw std::invalid_argument(std::string(who) + "config.rectifierJunctionCapacitance must be a number >= 0 (F, per diode)");
+            cj = v.get<double>();
+        }
+        // Full bridge: two series pairs in parallel across the winding -> Cj; referred to the primary by 1/n².
+        d.rectifierCapacitance = d.parallelOnSecondary ? cj : cj / (n * n);
+        if (!(d.rectifierCapacitance < d.parallelCapacitance))
+            throw std::invalid_argument(std::string(who) + "the rectifier's junction capacitance (" +
+                std::to_string(d.rectifierCapacitance * 1e12) + " pF on Cp's side) alone reaches the tank's Cp (" +
+                std::to_string(d.parallelCapacitance * 1e12) + " pF): pick lower-capacitance diodes or a larger capacitanceRatio");
+        d.discreteParallelCapacitance = d.parallelCapacitance - d.rectifierCapacitance;
+    }
     d.seriesResonantFrequency = fr;
 
     // Frequency control across the input range at full load, and ZVS at each corner.
@@ -474,7 +493,7 @@ json build_lcc_tas(const LccDesign& d) {
     // Resonant caps (role resonant: sourced near nominal), rated from the Vin_min corner's peaks.
     const json cs = cap(d.seriesCapacitance, peak(worst.seriesCapacitorVoltage) / cfg::v_derate_capacitor(d.config), "resonant");
     const double vCpPeak = peak(worst.parallelCapacitorVoltage) / (d.parallelOnSecondary ? n : 1.0);
-    const json cp = cap(d.parallelCapacitance, vCpPeak / cfg::v_derate_capacitor(d.config), "resonant");
+    const json cp = cap(d.discreteParallelCapacitance, vCpPeak / cfg::v_derate_capacitor(d.config), "resonant");
 
     const double ratedVds = d.inputVoltageMax / cfg::v_derate_mosfet(d.config);
     json mosfetReq; mosfetReq["semiconductor"]["mosfet"] = json::object();
