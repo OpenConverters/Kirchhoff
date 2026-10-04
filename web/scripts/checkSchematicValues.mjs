@@ -34,7 +34,9 @@ export function quantities(text) {
   // so "100 Ω" has no word boundary after the unit and the original pattern matched NOTHING for ohms.
   // Every resistor value and every "RDS(on) ≤ 80 mΩ" walked past this gate while it reported a count that
   // made it look thorough. Hz is listed before H so the alternation cannot take the H and strand the z.
-  for (const m of text.matchAll(/(-?\d+(?:\.\d+)?)\s*([yzafpnµumkMGT])?(Hz|F|H|Ω|V|A|W|s)(?![A-Za-z0-9])/g)) {
+  // The lookbehind keeps a match from starting INSIDE a number: "7.42e-13 F" once read as "-13 F". Exponent
+  // notation is reported on its own by valueProblems (no prefix, unreadable on a drawing).
+  for (const m of text.matchAll(/(?<![\d.eE])(-?\d+(?:\.\d+)?)\s*([yzafpnµumkMGT])?(Hz|F|H|Ω|V|A|W|s)(?![A-Za-z0-9])/g)) {
     const [, num, prefix, unit] = m
     if (!UNIT.test(unit)) continue
     out.push({ value: Number(num) * (prefix ? PREFIX[prefix] ?? 1 : 1), unit, text: m[0] })
@@ -50,6 +52,7 @@ export function valueProblems(svg) {
     const text = m[1]
     checked++
     if (/NaN|Infinity|undefined|null/.test(text)) { problems.push(`NONFINITE "${text}"`); continue }
+    if (/\d[eE][-+]?\d/.test(text)) problems.push(`EXPONENT "${text}" — a drawn value must carry an SI prefix, not exponent notation`)
     for (const q of quantities(text))
       if (!(q.value > 0)) problems.push(`ZERO "${text}" — ${q.text} is not a quantity a part can have`)
     // "· n=6.51" or "· n=1 / 0": a zero ratio is a winding that transfers nothing.

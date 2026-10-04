@@ -26,7 +26,8 @@ const PREFIX = { y: 1e-24, z: 1e-21, a: 1e-18, f: 1e-15, p: 1e-12, n: 1e-9, µ: 
                  k: 1e3, M: 1e6, G: 1e9, T: 1e12 }
 // The terminator is a lookahead, not \b: Ω is not a word character, so \b after it never matches and
 // every resistor value would be skipped (the bug that once made checkSchematicValues look thorough).
-const QTY = /(-?\d+(?:\.\d+)?)\s*([yzafpnµumkMGT])?(Hz|F|H|Ω|V|A|W|s)(?![A-Za-z0-9])/g
+// The lookbehind keeps a match from starting inside a number's exponent ("7.42e-13 F" read as "-13 F").
+const QTY = /(?<![\d.eE])(-?\d+(?:\.\d+)?)\s*([yzafpnµumkMGT])?(Hz|F|H|Ω|V|A|W|s)(?![A-Za-z0-9])/g
 export const quantities = (text) => [...text.matchAll(QTY)]
   .map((m) => ({ value: Number(m[1]) * (m[2] ? PREFIX[m[2]] : 1), unit: m[3], text: m[0] }))
 
