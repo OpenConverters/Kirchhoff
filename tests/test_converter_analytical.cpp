@@ -2129,6 +2129,18 @@ TwoSidedDeckRun run_two_sided_deck(const nlohmann::json& tas, double fsw, double
         pLoad += 0.5 * dt * ((*vl)[k] * (*vl)[k] + (*vl)[k - 1] * (*vl)[k - 1]) / loadResistance;
         span += dt;
     }
+    // What the load takes is not all the source gave over a window this short: the output capacitor's start-up ring
+    // against the tank (~0.5 kHz, period ≫ 20 switching periods) is still moving energy in and out of Cout, enough
+    // to swing a lossless deck's P_load/P_source by ±0.4 % with the window's phase. Count that stored-energy change
+    // with the load, so the balance is the converter's and not the ring's. (Reverse: the delivered HV rail has no
+    // filter capacitor.)
+    std::smatch mc;
+    if (std::string(deliveredNode) == "vout" && std::regex_search(deck, mc, std::regex(R"(\nCCout \S+ \S+ (\S+))"))) {
+        const double cOut = std::stod(mc[1].str());
+        size_t k0 = 0;
+        while (k0 + 1 < t.size() && t[k0] < from) ++k0;
+        pLoad += 0.5 * cOut * ((*vl).back() * (*vl).back() - (*vl)[k0] * (*vl)[k0]);
+    }
     // A DC source's branch current is positive INTO its + terminal: a sourcing supply reads negative.
     return {*v, -*i * vSource, pLoad / span};
 }

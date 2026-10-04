@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <optional>
 #include <sstream>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -626,20 +627,42 @@ json build_cllc_tas(const CllcDesign& d) {
     // bridge rectifies through its body diodes (its gates held off: dutyCycle 0 is a DC 0 V gate). The deck has
     // no primary-side current sense for an SR there; one diode drop on the HV rail is a small fraction of it.
     // ONE stimulus per gate net (a voltage source per switch would short the net's shared gate node).
+    // The driven bridge's leading diagonal is already ON at t = 0: its phase sits a hair before the period start, so
+    // under uic its pulse wraps and starts in period 0 (TasAssembler). With the start below stated in that conducting
+    // state, no node has to jump at the first edge (ABT #1684; see the initial conditions).
+    constexpr double kLeadPhase = 360.0 * (1.0 - 1e-3);
     auto stim = [&](const char* sw, double phaseDeg, double duty) {
         json st; st["stage"] = "cllcCell"; st["component"] = sw; st["signal"] = "gate";
         st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.operatingFrequency;
         st["waveform"]["dutyCycle"] = duty; st["waveform"]["phase"] = phaseDeg;
         return st; };
     tas["simulation"]["stimulus"] = d.reverse
-        ? json::array({stim("Qa", 0.0, d.switchDuty), stim("Qb", 180.0, d.switchDuty),
+        ? json::array({stim("Qa", kLeadPhase, d.switchDuty), stim("Qb", kLeadPhase - 180.0, d.switchDuty),
                        stim("Q1", 0.0, 0.0), stim("Q2", 0.0, 0.0)})
-        : json::array({stim("Q1", 0.0, d.switchDuty), stim("Q2", 180.0, d.switchDuty)});
+        : json::array({stim("Q1", kLeadPhase, d.switchDuty), stim("Q2", kLeadPhase - 180.0, d.switchDuty)});
     // Precharge the DELIVERED bus to its target so the SR has a rail to rectify into from the first cycle and the deck
     // runs with use-initial-conditions (skipping the resonant tank's singular DC operating point). Forward
     // precharges Vout; reverse precharges Vin (the HV side is now the delivered rail — ABT #85).
-    { json ic; ic["node"] = d.reverse ? "Vin" : "Vout"; ic["voltage"] = deliverV;
-      tas["simulation"]["initialConditions"] = json::array({ic}); }
+    // Every other node starts in the state the first edge puts it in (ABT #1684): the leading diagonal conducts, the
+    // receiving bridge rectifies into its precharged rail, both resonant capacitors are uncharged. Left at uic's 0 V
+    // the floating bridge and tank nodes had to jump through capacitance-free nodes — at t = 0 onto the off-resistance
+    // dividers, then again at the first edge: the 400 V -> 48 V / 1 kW preset aborted at 0.3 ns ("Timestep too small
+    // ... vvin#branch"), and started from the all-off state it crawled at ps steps for 16 minutes. Forward the HV rail
+    // is the source and the LV rail the precharged output; reverse, the other way round — the node levels are the same.
+    {
+        const double vHv = d.reverse ? deliverV : d.inputVoltage, vLv = d.reverse ? d.outputVoltage : deliverV;
+        json ic; ic["node"] = d.reverse ? "Vin" : "Vout"; ic["voltage"] = deliverV;
+        json ics = json::array({ic});
+        std::set<std::string> nets;
+        for (const auto& c : cell.at("connections")) nets.insert(c.at("name").get<std::string>());
+        auto at = [&](const char* net, double v) {
+            if (nets.count(net)) ics.push_back({{"node", std::string("cllcCell.") + net}, {"voltage", v}}); };
+        at("node_a", vHv); at("c1_mid", vHv); at("node_b", 0.0); at("pri_top", d.turnsRatio * vLv);
+        at("sec_p", vLv); at("l2_mid", vLv); at("node_d", 0.0);
+        ics.push_back({{"node", "senseP"}, {"voltage", vLv}});
+        ics.push_back({{"node", "senseM"}, {"voltage", vLv}});
+        tas["simulation"]["initialConditions"] = ics;
+    }
     req::finalize_control_seeds(tas, Topology::CLLC_RESONANT_CONVERTER);  // CTAS seed: topology+fsw for switching controllers
     return tas;
 }

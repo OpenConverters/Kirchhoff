@@ -379,6 +379,8 @@ const std::vector<PtpPoint>& ptpPoints() {
         {"src", 400.0, 48.0, 10.0, 110e3}, {"src", 400.0, 48.0, 5.0, 110e3}, {"src", 400.0, 48.0, 30.0, 120e3},
         // cllc — Telecom 500 W (above & below fr), Telecom 250 W.
         {"cllc", 400.0, 48.0, 10.0, 200e3}, {"cllc", 400.0, 48.0, 10.0, 140e3}, {"cllc", 400.0, 24.0, 10.4, 250e3},
+        // the web preset's point (400 V -> 48 V, 1 kW, 100 kHz): its uic start once aborted at 0.3 ns (ABT #1684)
+        {"cllc", 400.0, 48.0, 1000.0 / 48.0, 100e3},
         // isolated_buck (flybuck; measured = primary buck rail) — 24->12, 48->5, 60->12.
         {"isolated_buck", 24.0, 12.0, 0.10, 350e3}, {"isolated_buck", 48.0, 5.0, 0.50, 200e3}, {"isolated_buck", 60.0, 12.0, 1.00, 350e3},
         // isolated_buck_boost — 12->5, 24->12, 24->36.
