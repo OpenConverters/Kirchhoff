@@ -242,9 +242,9 @@ json build_ahb_tas(const AhbDesign& d) {
         const double IsecPkF = IpriPkF * N;
         const double IsecRmsF = Io / std::sqrt(std::max(1.0 - Dn, 1e-3));
         const double vPriClamp = d.inputVoltage + Vo * N;   // primary swing (Vin on / reflected Vo off)
-        xwindings.push_back(req::winding_excitation("ahbFlybackPrimary", fsw, IpriPkF, IpriRmsF, IpriAvgF,
+        xwindings.push_back(req::winding_excitation("flybackPrimary", fsw, IpriPkF, IpriRmsF, IpriAvgF,
                                 dILmF, Dn, d.inputVoltage, d.inputVoltage * std::sqrt(std::max(Dn, 1e-3)), 0.0, vPriClamp));
-        xwindings.push_back(req::winding_excitation("ahbFlybackSecondary", fsw, IsecPkF, IsecRmsF, Io,
+        xwindings.push_back(req::winding_excitation("flybackSecondary", fsw, IsecPkF, IsecRmsF, Io,
                                 std::max(IsecPkF - Io, 0.0) * 2.0, 1.0 - Dn, Vo, Vo * std::sqrt(std::max(1.0 - Dn, 1e-3)),
                                 0.0, Vo + d.inputVoltage / std::max(N, 1e-6)));
     } else if (d.rectifierType == RectifierType::FullBridge || d.rectifierType == RectifierType::CenterTapped) {
@@ -255,10 +255,11 @@ json build_ahb_tas(const AhbDesign& d) {
             d.inputVoltage, {Vo}, {Io}, {N}, fsw, Lm, Dn, rippleRatio, req::analytical_rectifier_drop(d.config), rect);
         xwindings = AN::excitations_processed(aopT1, "T1");
     } else {
-        xwindings.push_back(req::winding_excitation("ahbPrimary", fsw, IpriPk, IpriRms, 0.0, dILm, Dn,
+        xwindings.push_back(req::winding_excitation("rectangular",   // zero-mean D / 1−D (DC-blocking cap); a PEAS label (ABT #1674)
+                                 fsw, IpriPk, IpriRms, 0.0, dILm, Dn,
                                 vPriPk, vPriRms, 0.0, vPriPkPk));
         for (int w = 0; w < wpo; ++w)
-            xwindings.push_back(req::winding_excitation("ahbSecondary", fsw, IsecPk, IsecRms, 0.0, dIsecRefl, Dn,
+            xwindings.push_back(req::winding_excitation("rectangular", fsw, IsecPk, IsecRms, 0.0, dIsecRefl, Dn,
                                     vSecPk, vSecRms, 0.0, vSecPkPk));
     }
     json xfmr; xfmr["magnetic"] = json::object();
@@ -330,7 +331,7 @@ json build_ahb_tas(const AhbDesign& d) {
     auto loopBreakR = [&]() { json c; c["resistor"] = json::object();
         auto& dr = c["inputs"]["designRequirements"]; dr["deviceType"] = "resistor";
         dr["resistance"]["nominal"] = cfg::loop_breaker_res(d.config, d.loadResistance);
-        dr["powerRating"] = 0.25; dr["role"] = "balancing"; return c; };
+        dr["powerRating"] = 0.25; return c; };   // no RAS role fits a loop breaker; role is optional (ABT #1674)
 
     json cell; cell["name"] = "ahb-cell";
     cell["ports"] = json::array({port("vin"), port("gnd"), port("sgnd"), port("vout"), port("gate1"), port("gate2")});

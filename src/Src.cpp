@@ -437,7 +437,7 @@ json build_src_tas(const SrcDesign& d) {
         dr["deviceType"] = "resistor";
         dr["resistance"]["nominal"] = 100000.0;
         dr["powerRating"] = 0.5;
-        dr["role"] = "balancing"; return c; };
+        dr["role"] = "bleed"; return c; };   // RAS has no "balancing" role: a split-cap bleeder (ABT #1674)
     // Half-bridge switching-node numerical dV/dt snubber (Csw -> stripped when the FET carries real Coss).
     // The IDEAL switch slews sw_node infinitely fast; at some operating points ngspice can't resolve the
     // edge and aborts ("Timestep too small ... node sw_node"). A small cap to ground mimics Coss so the
@@ -459,7 +459,7 @@ json build_src_tas(const SrcDesign& d) {
     auto loopBreakR = [&]() { json c; c["resistor"] = json::object();
         auto& dr = c["inputs"]["designRequirements"]; dr["deviceType"] = "resistor";
         dr["resistance"]["nominal"] = cfg::loop_breaker_res(d.config, d.loadResistance);
-        dr["powerRating"] = 0.25; dr["role"] = "balancing"; return c; };
+        dr["powerRating"] = 0.25; return c; };   // no RAS role fits a loop breaker; role is optional (ABT #1674)
 
     json cell; cell["name"] = "src-cell";
     // Cell ports: vin/gnd/vout/g1/g2 for the main rail; extra isolated rails append a vout<i> port below.

@@ -240,10 +240,11 @@ json build_psfb_tas(const PsfbDesign& d) {
                                                               d.phaseDeg, req::analytical_rectifier_drop(d.config), rect);
         xwindings = AN::excitations_processed(aopT1, "T1");
     } else {
-        xwindings.push_back(req::winding_excitation("psfbPrimary", fsw, IpriPk, IpriRms, 0.0, dILm, Deff,
+        xwindings.push_back(req::winding_excitation("bipolarRectangular",   // ±reflected load, freewheel zeros (ABT #1674: a PEAS label)
+                                 fsw, IpriPk, IpriRms, 0.0, dILm, Deff,
                                 vPriPk, vPriRms, 0.0, vPriPkPk));
         for (int w = 0; w < wpo; ++w)
-            xwindings.push_back(req::winding_excitation("psfbSecondary", fsw, IsecPk, IsecRms, 0.0, dILo, Deff,
+            xwindings.push_back(req::winding_excitation("bipolarRectangular", fsw, IsecPk, IsecRms, 0.0, dILo, Deff,
                                     vSecPk, vSecRms, 0.0, vSecPkPk));
     }
     json xfmr; xfmr["magnetic"] = json::object();
@@ -300,7 +301,7 @@ json build_psfb_tas(const PsfbDesign& d) {
     auto loopBreakR = [&]() { json c; c["resistor"] = json::object();
         auto& dr = c["inputs"]["designRequirements"]; dr["deviceType"] = "resistor";
         dr["resistance"]["nominal"] = cfg::loop_breaker_res(d.config, d.loadResistance);
-        dr["powerRating"] = 0.25; dr["role"] = "balancing"; return c; };
+        dr["powerRating"] = 0.25; return c; };   // no RAS role fits a loop breaker; role is optional (ABT #1674)
     // FUNCTIONAL bleed resistor for the full-bridge secondary. When all four ideal rectifier diodes are
     // reverse-biased, sec_a/sec_b hang on their snubber caps alone — a node with no DC path, so the IDEAL
     // ngspice deck goes singular ("timestep too small; trouble with sec_b"). A high-value bleed to gnd gives

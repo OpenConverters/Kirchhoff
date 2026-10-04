@@ -113,6 +113,20 @@ for cfg in ({"phaseCount": 3}, {"phaseCount": 2, "rectifier": "synchronous"}, {"
     tag = "-".join(f"{k}{v}" for k, v in cfg.items())
     check(f"buck-{tag}", PyKirchhoff.design_buck_tas({**BUCK_IN, "config": cfg}))
     check(f"boost-{tag}", PyKirchhoff.design_boost_tas({**HVBOOST_IN, "config": cfg}))
+# Resonant / bridge families on every rectifier they support (ABT #1674): the split-cap bleeders and the current-
+# doubler loop breaker once carried a resistor role ('balancing') that RAS does not have, unseen because no
+# rectifier variant was checked here.
+BRIDGE_IN = {"designRequirements": {"efficiency": 0.95, "inputType": "dc",
+             "inputVoltage": {"minimum": 380, "nominal": 400, "maximum": 420}, "switchingFrequency": {"nominal": 100000},
+             "outputs": [{"name": "out", "voltage": {"nominal": 12}, "regulation": "voltage"}]},
+             "operatingPoints": [{"name": "f", "inputVoltage": 400, "outputs": [{"name": "out", "power": 500}]}]}
+for topo, rects in (("llc", ("fullBridge", "centerTapped", "currentDoubler", "voltageDoubler")),
+                    ("src", ("fullBridge", "centerTapped", "currentDoubler")),
+                    ("psfb", ("fullBridge", "centerTapped", "currentDoubler")),
+                    ("pshb", ("fullBridge", "centerTapped", "currentDoubler")),
+                    ("ahb", ("fullBridge", "centerTapped", "currentDoubler", "ahbFlyback"))):
+    for rect in rects:
+        check(f"{topo}-{rect}", getattr(PyKirchhoff, f"design_{topo}_tas")({**BRIDGE_IN, "config": {"rectifierType": rect}}))
 # Inverting buck-boost (ABT #1433): the negative rail, both rectifiers and DCM must all be schema-valid TAS.
 IBB_IN = {"designRequirements": {"efficiency": 0.95, "inputVoltage": {"minimum": 19.2, "nominal": 24, "maximum": 28.8},
           "switchingFrequency": {"nominal": 200000}, "outputs": [{"name": "out", "voltage": {"nominal": -12}}]},

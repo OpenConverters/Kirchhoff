@@ -56,6 +56,24 @@ double stop_time_clear_of_gate_edges(double stopTime, const std::vector<PulseEdg
                              "(edges closer than 2 ns apart)");
 }
 
+// True iff some component's PEAS designRequirements tags the deck with this topology (the controller seed does,
+// via req::finalize_control_seeds).
+bool deck_declares_topology(const json& tasDoc, const std::string& topology) {
+    if (!tasDoc.contains("topology") || !tasDoc.at("topology").contains("stages")) return false;
+    for (const auto& st : tasDoc.at("topology").at("stages")) {
+        if (!st.contains("circuit") || !st.at("circuit").is_object() || !st.at("circuit").contains("components")) continue;
+        for (const auto& c : st.at("circuit").at("components")) {
+            if (!c.contains("data") || !c.at("data").is_object()) continue;
+            const json& d = c.at("data");
+            if (d.contains("inputs") && d.at("inputs").is_object() && d.at("inputs").contains("designRequirements")
+                && d.at("inputs").at("designRequirements").is_object()
+                && d.at("inputs").at("designRequirements").value("topology", std::string{}) == topology)
+                return true;
+        }
+    }
+    return false;
+}
+
 bool contains_ci(const std::string& s, const std::string& sub) {
     std::string a = s, b = sub;
     std::transform(a.begin(), a.end(), a.begin(), ::tolower);
@@ -754,7 +772,14 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
         // topology that needs a per-node DC path on its IDEAL deck must NOT bolt them on here — it would leak
         // into the next deck's sim. Use a deck-local bleed resistor in the brick instead (see e.g. Psfb).
         const json in = cfg::object_of(tasDoc.at("inputs"));
-        os << " cshunt=" << cfg::node_shunt_cap(in)
+        // PSHB's stiff gapped MKF_MODEL core (the low turns ratio the realism gate pins) leaves its fast primary /
+        // Lr nodes with no defined dV/dt at 1 pF and the transient collapses across the whole control bracket
+        // (abt #66); 1 nF (~1.6 MΩ at fsw) is electrically negligible there. Keyed on the topology the deck's
+        // components declare (PEAS designRequirements.topology) — the TAS has no schema-legal place for a solver
+        // option, which is why the design no longer writes tas.inputs.config (ABT #1674).
+        const double shunt = deck_declares_topology(tasDoc, "phaseShiftedHalfBridgeConverter")
+            ? cfg::get(in, "nodeShuntCap", 1e-9) : cfg::node_shunt_cap(in);
+        os << " cshunt=" << shunt
            << " rshunt=" << cfg::node_shunt_res(in)
            << " itl4="   << cfg::tran_iter_limit(in);
     }
