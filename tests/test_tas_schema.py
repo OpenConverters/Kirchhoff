@@ -124,6 +124,14 @@ for mode in ("complementary", "nonComplementary"):
     for side in ("high", "low"):
         check(f"active_clamp_flyback-{mode}-{side}",
               PyKirchhoff.design_active_clamp_flyback_tas({**ACFLY_IN, "config": {"mode": mode, "clampSide": side}}))
+# Hard-switched half / full bridge (ABT #1434/#1435): each bridge x each rectifier (split caps + balancing resistors,
+# body diodes, the primary RC damper, the current doubler's second inductor).
+HB_IN = {"designRequirements": {"efficiency": 1.0, "inputVoltage": {"minimum": 360, "nominal": 400, "maximum": 440},
+         "switchingFrequency": {"nominal": 100000}, "outputs": [{"name": "out", "voltage": {"nominal": 24}}]},
+         "operatingPoints": [{"inputVoltage": 400, "outputs": [{"power": 240}]}]}
+for rect in ("centerTapped", "fullBridge", "currentDoubler"):
+    check(f"half_bridge-{rect}", PyKirchhoff.design_half_bridge_tas({**HB_IN, "config": {"rectifierType": rect}}))
+    check(f"full_bridge-{rect}", PyKirchhoff.design_full_bridge_tas({**HB_IN, "config": {"rectifierType": rect}}))
 
 # Multi-output (N isolated secondaries) — ABT #86. A 2-output forward-family spec must still emit a
 # schema-valid TAS (extra secondary windings, per-output rectifiers/filters, extra external output ports).

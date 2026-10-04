@@ -104,6 +104,21 @@ def test_regulate_duty_active_clamp_flyback(mode):
     assert 0.5 < r["efficiency"] <= 1.0
 
 
+@pytest.mark.parametrize("topology,vout,power", [("half_bridge", 24, 240), ("full_bridge", 48, 960)])
+@pytest.mark.parametrize("rect", ["centerTapped", "currentDoubler"])
+def test_regulate_duty_hard_switched_bridge(topology, vout, power, rect):
+    # Symmetric PWM: every bridge switch at the same duty D < 0.5, the pairs half a period apart (ppDuty).
+    spec = _spec(400, vout, power, 100000)
+    spec["config"] = {"rectifierType": rect}
+    tas = getattr(PyKirchhoff, f"design_{topology}_tas")(spec)
+    R.bind_datasheet_semis(tas)
+    r = R.simulate_regulated(tas, vout, topology, fidelity={"origin": "DATASHEET"})
+    assert r["regulated"], f"{topology}/{rect} did not regulate (vout={r.get('vout')})"
+    assert r["steady_state"]
+    assert abs(r["vout"] - vout) <= 0.02 * vout
+    assert 0.5 < r["efficiency"] <= 1.0
+
+
 def test_regulate_phase_psfb():
     _check(PyKirchhoff.design_psfb_tas, "psfb", 400, 12, 600, 100000)
 

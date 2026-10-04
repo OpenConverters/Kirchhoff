@@ -380,6 +380,23 @@ MAS::OperatingPoint analytical_pshb(double inputVoltage,
                                     double phaseShiftDegrees, double diodeVoltageDrop = 0.0,
                                     SrcRectifier rectifier = SrcRectifier::CENTER_TAPPED);
 
+// Hard-switched (symmetric PWM) half or full bridge, CCM, single output (ABT #1434/#1435). The bridge
+// applies +Vb for D·T, nothing for (½−D)·T, −Vb for D·T and nothing again, with Vb = bridgeVoltageFactor·Vin
+// (½ for the split-cap half bridge, 1 for the full bridge). During the dead intervals both switches of the
+// conducting pair are off, every rectifier diode conducts, the transformer voltage is clamped to zero and the
+// primary current is zero: the secondaries carry the held magnetizing current. The duty follows from the
+// output: D = n(Vo + Vd_path)/(2·Vb) for FULL_BRIDGE (two diodes in the path) and CENTER_TAPPED (one);
+// D = n(Vo + Vd)/Vb for CURRENT_DOUBLER, whose two inductors (Lo each, Io/2 each) ripple at fs. Exact,
+// lossless and piecewise linear. Emits "Primary" + "Secondary 0" (FB/CD) or "Secondary 0a"/"0b" (CT), in
+// the same ampere-turn convention as analytical_pshb. Throws when D > ½, when an output inductor runs
+// discontinuous, or when the magnetizing current exceeds the freewheeling inductor current (a diode would
+// stop conducting and the transformer voltage would no longer be clamped — the model would not hold).
+MAS::OperatingPoint analytical_hard_switched_bridge(double inputVoltage, double bridgeVoltageFactor,
+                                                    double outputVoltage, double outputCurrent,
+                                                    double turnsRatio, double switchingFrequency,
+                                                    double magnetizingInductance, double outputInductance,
+                                                    double diodeVoltageDrop, SrcRectifier rectifier);
+
 // Asymmetric half bridge (CCM, center-tapped). Complementary-duty half bridge with a
 // series DC-blocking cap Cb. Pushes Primary + center-tapped "Secondary 0a"/"Secondary 0b"
 // (single output), or per-output load-share "Secondary k" (multi-output). Key AHB physics:

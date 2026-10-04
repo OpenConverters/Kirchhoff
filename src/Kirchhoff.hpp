@@ -150,6 +150,8 @@
  * | Inverting buck-boost      | `design_inverting_buck_boost` / `build_inverting_buck_boost_tas` | non-isolated, **inverting**, CCM/DCM |
  * | Two-switch flyback        | `design_two_switch_flyback` / `build_two_switch_flyback_tas` | isolated, switches clamped at Vin, Vor < Vin,min |
  * | Active-clamp flyback      | `design_active_clamp_flyback` / `build_active_clamp_flyback_tas` | isolated, ZVS; complementary or NC, high-/low-side clamp |
+ * | Half bridge (hard-switched) | `design_half_bridge`  / `build_half_bridge_tas`         | isolated, split caps, symmetric PWM; CT/FB/CD rectifier |
+ * | Full bridge (hard-switched) | `design_full_bridge`  / `build_full_bridge_tas`         | isolated, 4 switches, symmetric PWM; CT/FB/CD rectifier |
  * | Push-pull                 | `design_push_pull`      / `build_push_pull_tas`           | isolated, center-tapped, 2 switches    |
  * | Phase-shifted full bridge | `design_psfb`           / `build_psfb_tas`                | isolated, 4 switches, phase-shift control |
  * | Asymmetric half-bridge    | `design_ahb`            / `build_ahb_tas`                 | isolated, 2 switches, complementary duty |
@@ -214,6 +216,7 @@
 #include "InvertingBuckBoost.hpp"
 #include "TwoSwitchFlyback.hpp"
 #include "ActiveClampFlyback.hpp"
+#include "HardSwitchedBridge.hpp"
 #include "Zeta.hpp"
 #include "PushPull.hpp"
 #include "Psfb.hpp"

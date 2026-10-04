@@ -3757,5 +3757,89 @@ MAS::OperatingPoint analytical_common_mode_choke_line(double operatingCurrent, d
     return operatingPoint;
 }
 
+
+// Hard-switched (symmetric PWM) half / full bridge — see the header. Breakpoints only: every waveform is
+// piecewise linear, so the four interval ends (with doubled time stamps at the primary-current steps) are exact.
+MAS::OperatingPoint analytical_hard_switched_bridge(double inputVoltage, double bridgeVoltageFactor,
+                                                    double outputVoltage, double outputCurrent,
+                                                    double turnsRatio, double switchingFrequency,
+                                                    double magnetizingInductance, double outputInductance,
+                                                    double diodeVoltageDrop, SrcRectifier rectifier) {
+    using Lbl = MAS::WaveformLabel;
+    const std::string fn = "analytical_hard_switched_bridge: ";
+    if (!(inputVoltage > 0) || !(outputVoltage > 0) || !(outputCurrent > 0) || !(turnsRatio > 0) ||
+        !(switchingFrequency > 0) || !(magnetizingInductance > 0) || !(outputInductance > 0))
+        throw std::invalid_argument(fn + "Vin, Vo, Io, n, fs, Lm and Lo must all be > 0");
+    if (!(bridgeVoltageFactor == 0.5 || bridgeVoltageFactor == 1.0))
+        throw std::invalid_argument(fn + "bridgeVoltageFactor must be 0.5 (half bridge) or 1 (full bridge), got " +
+                                    std::to_string(bridgeVoltageFactor));
+    if (diodeVoltageDrop < 0) throw std::invalid_argument(fn + "diode drop must be >= 0");
+    const double T = 1.0 / switchingFrequency, n = turnsRatio;
+    const double Vb = bridgeVoltageFactor * inputVoltage, Vs = Vb / n;
+    const bool cd = (rectifier == SrcRectifier::CURRENT_DOUBLER);
+    const double Vdp = (rectifier == SrcRectifier::FULL_BRIDGE ? 2.0 : 1.0) * diodeVoltageDrop;
+    const double D = cd ? (outputVoltage + Vdp) / Vs : (outputVoltage + Vdp) / (2.0 * Vs);
+    if (!(D < 0.5))
+        throw std::invalid_argument(fn + "infeasible at Vin = " + std::to_string(inputVoltage) + " V: the output needs "
+                                    "a per-switch duty " + std::to_string(D) + " >= 0.5 with n = " + std::to_string(n));
+    const double t1 = D * T, th = 0.5 * T;
+    // Output inductor(s). FB/CT: one Lo at 2·fs, rising D·T, falling (½−D)·T. CD: Lo1 rising D·T from 0, falling
+    // the rest of the period; Lo2 the same shifted by T/2. Each carries its share of Io as its mean.
+    const double iShare = cd ? 0.5 * outputCurrent : outputCurrent;
+    const double dILo = (Vs - Vdp - outputVoltage) * t1 / outputInductance;
+    const double iLoMin = iShare - 0.5 * dILo, iLoMax = iShare + 0.5 * dILo;
+    if (!(iLoMin > 0))
+        throw std::invalid_argument(fn + "the output inductor runs discontinuous (ripple " + std::to_string(dILo) +
+                                    " A pk-pk over a mean of " + std::to_string(iShare) + " A); DCM is not modelled");
+    // Magnetizing current: −ΔIm/2 → +ΔIm/2 over the +Vb interval, held while the transformer is clamped.
+    const double dIm = Vb * t1 / magnetizingInductance;
+    // During the dead interval the rectifier carries n·im on top of the inductor current; every diode stays on
+    // only while n·ΔIm/2 is below the smallest freewheeling inductor current. That is iLoMin for every
+    // rectifier: FB/CT at the end of the dead interval; CD in the diode feeding the inductor whose power
+    // interval comes next (it is at its minimum right before it).
+    const double iFreewheelMin = iLoMin;
+    if (!(n * 0.5 * dIm < iFreewheelMin))
+        throw std::invalid_argument(fn + "the reflected magnetizing current n·ΔIm/2 = " + std::to_string(n * 0.5 * dIm) +
+                                    " A exceeds the freewheeling inductor current " + std::to_string(iFreewheelMin) +
+                                    " A: a rectifier diode would turn off in the dead time (raise Lm)");
+    // Secondary (dot-reference) current carried by the winding during each power interval: the inductor
+    // that the active polarity feeds (FB/CT: the single Lo; CD: Lo1 on the + half, Lo2 on the − half — and
+    // Lo2 at t is Lo1 at t − T/2, so on the − half it ramps up exactly as Lo1 did on the + half).
+    const double iLoAtT1 = iLoMax;   // every rectifier: the power interval starts at the minimum and ends at the max
+    std::vector<double> time{0.0, t1, t1, th, th, th + t1, th + t1, T};
+    std::vector<double> im{-0.5 * dIm, 0.5 * dIm, 0.5 * dIm, 0.5 * dIm, 0.5 * dIm, -0.5 * dIm, -0.5 * dIm, -0.5 * dIm};
+    std::vector<double> iSecNet{iLoMin, iLoAtT1, -n * 0.5 * dIm, -n * 0.5 * dIm, -iLoMin, -iLoAtT1, n * 0.5 * dIm, n * 0.5 * dIm};
+    std::vector<double> iPri(time.size()), vPri{Vb, Vb, 0.0, 0.0, -Vb, -Vb, 0.0, 0.0}, vSec(time.size());
+    for (size_t k = 0; k < time.size(); ++k) {
+        iPri[k] = im[k] + iSecNet[k] / n;
+        vSec[k] = vPri[k] / n;
+    }
+    // Freewheel: the primary current is exactly zero (both switches of the pair are off).
+    iPri[2] = iPri[3] = iPri[6] = iPri[7] = 0.0;
+    auto wfm = [&](const std::vector<double>& d) {
+        MAS::Waveform w; w.set_ancillary_label(Lbl::CUSTOM); w.set_data(d); w.set_time(time); return w; };
+    MAS::OperatingPoint operatingPoint;
+    operatingPoint.get_mutable_excitations_per_winding().push_back(
+        WP::complete_excitation(wfm(iPri), wfm(vPri), switchingFrequency, "Primary"));
+    if (rectifier != SrcRectifier::CENTER_TAPPED) {
+        operatingPoint.get_mutable_excitations_per_winding().push_back(
+            WP::complete_excitation(wfm(iSecNet), wfm(vSec), switchingFrequency, "Secondary 0"));
+        return operatingPoint;
+    }
+    // Centre tap: i_a − i_b = iLo and i_a + i_b = net (same split as analytical_pshb). The inductor current
+    // repeats at T/2: it rises over each power interval and falls over each dead interval.
+    std::vector<double> iLo{iLoMin, iLoMax, iLoMax, iLoMin, iLoMin, iLoMax, iLoMax, iLoMin};
+    std::vector<double> iA(time.size()), iB(time.size());
+    for (size_t k = 0; k < time.size(); ++k) {
+        iA[k] = 0.5 * (iLo[k] + iSecNet[k]);
+        iB[k] = 0.5 * (iSecNet[k] - iLo[k]);
+    }
+    operatingPoint.get_mutable_excitations_per_winding().push_back(
+        WP::complete_excitation(wfm(iA), wfm(vSec), switchingFrequency, "Secondary 0a"));
+    operatingPoint.get_mutable_excitations_per_winding().push_back(
+        WP::complete_excitation(wfm(iB), wfm(vSec), switchingFrequency, "Secondary 0b"));
+    return operatingPoint;
+}
+
 } // namespace analytical
 } // namespace Kirchhoff

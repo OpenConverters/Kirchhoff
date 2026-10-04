@@ -68,6 +68,7 @@ _TOPO_CONTROL = {
                            "zeta", "ahb", "acf", "fsbb", "weinberg", "isolated_buck", "isolated_buck_boost",
                            "inverting_buck_boost", "two_switch_flyback", "active_clamp_flyback")},
     "push_pull": "ppDuty",   # buck-derived center-tapped: per-switch duty < 0.5 (overlap shorts the primary)
+    **{t: "ppDuty" for t in ("half_bridge", "full_bridge")},   # symmetric PWM: every switch at D < 0.5
     **{t: "phase" for t in ("psfb", "dab")},
     "pshb": "pshbDuty",   # 3-level NPC: control the outer-pair width, not a leg phase (abt #66)
     **{t: "frequency" for t in ("llc", "src", "cllc", "clllc")},

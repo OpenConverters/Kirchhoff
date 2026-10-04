@@ -123,6 +123,12 @@ Complementary drive: Lk is designed as Cc's resonant partner (π·√(Lk·Cc) = 
 a nominal leakage requirement. NC-ACF: Lk is a capped parasitic and one clamp pulse before turn-on buys ZVS.
 `test_active_clamp_flyback` runs all four drive × clamp-side variants in ngspice: Vout within 3 %, primary-current
 NRMSE 0.028 (complementary) / 0.074 (NC), drain at the body-diode drop before Q1 turns on (ZVS).
+The hard-switched **half bridge** (split-capacitor bus, bleeders across each half) and **full bridge** drive the
+primary at ±Vb for D·T per half period with D < ½ and leave it clamped at zero while every rectifier diode
+freewheels; `analytical_hard_switched_bridge` is their exact piecewise-linear steady state for a centre-tapped,
+full-bridge or current-doubler rectifier. `test_hard_switched_bridge` runs all six bridge × rectifier pairs in
+ngspice: Vout within 0.7 %, primary current within 2 % of the solver mid power interval, zero in the dead time,
+peak within 1.5 %, and the half bridge's midpoint at Vin/2 within 0.03 %.
 
 Current agreement: **boost** Vout/Iout 0.2 %, η 0.2 %; **flyback** Vout/Iout 1.9 %, η 2.5 %; **PSFB**
 Vout/Iout ~0.9 % (efficiency directional — Kirchhoff's ideal switches beat MKF's lossy rectifier diodes).

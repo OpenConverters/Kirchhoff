@@ -23,6 +23,7 @@
 #include "InvertingBuckBoost.hpp"
 #include "TwoSwitchFlyback.hpp"
 #include "ActiveClampFlyback.hpp"
+#include "HardSwitchedBridge.hpp"
 #include "Zeta.hpp"
 #include "PushPull.hpp"
 #include "Psfb.hpp"
@@ -111,6 +112,11 @@ const std::map<std::string, json>& standalone_inputs() {
         // 375 V (a rectified-universal / PFC bus) -> 12 V, 5 A, 65 kHz: the two-switch flyback's home ground
         // (synthetic; the high bus is what the Vin-clamped switches are for).
         // 200 V -> 20 V, 3.25 A, 150 kHz: a USB-PD-class adapter on a rectified-mains bus (synthetic).
+        // 400 V (a PFC bus) -> 24 V, 10 A, 100 kHz half bridge and -> 48 V, 20 A, 100 kHz full bridge (synthetic).
+        {"half_bridge", {{"inputVoltage", 400.0}, {"outputVoltage", 24.0}, {"outputCurrent", 10.0},
+                         {"outputPower", 240.0}, {"switchingFrequency", 100000.0}, {"currentRippleRatio", 0.3}}},
+        {"full_bridge", {{"inputVoltage", 400.0}, {"outputVoltage", 48.0}, {"outputCurrent", 20.0},
+                         {"outputPower", 960.0}, {"switchingFrequency", 100000.0}, {"currentRippleRatio", 0.3}}},
         {"active_clamp_flyback", {{"inputVoltage", 200.0}, {"outputVoltage", 20.0}, {"outputCurrent", 3.25},
                                   {"outputPower", 65.0}, {"switchingFrequency", 150000.0}, {"currentRippleRatio", 0.4}}},
         {"two_switch_flyback", {{"inputVoltage", 375.0}, {"outputVoltage", 12.0}, {"outputCurrent", 5.0},
@@ -215,6 +221,8 @@ const std::vector<Topology>& topologies() {
             const auto d = Kirchhoff::design_active_clamp_flyback(di);
             return Built{Kirchhoff::build_active_clamp_flyback_tas(d), d.flyback.loadResistance,
                          d.flyback.outputCapacitance, d.flyback.inputVoltage}; }},
+        {"half_bridge", [](const json& di){ return build_topology(Kirchhoff::design_half_bridge, Kirchhoff::build_half_bridge_tas, di); }},
+        {"full_bridge", [](const json& di){ return build_topology(Kirchhoff::design_full_bridge, Kirchhoff::build_full_bridge_tas, di); }},
         {"forward", [](const json& di){ return build_topology(Kirchhoff::design_forward, Kirchhoff::build_forward_tas, di); }},
         {"two_switch_forward", [](const json& di){ return build_topology(Kirchhoff::design_two_switch_forward, Kirchhoff::build_two_switch_forward_tas, di); }},
         {"sepic",   [](const json& di){ return build_topology(Kirchhoff::design_sepic,   Kirchhoff::build_sepic_tas,   di); }},
@@ -328,6 +336,11 @@ const std::vector<PtpPoint>& ptpPoints() {
         // active-clamp flyback — SYNTHETIC points (no MKF model): USB-PD 20 V on a low and a high bus, 12 V aux.
         {"active_clamp_flyback", 120.0, 20.0, 3.25, 150e3}, {"active_clamp_flyback", 300.0, 20.0, 3.25, 150e3},
         {"active_clamp_flyback", 200.0, 12.0, 3.0, 100e3},
+        // hard-switched half / full bridge — SYNTHETIC points (no MKF model): 48 V telecom, 400 V PFC bus, 12 V aux.
+        {"half_bridge", 48.0, 12.0, 8.0, 200e3}, {"half_bridge", 400.0, 12.0, 20.0, 100e3},
+        {"half_bridge", 400.0, 48.0, 5.0, 150e3},
+        {"full_bridge", 48.0, 12.0, 20.0, 200e3}, {"full_bridge", 400.0, 48.0, 20.0, 100e3},
+        {"full_bridge", 400.0, 12.0, 50.0, 100e3},
         {"sepic", 5.0, 12.0, 0.5, 600e3}, {"sepic", 3.3, 5.0, 1.0, 250e3}, {"sepic", 12.0, 12.0, 1.0, 250e3},
         {"zeta", 12.0, 5.0, 1.0, 600e3}, {"zeta", 12.0, 12.0, 1.0, 300e3}, {"zeta", 5.0, 12.0, 0.5, 600e3},
         {"push_pull", 5.0, 3.3, 0.35, 410e3}, {"push_pull", 5.0, 3.3, 1.0, 420e3}, {"push_pull", 12.0, 5.0, 1.0, 200e3},
@@ -611,6 +624,8 @@ TEST_CASE("Buck meets requirements", "[requirements][buck]")                    
 TEST_CASE("Flyback meets requirements", "[requirements][flyback]")                 { check_meets_requirements("flyback"); }
 TEST_CASE("Two-switch flyback meets requirements", "[requirements][two_switch_flyback]") { check_meets_requirements("two_switch_flyback"); }
 TEST_CASE("Active-clamp flyback meets requirements", "[requirements][active_clamp_flyback]") { check_meets_requirements("active_clamp_flyback"); }
+TEST_CASE("Half bridge meets requirements", "[requirements][half_bridge]") { check_meets_requirements("half_bridge"); }
+TEST_CASE("Full bridge meets requirements", "[requirements][full_bridge]") { check_meets_requirements("full_bridge"); }
 TEST_CASE("Forward meets requirements", "[requirements][forward]")                 { check_meets_requirements("forward"); }
 TEST_CASE("Two-switch forward meets requirements", "[requirements][tsf]")          { check_meets_requirements("two_switch_forward"); }
 TEST_CASE("SEPIC meets requirements", "[requirements][sepic]")                     { check_meets_requirements("sepic"); }
@@ -774,6 +789,8 @@ TEST_CASE("Boost synchronous rectifier regulates (abt #67)", "[requirements][boo
 TEST_CASE("Flyback PtP reference designs deliver spec", "[requirements][ptp][flyback]")     { check_topo_points("flyback"); }
 TEST_CASE("Two-switch flyback points deliver spec", "[requirements][ptp][two_switch_flyback]") { check_topo_points("two_switch_flyback"); }
 TEST_CASE("Active-clamp flyback points deliver spec", "[requirements][ptp][active_clamp_flyback]") { check_topo_points("active_clamp_flyback"); }
+TEST_CASE("Half bridge points deliver spec", "[requirements][ptp][half_bridge]") { check_topo_points("half_bridge"); }
+TEST_CASE("Full bridge points deliver spec", "[requirements][ptp][full_bridge]") { check_topo_points("full_bridge"); }
 TEST_CASE("SEPIC PtP reference designs deliver spec", "[requirements][ptp][sepic]")         { check_topo_points("sepic"); }
 TEST_CASE("Zeta PtP reference designs deliver spec", "[requirements][ptp][zeta]")           { check_topo_points("zeta"); }
 TEST_CASE("Push-pull PtP reference designs deliver spec", "[requirements][ptp][pushpull]")  { check_topo_points("push_pull"); }

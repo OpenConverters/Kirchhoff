@@ -252,6 +252,132 @@ function acfFlybackVisual(side) {
   }
 }
 
+// Hard-switched (symmetric PWM) half / full bridge (ABT #1434/#1435). The FETs are replaced by ideal drives, as for
+// every other bridge (ABT#262): with real FETs CircuitJS1 fails to converge at the first low-side turn-off, when
+// the primary current jumps onto the high-side body diode (checked live: "Convergence failed!" at 0.9·T). The
+// primary voltage is kept exact — +Vb for D·T, 0, −Vb for D·T, 0 — only the zero state is a short across the
+// primary instead of an open bridge (the rectifier clamps the winding to zero either way, so Vout is the same):
+//   full bridge: two 0..Vin leg sources, leg B shifted by 2π·D (the overlap is the power interval);
+//   half bridge: two stacked sources from GND, A = Vin/2 | Vin (Q1 on) and B = 0 | −Vin/2 (Q2 on), so the
+//   switch node sits at Vin, Vin/2 or 0.
+// The rectifier/output side reuses pshb's geometry (x ≥ 800) for all three secondaries; x0 is where the
+// bridge's return rail ends and the secondary's begins.
+// x: source 176 · split caps 272 · bleeders 336 · leg A 448 · leg B 560 · damper 744 · T1 800/880.
+// y: Vin rail 112, switch node / primary start 272, midpoint / primary end 304, GND 480.
+function hardBridgeVisual(full) {
+  const x0 = full ? 560 : 448
+  const T1 = {
+    pins: (q) => isCTr(q)
+      ? { primary_start: [800, 240], primary_end: [800, 320],
+          secondary1_start: [880, 240], secondary1_end: [880, 272],
+          secondary2_start: [880, 288], secondary2_end: [880, 320] }
+      : { primary_start: [800, 272], primary_end: [800, 304], secondary1_start: [880, 272], secondary1_end: [880, 304] },
+    line: (q, c) => {
+      const sec = 1 / resolveDim(q.req.turnsRatios[0], `${q.ref} turnsRatios[0]`)
+      return isCTr(q)
+        ? `406 800 240 880 240 0 ${c.L(q)} 0.999 1:${sec},${sec} 3 0 0 0`
+        : `T 800 272 880 272 0 ${c.L(q)} ${sec} 0 0 0.999`
+    },
+  }
+  const bridge = full ? {} : {
+    CsHi: { pins: { 1: [272, 112], 2: [272, 304] }, line: (q, c) => `c 272 112 272 304 0 ${c.C(q)} ${c.vin / 2}` },
+    CsLo: { pins: { 1: [272, 304], 2: [272, 480] }, line: (q, c) => `c 272 304 272 480 0 ${c.C(q)} ${c.vin / 2}` },
+    RbHi: { pins: { 1: [336, 112], 2: [336, 304] }, line: (q, c) => `r 336 112 336 304 0 ${c.R(q)}` },
+    RbLo: { pins: { 1: [336, 304], 2: [336, 480] }, line: (q, c) => `r 336 304 336 480 0 ${c.R(q)}` },
+  }
+  const bridgeWires = full
+    ? [[176, 112, 448, 112], [448, 112, 560, 112],
+       [448, 272, 744, 272], [744, 272, 800, 272],                         // leg A mid → primary start (crosses leg B's source)
+       [560, 304, 744, 304], [744, 304, 800, 304],                         // leg B mid → primary end
+       [176, 480, 560, 480]]
+    : [[176, 112, 272, 112], [272, 112, 336, 112],
+       [448, 272, 744, 272], [744, 272, 800, 272],                         // switch node → primary start
+       // the midpoint rail crosses the drive column at (448,304) with no vertex there (as pshb's does)
+       [272, 304, 336, 304], [336, 304, 744, 304], [744, 304, 800, 304],
+       [176, 480, 272, 480], [272, 480, 336, 480], [336, 480, 448, 480]]
+  const r = (pts, more) => ({ pts, ...more })
+  return {
+    place: {
+      ...bridge,
+      T1,
+      Crc_pri: { pins: { 1: [744, 272], 2: [744, 288] }, line: (q, c) => `c 744 272 744 288 0 ${c.C(q)} 0` },
+      Rrc_pri: { pins: { 1: [744, 288], 2: [744, 304] }, line: (q, c) => `r 744 288 744 304 0 ${c.R(q)}` },
+      Dr1: { pins: (q, c) => c.has('Lo2') ? { anode: [920, 430], cathode: [920, 272] } : { anode: [960, 272], cathode: [960, 176] },
+             line: (q, c) => c.has('Lo2') ? 'd 920 430 920 272 2 default' : 'd 960 272 960 176 2 default' },
+      Dr2: { pins: (q, c) => c.has('Lo2') ? { anode: [1000, 450], cathode: [1000, 304] } : { anode: [1056, 304], cathode: [1056, 176] },
+             line: (q, c) => c.has('Lo2') ? 'd 1000 450 1000 304 2 default' : 'd 1056 304 1056 176 2 default' },
+      Dr3: { optional: true, pins: { anode: [960, 480], cathode: [960, 336] }, line: () => 'd 960 480 960 336 2 default' },
+      Dr4: { optional: true, pins: { anode: [1056, 480], cathode: [1056, 336] }, line: () => 'd 1056 480 1056 336 2 default' },
+      Lo2: { optional: true, pins: { primary_start: [1120, 320], primary_end: [1184, 320] }, line: (q, c) => `l 1120 320 1184 320 0 ${c.L(q)} 0` },
+      Rlb: { optional: true, pins: { 1: [1184, 224], 2: [1184, 144] }, line: (q, c) => `r 1184 224 1184 144 0 ${c.R(q)}` },
+      Lout: { pins: { primary_start: [1120, 176], primary_end: [1248, 176] }, line: (q, c) => `l 1120 176 1248 176 0 ${c.L(q)} 0` },
+      Cout: { pins: { 1: [1248, 176], 2: [1248, 480] }, line: (q, c) => `c 1248 176 1248 480 0 ${c.C(q)} ${c.vout}` },
+    },
+    wires: [
+      ...bridgeWires,
+      [1248, 176, 1312, 176],
+      r([960, 176, 1056, 176], { not: ['Lo2'] }), r([1056, 176, 1120, 176], { not: ['Lo2'] }),
+      // full-bridge rectifier
+      r([880, 272, 960, 272], { needs: ['Dr3'] }), r([960, 272, 960, 336], { needs: ['Dr3'] }),
+      r([880, 304, 1056, 304], { needs: ['Dr3'] }), r([1056, 304, 1056, 336], { needs: ['Dr3'] }),
+      r([x0, 480, 960, 480], { needs: ['Dr3'] }), r([960, 480, 1056, 480], { needs: ['Dr3'] }),
+      r([1056, 480, 1248, 480], { needs: ['Dr3'] }), r([1248, 480, 1312, 480], { needs: ['Dr3'] }),
+      // centre-tapped rectifier: the 406 primary spans 240..320, joined onto the 272/304 lanes
+      r([800, 240, 800, 272], { needs: ['Dr1'], not: ['Dr3', 'Lo2'] }), r([800, 320, 800, 304], { needs: ['Dr1'], not: ['Dr3', 'Lo2'] }),
+      r([880, 240, 928, 240], { needs: ['Dr1'], not: ['Dr3', 'Lo2'] }), r([928, 240, 928, 272], { needs: ['Dr1'], not: ['Dr3', 'Lo2'] }),
+      r([928, 272, 960, 272], { needs: ['Dr1'], not: ['Dr3', 'Lo2'] }),
+      r([880, 320, 1056, 320], { needs: ['Dr1'], not: ['Dr3', 'Lo2'] }), r([1056, 320, 1056, 304], { needs: ['Dr1'], not: ['Dr3', 'Lo2'] }),
+      r([880, 272, 880, 288], { needs: ['Dr1'], not: ['Dr3', 'Lo2'] }),
+      r([880, 288, 820, 288], { needs: ['Dr1'], not: ['Dr3', 'Lo2'] }), r([820, 288, 820, 480], { needs: ['Dr1'], not: ['Dr3', 'Lo2'] }),
+      r([x0, 480, 820, 480], { needs: ['Dr1'], not: ['Dr3', 'Lo2'] }), r([820, 480, 1248, 480], { needs: ['Dr1'], not: ['Dr3', 'Lo2'] }),
+      r([1248, 480, 1312, 480], { needs: ['Dr1'], not: ['Dr3', 'Lo2'] }),
+      // current doubler
+      r([880, 272, 920, 272], { needs: ['Lo2'] }), r([920, 272, 1120, 272], { needs: ['Lo2'] }), r([1120, 272, 1120, 176], { needs: ['Lo2'] }),
+      r([880, 304, 1000, 304], { needs: ['Lo2'] }), r([1000, 304, 1120, 304], { needs: ['Lo2'] }), r([1120, 304, 1120, 320], { needs: ['Lo2'] }),
+      r([1184, 320, 1184, 224], { needs: ['Lo2'] }), r([1184, 144, 1248, 144], { needs: ['Lo2'] }), r([1248, 144, 1248, 176], { needs: ['Lo2'] }),
+      r([920, 430, 920, 480], { needs: ['Lo2'] }), r([1000, 450, 1000, 480], { needs: ['Lo2'] }),
+      r([x0, 480, 920, 480], { needs: ['Lo2'] }), r([920, 480, 1000, 480], { needs: ['Lo2'] }),
+      r([1000, 480, 1248, 480], { needs: ['Lo2'] }), r([1248, 480, 1312, 480], { needs: ['Lo2'] }),
+    ],
+    synth: (c) => {
+      return [
+        { line: `v 176 480 176 112 0 0 40 ${c.vin} 0 0 0.5`, posts: [[176, 480], [176, 112]],
+          attach: full ? { '176,480': ['Cout', '2'] } : { '176,112': ['CsHi', '1'], '176,480': ['CsLo', '2'] } },
+        { line: 'g 176 480 176 496 0', posts: [[176, 480]] },
+        { line: `r 1312 176 1312 480 0 ${c.rload}`, tag: 'Rload', posts: [[1312, 176], [1312, 480]], attach: { '1312,176': ['Cout', '1'], '1312,480': ['Cout', '2'] } },
+        { line: '207 1248 176 1296 176 0 vout', posts: [[1248, 176]] },
+      ]
+    },
+    drive: {
+      fets: full ? ['Q1', 'Q2', 'Q3', 'Q4'] : ['Q1', 'Q2'],
+      sources: (c) => {
+        if (full) {
+          const theta = 2 * Math.PI * c.dutyOf('Q1')
+          return [
+            { line: legSrc(c, 448, 272, 112, 0.5), posts: [[448, 272], [448, 112]], tag: 'Q1' },
+            { line: legSrc(c, 560, 304, 112, 0.5, theta), posts: [[560, 304], [560, 112]], tag: 'Q3' },
+          ]
+        }
+        const d2 = c.dutyOf('Q2'), wrap = (a) => ((a % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI)
+        return [
+          { line: `v 448 480 448 384 0 2 ${c.fVis} ${c.vin / 4} ${(3 * c.vin) / 4} ${c.phaseShiftOf('Q1')} ${c.dutyOf('Q1')}`,
+            posts: [[448, 480], [448, 384]], tag: 'Q1' },
+          // 0 while Q2 is off (its off-window starts D·T after its turn-on), −Vin/2 while it is on
+          { line: `v 448 384 448 272 0 2 ${c.fVis} ${c.vin / 4} ${-c.vin / 4} ${wrap(c.phaseShiftOf('Q2') - 2 * Math.PI * d2)} ${1 - d2}`,
+            posts: [[448, 384], [448, 272]], tag: 'Q2' },
+        ]
+      },
+    },
+    scopeSets: {
+      overview:  [['Q2', 'voltage'], ['Dr1', 'voltage'], ['Rload', 'voltage']],
+      magnetic:  [['Lout', 'both'], { magI: [744, 272, 800, 272], magVtag: 'Q2' }, ['Rload', 'voltage']],
+      switch:    full ? [['Q1', 'both'], ['Q3', 'both'], ['Rload', 'voltage']] : [['Q1', 'both'], ['Q2', 'both'], ['Rload', 'voltage']],
+      rectifier: [['Dr1', 'both'], ['Dr2', 'both'], ['Lout', 'current'], ['Rload', 'voltage']],
+      output:    [['Lout', 'current'], ['Rload', 'both']],
+    },
+  }
+}
+
 const LAYOUTS = {
   flyback: {
     place: {
@@ -355,6 +481,8 @@ const LAYOUTS = {
   // Qc's floating gate drive is referenced to its own source and carries the stimulus phase, so the clamp
   // runs complementary (or as the NC pulse) exactly as the deck does.
   active_clamp_flyback: (tas) => acfFlybackVisual(acfClampSide(tas)),
+  half_bridge: hardBridgeVisual(false),
+  full_bridge: hardBridgeVisual(true),
 
   // Non-isolated buck: high-side switch (Vin→sw), freewheel diode, LC filter. The high-side gate drive
   // is a FLOATING gate-source PWM (its reference wires to the switching node) so Vgs toggles regardless

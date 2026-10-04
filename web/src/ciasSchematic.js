@@ -1063,6 +1063,98 @@ const LAYOUTS = {
       ],
     }
   },
+  // ── bridge: hard-switched (symmetric PWM) half bridge ─────────────────────
+  // The split bus and its bleeders on the left, the Q1/Q2 leg, the primary from the switch node to the
+  // bus midpoint, the RC damper across it, then whichever rectifier the design carries.
+  half_bridge: (present) => {
+    const top = 80, gy = 330, mid = 205, tx = 580, ty = 205, h = 90
+    const sec = secondaryFrag(present, tx, ty, h,
+      { fb: ['Dr1', 'Dr3', 'Dr2', 'Dr4'], d1: 'Dr1', d2: 'Dr2', lout: 'Lout', lo2: 'Lo2' })
+    return {
+      size: [1160, 440],
+      place: {
+        CsHi: { draw: (b) => capV('CsHi', b, 120, (top + mid) / 2, 'left') },
+        CsLo: { draw: (b) => capV('CsLo', b, 120, (mid + gy) / 2, 'left') },
+        RbHi: { draw: (b) => resV('RbHi', b, 170, (top + mid) / 2, 'right') },
+        RbLo: { draw: (b) => resV('RbLo', b, 170, (mid + gy) / 2, 'right') },
+        Q1:   { draw: (b) => mosfetV('Q1', b, 300, 140, 'right', true) },
+        Q2:   { draw: (b) => mosfetV('Q2', b, 300, 262, 'right', true) },
+        T1:   { draw: (b) => xfmr('T1', b, tx, ty, { h, ct: present.has('Dr3') || present.has('Lo2') ? undefined : 'right', labelDy: -24 }) },
+        Crc_pri: { draw: (b) => capV('Crc_pri', b, 450, 236, 'right') },
+        Rrc_pri: { draw: (b) => resV('Rrc_pri', b, 450, 300, 'right') },
+        ...sec.place,
+      },
+      wires: [
+        { from: '@src.p0', to: 'Q1.drain', via: [[50, top], [300, top]] },   // Vin rail (caps + bleeders tap it)
+        { from: '@src.p1', to: 'Q2.source', via: [[50, gy], [300, gy]] },    // primary return rail
+        { from: 'CsHi.p0', to: [120, top] },
+        { from: 'CsHi.p1', to: [120, mid] },
+        { from: 'CsLo.p0', to: [120, mid] },
+        { from: 'CsLo.p1', to: [120, gy] },
+        { from: 'RbHi.p0', to: [170, top] },
+        { from: 'RbHi.p1', to: [170, mid] },
+        { from: 'RbLo.p0', to: [170, mid] },
+        { from: 'RbLo.p1', to: [170, gy] },
+        { from: [120, mid], to: [170, mid] },                                  // the bus midpoint
+        { from: 'Q1.source', to: 'Q2.drain' },                                 // switch node
+        // switch node → primary start; the damper taps this lane
+        { from: [300, 200], to: 'T1.p0', via: [[480, 200], [480, ty - h / 2]] },
+        // primary return → the bus midpoint, under the leg and up a lane clear of the bleeders' labels
+        { from: 'T1.p1', to: [170, mid], via: [[tx - 10, 365], [230, 365], [230, mid]] },
+        { from: 'Crc_pri.p0', to: [450, 200] },
+        { from: 'Crc_pri.p1', to: 'Rrc_pri.p0' },
+        { from: 'Rrc_pri.p1', to: [450, 365] },
+        ...sec.wires,
+      ],
+      synth: (b) => [
+        srcDC(50, mid + 5), gnd(50, gy), ...sec.synthEls(b),
+        sig(274, 140, 'g1'), sig(274, 262, 'g2'), ctrlIC(b, 90, 395, ['g1', 'g2']),
+      ],
+    }
+  },
+  // ── bridge: hard-switched (symmetric PWM) full bridge ─────────────────────
+  // psfb's bridge and coordinates without the series inductor: leg A (Q1/Q2) and leg B (Q3/Q4), the
+  // primary between the two leg midpoints, the RC damper across it.
+  full_bridge: (present) => {
+    const tx = 360, ty = 195, h = 90
+    const sec = secondaryFrag(present, tx, ty, h,
+      { fb: ['Dr1', 'Dr3', 'Dr2', 'Dr4'], d1: 'Dr1', d2: 'Dr2', lout: 'Lout', lo2: 'Lo2' })
+    return {
+      size: [1040, 430],
+      place: {
+        Q1: { draw: (b) => mosfetV('Q1', b, 130, 128, 'right', true) },
+        Q2: { draw: (b) => mosfetV('Q2', b, 130, 246, 'right', true) },
+        Q3: { draw: (b) => mosfetV('Q3', b, 280, 128, 'right', true) },
+        Q4: { draw: (b) => mosfetV('Q4', b, 280, 246, 'right', true) },
+        T1: { draw: (b) => xfmr('T1', b, tx, ty, { h, ct: present.has('Dr3') || present.has('Lo2') ? undefined : 'right', labelDy: -70 }) },
+        Crc_pri: { draw: (b) => capV('Crc_pri', b, 168, 270, 'right') },
+        Rrc_pri: { draw: (b) => resH('Rrc_pri', b, 220, 300, 'below') },
+        ...sec.place,
+      },
+      wires: [
+        { from: '@src.p0', to: [280, 80], via: [[60, 80]] },
+        { from: '@src.p1', to: [280, 340], via: [[60, 340]] },
+        { from: 'Q1.drain', to: [130, 80] },
+        { from: 'Q1.source', to: 'Q2.drain' },                               // leg-A mid
+        { from: 'Q2.source', to: [130, 340] },
+        { from: 'Q3.drain', to: [280, 80] },
+        { from: 'Q3.source', to: 'Q4.drain' },                               // leg-B mid
+        { from: 'Q4.source', to: [280, 340] },
+        // leg-A mid → primary start, crossing leg B high in its window (as psfb's tank does)
+        { from: [130, 200], to: 'T1.p0', via: [[270, 200], [270, 175], [300, 175], [300, 150]] },
+        { from: 'T1.p1', to: [280, 210], via: [[tx - 10, 270], [tx - 40, 270], [tx - 40, 210]] },
+        { from: 'Crc_pri.p0', to: [168, 200] },
+        { from: 'Crc_pri.p1', to: 'Rrc_pri.p0', via: [[168, 300]] },
+        { from: 'Rrc_pri.p1', to: [280, 210], via: [[240, 300], [240, 210]] },
+        ...sec.wires,
+      ],
+      synth: (b) => [
+        srcDC(60, 175), gnd(110, 340), ...sec.synthEls(b),
+        sig(104, 128, 'g1'), sig(104, 246, 'g2'), sig(254, 128, 'g3'), sig(254, 246, 'g4'),
+        ctrlIC(b, 90, 385, ['g1', 'g2', 'g3', 'g4']),
+      ],
+    }
+  },
   // ── bridge: phase-shifted full bridge ─────────────────────────────────────
   psfb: (present) => {
     // tx=360: T1 stands 30 px clear of the leg-C column so QD's ref fits beside its own body. At 330 the
