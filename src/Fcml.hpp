@@ -10,7 +10,7 @@
 // frequency — the inductance shrinks by (N−1)². The flying capacitors balance naturally under phase-shifted
 // PWM with equal duties when the inductor faces a resistive load (buck); a boost's inductor faces the source, so its
 // imbalance mode is undamped and in hardware a controller holds the flying capacitors — its deck starts them on the
-// periodic orbit instead (the controller: ABT #1681). Buck: Vtop = Vin, the pair's high switch is the main switch. Boost: Vtop = Vout, the low
+// periodic orbit, with the duty trims a balancing controller would settle on (fcml_balanced_orbit, ABT #1681). Buck: Vtop = Vin, the pair's high switch is the main switch. Boost: Vtop = Vout, the low
 // switch is.
 
 #include <nlohmann/json.hpp>
@@ -37,12 +37,20 @@ double fcml_ripple_volt_seconds(bool boost, int levels, double inputVoltage, dou
 double fcml_flying_charge_per_amp(bool boost, int levels, double inputVoltage, double outputVoltage,
                                   double switchingFrequency);
 
-// The state at t = 0 on the periodic orbit (stiff capacitors to first order): the inductor current, each flying
-// capacitor's voltage (k·Vtop/(N−1) shifted by its ripple at t = 0) and the boost's output voltage (likewise). A
-// boost FCML has no natural balancing against a stiff source — nothing resistive sits behind its inductor at the
-// switching frequency — so its deck must START on the orbit rather than settle onto it.
-struct FcmlStart { double inductorCurrent; std::vector<double> flyingCapacitorVoltages; double outputVoltage; };
-FcmlStart fcml_periodic_start(bool boost, int levels, double inputVoltage, double outputVoltage, double outputCurrent,
+// The balanced periodic steady state of the switched cell with FINITE flying capacitors, output capacitor and load
+// (R = Vo²/P), lossless switches, at average duty D: per-pair main-switch duty trims (summing to zero, so the
+// average duty and Vout are kept) chosen so every flying capacitor's period mean sits at k·Vtop/(N−1), and the
+// state at t = 0 on that orbit. Solved by shooting one period (Newton on periodicity + the N−2 mean conditions).
+// With equal duties the output's switching ripple drives the flying capacitors off their levels, and a boost has
+// nothing to pull them back (its inductor faces the stiff source): the trims are what a balancing controller
+// converges to (ABT #1681). Throws when Newton does not converge.
+struct FcmlOrbit {
+    std::vector<double> dutyTrims;               // per pair k = 1..N−1, added to D
+    double inductorCurrent;                      // at t = 0
+    std::vector<double> flyingCapacitorVoltages; // k = 1..N−2, at t = 0
+    double outputVoltage;                        // at t = 0
+};
+FcmlOrbit fcml_balanced_orbit(bool boost, int levels, double inputVoltage, double dutyCycle, double loadResistance,
                               double switchingFrequency, double inductance, double flyingCapacitance,
                               double outputCapacitance);
 } // namespace analytical

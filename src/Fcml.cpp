@@ -130,39 +130,134 @@ MAS::OperatingPoint analytical_fcml(bool boost, int levels, double vin, double v
     return op;
 }
 
-FcmlStart fcml_periodic_start(bool boost, int levels, double vin, double vo, double io, double fs, double L,
+FcmlOrbit fcml_balanced_orbit(bool boost, int levels, double vin, double D, double R, double fs, double L,
                               double cf, double cout) {
-    if (!(cf > 0) || !(cout > 0)) throw std::invalid_argument("fcml_periodic_start: the capacitances must be > 0");
-    const Pattern p = pattern(boost, levels, vin, vo, fs, "fcml_periodic_start");
-    const auto wave = winding_current_samples(analytical_fcml(boost, levels, vin, vo, io, fs, L), 0, p.T);
-    const auto& tw = wave.first; const auto& iw = wave.second;
-    // The flying-capacitor current is ±IL while its two pairs disagree: charging (+ on its high node) when the inner
-    // pair is high and the outer low, for a boost's inductor current flowing into the switch node; a buck's flows out.
-    // The boost's output takes IL while the outermost pair is high. Integrate each from t = 0 and take the charge
-    // at t = 0 relative to its period mean.
-    const int M = 20000;
-    std::vector<double> q(p.pairs - 1, 0.0), qMean(p.pairs - 1, 0.0);
-    double qo = 0, qoMean = 0;
-    size_t j = 0;
-    const double h = p.T / M;
-    for (int s = 0; s < M; ++s) {
-        const double t = (s + 0.5) * h;
-        while (j + 1 < tw.size() && tw[j + 1] < t) ++j;
-        const double il = (j + 1 < tw.size() && tw[j + 1] > tw[j])
-            ? iw[j] + (t - tw[j]) / (tw[j + 1] - tw[j]) * (iw[j + 1] - iw[j]) : iw[j];
-        for (int k = 1; k < p.pairs; ++k) {
-            const double dir = static_cast<int>(p.high_on(k, t)) - static_cast<int>(p.high_on(k + 1, t));
-            q[k - 1] += (boost ? 1.0 : -1.0) * dir * il * h;
-            qMean[k - 1] += q[k - 1] / M;
+    const char* who = "fcml_balanced_orbit";
+    if (levels < 3) throw std::invalid_argument(std::string(who) + ": needs levels >= 3 (a flying capacitor)");
+    if (!(vin > 0) || !(D > 0 && D < 1) || !(R > 0) || !(fs > 0) || !(L > 0) || !(cf > 0) || !(cout > 0))
+        throw std::invalid_argument(std::string(who) + ": Vin, R, fs, L, Cf, Cout must be > 0 and 0 < D < 1");
+    const int P = levels - 1, NF = levels - 2, NS = levels;   // pairs, flying caps, states [iL, vcf.., vout]
+    const double T = 1.0 / fs;
+    // high_on: pair k's HIGH switch conducts. The main switch (buck high, boost low) is on for D_k from (k−1)T/P.
+    auto high_on = [&](const std::vector<double>& Dk, int k, double t) {
+        double x = std::fmod(t - (k - 1) * T / P, T); if (x < 0) x += T;
+        const bool mainOn = x < Dk[k - 1] * T;
+        return boost ? !mainOn : mainOn;
+    };
+    // Lossless switched dynamics. Vc_0 = 0, Vc_k = vcf_k, Vc_P = Vtop (buck Vin, boost vout); the switch node is
+    // Σ h_k (Vc_k − Vc_{k−1}); the current from the switch node into the stack (iL for a boost, −iL for a buck)
+    // charges Cf_k while pair k is high and pair k+1 low, and the top rail while pair P is high.
+    auto deriv = [&](const std::vector<int>& h, const std::vector<double>& x, std::vector<double>& dx) {
+        const double iL = x[0], vout = x[NS - 1], vtop = boost ? vout : vin;
+        auto Vc = [&](int k) { return k == 0 ? 0.0 : k == P ? vtop : x[k]; };
+        double vsw = 0;
+        for (int k = 1; k <= P; ++k) vsw += h[k - 1] * (Vc(k) - Vc(k - 1));
+        const double iStack = boost ? iL : -iL;
+        dx[0] = boost ? (vin - vsw) / L : (vsw - vout) / L;
+        for (int k = 1; k <= NF; ++k) dx[k] = iStack * (h[k - 1] - h[k]) / cf;
+        dx[NS - 1] = ((boost ? iL * h[P - 1] : iL) - vout / R) / cout;
+    };
+    // One period from x0 with duties Dk: the end state and each flying capacitor's / the top rail's period mean.
+    auto shoot = [&](std::vector<double> x, const std::vector<double>& Dk, std::vector<double>& means, double& vtopMean) {
+        std::vector<double> e{0.0, T};
+        for (int k = 1; k <= P; ++k) {
+            const double phi = (k - 1) * T / P;
+            for (double t : {phi, std::fmod(phi + Dk[k - 1] * T, T)}) if (t > 0 && t < T) e.push_back(t);
         }
-        if (boost) { qo += (il * p.high_on(p.pairs, t) - io) * h; qoMean += qo / M; }
+        std::sort(e.begin(), e.end());
+        means.assign(NF, 0.0); vtopMean = 0;
+        std::vector<double> k1(NS), k2(NS), k3(NS), k4(NS), y(NS);
+        std::vector<int> h(P);
+        const int sub = 64;
+        for (size_t i = 0; i + 1 < e.size(); ++i) {
+            const double span = e[i + 1] - e[i];
+            if (span <= 0) continue;
+            const double tm = 0.5 * (e[i] + e[i + 1]);
+            for (int k = 1; k <= P; ++k) h[k - 1] = high_on(Dk, k, tm);
+            const double dt = span / sub;
+            for (int s = 0; s < sub; ++s) {
+                const std::vector<double> x0 = x;
+                deriv(h, x, k1);
+                for (int j = 0; j < NS; ++j) y[j] = x[j] + 0.5 * dt * k1[j];
+                deriv(h, y, k2);
+                for (int j = 0; j < NS; ++j) y[j] = x[j] + 0.5 * dt * k2[j];
+                deriv(h, y, k3);
+                for (int j = 0; j < NS; ++j) y[j] = x[j] + dt * k3[j];
+                deriv(h, y, k4);
+                for (int j = 0; j < NS; ++j) x[j] += dt / 6.0 * (k1[j] + 2 * k2[j] + 2 * k3[j] + k4[j]);
+                for (int k = 1; k <= NF; ++k) means[k - 1] += 0.5 * (x0[k] + x[k]) * dt / T;
+                vtopMean += (boost ? 0.5 * (x0[NS - 1] + x[NS - 1]) : vin) * dt / T;
+            }
+        }
+        return x;
+    };
+    // Unknowns z = [x0 (NS), t_1..t_{P−1}] with D_k = D + t_k and t_P = −Σ t (the average duty is kept).
+    auto duties = [&](const std::vector<double>& z) {
+        std::vector<double> Dk(P, D); double sum = 0;
+        for (int k = 0; k < P - 1; ++k) { Dk[k] += z[NS + k]; sum += z[NS + k]; }
+        Dk[P - 1] -= sum;
+        return Dk;
+    };
+    const int n = NS + P - 1;
+    auto residual = [&](const std::vector<double>& z) {
+        std::vector<double> x0(z.begin(), z.begin() + NS), means; double vtopMean;
+        const std::vector<double> x1 = shoot(x0, duties(z), means, vtopMean);
+        std::vector<double> F(n);
+        for (int j = 0; j < NS; ++j) F[j] = x1[j] - x0[j];
+        for (int k = 1; k <= NF; ++k) F[NS + k - 1] = means[k - 1] - k * vtopMean / P;
+        return F;
+    };
+    // Start from the ideal operating point, equal duties, flying capacitors at their levels.
+    std::vector<double> z(n, 0.0);
+    const double voGuess = boost ? vin / (1.0 - D) : D * vin, vtopGuess = boost ? voGuess : vin;
+    z[0] = boost ? voGuess / R / (1.0 - D) : voGuess / R;
+    for (int k = 1; k <= NF; ++k) z[k] = k * vtopGuess / P;
+    z[NS - 1] = voGuess;
+    // Periodicity is checked on a scale of the state (A, V), the means on volts.
+    std::vector<double> scale(n, 1.0);
+    scale[0] = std::max(1e-3, std::fabs(z[0]));
+    for (int j = 1; j < NS; ++j) scale[j] = vtopGuess;
+    for (int j = NS; j < n; ++j) scale[j] = vtopGuess;
+    for (int it = 0; it < 30; ++it) {
+        const std::vector<double> F = residual(z);
+        double norm = 0;
+        for (int j = 0; j < n; ++j) norm = std::max(norm, std::fabs(F[j]) / scale[j]);
+        if (norm < 1e-9) {
+            FcmlOrbit o;
+            o.dutyTrims = duties(z);
+            for (double& d : o.dutyTrims) d -= D;
+            o.inductorCurrent = z[0];
+            for (int k = 1; k <= NF; ++k) o.flyingCapacitorVoltages.push_back(z[k]);
+            o.outputVoltage = z[NS - 1];
+            for (double d : o.dutyTrims)
+                if (!(D + d > 0 && D + d < 1))
+                    throw std::runtime_error(std::string(who) + ": a balancing trim drives a pair's duty out of (0, 1)");
+            return o;
+        }
+        // Finite-difference Jacobian, then a dense solve.
+        std::vector<std::vector<double>> J(n, std::vector<double>(n + 1));
+        for (int c = 0; c < n; ++c) {
+            std::vector<double> zp = z;
+            const double h = (c < NS ? 1e-6 * scale[c] : 1e-7);
+            zp[c] += h;
+            const std::vector<double> Fp = residual(zp);
+            for (int r = 0; r < n; ++r) J[r][c] = (Fp[r] - F[r]) / h;
+        }
+        for (int r = 0; r < n; ++r) J[r][n] = -F[r];
+        for (int c = 0; c < n; ++c) {
+            int piv = c;
+            for (int r = c + 1; r < n; ++r) if (std::fabs(J[r][c]) > std::fabs(J[piv][c])) piv = r;
+            if (!(std::fabs(J[piv][c]) > 0)) throw std::runtime_error(std::string(who) + ": singular Newton step");
+            std::swap(J[c], J[piv]);
+            for (int r = 0; r < n; ++r) {
+                if (r == c) continue;
+                const double f = J[r][c] / J[c][c];
+                for (int k = c; k <= n; ++k) J[r][k] -= f * J[c][k];
+            }
+        }
+        for (int c = 0; c < n; ++c) z[c] += J[c][n] / J[c][c];
     }
-    FcmlStart st;
-    st.inductorCurrent = iw.front();
-    const double vtop = boost ? vo : vin;
-    for (int k = 1; k < p.pairs; ++k) st.flyingCapacitorVoltages.push_back(k * vtop / p.pairs - qMean[k - 1] / cf);
-    st.outputVoltage = boost ? vo - qoMean / cout : vo;
-    return st;
+    throw std::runtime_error(std::string(who) + ": the balanced orbit did not converge in 30 Newton steps");
 }
 
 } // namespace analytical
@@ -309,36 +404,37 @@ json build_fcml_tas(const FcmlCell& c) {
     json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(c.config, 0.004);
     an["maximumTimeStep"] = cfg::tran_max_timestep(c.config, 5e-8);
     tas["simulation"]["analyses"] = json::array({an});
-    // Phase-shifted PWM: pair k's main switch at (k−1)·360/(N−1) for D, its complement after a dead time.
+    // Phase-shifted PWM: pair k's main switch at (k−1)·360/(N−1) for D + its balancing trim, its complement after a
+    // dead time. The trims and the boost's start come from the balanced orbit of the lossless deck: it settles at
+    // Vo/η into the Vo²/P load.
     const double D = c.dutyCycle, dt = c.deadFraction;
-    if (!(D > dt && 1.0 - D > 2.0 * dt))
-        throw std::invalid_argument(std::string(who) + ": duty " + std::to_string(D) + " leaves no room for the dead times");
+    const AN::FcmlOrbit orbit = AN::fcml_balanced_orbit(c.boost, N, c.inputVoltage, D, Vo * Vo / c.outputPower, fs,
+                                                        c.inductance, c.flyingCapacitance, c.outputCapacitance);
     tas["simulation"]["stimulus"] = json::array();
     for (int k = 1; k <= pairs; ++k) {
-        const double phi = (k - 1) * 360.0 / pairs;
+        const double phi = (k - 1) * 360.0 / pairs, Dk = D + orbit.dutyTrims[k - 1];
+        if (!(Dk > dt && 1.0 - Dk > 2.0 * dt))
+            throw std::invalid_argument(std::string(who) + ": pair " + std::to_string(k) + " duty " + std::to_string(Dk) +
+                                        " leaves no room for the dead times");
         const std::string mainSw = (c.boost ? "QL" : "QH") + std::to_string(k), compSw = (c.boost ? "QH" : "QL") + std::to_string(k);
         auto stim = [&](const std::string& sw, double duty, double phase) {
             json st; st["stage"] = "switchingCell"; st["component"] = sw; st["signal"] = "gate";
             st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = fs;
             st["waveform"]["dutyCycle"] = duty; st["waveform"]["phase"] = std::fmod(phase, 360.0); return st; };
-        tas["simulation"]["stimulus"].push_back(stim(mainSw, D, phi));
-        tas["simulation"]["stimulus"].push_back(stim(compSw, 1.0 - D - 2.0 * dt, phi + (D + dt) * 360.0));
+        tas["simulation"]["stimulus"].push_back(stim(mainSw, Dk, phi));
+        tas["simulation"]["stimulus"].push_back(stim(compSw, 1.0 - Dk - 2.0 * dt, phi + (Dk + dt) * 360.0));
     }
     // The boost's operating point has no DC solution with the flying capacitors at their levels (the inductor shorts
-    // the switch node to Vin), and nothing would pull them there (see fcml_periodic_start): start the flying
-    // capacitors, the output and the inductor on the periodic orbit.
+    // the switch node to Vin): start the flying capacitors, the output and the inductor on the balanced orbit.
     if (c.boost) {
-        // The lossless deck settles at Vo/η into the Vo²/P load, i.e. Io/η.
-        const AN::FcmlStart st = AN::fcml_periodic_start(true, N, c.inputVoltage, VoCell, Io / c.efficiency, fs, c.inductance,
-                                                         c.flyingCapacitance, c.outputCapacitance);
         json ics = json::array();
-        ics.push_back({{"node", "Vout"}, {"voltage", st.outputVoltage}});
+        ics.push_back({{"node", "Vout"}, {"voltage", orbit.outputVoltage}});
         ics.push_back({{"node", "switchingCell.sw_node"}, {"voltage", 0.0}});
         for (int k = 1; k < pairs; ++k) {
-            ics.push_back({{"node", "switchingCell.nh" + std::to_string(k)}, {"voltage", st.flyingCapacitorVoltages[k - 1]}});
+            ics.push_back({{"node", "switchingCell.nh" + std::to_string(k)}, {"voltage", orbit.flyingCapacitorVoltages[k - 1]}});
             ics.push_back({{"node", "switchingCell.nl" + std::to_string(k)}, {"voltage", 0.0}});
         }
-        ics.push_back({{"stage", "switchingCell"}, {"component", "L1"}, {"winding", 0}, {"current", st.inductorCurrent}});
+        ics.push_back({{"stage", "switchingCell"}, {"component", "L1"}, {"winding", 0}, {"current", orbit.inductorCurrent}});
         tas["simulation"]["initialConditions"] = ics;
     }
     req::finalize_control_seeds(tas, c.boost ? Topology::BOOST_CONVERTER : Topology::BUCK_CONVERTER);

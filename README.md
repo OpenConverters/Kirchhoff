@@ -120,7 +120,8 @@ complementary pairs with N−2 flying capacitors under phase-shifted PWM, so the
 and 4 levels in ngspice: Vout within 0.5 % of the lossless output less the switches' on-resistance drop, inductor
 ripple shape NRMSE ≤ 0.06 and peak-to-peak within 8 %, every flying capacitor within 3 % of k·Vtop/(N−1). The buck's
 flying capacitors settle themselves; a boost's have no natural balancing (its inductor faces the stiff source), so
-its deck starts on the periodic orbit (`fcml_periodic_start`) and hardware needs a balancing controller.
+its deck switches the per-pair duty trims a balancing controller settles on and starts on that balanced orbit
+(`fcml_balanced_orbit`: the exact periodic steady state with finite capacitors and load).
 The **two-switch flyback** (clamp diodes return the leakage energy to Vin, so each
 switch sees only Vin) is checked in `test_two_switch_flyback` against the single-switch flyback deck with the
 same transformer: Vout within 3 %, switch nodes inside the rails, primary peak and on-time ramp within 5 %.
@@ -141,7 +142,9 @@ capacitance is the parallel capacitor — capacitive output filter) is solved on
 piecewise-linear tank with the rectifier clamping Cp, half-wave antisymmetric, Newton on the period map), since FHA
 is poor for a capacitive-filter LCC. The turns ratio comes from the exact gain at the spec frequency, the frequency
 range across the input range from the same solver, and every corner is checked inductive (ZVS). `test_lcc` runs
-both Cp sides × both bridges in ngspice: 400 V → 2 kV within 0.85 %, tank-current NRMSE 0.007–0.011.
+both Cp sides × both bridges in ngspice: 400 V → 2 kV within 0.85 %, tank-current NRMSE 0.007–0.011. The rectifier's
+junction capacitance is part of that tank: `config.rectifierJunctionCapacitance` (per diode) is folded out of the
+discrete Cp part — with 30 pF diodes the folded design delivers 2017 V, the unfolded one 1765 V.
 
 Current agreement: **boost** Vout/Iout 0.2 %, η 0.2 %; **flyback** Vout/Iout 1.9 %, η 2.5 %; **PSFB**
 Vout/Iout ~0.9 % (efficiency directional — Kirchhoff's ideal switches beat MKF's lossy rectifier diodes).

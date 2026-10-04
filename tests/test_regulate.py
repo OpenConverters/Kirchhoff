@@ -145,9 +145,9 @@ def test_regulate_frequency_lcc(side):
     spec = _spec(400, 2000, 200, 100000)
     spec["config"] = {"parallelCapacitorSide": side}
     tas = PyKirchhoff.design_lcc_tas(spec)
-    # Ideal semiconductors: bind_datasheet_semis' stand-in diode (650 V, 1 nF junction) can neither block the 2 kV
-    # rail nor leave the 157 pF Cp in charge of the tank (four of them read 649 V). The design does not yet fold a
-    # real rectifier's junction capacitance into Cp (ABT #1678).
+    # Ideal semiconductors: bind_datasheet_semis' stand-in diode (650 V, 1 nF junction) cannot block the 2 kV rail
+    # (four of them read 649 V). The design folds a real rectifier's capacitance out of Cp when it is given
+    # (config.rectifierJunctionCapacitance, ABT #1678), but a 1 nF part alone exceeds the 157 pF tank Cp and is refused.
     r = R.simulate_regulated(tas, 2000, "lcc", fidelity={"origin": "REQUIREMENTS"})
     assert r["regulated"], f"lcc/{side} did not regulate (vout={r.get('vout')})"
     assert r["steady_state"]
@@ -288,3 +288,24 @@ def test_exporter_isat_mismatch_via_model():
     # genuine saturation (operating above the real Isat) -> kind saturated, source model
     g = R.saturation_findings(_mag_tas(f".subckt M P1 P2\n.param Lmag_1_Isat={isat}\n.ends", offset=isat * 1.5, core_coil=mag))
     assert len(g) == 1 and g[0]["kind"] == "saturated" and g[0]["isat_source"] == "model", g
+
+
+def test_fcml_balancing_trims_survive_the_duty_search():
+    # The FCML boost deck switches per-pair balancing trims (fcml_balanced_orbit, ABT #1681). Moving the duty
+    # must shift every pair by the same amount and keep each pair's trim — flattening them walks the flying caps.
+    spec = _spec(200, 500, 500, 100000)
+    spec["config"] = {"levels": 3}
+    tas = PyKirchhoff.design_boost_tas(spec)
+    mains = {st["component"]: st["waveform"]["dutyCycle"] for st in tas["simulation"]["stimulus"]
+             if st["component"].startswith("QL")}
+    assert abs(mains["QL1"] - mains["QL2"]) > 1e-6, "the design emitted no balancing trim"
+    R._stash_buck_boost_pairs(tas, "boost")
+    R._set_control(tas, "dutyCycle", 0.55, "boost")
+    after = {st["component"]: st["waveform"] for st in tas["simulation"]["stimulus"]}
+    avg = sum(mains.values()) / len(mains)
+    dt = tas["_fsbbDeadFraction"]
+    for q, d0 in mains.items():
+        d = 0.55 + (d0 - avg)
+        assert abs(after[q]["dutyCycle"] - d) < 1e-12
+        comp = "QH" + q[2:]
+        assert abs(after[comp]["dutyCycle"] - ((1 - d) - 2 * dt)) < 1e-12

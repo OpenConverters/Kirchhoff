@@ -207,20 +207,17 @@ TEST_CASE("FCML in ngspice: Vout, inductor current as solved, flying capacitors 
             else { const auto d = Kirchhoff::design_buck(s); L = d.inductance; D = d.dutyCycle; tas = Kirchhoff::build_buck_tas(d); }
             PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
             std::string deck = Kirchhoff::tas_to_ngspice(tas, ideal);
-            // The buck settles its flying capacitors itself (from the operating point), so it runs long. The boost has
-            // no natural balancing: its imbalance mode faces only the lossless inductor and the stiff source, and the
-            // output's switching ripple (only the outer pair feeds Cout) walks it open loop — about 1 V/ms here, gone
-            // with a stiff Cout — so in hardware a controller holds the flying capacitors. Its deck therefore starts ON
-            // the periodic orbit, and the power stage is checked over the first 100 periods, before the uncontrolled
-            // mode has moved (by 400 periods a 2 % imbalance already adds 10 % of fs ripple to the inductor). The
-            // balancing controller is ABT #1681.
-            const double T = 1.0 / c.fsw, tstop = (c.boost ? 100.0 : 3000.0) * T, tstep = T / 400.0;
+            // Both run long. The buck settles its flying capacitors itself; the boost has no natural balancing (its
+            // imbalance mode faces only the lossless inductor and the stiff source) and with equal duties the output's
+            // switching ripple walks it ~1 V/ms, so its deck switches the balanced-orbit duty trims a balancing
+            // controller settles on and starts on that orbit (fcml_balanced_orbit, ABT #1681).
+            const double T = 1.0 / c.fsw, tstop = 3000.0 * T, tstep = T / 400.0;
             deck = std::regex_replace(deck, std::regex(R"(\.tran\s+\S+\s+\S+\s+\S+\s+\S+)"),
                                       ".tran " + num(tstep) + " " + num(tstop) + " 0 " + num(tstep) + (c.boost ? " uic" : ""));
             const Kirchhoff::NgspiceRunResult res = Kirchhoff::run_ngspice_in_process(deck);
             INFO("ngspice error: " << res.error);
             REQUIRE(res.success);
-            const double avgWin = (c.boost ? 10.0 : 40.0) * T;
+            const double avgWin = 40.0 * T;
             const auto vo = res.average("v(Vout)", tstop - avgWin, tstop);
             REQUIRE(vo.has_value());
             const auto* il = find_vector(res, {"l1", "#branch"});
@@ -263,4 +260,27 @@ TEST_CASE("FCML in ngspice: Vout, inductor current as solved, flying capacitors 
             }
             std::cerr << "\n";
         }
+}
+
+TEST_CASE("FCML balanced orbit: periodic, flying capacitors at their levels, trims sum to zero", "[fcml][orbit]") {
+    namespace AN = Kirchhoff::analytical;
+    for (const Case& c : {kBuck, kBoost})
+        for (int n : {3, 4}) {
+            INFO((c.boost ? "boost" : "buck") << " N=" << n);
+            const json s = spec(c.vin, c.vout, c.power, c.fsw, {{"levels", n}});
+            double L, Cf, Cout, D;
+            if (c.boost) { const auto d = Kirchhoff::design_boost(s); L = d.inductance; Cf = d.flyingCapacitance; Cout = d.outputCapacitance; D = d.dutyCycle; }
+            else { const auto d = Kirchhoff::design_buck(s); L = d.inductance; Cf = d.flyingCapacitance; Cout = d.outputCapacitance; D = d.dutyCycle; }
+            const double R = c.vout * c.vout / c.power;
+            const AN::FcmlOrbit o = AN::fcml_balanced_orbit(c.boost, n, c.vin, D, R, c.fsw, L, Cf, Cout);
+            REQUIRE(o.dutyTrims.size() == static_cast<size_t>(n - 1));
+            double sum = 0;
+            for (double t : o.dutyTrims) { sum += t; CHECK(std::fabs(t) < 0.05); }
+            CHECK(std::fabs(sum) < 1e-12);
+            // the orbit's output is the lossless one at D, and each flying capacitor starts near its level
+            CHECK_THAT(o.outputVoltage, WithinRel(c.boost ? c.vin / (1 - D) : D * c.vin, 0.03));
+            const double vtop = c.boost ? c.vout : c.vin;
+            for (int k = 1; k < n - 1; ++k) CHECK_THAT(o.flyingCapacitorVoltages[k - 1], WithinRel(k * vtop / (n - 1), 0.06));
+        }
+    CHECK_THROWS(AN::fcml_balanced_orbit(true, 2, 200, 0.6, 500, 100e3, 1e-3, 1e-6, 1e-6));
 }

@@ -182,21 +182,22 @@ def _set_control(tas, field, value, topology=None):
                 wf["dutyCycle"] = value
         return
     if topology in ("buck", "boost") and field == "dutyCycle" and "_buckBoostPairs" in tas:
-        # Plain, synchronous, interleaved or FCML: each pair's main at D from its base phase, the complement after
-        # a dead time for the rest of the period (see _stash_buck_boost_pairs).
+        # Plain, synchronous, interleaved or FCML: each pair's main at D (+ its designed balancing trim) from its
+        # base phase, the complement after a dead time for the rest of the period (see _stash_buck_boost_pairs).
         dt = float(tas["_fsbbDeadFraction"])
         pairs = tas["_buckBoostPairs"]
         for st in tas.get("simulation", {}).get("stimulus", []):
             wf = st.get("waveform", {})
             if wf.get("type") != "pwm":
                 continue
-            role, phi = pairs[st["component"]]
+            role, phi, trim = pairs[st["component"]]
+            d = value + trim
             if role == "main":
-                wf["dutyCycle"] = value
+                wf["dutyCycle"] = d
                 wf["phase"] = phi
             else:
-                wf["dutyCycle"] = max(0.0, (1.0 - value) - 2.0 * dt)
-                wf["phase"] = (phi + (value + dt) * 360.0) % 360.0
+                wf["dutyCycle"] = max(0.0, (1.0 - d) - 2.0 * dt)
+                wf["phase"] = (phi + (d + dt) * 360.0) % 360.0
         return
     if topology in ("fsbb", "ahb", "buck", "boost", "active_clamp_flyback") and field == "dutyCycle":
         # active_clamp_flyback (complementary drive): Q1 at D, the clamp switch on for the rest (1−D)−2·dt.
@@ -266,10 +267,12 @@ def _stash_buck_boost_pairs(tas, topology):
     plain or interleaved cell names them Q1[_k] (main) / Q2[_k] (synchronous rectifier); an FCML (config.levels)
     names its pairs QH k / QL k, the main being QH for a buck and QL for a boost. Interleaved phases and FCML pairs
     sit at their own base phase ((k−1)·360/N), so "phase 0 = main" no longer partitions them: each pair keeps its
-    base phase, its main switch runs D at that phase and its complement (1−D)−2·dt after it. A diode cell has
-    mains only."""
+    base phase, its main switch runs D (plus the pair's designed balancing trim) at that phase and its complement
+    (1−D)−2·dt after it. A diode cell has mains only."""
     stims = [st for st in tas.get("simulation", {}).get("stimulus", [])
              if st.get("waveform", {}).get("type") == "pwm"]
+    if not stims:
+        return   # no open-loop drive to modulate (e.g. a deck driven by a control stage)
     roles, base = {}, {}
     for st in stims:
         m = _BUCK_BOOST_SWITCH.match(st.get("component", ""))
@@ -280,20 +283,22 @@ def _stash_buck_boost_pairs(tas, topology):
         roles[st["component"]] = ("main" if main else "comp", key)
         if main:
             base[key] = float(st["waveform"].get("phase", 0.0))
-    d0, dt = None, None
-    for st in stims:
-        role, key = roles[st["component"]]
+    for c, (role, key) in roles.items():
         if key not in base:
-            raise ValueError(f"{topology}: complement '{st['component']}' has no main switch in its pair")
-        if role == "main":
-            d0 = float(st["waveform"]["dutyCycle"])
+            raise ValueError(f"{topology}: complement '{c}' has no main switch in its pair")
+    # Each main switch's duty relative to the mains' average: an FCML boost switches per-pair balancing trims
+    # (fcml_balanced_orbit) that the bisection must carry, not flatten.
+    mainDuty = {roles[st["component"]][1]: float(st["waveform"]["dutyCycle"]) for st in stims
+                if roles[st["component"]][0] == "main"}
+    avg = sum(mainDuty.values()) / len(mainDuty)
+    dt = None
     for st in stims:
         role, key = roles[st["component"]]
         if role == "comp":
             lag = ((float(st["waveform"].get("phase", 0.0)) - base[key]) / 360.0) % 1.0
-            dt = lag - d0
+            dt = lag - mainDuty[key]
             break
-    tas["_buckBoostPairs"] = {c: [r, base[k]] for c, (r, k) in roles.items()}
+    tas["_buckBoostPairs"] = {c: [r, base[k], mainDuty[k] - avg] for c, (r, k) in roles.items()}
     tas["_fsbbDeadFraction"] = max(0.0, dt) if dt is not None else 0.0
 
 
@@ -403,9 +408,13 @@ def _parse_deck(deck):
         # so a stray one is never silently summed as delivered power.
         if m and not re.search(r"esr|sense|rsn|dcr|bias|bleed", m.group(1), re.I):
             n1, n2, rv = m.group(2), m.group(3), float(m.group(4))
-            if re.search("out", n1, re.I) and n2 in _GND:
+            # Ground is judged on the RESOLVED node: since the isolated topologies split their returns (ABT #778) a
+            # secondary load returns to its own subckt port (`RRsec vout_sec sgnd`), which is node 0 at the top level.
+            # Judged on the local name it was not a load, and the flybuck's efficiency counted only the primary rail.
+            g1, g2 = resolve(n1, sub) in _GND or n1 in _GND, resolve(n2, sub) in _GND or n2 in _GND
+            if re.search("out", n1, re.I) and g2:
                 loads.append((resolve(n1, sub), resolve(n2, sub), "R", rv))
-            elif re.search("out", n2, re.I) and n1 in _GND:
+            elif re.search("out", n2, re.I) and g1:
                 loads.append((resolve(n2, sub), resolve(n1, sub), "R", rv))
         m = re.match(r"^Iload\d*\s+(\S+)\s+(\S+)\s+DC\s+([-\d.eE+]+)", ln)   # \d*: multi-output suffix
         if m:
