@@ -1423,6 +1423,9 @@ const LAYOUTS = {
       // ── secondary resonant tank Lr2 → Cr2 (mirror of the primary) ─────────────────────────────
       Lr2: { pins: { primary_start: [944, 256], primary_end: [1056, 256] }, line: (q, c) => `l 944 256 1056 256 0 ${c.L(q)} 0` },
       Cr2: { pins: { 1: [1184, 256], 2: [1248, 256] }, line: (q, c) => `c 1184 256 1248 256 0 ${c.C(q)} 0` },
+      // the SR current-sense shunt the engine puts in series with the secondary tank (since 8acee60):
+      // Cr2.2 (senseP) → Rsense → leg-a mid (node_c)
+      Rsense: { pins: { 1: [1248, 256], 2: [1312, 256] }, line: (q, c) => `r 1248 256 1312 256 0 ${c.R(q)}` },
       // ── secondary full bridge — SR FETs drawn as their rectifying diodes (anode=source net, cathode=
       //    drain net; leg mids net8/net7 → Vout, gnd → leg mids). Pin names stay drain/source (CIAS nets).
       Qc: { pins: { drain: [1120, 160], source: [1120, 192] }, line: () => 'd 1120 192 1120 160 2 default' },
@@ -1443,8 +1446,8 @@ const LAYOUTS = {
       // net2 wrap: leg2 mid → T1.primary_end (routed clear of the tank rail)
       [480, 240, 768, 240], [768, 240, 768, 288], [768, 288, 800, 288],
       // ── secondary side (mirror) ──────────────────────────────────────────────────────────────
-      // secondary tank: T1.secondary1_start(net5) → Lr2, Lr2|end(net6) crosses leg-c to Cr2, Cr2|2(net7) → leg-a
-      [880, 256, 944, 256], [1056, 256, 1184, 256], [1248, 256, 1312, 256],
+      // secondary tank: T1.secondary1_start(net5) → Lr2, Lr2|end(net6) crosses leg-c to Cr2, Cr2|2 → Rsense → leg-a
+      [880, 256, 944, 256], [1056, 256, 1184, 256],
       // leg-c vertical: Qc source → net8 (= T1.secondary1_end) → Qd drain → … → gnd
       [1120, 192, 1120, 240], [1120, 240, 1120, 304], [1120, 336, 1120, 384], [1120, 384, 1120, 432],
       // net8 wrap: leg-c mid → T1.secondary1_end

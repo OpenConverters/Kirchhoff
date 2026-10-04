@@ -152,13 +152,10 @@ export const TOPOLOGIES = [
 ]
 
 // Not yet in the engine (docs/TOPOLOGY_ROADMAP.md) — shown greyed out.
-export const PLANNED = [
-  { id: 'inverting_buck_boost', name: 'Inverting buck-boost', family: 'Non-Isolated DC-DC', desc: 'Planned.' },
-  { id: 'half_bridge', name: 'Hard-switched half bridge', family: 'Isolated Bridge / Push-Pull', desc: 'Planned.' },
-  { id: 'full_bridge', name: 'Hard-switched full bridge', family: 'Isolated Bridge / Push-Pull', desc: 'Planned.' },
-  { id: 'acf_flyback', name: 'Active-clamp flyback', family: 'Isolated Forward / Flyback', desc: 'Planned.' },
-  { id: 'totem_pole_pfc', name: 'Totem-pole PFC', family: 'Filters / PFC', desc: 'Planned.' },
-]
+// Every entry once listed here is now in the engine (inverting buck-boost, hard-switched half / full bridge and
+// active-clamp flyback as topologies, totem-pole as a PFC variant); the inverters (ABT #1440) wait on an AC-output
+// field in the TAS schema.
+export const PLANNED = []
 
 // ── Variants ─────────────────────────────────────────────────────────────────
 // Design knobs the engine reads from the spec's `config` object (KirchhoffConfig.hpp →
