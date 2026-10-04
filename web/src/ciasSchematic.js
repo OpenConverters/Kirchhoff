@@ -100,9 +100,10 @@ const merge = (...frags) => ({
 })
 
 // Output tail: optional choke, Cout, the load, the VOUT port and the isolated return.
-const outTailFrag = (x0, yTop, retY, lout) => {
+// loadGap: Cout-to-load spacing — wider where Cout's value string is long (an HV design's "24.7 nF").
+const outTailFrag = (x0, yTop, retY, lout, loadGap = 58) => {
   const px = lout ? x0 + 80 : x0
-  const cX = px + 44, lX = cX + 58, pX = cX + 112, cY = (yTop + retY) / 2
+  const cX = px + 44, lX = cX + loadGap, pX = lX + 54, cY = (yTop + retY) / 2
   return {
     retX: lX,
     coutX: cX,
@@ -140,12 +141,13 @@ const secCTFrag = (tx, ty, h, o) => {
   }, tail)
 }
 
-// Full-bridge secondary: four diodes in two legs; sec_b wraps under the bridge to the far leg.
+// Full-bridge secondary: four diodes in two legs; sec_b wraps under the bridge to the far leg. o.gap moves the bridge
+// right (room for a part across the winding, the LCC's Cp); o.loadGap is passed to the tail.
 const secFBFrag = (tx, ty, h, o) => {
   const ds = o.diodes
   const yM = ty, yP = ty - h / 2 - 30, yN = ty + h / 2 + 90
-  const xA = tx + 90, xB = tx + 160
-  const tail = outTailFrag(xB, yP, yN, o.lout)
+  const xA = tx + 90 + (o.gap ?? 0), xB = tx + 160 + (o.gap ?? 0)
+  const tail = outTailFrag(xB, yP, yN, o.lout, o.loadGap)
   const wrapX = Math.min(xB + 44, tail.coutX - 22)
   return merge({
     place: {
@@ -389,6 +391,112 @@ const cllcLike = (present, srRefs) => {
 // Which side the active-clamp flyback's clamp leg is on, from the netlist (not the form): Cc's pin 1 sits on
 // the input rail (high-side: Cc to Vin, Qc to the drain) or on the switch node (low-side: Cc to the drain,
 // Qc to GND).
+// Which side the LCC's parallel capacitor is on, from the netlist: Cp pin 1 on the secondary (sec_a) or on the
+// primary (pri_top).
+function lccParallelSide(tas) {
+  const st = (tas?.topology?.stages ?? []).find((s) => s.name === 'lccCell')
+  const net = (st?.circuit?.connections ?? []).find((c) => c.endpoints.some((e) => e.component === 'Cp' && e.pin === '1'))
+  if (net?.name === 'sec_a') return 'secondary'
+  if (net?.name === 'pri_top') return 'primary'
+  throw new Error(`lcc: cannot tell the parallel capacitor's side (Cp pin 1 on net '${net?.name}')`)
+}
+
+// LCC: the bridge (split-bus half bridge, or psfb's two legs), the tank Lr → Cs into the primary, Cp across the
+// primary (left of T1) or the secondary (between the winding ends), a full-bridge rectifier and the capacitive tail.
+function lccSchematic(present, side, full) {
+  const tx = full ? 480 : 600, ty = full ? 195 : 205, h = 90
+  const cpSec = side === 'secondary'
+  // A secondary Cp stands between the winding and the bridge, from the sec_a lane (y = ty) down to sec_b's wrap lane.
+  const sec = secFBFrag(tx, ty, h, { diodes: ['Dr1', 'Dr3', 'Dr2', 'Dr4'], gap: cpSec ? 80 : 0, loadGap: 90 })
+  const cp = cpSec
+    ? { Cp: { draw: (b) => capV('Cp', b, tx + 65, ty + 50, 'right') } }
+    : { Cp: { draw: (b) => capV('Cp', b, full ? 400 : 500, full ? 185 : 280, 'right') } }
+  const cpWires = cpSec
+    ? [{ from: 'Cp.p0', to: [tx + 65, ty] }, { from: 'Cp.p1', to: [tx + 65, ty + h / 2 + 124] }]
+    : full
+      ? [{ from: 'Cp.p0', to: [400, 150] }, { from: 'Cp.p1', to: [400, 210] }]
+      : [{ from: 'Cp.p0', to: [500, 200] }, { from: 'Cp.p1', to: [500, 365] }]
+  if (full) {
+    return {
+      size: [1160, 430],
+      place: {
+        Q1: { draw: (b) => mosfetV('Q1', b, 130, 128, 'right', true) },
+        Q2: { draw: (b) => mosfetV('Q2', b, 130, 246, 'right', true) },
+        Q3: { draw: (b) => mosfetV('Q3', b, 280, 128, 'right', true) },
+        Q4: { draw: (b) => mosfetV('Q4', b, 280, 246, 'right', true) },
+        Lr: { draw: (b) => indH('Lr', b, 210, 200) },
+        Cs: { draw: (b) => capH('Cs', b, 350, 150) },
+        T1: { draw: (b) => xfmr('T1', b, tx, ty, { h, labelDy: -70 }) },
+        ...cp,
+        ...sec.place,
+      },
+      wires: [
+        { from: '@src.p0', to: [280, 80], via: [[60, 80]] },
+        { from: '@src.p1', to: [280, 340], via: [[60, 340]] },
+        { from: 'Q1.drain', to: [130, 80] },
+        { from: 'Q1.source', to: 'Q2.drain' },
+        { from: 'Q2.source', to: [130, 340] },
+        { from: 'Q3.drain', to: [280, 80] },
+        { from: 'Q3.source', to: 'Q4.drain' },
+        { from: 'Q4.source', to: [280, 340] },
+        { from: [130, 200], to: 'Lr.p0' },
+        // the tank crosses leg B high in its window (as psfb's does), then runs over to Cs and the primary
+        { from: 'Lr.p1', to: 'Cs.p0', via: [[270, 200], [270, 175], [310, 175], [310, 150]] },
+        { from: 'Cs.p1', to: 'T1.p0' },
+        { from: 'T1.p1', to: [280, 210], via: [[tx - 10, 270], [tx - 40, 270], [tx - 40, 210]] },
+        ...cpWires,
+        ...sec.wires,
+      ],
+      synth: (b) => [
+        srcDC(60, 175), gnd(110, 340), ...sec.synthEls(b),
+        sig(104, 128, 'g1'), sig(104, 246, 'g2'), sig(254, 128, 'g3'), sig(254, 246, 'g4'),
+        ctrlIC(b, 90, 385, ['g1', 'g2', 'g3', 'g4']),
+      ],
+    }
+  }
+  const top = 80, gy = 330, mid = 205
+  return {
+    size: [1180, 440],
+    place: {
+      CsHi: { draw: (b) => capV('CsHi', b, 120, (top + mid) / 2, 'left') },
+      CsLo: { draw: (b) => capV('CsLo', b, 120, (mid + gy) / 2, 'left') },
+      RbHi: { draw: (b) => resV('RbHi', b, 170, (top + mid) / 2, 'right') },
+      RbLo: { draw: (b) => resV('RbLo', b, 170, (mid + gy) / 2, 'right') },
+      Q1: { draw: (b) => mosfetV('Q1', b, 300, 140, 'right', true) },
+      Q2: { draw: (b) => mosfetV('Q2', b, 300, 262, 'right', true) },
+      Lr: { draw: (b) => indH('Lr', b, 370, 200) },
+      Cs: { draw: (b) => capH('Cs', b, 440, 200) },
+      T1: { draw: (b) => xfmr('T1', b, tx, ty, { h, labelDy: -24 }) },
+      ...cp,
+      ...sec.place,
+    },
+    wires: [
+      { from: '@src.p0', to: 'Q1.drain', via: [[50, top], [300, top]] },
+      { from: '@src.p1', to: 'Q2.source', via: [[50, gy], [300, gy]] },
+      { from: 'CsHi.p0', to: [120, top] },
+      { from: 'CsHi.p1', to: [120, mid] },
+      { from: 'CsLo.p0', to: [120, mid] },
+      { from: 'CsLo.p1', to: [120, gy] },
+      { from: 'RbHi.p0', to: [170, top] },
+      { from: 'RbHi.p1', to: [170, mid] },
+      { from: 'RbLo.p0', to: [170, mid] },
+      { from: 'RbLo.p1', to: [170, gy] },
+      { from: [120, mid], to: [170, mid] },
+      { from: 'Q1.source', to: 'Q2.drain' },
+      { from: [300, 200], to: 'Lr.p0' },
+      { from: 'Lr.p1', to: 'Cs.p0' },
+      { from: 'Cs.p1', to: 'T1.p0', via: [[540, 200], [540, ty - h / 2]] },
+      { from: 'T1.p1', to: [170, mid], via: [[tx - 10, 365], [230, 365], [230, mid]] },
+      ...cpWires,
+      ...sec.wires,
+    ],
+    synth: (b) => [
+      srcDC(50, mid + 5), gnd(50, gy), ...sec.synthEls(b),
+      sig(274, 140, 'g1'), sig(274, 262, 'g2'), ctrlIC(b, 90, 395, ['g1', 'g2']),
+    ],
+  }
+}
+
 function acfClampSide(tas) {
   const st = (tas?.topology?.stages ?? []).find((s) => s.name === 'inverter')
   const net = (st?.circuit?.connections ?? []).find((c) => c.endpoints.some((e) => e.component === 'Cc' && e.pin === '1'))
@@ -1155,6 +1263,8 @@ const LAYOUTS = {
       ],
     }
   },
+  // ── resonant: LCC (series Lr–Cs, parallel Cp on the primary or the secondary) ──
+  lcc: (present, tas) => lccSchematic(present, lccParallelSide(tas), present.has('Q3')),
   // ── bridge: phase-shifted full bridge ─────────────────────────────────────
   psfb: (present) => {
     // tx=360: T1 stands 30 px clear of the leg-C column so QD's ref fits beside its own body. At 330 the

@@ -127,6 +127,10 @@ export const TOPOLOGIES = [
   T('src', 'Series resonant (SRC)', 'Resonant',
     'Series L-C tank; buck-only resonant.',
     { vinNom: 400, isolation: 3000, outputs: [{ name: 'out', voltage: 12, power: 240 }] }),
+  T('lcc', 'LCC', 'Resonant',
+    'Series Lr–Cs plus a parallel Cp across the transformer (its winding capacitance on the HV side); capacitive output.',
+    { vinMin: 380, vinNom: 400, vinMax: 420, isolation: 3000, maxOutputs: 1,
+      outputs: [{ name: 'out', voltage: 2000, power: 200 }] }),
   T('cllc', 'CLLC', 'Resonant',
     'Symmetric bidirectional resonant tank.',
     { vinNom: 400, isolation: 3000, outputs: [{ name: 'out', voltage: 48, power: 1000 }] }),
@@ -196,6 +200,10 @@ export const VARIANTS = {
   psfb: { key: 'rectifierType', label: 'Secondary rectifier', default: 'fullBridge', options: RECTIFIER_3 },
   pshb: { key: 'rectifierType', label: 'Secondary rectifier', default: 'fullBridge', options: RECTIFIER_3 },
   src: { key: 'rectifierType', label: 'Secondary rectifier', default: 'centerTapped', options: RECTIFIER_3 },
+  lcc: { key: 'parallelCapacitorSide', label: 'Parallel capacitor', default: 'secondary', options: [
+    { id: 'secondary', name: 'Secondary (winding C)', desc: 'Cp across the HV secondary: the winding capacitance is the parallel capacitor.' },
+    { id: 'primary', name: 'Primary (discrete)', desc: 'Cp across the primary as a discrete capacitor.' },
+  ] },
   llc: { key: 'rectifierType', label: 'Secondary rectifier', default: 'centerTapped', options: RECTIFIER_3 },
 }
 
@@ -212,9 +220,11 @@ const STRUCTURAL_CASES = {
   boost: ['diode@3ph', 'synchronous@2ph'],
   // The clamp side moves Cc and Qc (Cc to Vin vs Cc to the drain, Qc to GND): a different circuit per side.
   active_clamp_flyback: ['complementary@lowClamp', 'nonComplementary@lowClamp'],
+  // The full bridge replaces the split bus with a second leg: a different circuit, a different drawing.
+  lcc: ['secondary@fullBridge', 'primary@fullBridge'],
 }
 // Non-phase "@" suffixes: the config each one writes.
-const STRUCTURAL_SUFFIX = { lowClamp: { clampSide: 'low' } }
+const STRUCTURAL_SUFFIX = { lowClamp: { clampSide: 'low' }, fullBridge: { bridgeType: 'fullBridge' } }
 
 // Every option an offline gate sweeps for a topology: each variant, then each structural case.
 export function auditOptions(topologyId) {
@@ -449,6 +459,15 @@ export const KNOBS = {
     kOutCap(100e-6), kVderate()],
 
   // ── Resonant ──────────────────────────────────────────────────────────────────
+  lcc: [kPinN(),
+    enm('bridgeType', 'Bridge', [{ id: 'halfBridge', name: 'Half bridge' }, { id: 'fullBridge', name: 'Full bridge' }], 'halfBridge', 1),
+    num('qualityFactor', 'Quality factor', 1.0, { tier: 1, sym: 'Q', min: 0.1, max: 5, step: 0.05, tip: '√(Lr/Cs) over the reflected load 8n²R/π².' }),
+    num('capacitanceRatio', 'Cp / Cs', 1.0, { tier: 1, sym: 'A', min: 0.05, max: 10, step: 0.05 }),
+    num('resonanceRatio', 'fs / fr', 1.6, { tier: 1, min: 1.05, max: 4, step: 0.05, tip: 'Spec frequency over the Lr–Cs resonance: high enough to stay inductive (ZVS) across the input range.' }),
+    num('inductanceRatio', 'Lm / Lr', 10, { tier: 2, min: 1, max: 100, step: 1 }),
+    num('deadTimeFraction', 'Dead time', 0.02, { tier: 2, min: 0.005, max: 0.09, step: 0.005 }),
+    num('outputVoltageRipple', 'Output ripple', 0.01, { tier: 2, min: 0.001, max: 0.1, step: 0.001 }),
+    kMaxIsw(), kVderate()],
   llc: [
     num('qualityFactor', 'Quality factor', 0.4, { tier: 1, sym: 'Q', min: 0.05, max: 2, step: 0.05, tip: '0.3–0.5 typical at full load (TI SLUP263).' }),
     num('inductanceRatio', 'Inductance ratio', 5, { tier: 1, sym: 'Ln=Lm/Lr', min: 1, max: 20, step: 0.5, tip: '3–7 typical.' }),

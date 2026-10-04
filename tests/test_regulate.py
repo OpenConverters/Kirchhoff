@@ -119,6 +119,22 @@ def test_regulate_duty_hard_switched_bridge(topology, vout, power, rect):
     assert 0.5 < r["efficiency"] <= 1.0
 
 
+@pytest.mark.parametrize("side", ["secondary", "primary"])
+def test_regulate_frequency_lcc(side):
+    spec = _spec(400, 2000, 200, 100000)
+    spec["config"] = {"parallelCapacitorSide": side}
+    tas = PyKirchhoff.design_lcc_tas(spec)
+    # Ideal semiconductors: bind_datasheet_semis' stand-in diode (650 V, 1 nF junction) can neither block the 2 kV
+    # rail nor leave the 157 pF Cp in charge of the tank (four of them read 649 V). The design does not yet fold a
+    # real rectifier's junction capacitance into Cp (ABT #1678).
+    r = R.simulate_regulated(tas, 2000, "lcc", fidelity={"origin": "REQUIREMENTS"})
+    assert r["regulated"], f"lcc/{side} did not regulate (vout={r.get('vout')})"
+    assert r["steady_state"]
+    assert abs(r["vout"] - 2000) <= 0.02 * 2000
+    # A lossless deck: input and output power agree to the one-period measurement (1.006 / 0.997 seen).
+    assert abs(r["efficiency"] - 1.0) < 0.01
+
+
 def test_regulate_phase_psfb():
     _check(PyKirchhoff.design_psfb_tas, "psfb", 400, 12, 600, 100000)
 

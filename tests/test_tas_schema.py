@@ -132,6 +132,13 @@ HB_IN = {"designRequirements": {"efficiency": 1.0, "inputVoltage": {"minimum": 3
 for rect in ("centerTapped", "fullBridge", "currentDoubler"):
     check(f"half_bridge-{rect}", PyKirchhoff.design_half_bridge_tas({**HB_IN, "config": {"rectifierType": rect}}))
     check(f"full_bridge-{rect}", PyKirchhoff.design_full_bridge_tas({**HB_IN, "config": {"rectifierType": rect}}))
+# LCC (ABT #1438): Cp on each side x each bridge (resonant Cs/Cp, the common-mode bleed, the Lr magnetic).
+LCC_IN = {"designRequirements": {"efficiency": 1.0, "inputVoltage": {"minimum": 380, "nominal": 400, "maximum": 420},
+          "switchingFrequency": {"nominal": 100000}, "outputs": [{"name": "out", "voltage": {"nominal": 2000}}]},
+          "operatingPoints": [{"inputVoltage": 400, "outputs": [{"power": 200}]}]}
+for side in ("secondary", "primary"):
+    for bridge in ("halfBridge", "fullBridge"):
+        check(f"lcc-{side}-{bridge}", PyKirchhoff.design_lcc_tas({**LCC_IN, "config": {"parallelCapacitorSide": side, "bridgeType": bridge}}))
 
 # Multi-output (N isolated secondaries) — ABT #86. A 2-output forward-family spec must still emit a
 # schema-valid TAS (extra secondary windings, per-output rectifiers/filters, extra external output ports).

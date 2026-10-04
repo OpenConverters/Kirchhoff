@@ -93,7 +93,7 @@ TOPOLOGIES = (
     "push_pull", "psfb", "pshb", "ahb", "acf", "fsbb", "llc", "cllc", "clllc", "src",
     "dab", "isolated_buck", "isolated_buck_boost", "weinberg", "pfc", "vienna",
     "inverting_buck_boost", "two_switch_flyback", "active_clamp_flyback",
-    "half_bridge", "full_bridge",
+    "half_bridge", "full_bridge", "lcc",
 )
 
 DEFAULT_FIDELITY = {"origin": "REQUIREMENTS"}

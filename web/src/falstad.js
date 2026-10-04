@@ -378,6 +378,83 @@ function hardBridgeVisual(full) {
   }
 }
 
+// LCC (ABT #1438): ideal 50 % leg drive(s) as for the LLC (ABT#262), the tank Lr → Cs, Cp across the primary (x 720)
+// or the secondary (x 928), a 4-diode bridge and the capacitive tail. Which side Cp is on is read off the netlist.
+// x: source 176 · split caps 272 · bleeders 336 · leg B 400 (full) · leg A 448 · Lr 512 · Cs 576 · T1 800/880.
+function lccParallelSide(tas) {
+  const st = (tas?.topology?.stages ?? []).find((s) => s.name === 'lccCell')
+  const net = (st?.circuit?.connections ?? []).find((c) => c.endpoints.some((e) => e.component === 'Cp' && e.pin === '1'))
+  if (net?.name === 'sec_a') return 'secondary'
+  if (net?.name === 'pri_top') return 'primary'
+  throw new Error(`lcc: cannot tell the parallel capacitor's side (Cp pin 1 on net '${net?.name}')`)
+}
+function lccVisual(tas) {
+  const cpSec = lccParallelSide(tas) === 'secondary'
+  const st = (tas?.topology?.stages ?? []).find((s) => s.name === 'lccCell')
+  const full = (st?.circuit?.components ?? []).some((c) => c.name === 'Q3')
+  return {
+    place: {
+      ...(full ? {} : {
+        CsHi: { pins: { 1: [272, 112], 2: [272, 304] }, line: (q, c) => `c 272 112 272 304 0 ${c.C(q)} ${c.vin / 2}` },
+        CsLo: { pins: { 1: [272, 304], 2: [272, 480] }, line: (q, c) => `c 272 304 272 480 0 ${c.C(q)} ${c.vin / 2}` },
+        RbHi: { pins: { 1: [336, 112], 2: [336, 304] }, line: (q, c) => `r 336 112 336 304 0 ${c.R(q)}` },
+        RbLo: { pins: { 1: [336, 304], 2: [336, 480] }, line: (q, c) => `r 336 304 336 480 0 ${c.R(q)}` },
+      }),
+      Lr: { pins: { primary_start: [512, 272], primary_end: [576, 272] }, line: (q, c) => `l 512 272 576 272 0 ${c.L(q)} 0` },
+      Cs: { pins: { 1: [576, 272], 2: [640, 272] }, line: (q, c) => `c 576 272 640 272 0 ${c.C(q)} 0` },
+      T1: {
+        pins: { primary_start: [800, 272], primary_end: [800, 304], secondary1_start: [880, 272], secondary1_end: [880, 304] },
+        line: (q, c) => `T 800 272 880 272 0 ${c.L(q)} ${1 / resolveDim(q.req.turnsRatios[0], `${q.ref} turnsRatios[0]`)} 0 0 0.999`,
+      },
+      Cp: cpSec
+        ? { pins: { 1: [928, 272], 2: [928, 304] }, line: (q, c) => `c 928 272 928 304 0 ${c.C(q)} 0` }
+        : { pins: { 1: [720, 272], 2: [720, 304] }, line: (q, c) => `c 720 272 720 304 0 ${c.C(q)} 0` },
+      Dr1: { pins: { anode: [960, 272], cathode: [960, 176] }, line: () => 'd 960 272 960 176 2 default' },
+      Dr2: { pins: { anode: [1056, 304], cathode: [1056, 176] }, line: () => 'd 1056 304 1056 176 2 default' },
+      Dr3: { pins: { anode: [960, 480], cathode: [960, 336] }, line: () => 'd 960 480 960 336 2 default' },
+      Dr4: { pins: { anode: [1056, 480], cathode: [1056, 336] }, line: () => 'd 1056 480 1056 336 2 default' },
+      Cout: { pins: { 1: [1248, 176], 2: [1248, 480] }, line: (q, c) => `c 1248 176 1248 480 0 ${c.C(q)} ${c.vout}` },
+    },
+    wires: [
+      ...(full
+        ? [[176, 112, 400, 112], [400, 112, 448, 112],
+           [400, 304, 720, 304]]                                            // leg B mid → primary return
+        : [[176, 112, 272, 112], [272, 112, 336, 112], [336, 112, 448, 112],
+           [272, 304, 336, 304], [336, 304, 720, 304],                      // bus midpoint → primary return
+           [176, 480, 272, 480], [272, 480, 336, 480]]),
+      ...(full ? [[176, 480, 448, 480]] : [[336, 480, 448, 480]]),
+      [448, 272, 512, 272],                                                 // leg A / switch node → Lr
+      [640, 272, 720, 272], [720, 272, 800, 272], [720, 304, 800, 304],
+      ...(cpSec ? [[880, 272, 928, 272], [928, 272, 960, 272], [880, 304, 928, 304], [928, 304, 1056, 304]]
+                : [[880, 272, 960, 272], [880, 304, 1056, 304]]),
+      [960, 272, 960, 336], [1056, 304, 1056, 336],
+      [960, 176, 1056, 176], [1056, 176, 1248, 176], [1248, 176, 1312, 176],
+      [448, 480, 960, 480], [960, 480, 1056, 480], [1056, 480, 1248, 480], [1248, 480, 1312, 480],
+    ],
+    synth: (c) => [
+      { line: `v 176 480 176 112 0 0 40 ${c.vin} 0 0 0.5`, posts: [[176, 480], [176, 112]],
+        attach: full ? { '176,480': ['Cout', '2'] } : { '176,112': ['CsHi', '1'], '176,480': ['CsLo', '2'] } },
+      { line: 'g 176 480 176 496 0', posts: [[176, 480]] },
+      { line: `r 1312 176 1312 480 0 ${c.rload}`, tag: 'Rload', posts: [[1312, 176], [1312, 480]], attach: { '1312,176': ['Cout', '1'], '1312,480': ['Cout', '2'] } },
+      { line: '207 1248 176 1296 176 0 vout', posts: [[1248, 176]] },
+    ],
+    drive: {
+      fets: full ? ['Q1', 'Q2', 'Q3', 'Q4'] : ['Q1', 'Q2'],
+      sources: (c) => [
+        { line: legSrc(c, 448, 272, 112, 0.5), posts: [[448, 272], [448, 112]], tag: 'Q1' },
+        ...(full ? [{ line: legSrc(c, 400, 304, 112, 0.5, Math.PI), posts: [[400, 304], [400, 112]], tag: 'Q3' }] : []),
+      ],
+    },
+    scopeSets: {
+      overview:  [['Q1', 'voltage'], ['Cp', 'voltage'], ['Rload', 'voltage']],
+      magnetic:  [['Lr', 'both'], ['Cs', 'voltage'], ['Rload', 'voltage']],
+      switch:    [['Q1', 'both'], ['Lr', 'current'], ['Rload', 'voltage']],
+      rectifier: [['Dr1', 'both'], ['Dr3', 'both'], ['Rload', 'voltage']],
+      output:    [['Cp', 'voltage'], ['Rload', 'both']],
+    },
+  }
+}
+
 const LAYOUTS = {
   flyback: {
     place: {
@@ -483,6 +560,7 @@ const LAYOUTS = {
   active_clamp_flyback: (tas) => acfFlybackVisual(acfClampSide(tas)),
   half_bridge: hardBridgeVisual(false),
   full_bridge: hardBridgeVisual(true),
+  lcc: (tas) => lccVisual(tas),
 
   // Non-isolated buck: high-side switch (Vin→sw), freewheel diode, LC filter. The high-side gate drive
   // is a FLOATING gate-source PWM (its reference wires to the switching node) so Vgs toggles regardless

@@ -129,6 +129,12 @@ freewheels; `analytical_hard_switched_bridge` is their exact piecewise-linear st
 full-bridge or current-doubler rectifier. `test_hard_switched_bridge` runs all six bridge × rectifier pairs in
 ngspice: Vout within 0.7 %, primary current within 2 % of the solver mid power interval, zero in the dead time,
 peak within 1.5 %, and the half bridge's midpoint at Vin/2 within 0.03 %.
+The **LCC** (series Lr–Cs, parallel Cp across the transformer — on the secondary by default, where an HV winding's
+capacitance is the parallel capacitor — capacitive output filter) is solved on its exact steady state (`solve_lcc`:
+piecewise-linear tank with the rectifier clamping Cp, half-wave antisymmetric, Newton on the period map), since FHA
+is poor for a capacitive-filter LCC. The turns ratio comes from the exact gain at the spec frequency, the frequency
+range across the input range from the same solver, and every corner is checked inductive (ZVS). `test_lcc` runs
+both Cp sides × both bridges in ngspice: 400 V → 2 kV within 0.85 %, tank-current NRMSE 0.007–0.011.
 
 Current agreement: **boost** Vout/Iout 0.2 %, η 0.2 %; **flyback** Vout/Iout 1.9 %, η 2.5 %; **PSFB**
 Vout/Iout ~0.9 % (efficiency directional — Kirchhoff's ideal switches beat MKF's lossy rectifier diodes).

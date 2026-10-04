@@ -24,6 +24,7 @@
 #include "TwoSwitchFlyback.hpp"
 #include "ActiveClampFlyback.hpp"
 #include "HardSwitchedBridge.hpp"
+#include "Lcc.hpp"
 #include "Zeta.hpp"
 #include "PushPull.hpp"
 #include "Psfb.hpp"
@@ -113,6 +114,9 @@ const std::map<std::string, json>& standalone_inputs() {
         // (synthetic; the high bus is what the Vin-clamped switches are for).
         // 200 V -> 20 V, 3.25 A, 150 kHz: a USB-PD-class adapter on a rectified-mains bus (synthetic).
         // 400 V (a PFC bus) -> 24 V, 10 A, 100 kHz half bridge and -> 48 V, 20 A, 100 kHz full bridge (synthetic).
+        // 400 V -> 2 kV, 0.1 A, 100 kHz: an LCC on a PFC bus feeding an HV supply (synthetic).
+        {"lcc", {{"inputVoltage", 400.0}, {"outputVoltage", 2000.0}, {"outputCurrent", 0.1},
+                 {"outputPower", 200.0}, {"switchingFrequency", 100000.0}, {"currentRippleRatio", 0.3}}},
         {"half_bridge", {{"inputVoltage", 400.0}, {"outputVoltage", 24.0}, {"outputCurrent", 10.0},
                          {"outputPower", 240.0}, {"switchingFrequency", 100000.0}, {"currentRippleRatio", 0.3}}},
         {"full_bridge", {{"inputVoltage", 400.0}, {"outputVoltage", 48.0}, {"outputCurrent", 20.0},
@@ -221,6 +225,7 @@ const std::vector<Topology>& topologies() {
             const auto d = Kirchhoff::design_active_clamp_flyback(di);
             return Built{Kirchhoff::build_active_clamp_flyback_tas(d), d.flyback.loadResistance,
                          d.flyback.outputCapacitance, d.flyback.inputVoltage}; }},
+        {"lcc", [](const json& di){ return build_topology(Kirchhoff::design_lcc, Kirchhoff::build_lcc_tas, di); }},
         {"half_bridge", [](const json& di){ return build_topology(Kirchhoff::design_half_bridge, Kirchhoff::build_half_bridge_tas, di); }},
         {"full_bridge", [](const json& di){ return build_topology(Kirchhoff::design_full_bridge, Kirchhoff::build_full_bridge_tas, di); }},
         {"forward", [](const json& di){ return build_topology(Kirchhoff::design_forward, Kirchhoff::build_forward_tas, di); }},
@@ -336,6 +341,8 @@ const std::vector<PtpPoint>& ptpPoints() {
         // active-clamp flyback — SYNTHETIC points (no MKF model): USB-PD 20 V on a low and a high bus, 12 V aux.
         {"active_clamp_flyback", 120.0, 20.0, 3.25, 150e3}, {"active_clamp_flyback", 300.0, 20.0, 3.25, 150e3},
         {"active_clamp_flyback", 200.0, 12.0, 3.0, 100e3},
+        // LCC — SYNTHETIC points (no MKF model): HV supplies from a PFC bus and a 48 V rail.
+        {"lcc", 400.0, 2000.0, 0.1, 100e3}, {"lcc", 400.0, 600.0, 0.5, 150e3}, {"lcc", 48.0, 400.0, 0.25, 200e3},
         // hard-switched half / full bridge — SYNTHETIC points (no MKF model): 48 V telecom, 400 V PFC bus, 12 V aux.
         {"half_bridge", 48.0, 12.0, 8.0, 200e3}, {"half_bridge", 400.0, 12.0, 20.0, 100e3},
         {"half_bridge", 400.0, 48.0, 5.0, 150e3},
@@ -626,6 +633,7 @@ TEST_CASE("Two-switch flyback meets requirements", "[requirements][two_switch_fl
 TEST_CASE("Active-clamp flyback meets requirements", "[requirements][active_clamp_flyback]") { check_meets_requirements("active_clamp_flyback"); }
 TEST_CASE("Half bridge meets requirements", "[requirements][half_bridge]") { check_meets_requirements("half_bridge"); }
 TEST_CASE("Full bridge meets requirements", "[requirements][full_bridge]") { check_meets_requirements("full_bridge"); }
+TEST_CASE("LCC meets requirements", "[requirements][lcc]") { check_meets_requirements("lcc"); }
 TEST_CASE("Forward meets requirements", "[requirements][forward]")                 { check_meets_requirements("forward"); }
 TEST_CASE("Two-switch forward meets requirements", "[requirements][tsf]")          { check_meets_requirements("two_switch_forward"); }
 TEST_CASE("SEPIC meets requirements", "[requirements][sepic]")                     { check_meets_requirements("sepic"); }
@@ -791,6 +799,7 @@ TEST_CASE("Two-switch flyback points deliver spec", "[requirements][ptp][two_swi
 TEST_CASE("Active-clamp flyback points deliver spec", "[requirements][ptp][active_clamp_flyback]") { check_topo_points("active_clamp_flyback"); }
 TEST_CASE("Half bridge points deliver spec", "[requirements][ptp][half_bridge]") { check_topo_points("half_bridge"); }
 TEST_CASE("Full bridge points deliver spec", "[requirements][ptp][full_bridge]") { check_topo_points("full_bridge"); }
+TEST_CASE("LCC points deliver spec", "[requirements][ptp][lcc]") { check_topo_points("lcc"); }
 TEST_CASE("SEPIC PtP reference designs deliver spec", "[requirements][ptp][sepic]")         { check_topo_points("sepic"); }
 TEST_CASE("Zeta PtP reference designs deliver spec", "[requirements][ptp][zeta]")           { check_topo_points("zeta"); }
 TEST_CASE("Push-pull PtP reference designs deliver spec", "[requirements][ptp][pushpull]")  { check_topo_points("push_pull"); }

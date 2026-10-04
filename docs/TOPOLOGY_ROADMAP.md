@@ -5,7 +5,7 @@ design math + TAS assembly + runnable SPICE deck, exportable and usable independ
 magnetics design. (Historically these models lived in OpenMagnetics/MKF; they are migrating
 here as MKF returns to being a pure magnetics library — see `docs/MKF_MIGRATION.md`.)
 
-## Implemented today (29 topologies)
+## Implemented today (30 topologies)
 
 | Family | Topologies | Verification |
 |---|---|---|
@@ -17,6 +17,7 @@ here as MKF returns to being a pure magnetics library — see `docs/MKF_MIGRATIO
 | Isolated bridge / phase-shift | PSFB, PSHB (3-level NPC), DAB (bidirectional) | MKF-equivalence |
 | Isolated bridge (hard-switched) | Half bridge (split caps), Full bridge — symmetric PWM, CT/FB/CD rectifier | standalone (exact piecewise-linear solver vs ngspice) |
 | Resonant | LLC, SRC, CLLC, CLLLC | LLC/SRC/CLLC vs MKF; CLLLC standalone |
+| Resonant | LCC (series Lr–Cs, parallel Cp on the secondary or the primary; capacitive output; half or full bridge) | standalone (exact steady-state solver vs ngspice) |
 | AC-input PFC | PFC (1-φ boost), Vienna (3-φ 3-level) | standalone |
 
 21 are gated by the MKF-equivalence suite; CLLLC/PFC/Vienna diverge from MKF by design
@@ -38,9 +39,6 @@ topology MKF never modelled (the inverting buck-boost onwards).
 
 ## Remaining gaps — prioritized (each tracked in ABT)
 
-### Tier 2 — high-value modern variants
-- **LCC resonant** (ABT #1438) — series-parallel tank, HV outputs where winding capacitance is Cp.
-
 ### Tier 3 — multilevel
 - **Flying-capacitor multilevel (FCML) buck/boost** (ABT #1439).
 
@@ -56,4 +54,4 @@ topology MKF never modelled (the inverting buck-boost onwards).
 
 ### Order being worked (2026-10-03)
 Interleaved buck/boost → two-switch flyback → active-clamp flyback → hard-switched half-bridge →
-hard-switched full-bridge (all done) → LCC → FCML → inverters (in scope, decided 2026-10-03). Tracked per ABT ticket.
+hard-switched full-bridge → LCC (all done) → FCML → inverters (in scope, decided 2026-10-03). Tracked per ABT ticket.

@@ -50,7 +50,7 @@ test('a topology without a visual layout reports unsupported (no garbage export)
 
 // Every isolated/bridge topology that grew a visual layout must still produce a CIAS-consistent export
 // (the exporter throws on any net drift, so a well-formed url IS the proof) with a labeled output node.
-for (const id of ['fsbb', 'ahb', 'acf', 'psfb', 'pshb', 'llc', 'src', 'cllc', 'clllc', 'dab', 'forward', 'push_pull', 'weinberg']) {
+for (const id of ['fsbb', 'ahb', 'acf', 'psfb', 'pshb', 'llc', 'src', 'cllc', 'clllc', 'dab', 'forward', 'push_pull', 'weinberg', 'lcc']) {
   test(`${id} solve produces a CIAS-consistent falstad export`, async ({ page }) => {
     await boot(page)
     await selectTopology(page, id)

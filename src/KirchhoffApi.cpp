@@ -54,7 +54,7 @@ const std::unordered_map<std::string, TasBuilder>& tas_builders() {
         KH_ROW(isolated_buck), KH_ROW(isolated_buck_boost), KH_ROW(weinberg), KH_ROW(pfc),
         KH_ROW(vienna), KH_ROW(pshb), KH_ROW(inverting_buck_boost),
         KH_ROW(two_switch_flyback), KH_ROW(active_clamp_flyback),
-        KH_ROW(half_bridge), KH_ROW(full_bridge),
+        KH_ROW(half_bridge), KH_ROW(full_bridge), KH_ROW(lcc),
 #undef KH_ROW
     };
     return table;

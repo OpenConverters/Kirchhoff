@@ -71,7 +71,7 @@ _TOPO_CONTROL = {
     **{t: "ppDuty" for t in ("half_bridge", "full_bridge")},   # symmetric PWM: every switch at D < 0.5
     **{t: "phase" for t in ("psfb", "dab")},
     "pshb": "pshbDuty",   # 3-level NPC: control the outer-pair width, not a leg phase (abt #66)
-    **{t: "frequency" for t in ("llc", "src", "cllc", "clllc")},
+    **{t: "frequency" for t in ("llc", "src", "cllc", "clllc", "lcc")},
 }
 
 # AC-input topologies whose closed-loop controller is rendered INTO the deck (a designed PI voltage loop +
@@ -357,13 +357,15 @@ def _parse_deck(deck):
         m = re.match(r"^Bload\d*\s+(\S+)\s+(\S+)\b.*?=\s*([-\d.eE+]+)\s*/", ln)   # constant-power, \d*: suffix
         if m:
             loads.append((resolve(m.group(1), sub), resolve(m.group(2), sub), "P", float(m.group(3))))
-        m = re.match(r"^(C\w+)\s+\S+\s+\S+\s+([-\d.eE+]+)", ln)
-        # cmax is the OUTPUT bulk cap (sets the settle RC). Exclude model-internal
-        # caps by name: the saturating-inductor flux integrator (Cflux_*) is a 1 F
-        # numerical integrator on an internal flux node, NOT a power capacitor —
-        # counting it makes rc (and the .tran settle) explode by orders of magnitude.
+        m = re.match(r"^(C\w+)\s+(\S+)\s+(\S+)\s+([-\d.eE+]+)", ln)
+        # cmax is the OUTPUT bulk cap (sets the settle RC with the load): the largest capacitor with a terminal on an
+        # output node, found the same way the loads are. Any other cap is not in that RC — a bus split capacitor
+        # (µF) times an HV load (20 kΩ) asked an LCC deck for a 0.2 s transient at 200 points a period, and the
+        # pytest grew to 28 GB. Model-internal caps (the saturating-inductor flux integrator Cflux_*, a 1 F
+        # numerical integrator) are excluded by name as before.
         if m and not re.search(r"flux", m.group(1), re.I):
-            cmax = max(cmax, float(m.group(2)))
+            if any(re.search("out", resolve(n, sub), re.I) for n in (m.group(2), m.group(3))):
+                cmax = max(cmax, float(m.group(4)))
     return vin_name, vin, loads, cmax
 
 
