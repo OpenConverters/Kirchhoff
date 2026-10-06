@@ -77,7 +77,7 @@ inline double cmc_excitation_frequency(const CmcDesign& d) {
 // desiredInductance?, designFrequency?). Throws on missing required fields, numberOfWindings ∉
 // [2,4], non-positive operating current / line frequency / impedance points, a partial or
 // non-positive noise spec (parasiticCap_pF and dvdt_V_ns must come together, both > 0 — a half spec
-// would silently drop the intended I_cm = C·dV/dt excitation), and when NO spec mode yields an
+// would silently drop the intended C_par/dV/dt CM excitation), and when NO spec mode yields an
 // inductance (no impedance point and no desiredInductance).
 CmcDesign design_cmc(const nlohmann::json& spec);
 
@@ -90,7 +90,7 @@ MAS::Inputs build_cmc_inputs(const CmcDesign& d);
 // Ported from MKF simulate_realistic_cmc + simulate_and_extract_waveforms (CmcSim.cpp). Both return
 // {"success": false, "error": ...} when the build has no libngspice (callers branch on it).
 //
-// simulate_cmc_ideal_waveforms: per-winding CM sine (I_cm = C·dV/dt) → {success, inputs:{operatingPoints:
+// simulate_cmc_ideal_waveforms: per-winding CM sine (share of cmc_common_mode_current_peak) → {success, inputs:{operatingPoints:
 // [<simulated OperatingPoint>]}, converterWaveforms:[], cmcDiagnostics:{computedInductance}}.
 // simulate_cmc_lisn_waveforms: CISPR LISN test over the impedance-spec frequencies → {success,
 // converterWaveforms:[{frequency, time, inputVoltage, windingCurrents, lisnVoltage,

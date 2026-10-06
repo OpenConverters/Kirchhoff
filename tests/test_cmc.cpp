@@ -192,15 +192,17 @@ TEST_CASE("build_cmc_inputs: advanced mode pins L nominal and excites at designF
     // Excitation frequency follows designFrequency, not the noise-synthesized 150 kHz point.
     CHECK(in.get_operating_points()[0].get_excitations_per_winding()[0].get_frequency()
           == Approx(250e3));
-    // V = L·ω·(Σ I_cm) = n·L·ω·I_cm: the pinned L shapes the voltage amplitude (I_cm = C·dV/dt = 0.5 A at
-    // 230 V per winding). MAS convention (2026-09-24): v_k = L·d(i_m)/dt with i_m = Σ_k i_k for the fully
-    // coupled CM windings — n times the former per-winding L·ω·I_cm.
+    // V = L·ω·(Σ I_cm): the pinned L shapes the voltage amplitude. MAS convention (2026-09-24): v_k =
+    // L·d(i_m)/dt with i_m = Σ_k i_k for the fully coupled CM windings. Σ I_cm is the switch-node displacement
+    // current at 250 kHz (100 pF, 5 V/ns, 230 V: 4·f·C·√2·230·sinc ≈ 32.5 mA), not C·dV/dt = 0.5 A.
     auto vol = in.get_operating_points()[0].get_excitations_per_winding()[0].get_voltage();
     REQUIRE(vol.has_value());
     REQUIRE(vol->get_processed().has_value());
-    const double iCm = 100.0 * 5.0 * 1e-3;  // C·dV/dt in A, 230 V scaling is a no-op
+    const double vBus = std::sqrt(2.0) * 230.0, x = M_PI * 250e3 * vBus / 5e9;
+    const double iCmTotal = 2.0 * M_PI * 250e3 * 100e-12 * (2.0 / M_PI) * vBus * std::sin(x) / x;
+    CHECK(iCmTotal == Approx(0.0325).epsilon(0.01));
     CHECK(vol->get_processed()->get_peak().value()
-          == Approx(d.numberOfWindings * 2e-3 * 2.0 * M_PI * 250e3 * iCm).epsilon(0.02));
+          == Approx(2e-3 * 2.0 * M_PI * 250e3 * iCmTotal).epsilon(0.02));
 }
 
 TEST_CASE("api::design_cmc returns {inputs, cmcDiagnostics} and stays schema-clean",

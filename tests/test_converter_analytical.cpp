@@ -1491,19 +1491,51 @@ TEST_CASE("analytical_common_mode_choke: 2 windings, DM line/return levels cance
     CHECK(*processed_voltage(op, 0).get_peak() == Catch::Approx(vCmPeak).margin(0.2));
 }
 
-TEST_CASE("analytical_common_mode_choke honors winding count and C·dV/dt CM current",
+TEST_CASE("analytical_common_mode_choke honors winding count and the switch-node CM current",
           "[analytical][component][cmc]") {
     using Kirchhoff::analytical::analytical_common_mode_choke;
-    // 4 windings; explicit parasitics 100 pF × 10 V/ns → I_cm = 100·10·1e-3 = 1.0 A (× 230/230 = 1.0).
+    using Kirchhoff::analytical::cmc_common_mode_current_peak;
+    // 4 windings; noise source 100 pF, 10 V/ns at 230 V mains, excited at 150 kHz. The TOTAL CM current is
+    // the switch-node displacement current at 150 kHz: V_bus = √2·230 = 325.3 V, t_r = V_bus/(10 V/ns) =
+    // 32.5 ns, fundamental (2/π)·V_bus·sinc(π·f·t_r) = 207.1 V, I = 2π·f·C·V_1 = 19.5 mA — NOT C·dV/dt = 1 A
+    // (the ns-long edge current, formerly applied as a continuous sinusoid). It splits over the 4 windings.
     MAS::OperatingPoint op = analytical_common_mode_choke(1e-3, 5, 230, 150000, 4, 100.0, 10.0);
     REQUIRE(op.get_excitations_per_winding().size() == 4);   // Phase A/B/C + Neutral
-    CHECK(*processed_current(op, 0).get_peak_to_peak() == Catch::Approx(2.0).margin(0.05));   // 2·I_cm = 2.0
+    const double vBus = std::sqrt(2.0) * 230.0, tr = vBus / 10e9, x = M_PI * 150000 * tr;
+    const double iTotal = 2.0 * M_PI * 150000 * 100e-12 * (2.0 / M_PI) * vBus * std::sin(x) / x;
+    CHECK(iTotal == Catch::Approx(0.01951).epsilon(0.001));
+    CHECK(cmc_common_mode_current_peak(100.0, 10.0, 230.0, 150000) == Catch::Approx(iTotal).epsilon(1e-9));
+    for (size_t w = 0; w < 4; ++w)
+        CHECK(*processed_current(op, w).get_peak_to_peak() == Catch::Approx(2.0 * iTotal / 4).epsilon(0.02));
+    // v_k = L·d(Σ i)/dt = L·ω·I_total on every winding (here 1 mH·2π·150 kHz·19.5 mA = 18.4 V).
+    CHECK(*processed_voltage(op, 0).get_peak() == Catch::Approx(1e-3 * 2.0 * M_PI * 150000 * iTotal).epsilon(0.02));
     // DM snapshot at phase A's peak (MAS convention, 2026-09-24): A = +5, B = C = −2.5, balanced neutral 0 —
     // Σ = 0 (the DM flux cancels). Was +5 A on every winding, incl. the neutral.
     CHECK(*processed_current(op, 0).get_average() == Catch::Approx(5.0).margin(0.05));
     CHECK(*processed_current(op, 1).get_average() == Catch::Approx(-2.5).margin(0.05));
     CHECK(*processed_current(op, 2).get_average() == Catch::Approx(-2.5).margin(0.05));
     CHECK(*processed_current(op, 3).get_average() == Catch::Approx(0.0).margin(0.05));
+}
+
+TEST_CASE("cmc_common_mode_current_peak: square-wave envelope below the edge corner, sinc roll-off above",
+          "[analytical][component][cmc]") {
+    using Kirchhoff::analytical::cmc_common_mode_current_peak;
+    // Below the edge corner (π·f·t_r ≪ 1) dV/dt drops out: I = 4·f·C·V_bus, linear in f, C and V_mains.
+    const double vBus = std::sqrt(2.0) * 230.0;
+    CHECK(cmc_common_mode_current_peak(10.0, 50.0, 230.0, 150e3) == Catch::Approx(4 * 150e3 * 10e-12 * vBus).epsilon(1e-4));
+    CHECK(cmc_common_mode_current_peak(10.0, 5000.0, 230.0, 150e3)
+          == Catch::Approx(cmc_common_mode_current_peak(10.0, 50.0, 230.0, 150e3)).epsilon(1e-4));
+    CHECK(cmc_common_mode_current_peak(10.0, 50.0, 115.0, 150e3)
+          == Catch::Approx(0.5 * cmc_common_mode_current_peak(10.0, 50.0, 230.0, 150e3)).epsilon(1e-4));
+    // Far above the corner (slow 1 V/ns edges: t_r = 325 ns, at 10 MHz π·f·t_r ≈ 10.2) the edge limits it:
+    // |sinc| < 0.1 of the square-wave value.
+    CHECK(cmc_common_mode_current_peak(10.0, 1.0, 230.0, 10e6) < 0.1 * 4 * 10e6 * 10e-12 * vBus);
+    // Never above the edge current C·dV/dt it is derived from.
+    CHECK(cmc_common_mode_current_peak(10.0, 50.0, 230.0, 150e3) < 10e-12 * 50e9);
+    CHECK_THROWS(cmc_common_mode_current_peak(0.0, 50.0, 230.0, 150e3));
+    CHECK_THROWS(cmc_common_mode_current_peak(10.0, 0.0, 230.0, 150e3));
+    CHECK_THROWS(cmc_common_mode_current_peak(10.0, 50.0, 0.0, 150e3));
+    CHECK_THROWS(cmc_common_mode_current_peak(10.0, 50.0, 230.0, 0.0));
 }
 
 TEST_CASE("analytical_common_mode_choke rejects bad winding count / non-positive inputs",

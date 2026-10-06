@@ -1,4 +1,5 @@
 #include "Cmc.hpp"
+#include "ConverterAnalytical.hpp"  // cmc_common_mode_current_peak — the CM current, shared with the analytical OP
 #include "NgspiceRunner.hpp"          // run_ngspice_in_process + ngspice_in_process_available
 #include "SimWindow.hpp"             // last_period (shared with the DMC sim)
 #include "processors/WaveformProcessor.h"  // the shared DSP (MKF), reused — not re-implemented
@@ -28,12 +29,6 @@ namespace {
 
 const char* kCmcOptions = ".options reltol=1e-3 abstol=1e-9 vntol=1e-6\n";
 
-// V_mains → CM excitation scaling, calibrated so 230 V is a no-op (mirrors ConverterAnalytical's
-// cmc_excitation_scaling; dV/dt ∝ V_bus ≈ √2·V_mains → I_cm scales linearly with the mains voltage).
-double cmc_excitation_scaling(double operatingVoltage) {
-    return operatingVoltage <= 0.0 ? 0.0 : operatingVoltage / 230.0;
-}
-
 // Canonicalize an ngspice vector name for matching (lower-case; strip v()/i() wrapper, plot prefix, and
 // #branch suffix) — same rule NgspiceRunner uses internally, replicated here for the by-name lookup.
 std::string canon(std::string name) {
@@ -56,7 +51,7 @@ std::vector<double> vec_of(const NgspiceRunResult& r, const std::string& name) {
 }
 
 // ── The "realistic"/ideal per-winding CM excitation deck (MKF generate_realistic_cmc_circuit) ─────────
-// Each winding is driven by its own current source: DC line bias + sinusoidal CM ripple I_cm = C·dV/dt.
+// Each winding is driven by its own current source: DC line bias + its share of the sinusoidal CM current.
 // The windings are UNCOUPLED (self-inductance L each) so the deck matches the closed-form analytical
 // model (V = L·ω·I with no (1+k) factor). tstart cuts the transient to the steady-state window.
 std::string ideal_cmc_deck(int numWindings, double inductance, double operatingCurrent,
@@ -64,8 +59,11 @@ std::string ideal_cmc_deck(int numWindings, double inductance, double operatingC
                            double dvdtVPerNs, int numberOfPeriods, int numberOfSteadyStatePeriods) {
     if (numberOfPeriods < 1) numberOfPeriods = 1;
     if (numberOfSteadyStatePeriods < 0) numberOfSteadyStatePeriods = 0;
-    const double cmNoiseCurrent = (parasiticCapPf * 1e-12) * (dvdtVPerNs * 1e9)
-                                * cmc_excitation_scaling(operatingVoltage);
+    // Per-winding share of the total CM current at the excitation frequency (the same amplitude the
+    // analytical operating point uses), not the ns-long edge current C·dV/dt.
+    const double cmNoiseCurrent = analytical::cmc_common_mode_current_peak(parasiticCapPf, dvdtVPerNs,
+                                                                           operatingVoltage, excitationFreq)
+                                / numWindings;
     const int totalPeriods = numberOfSteadyStatePeriods + numberOfPeriods;
     const double simTime = double(totalPeriods) / excitationFreq;
     const double tStart = double(numberOfSteadyStatePeriods) / excitationFreq;
@@ -224,7 +222,7 @@ json simulate_cmc_ideal_waveforms(const CmcDesign& d, double inductance, double 
 
 // ═══ generate_cmc_ngspice_netlist — the deck the wizard's "Simulated" button runs (simulate_cmc_ideal_
 // waveforms), for the SPICE button. Same inductance rule as the design (the pinned desiredInductance in
-// advanced mode, else the synthesized CM inductance), same excitation frequency, same C·dV/dt CM source.
+// advanced mode, else the synthesized CM inductance), same excitation frequency, same CM source (cmc_common_mode_current_peak from C_par, dV/dt).
 // The noise spec is REQUIRED: without it the per-winding CM source has no amplitude and the deck would
 // show a DC-only circuit. ═══════════════════════════════════════════════════════════════════════════════
 
@@ -232,7 +230,7 @@ std::string generate_cmc_ngspice_netlist(const CmcDesign& d, int numberOfPeriods
     if (!(d.parasiticCapPf > 0) || !(d.dvdtVPerNs > 0))
         throw std::invalid_argument(
             "generate_cmc_ngspice_circuit: the CM excitation needs parasiticCap_pF and dvdt_V_ns (> 0) "
-            "— they set the per-winding CM source amplitude I_cm = C·dV/dt");
+            "— they set the CM source amplitude (cmc_common_mode_current_peak)");
     const double inductance = d.desiredInductance ? *d.desiredInductance : d.computedInductance;
     if (!(inductance > 0))
         throw std::invalid_argument("generate_cmc_ngspice_circuit: the design has no positive CM inductance");

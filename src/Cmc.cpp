@@ -87,7 +87,8 @@ CmcDesign design_cmc(const json& spec) {
                 cmc_insertion_loss_to_impedance(item.at("insertionLoss").get<double>(), d.lineImpedance)));
 
     // Noise-estimation params. Two distinct effects (MKF CommonModeChoke.cpp:158-195):
-    //   (A) they set the physical CM-excitation amplitude I_cm = C·dV/dt for the operating point,
+    //   (A) they set the physical CM-excitation amplitude for the operating point (the switch-node
+    //       displacement current at the excitation frequency, analytical::cmc_common_mode_current_peak),
     //       in EVERY spec mode;
     //   (B) only when the user gave no explicit impedance/insertion-loss spec, they synthesise the
     //       required-impedance point from the noise level vs the regulatory limit at 150 kHz.

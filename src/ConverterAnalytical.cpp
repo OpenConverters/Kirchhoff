@@ -3548,6 +3548,20 @@ static double cmc_excitation_scaling(double operatingVoltage) {
     return operatingVoltage / CMC_VREF_VMAINS;
 }
 
+double cmc_common_mode_current_peak(double parasiticCapacitancePf, double dvdtVPerNs,
+                                    double operatingVoltage, double frequency) {
+    if (!(parasiticCapacitancePf > 0) || !(dvdtVPerNs > 0) || !(operatingVoltage > 0) || !(frequency > 0))
+        throw std::invalid_argument("cmc_common_mode_current_peak: parasiticCapacitancePf, dvdtVPerNs, "
+                                    "operatingVoltage and frequency must all be > 0");
+    const double capacitance = parasiticCapacitancePf * 1e-12;      // F
+    const double busVoltage = std::sqrt(2.0) * operatingVoltage;    // rectified mains peak, V
+    const double riseTime = busVoltage / (dvdtVPerNs * 1e9);        // s
+    const double x = M_PI * frequency * riseTime;
+    const double sinc = std::abs(std::sin(x) / x);
+    const double switchNodeFundamental = (2.0 / M_PI) * busVoltage * sinc;
+    return 2.0 * M_PI * frequency * capacitance * switchNodeFundamental;
+}
+
 // Ported from MKF converter_models/CommonModeChoke.cpp:327 (the scalar-arg
 // process_operating_points(turnsRatios, magnetizingInductance)); the all-1:1 turnsRatios arg shapes no
 // excitation and is dropped.
@@ -3577,30 +3591,30 @@ MAS::OperatingPoint analytical_common_mode_choke(double magnetizingInductance,
 
     const double excFreq = excitationFrequency;
 
-    // CM current amplitude: I_cm = C·dV/dt when both are supplied, else a representative
-    // fallback, then scaled by the mains voltage (see cmc_excitation_scaling).
+    // CM current per winding. With the noise source supplied (C_par and dV/dt), the TOTAL CM current at the
+    // excitation frequency is the switch-node displacement current cmc_common_mode_current_peak (see the
+    // header: the frequency-domain component, not the ns-long edge current C·dV/dt, which as a continuous
+    // sinusoid put 500 V across each winding of a 500 Ω choke and drove its core to ~0.7 T). That one CM
+    // current returns through ALL the line conductors, so it divides equally among the n windings.
     //
-    // The fallback is the *residual* CM current flowing through the choke in normal
-    // operation — what the core actually sees after the input Y-caps shunt most of the
-    // switch-node injection — NOT the raw C·dV/dt source current. A raw-injection value
-    // (~100 mA ≈ 20 pF × 5 V/ns) through a high-permeability nanocrystalline CM core
-    // (µ_r ~1e5) drives B far past saturation (e.g. B_peak ≈ 2.7 T on a small WE
-    // nanocrystalline choke, B_sat ≈ 1.2 T), i.e. false saturation. 10 mA is a moderate
-    // post-Y-cap residual that keeps a typical mains CMC in its linear region; callers
-    // who want the raw-injection stress case supply parasiticCapacitancePf + dvdtVPerNs.
-    double iCmPeak;
+    // Without a noise source, each winding carries the *residual* CM current flowing through the choke in
+    // normal operation — what the core sees after the input Y-caps shunt most of the switch-node injection:
+    // 10 mA per winding, scaled by the mains voltage (dV/dt ∝ V_bus). (fd8d56f lowered it from 100 mA raw
+    // injection, which false-saturated high-permeability nanocrystalline CM cores.)
+    double iCmTotalPeak;
     if (parasiticCapacitancePf > 0.0 && dvdtVPerNs > 0.0)
-        iCmPeak = parasiticCapacitancePf * dvdtVPerNs * 1e-3;
+        iCmTotalPeak = cmc_common_mode_current_peak(parasiticCapacitancePf, dvdtVPerNs, operatingVoltage, excFreq);
     else
-        iCmPeak = 0.01;
-    iCmPeak *= cmc_excitation_scaling(operatingVoltage);
+        iCmTotalPeak = numberOfWindings * 0.01 * cmc_excitation_scaling(operatingVoltage);
+    const double iCmPeak = iCmTotalPeak / numberOfWindings;
 
     // MAS excitation convention (docs/inputs.md "Sign convention of the excitations"): every CMC winding is on
     // the primary side (PASSIVE current, positive into the dotted terminal) and the windings are dotted so the
     // COMMON-mode currents add: i_m = Σ_k i_k. The winding voltage is then v_k = L·d(Σ i)/dt with L the
-    // magnetizing (per-winding, fully coupled) inductance — n·L·ω·I_cm for n windings each carrying I_cm.
+    // magnetizing (per-winding, fully coupled) inductance: L·ω·I_cm,total = |Z_cm|·I_cm,total — the CM voltage
+    // drop on the choke's own CM impedance, the same on every winding.
     const double omega   = 2.0 * M_PI * excFreq;
-    const double vCmPeak = numberOfWindings * magnetizingInductance * omega * iCmPeak;
+    const double vCmPeak = magnetizingInductance * omega * iCmTotalPeak;
     // Differential-mode (line) current over the short excitation period: the instantaneous line current, a DC
     // level per winding. Line and return flow in OPPOSITE directions through the dotted windings, so their DM
     // ampere-turns cancel in the core: 2 windings +I / −I; three-phase (snapshot at phase A's peak)

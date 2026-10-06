@@ -728,13 +728,28 @@ MAS::OperatingPoint analytical_differential_mode_choke(double magnetizingInducta
                                                        double peakCurrent = std::numeric_limits<double>::quiet_NaN(),
                                                        double ambientTemperature = 25.0);
 
+// The TOTAL common-mode current (peak, A) a switch node injects through its parasitic capacitance at
+// `frequency`: the frequency-domain CM current at the frequency the choke is excited at, NOT the
+// instantaneous edge current C·dV/dt. The switch node is a trapezoid swinging the rectified bus
+// V_bus = √2·operatingVoltage (operatingVoltage = mains rms) with edges of rise time t_r = V_bus/(dV/dt);
+// its component at `frequency` (taken as the switching fundamental, the worst case: for a switching
+// frequency f_sw ≤ f the harmonic envelope gives 4·C·V_bus·f_sw ≤ 4·C·V_bus·f) is
+//   V_1 = (2/π)·V_bus·|sinc(π·f·t_r)|,
+// and the displacement current it drives through C_par (whose reactance ≫ the choke + LISN path) is
+//   I_cm = 2π·f·C_par·V_1.
+// C·dV/dt (= 0.5 A for 10 pF × 50 V/ns) lasts only the few-ns edge; driving the choke with it as a
+// continuous sinusoid overstated the CM current ~250× (1.95 mA at 230 V / 150 kHz / 10 pF) and put
+// ~500 V across each winding of a 500 Ω choke. Throws on non-positive inputs (no fabricated defaults).
+double cmc_common_mode_current_peak(double parasiticCapacitancePf, double dvdtVPerNs,
+                                    double operatingVoltage, double frequency);
+
 // Common-mode filter choke. Pushes ONE excitation per winding (numberOfWindings ∈ [2,4]; names
 // Line/Neutral, Phase A/B/C, +Neutral). The core sees only the COMMON-MODE excitation: every winding gets
 // the SAME sinusoidal CM ripple current at `excitationFrequency` (the dominant impedance-spec frequency)
 // riding on a DC bias equal to the line `operatingCurrent`, and a CM voltage V = L·ω·I_cm leading the
-// current by 90° (ideal inductor). The CM ripple amplitude is I_cm = parasiticCapacitancePf·dvdtVPerNs·1e-3
-// (the C·dV/dt switch-node injection) when both are supplied, else a representative 0.1 A, then scaled by
-// operatingVoltage/230 V (dV/dt ∝ V_bus). `magnetizingInductance` is the CM inductance (the one Magnetic-
+// current by 90° (ideal inductor). When parasiticCapacitancePf and dvdtVPerNs are supplied, the TOTAL CM
+// current is cmc_common_mode_current_peak(...) and it divides equally among the windings; else each winding
+// carries the 10 mA post-Y-cap residual scaled by operatingVoltage/230 V. `magnetizingInductance` is the CM inductance (the one Magnetic-
 // derived value, taken as a scalar). Ported from MKF converter_models/CommonModeChoke.cpp:327 (the scalar-
 // arg process_operating_points(turnsRatios, magnetizingInductance)) + windingNames (:35) + cmExcitationScaling
 // (:90). The `Magnetic` overload (:428), ngspice paths and DesignRequirements are omitted (not excitation).
