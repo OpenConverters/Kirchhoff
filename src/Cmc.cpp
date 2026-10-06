@@ -17,16 +17,23 @@ double cmc_insertion_loss_to_impedance(double insertionLossDb, double lineImpeda
 
 double cmc_noise_params_to_impedance(double parasiticCapPf,
                                      double dvdtVPerNs,
+                                     double operatingVoltage,
                                      double lineImpedanceOhms,
                                      double safetyMarginDb,
                                      double testFrequencyHz,
                                      double limitDbuv) {
-    (void)testFrequencyHz;  // the impedance requirement is placed AT this frequency by the caller
-    // CM current injected by the switching transients: I_cm = C_parasitic × dV/dt.
-    const double icmA = (parasiticCapPf * 1e-12) * (dvdtVPerNs * 1e9);
+    if (!(lineImpedanceOhms > 0))
+        throw std::invalid_argument("cmc_noise_params_to_impedance: lineImpedanceOhms must be > 0");
+    // CM current at the test frequency: the switch-node displacement current through C_par — the SAME
+    // helper analytical_common_mode_choke excites the choke with, so the impedance requirement and the
+    // operating point agree on I_cm. (Was C·dV/dt: the ns-long edge current, 0.5 A for 10 pF × 50 V/ns,
+    // ~250× the 1.95 mA spectral component at 150 kHz — it oversized the required Z by ~48 dB.)
+    // Throws on non-positive C_par, dV/dt, operatingVoltage or testFrequencyHz.
+    const double icmA = analytical::cmc_common_mode_current_peak(parasiticCapPf, dvdtVPerNs,
+                                                                 operatingVoltage, testFrequencyHz);
     // CM noise voltage across half the LISN impedance, in dBµV (CISPR reference: 1 µV).
     const double vnoiseV = icmA * (lineImpedanceOhms / 2.0);
-    const double vnoiseDbuv = 20.0 * std::log10(std::max(vnoiseV, 1e-9) / 1e-6);
+    const double vnoiseDbuv = 20.0 * std::log10(vnoiseV / 1e-6);
     const double attenDb = std::max(0.0, vnoiseDbuv - limitDbuv + safetyMarginDb);
     return (lineImpedanceOhms / 2.0) * std::pow(10.0, attenDb / 20.0);
 }
@@ -97,7 +104,7 @@ CmcDesign design_cmc(const json& spec) {
     if (hasParasiticCap != hasDvdt)
         throw std::invalid_argument(
             "design_cmc: parasiticCap_pF and dvdt_V_ns must be supplied together — "
-            "I_cm = C·dV/dt needs both");
+            "the CM noise current (cmc_common_mode_current_peak) needs both");
     if (hasParasiticCap) {
         d.parasiticCapPf = spec.at("parasiticCap_pF").get<double>();
         d.dvdtVPerNs = spec.at("dvdt_V_ns").get<double>();
@@ -110,8 +117,8 @@ CmcDesign design_cmc(const json& spec) {
             const double testFrequencyHz = 150e3;  // EN 55032 / CISPR 32 conducted band start
             d.impedancePoints.push_back(impedance_point(
                 testFrequencyHz,
-                cmc_noise_params_to_impedance(d.parasiticCapPf, d.dvdtVPerNs, d.lineImpedance,
-                                              safetyMarginDb, testFrequencyHz, limitDbuv)));
+                cmc_noise_params_to_impedance(d.parasiticCapPf, d.dvdtVPerNs, d.operatingVoltage,
+                                              d.lineImpedance, safetyMarginDb, testFrequencyHz, limitDbuv)));
         }
     }
 

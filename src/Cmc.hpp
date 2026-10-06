@@ -11,7 +11,7 @@
 //   1. minimumImpedance[]    : direct {frequency, impedance} pairs
 //   2. targetInsertionLoss[] : {frequency, insertionLoss[dB]} pairs, Z_cm = Z_line·(10^(IL/20)−1)
 //   3. Estimate from noise   : parasiticCap_pF + dvdt_V_ns (+ safetyMargin_dB, regulatoryStandard)
-//                              → I_cm = C·dV/dt → noise dBµV over the limit → required Z at 150 kHz
+//                              → I_cm (switch-node CM current at 150 kHz) → noise dBµV over the limit → required Z at 150 kHz
 // Required CM inductance L = max over points of Z/(2πf); the advanced ("I know the design I want")
 // mode pins the inductance to `desiredInductance` and excites at `designFrequency` instead.
 //
@@ -30,14 +30,18 @@ namespace Kirchhoff {
 // ── CMC-specific spec conversions (public for unit tests, mirroring MKF's statics) ──────────────────
 // Single-stage CM low-pass: IL(dB) ≈ 20·log10(Z_cm/Z_LISN + 1) → Z_cm = Z_LISN·(10^(IL/20) − 1).
 double cmc_insertion_loss_to_impedance(double insertionLossDb, double lineImpedanceOhms);
-// Noise-estimation mode: I_cm = C·dV/dt, V_noise = I_cm·(Z_line/2) in dBµV, attenuation needed to
-// reach the regulatory limit (+ margin) → required CM impedance at the test frequency.
+// Noise-estimation mode: I_cm = analytical::cmc_common_mode_current_peak(C_par, dV/dt, V_mains, f_test)
+// (the switch-node CM current at the test frequency — the same one analytical_common_mode_choke
+// excites the choke with), V_noise = I_cm·(Z_line/2) in dBµV, attenuation needed to reach the
+// regulatory limit (+ margin) → required CM impedance at the test frequency. Throws on non-positive
+// C_par / dV/dt / operatingVoltage / testFrequencyHz / lineImpedanceOhms. No defaulted arguments.
 double cmc_noise_params_to_impedance(double parasiticCapPf,
                                      double dvdtVPerNs,
+                                     double operatingVoltage,
                                      double lineImpedanceOhms,
                                      double safetyMarginDb,
-                                     double testFrequencyHz = 150e3,
-                                     double limitDbuv = 66.0);
+                                     double testFrequencyHz,
+                                     double limitDbuv);
 // Quasi-peak conducted-emissions limit at 150 kHz (dBµV) for a named standard. THROWS on an
 // unrecognized name (no silent 66 dBµV fallback — the MKF behaviour this replaces hid typos).
 double cmc_emissions_limit_dbuv(const std::string& standardName);

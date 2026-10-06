@@ -7,11 +7,13 @@
 #include <catch2/catch_approx.hpp>
 
 #include "Cmc.hpp"
+#include "ConverterAnalytical.hpp"  // analytical::cmc_common_mode_current_peak
 #include "ChokeDesign.hpp"
 #include "KirchhoffApi.hpp"
 
 #include <cmath>
 #include <regex>
+#include <tuple>
 #include <string>
 
 using json = nlohmann::json;
@@ -41,12 +43,24 @@ TEST_CASE("cmc spec-conversion helpers match the MKF formulas", "[cmc][helpers]"
     // IL → Z: 20 dB over 50 Ω → 50·(10^1 − 1) = 450 Ω.
     CHECK(Kirchhoff::cmc_insertion_loss_to_impedance(20.0, 50.0) == Approx(450.0));
 
-    // Noise params: 100 pF · 5 V/ns = 0.5 A CM; V = 0.5·25 = 12.5 V = 141.94 dBµV;
-    // atten = 141.94 − 66 + 6 = 81.94 dB; Z = 25·10^(81.94/20).
-    const double icm = 100e-12 * 5e9;
+    // Noise params (100 pF, 5 V/ns, 230 V mains, 150 kHz): the CM current is the switch-node displacement
+    // current at 150 kHz, I = 2π·f·C·(2/π)·V_bus·|sinc(π·f·t_r)|, V_bus = √2·230 = 325.3 V, t_r = V_bus/(5 V/ns)
+    // = 65.1 ns → I = 19.5 mA; V = I·25 Ω = 0.488 V = 113.8 dBµV; atten = 113.8 − 66 + 6 = 53.8 dB;
+    // Z = 25·10^(53.8/20) ≈ 12.2 kΩ.
+    // Re-pinned 2026-10-06: OLD I = C·dV/dt = 0.5 A → 141.94 dBµV → atten 81.94 dB → Z ≈ 312.5 kΩ. C·dV/dt is
+    // the ns-long edge current, not the 150 kHz spectral component, and it disagreed 25.6× with the CM
+    // current the operating point (analytical_common_mode_choke) excites the same choke with.
+    const double vBus = std::sqrt(2.0) * 230.0, x = M_PI * 150e3 * vBus / 5e9;
+    const double icm = 2.0 * M_PI * 150e3 * 100e-12 * (2.0 / M_PI) * vBus * std::sin(x) / x;
+    CHECK(icm == Approx(0.01951).epsilon(0.001));
     const double vDbuv = 20.0 * std::log10(icm * 25.0 / 1e-6);
     const double expectedZ = 25.0 * std::pow(10.0, (vDbuv - 66.0 + 6.0) / 20.0);
-    CHECK(Kirchhoff::cmc_noise_params_to_impedance(100.0, 5.0, 50.0, 6.0) == Approx(expectedZ));
+    CHECK(expectedZ == Approx(12.2e3).epsilon(0.01));
+    CHECK(Kirchhoff::cmc_noise_params_to_impedance(100.0, 5.0, 230.0, 50.0, 6.0, 150e3, 66.0) == Approx(expectedZ));
+    // Below the limit no attenuation is needed: the requirement is the bare LISN half-impedance.
+    CHECK(Kirchhoff::cmc_noise_params_to_impedance(0.001, 5.0, 230.0, 50.0, 6.0, 150e3, 66.0) == Approx(25.0));
+    CHECK_THROWS(Kirchhoff::cmc_noise_params_to_impedance(100.0, 5.0, 0.0, 50.0, 6.0, 150e3, 66.0));
+    CHECK_THROWS(Kirchhoff::cmc_noise_params_to_impedance(100.0, 5.0, 230.0, 0.0, 6.0, 150e3, 66.0));
 
     CHECK(Kirchhoff::cmc_emissions_limit_dbuv("CISPR 32 Class B") == 66.0);
     CHECK(Kirchhoff::cmc_emissions_limit_dbuv("EN 55032 Class B") == 66.0);  // EN alias of CISPR 32
@@ -85,9 +99,48 @@ TEST_CASE("design_cmc: noise-estimation mode synthesizes the 150 kHz point", "[c
     Kirchhoff::CmcDesign d = Kirchhoff::design_cmc(wizard_spec());
     REQUIRE(d.impedancePoints.size() == 1);
     CHECK(d.impedancePoints[0].get_frequency() == Approx(150e3));
-    const double expectedZ = Kirchhoff::cmc_noise_params_to_impedance(100.0, 5.0, 50.0, 6.0);
+    // The spec's operatingVoltage (230 V) feeds the CM current. Re-pinned 2026-10-06: OLD call had no
+    // mains-voltage argument (I = C·dV/dt, voltage-independent) → 312.5 kΩ; NEW 12.2 kΩ (see the helper test).
+    const double expectedZ = Kirchhoff::cmc_noise_params_to_impedance(100.0, 5.0, 230.0, 50.0, 6.0, 150e3, 66.0);
     CHECK(d.impedancePoints[0].get_impedance().get_magnitude() == Approx(expectedZ));
+    CHECK(d.impedancePoints[0].get_impedance().get_magnitude() == Approx(12.2e3).epsilon(0.01));
     CHECK(d.dominantFrequency == Approx(150e3));
+}
+
+TEST_CASE("design_cmc: noise-estimation sizing and the operating point use the SAME CM current",
+          "[cmc][design][inputs]") {
+    // Both halves of the noise-estimation mode — the required impedance synthesized at 150 kHz and the
+    // operating point that excites the choke at that frequency — must agree on I_cm for the same C_par,
+    // dV/dt and mains voltage. Back the CM current out of the synthesized |Z| (Z = (Z_line/2)·10^(atten/20),
+    // atten = 20·log10(I·Z_line/2 / 1 µV) − limit + margin) and compare it with Σ of the per-winding CM
+    // amplitudes the operating point carries. Before 2026-10-06 the sizing used C·dV/dt (0.5 A for the web
+    // wizard's 10 pF / 50 V/ns) while the operating point used 1.95 mA — 256× apart.
+    for (const auto& [capPf, dvdt, windings] : {std::tuple{10.0, 50.0, 2}, std::tuple{100.0, 5.0, 3}}) {
+        json spec = wizard_spec();
+        spec["parasiticCap_pF"] = capPf;
+        spec["dvdt_V_ns"] = dvdt;
+        spec["numberOfWindings"] = windings;
+        Kirchhoff::CmcDesign d = Kirchhoff::design_cmc(spec);
+        REQUIRE(d.impedancePoints.size() == 1);
+        const double z = d.impedancePoints[0].get_impedance().get_magnitude();
+        const double halfLine = d.lineImpedance / 2.0;
+        REQUIRE(z > halfLine);  // attenuation > 0, so the dB algebra below inverts exactly
+        const double limitDbuv = 66.0, marginDb = 6.0;
+        const double noiseDbuv = 20.0 * std::log10(z / halfLine) + limitDbuv - marginDb;
+        const double icmSizing = std::pow(10.0, noiseDbuv / 20.0) * 1e-6 / halfLine;
+
+        MAS::Inputs in = Kirchhoff::build_cmc_inputs(d);
+        const auto& op = in.get_operating_points()[0];
+        REQUIRE(op.get_excitations_per_winding().size() == static_cast<size_t>(windings));
+        double icmOperatingPoint = 0.0;
+        for (const auto& exc : op.get_excitations_per_winding()) {
+            CHECK(exc.get_frequency() == Approx(150e3));
+            icmOperatingPoint += exc.get_current()->get_processed()->get_peak_to_peak().value() / 2.0;
+        }
+        CHECK(icmSizing == Approx(icmOperatingPoint).epsilon(0.01));
+        CHECK(icmSizing == Approx(Kirchhoff::analytical::cmc_common_mode_current_peak(capPf, dvdt, 230.0, 150e3))
+                               .epsilon(1e-6));
+    }
 }
 
 TEST_CASE("design_cmc throws on missing/invalid required data", "[cmc][design]") {
