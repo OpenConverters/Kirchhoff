@@ -66,18 +66,17 @@ json clllc_inputs() {
 }
 }  // namespace
 
-TEST_CASE("CLLLC synchronous rectifier: lock-step SR delivers a regulated output",
+TEST_CASE("CLLLC synchronous rectifier: the current-sensed SR delivers a regulated output",
           "[control][cias][clllc]") {
     json di = clllc_inputs();
     Kirchhoff::ClllcDesign d = Kirchhoff::design_clllc(di);
     json tas = Kirchhoff::build_clllc_tas(d);
 
-    // The secondary synchronous rectifier is driven in LOCK-STEP off the primary gate signals g1/g2
-    // (diagonal A = QE,QH on g1; diagonal B = QF,QG on g2), mirroring CLLC — each SR FET conducts with
-    // its own body diode. A current-sensed SR CONTROL stage was structurally renderable (ctas_to_cias ->
-    // CIAS comparators) but did NOT transfer power at real (DATASHEET) fidelity — the secondary stayed at
-    // ~0 V — so lock-step is the working design (abt #60). The current-sensed SR controller IC is still
-    // carried as a role:control stage and sourced for the BOM (assembler skips it in the power deck).
+    // The receiving bridge rectifies on the SIGN of its tank current: the srControl stage carries a CTAS
+    // synchronous-rectifier controller with its behavioural law, which the assembler lowers into the deck
+    // as comparators (SSR_CmpA/B) driving the secondary gate nets. Lock-step gating off the primary drive
+    // (the abt #60 design) sags ~11% once the solved fsw sits off resonance, so ABT #1525 replaced it.
+    // The llcController seed stays a BOM-only role:control stage (no behavioural law, skipped in the deck).
     bool hasControlStage = false, hasController = false;
     for (const auto& st : tas.at("topology").at("stages")) {
         if (st.value("role", "") == "control") {
@@ -93,8 +92,9 @@ TEST_CASE("CLLLC synchronous rectifier: lock-step SR delivers a regulated output
     PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
     std::string deck = Kirchhoff::tas_to_ngspice(tas, ideal);
     REQUIRE(deck.find(" uic") != std::string::npos);     // resonant start: precharge + use-initial-conditions
-    // The four SR switches are gated by the primary stimulus nets (lock-step), not a separate drive net.
-    REQUIRE(deck.find("SSR_CmpA") == std::string::npos);  // no current-sensed SR comparator in the deck
+    // The SR comparators are in the deck (the behavioural law was lowered, not skipped as a BOM-only IC).
+    REQUIRE(deck.find("SSR_CmpA") != std::string::npos);
+    REQUIRE(deck.find("SSR_CmpB") != std::string::npos);
 
     // Run to steady state (the 100µF LV bus + resonant loop; output precharged so it settles quickly).
     const double fsw = 350e3, period = 1.0 / fsw, tstep = period / 200.0, tstop = 12e-3;
@@ -111,7 +111,7 @@ TEST_CASE("CLLLC synchronous rectifier: lock-step SR delivers a regulated output
     double vo = 0;
     REQUIRE(parse_meas(out, "vo", vo));
 
-    INFO("CLLLC lock-step SR: Vout=" << vo << " V");
+    INFO("CLLLC current-sensed SR: Vout=" << vo << " V");
     // Settles to a stable, sensible output — symmetric CLLLC at resonance is a ~unity-gain DC transformer
     // (Vout ~ Vin = 400 V). Wide band: a physical-sanity gate, not an MKF match (we deliberately diverge
     // from MKF's solver-timed SR). A delivered (non-zero, near-target) bus proves the SR rectifies.
