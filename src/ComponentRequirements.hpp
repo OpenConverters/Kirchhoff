@@ -170,6 +170,10 @@ inline json mosfet(const std::string& role, double ratedVds, double ratedId,
                    double maxRdsOn, double maxTjC) {
     json r;
     r["deviceType"] = "mosfet";
+    // Every switch Kirchhoff models is driven source-referenced, gate above source:
+    // an N-channel device. The catalogue holds P-channel parts too, with ratings of
+    // the same magnitudes, so the channel has to be asked for (SAS designRequirements).
+    r["channel"] = "nChannel";
     r["role"] = role;
     r["ratedDrainSourceVoltage"] = ratedVds;
     r["ratedContinuousDrainCurrent"] = ratedId;
