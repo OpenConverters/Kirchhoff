@@ -140,6 +140,39 @@ else:
 mcp = FastMCP("Kirchhoff", host="127.0.0.1", port=8401, transport_security=_security)
 
 
+import functools                                         # noqa: E402
+import inspect                                           # noqa: E402
+import threading                                         # noqa: E402
+
+import anyio                                             # noqa: E402
+
+# ONE tool body at a time, OFF the event loop. FastMCP calls a sync tool directly on its event
+# loop, so while a design or a simulation ran this server could not answer anything — not even
+# tools/list. Moebius's bridge lists every pipeline's tools before a turn and withholds one that
+# does not answer within 15 s, so a converter design in flight took Kirchhoff out of the next
+# turn ("select_parts/bind_part just disconnected"). The bodies stay SERIAL — libngspice runs
+# in-process and is not re-entrant — but the loop now stays free to answer while one runs.
+_TOOL_LOCK = threading.Lock()
+
+
+def _locked(fn, *args, **kw):
+    with _TOOL_LOCK:
+        return fn(*args, **kw)
+
+
+def _tool(*dargs, **dkwargs):
+    def register(fn):
+        if inspect.iscoroutinefunction(fn):
+            return mcp.tool(*dargs, **dkwargs)(fn)
+
+        @functools.wraps(fn)
+        async def threaded(*args, **kw):
+            return await anyio.to_thread.run_sync(functools.partial(_locked, fn, *args, **kw))
+        mcp.tool(*dargs, **dkwargs)(threaded)
+        return fn
+    return register
+
+
 # --- helpers ----------------------------------------------------------------
 
 def _eng(value: float, unit: str) -> str:
@@ -673,7 +706,7 @@ def _deck_text(deck: str | None, deck_ref: str | None) -> str:
 
 # --- tools: design ----------------------------------------------------------
 
-@mcp.tool(
+@_tool(
     title="List supported topologies",
     description="Every converter topology the engine can design, and the spec shape they take.",
 
@@ -705,7 +738,7 @@ def list_topologies() -> CallToolResult:
         })
 
 
-@mcp.tool(
+@_tool(
     title="Design a converter",
     description=(
         "Design a power converter from a high-level spec and return its full TAS "
@@ -764,7 +797,7 @@ def design_converter(topology: str, spec: dict, engine: str = "analytical") -> C
         view=UI_SCHEMATIC_URI)
 
 
-@mcp.tool(
+@_tool(
     title="Converter diagnostics",
     description="The engine's component sizing and design diagnostics for an assembled TAS.",
 
@@ -787,7 +820,7 @@ def converter_diagnostics(tas: dict | None = None, tas_ref: str | None = None) -
         quantities=quantities)
 
 
-@mcp.tool(
+@_tool(
     title="Add datasheet device models",
     description=(
         "Add requirements-derived datasheet models (real Rds(on) / Vf) to every "
@@ -812,7 +845,7 @@ def realize_tas(tas: dict | None = None, tas_ref: str | None = None) -> CallTool
 
 # --- tools: simulation ------------------------------------------------------
 
-@mcp.tool(
+@_tool(
     title="Export a SPICE netlist",
     description=(
         "Assemble a TAS into a runnable SPICE deck, in the ngspice or LTspice dialect. "
@@ -849,7 +882,7 @@ def export_netlist(tas: dict | None = None, flavor: str = "ngspice", fidelity: d
         document={"text": deck, "lines": len(lines)})
 
 
-@mcp.tool(
+@_tool(
     title="Simulate a converter",
     description=(
         "Run a designed converter through the IN-PROCESS libngspice and report what "
@@ -929,7 +962,7 @@ def simulate(tas: dict | None = None, fidelity: dict | None = None, tas_ref: str
                     "fidelity": {"value": str(_fidelity(fidelity).get("origin"))}})
 
 
-@mcp.tool(
+@_tool(
     title="AC sweep a raw deck",
     description=(
         "Run a raw .ac SPICE deck through the in-process libngspice and return the "
@@ -995,7 +1028,7 @@ def simulate_ac(deck: str | None = None, deck_ref: str | None = None) -> CallToo
         y2_axis=_axis("phase", "deg") if phase_series else None)
 
 
-@mcp.tool(
+@_tool(
     title="Per-component waveforms",
     description=(
         "Per-component voltage and current (switches, diodes, capacitors, resistors) "
@@ -1059,7 +1092,7 @@ def component_waveforms(tas: dict | None = None, fidelity: dict | None = None,
 
 # --- tools: magnetics -------------------------------------------------------
 
-@mcp.tool(
+@_tool(
     title="Magnetic design inputs",
     description=(
         "A magnetic's MAS Inputs (designRequirements + operatingPoints) extracted from "
@@ -1122,7 +1155,7 @@ def magnetic_inputs(tas: dict | None = None, magnetic: str = "", enrich: bool = 
                      "enrich=true if the excitation is custom-shaped"])
 
 
-@mcp.tool(
+@_tool(
     title="All magnetics, full waveforms",
     description=(
         "Full-waveform MAS Inputs for EVERY magnetic in a design (real time-domain "
@@ -1174,7 +1207,7 @@ def topology_waveforms(tas: dict | None = None, tas_ref: str | None = None) -> C
                      if charted < len(magnetics) else None))
 
 
-@mcp.tool(
+@_tool(
     title="Magnetic operating point",
     description=(
         "A magnetic's MAS operating point, computed analytically or extracted from an "
@@ -1215,7 +1248,7 @@ def operating_point(tas: dict | None = None, engine: str = "analytical", magneti
 
 # --- tools: parts sourcing --------------------------------------------------
 
-@mcp.tool(
+@_tool(
     title="Source real parts",
     description=(
         "Rank real catalogue parts for every fillable component in a design (Kelvin "
@@ -1337,7 +1370,7 @@ def select_parts(tas: dict | None = None, data_dir: str | None = None, options: 
         payload)
 
 
-@mcp.tool(
+@_tool(
     title="Rank parts for one component",
     description=(
         "Rank a single component's candidates from the prebuilt Kelvin index shards, "
@@ -1412,7 +1445,7 @@ def select_candidates(kind: str, requirements: dict, context: dict | None = None
     return _result(f"{len(cands)} {kind} candidate(s), best first:\n{detail}", payload)
 
 
-@mcp.tool(
+@_tool(
     title="Magnetic inputs from a spec",
     description=(
         "A magnetic's MAS Inputs straight from a converter spec, for ANY topology, "
@@ -1432,7 +1465,7 @@ def design_magnetic_inputs(topology: str, spec: dict) -> CallToolResult:
         derived_from=f"a {topology} spec")
 
 
-@mcp.tool(
+@_tool(
     title="PFC conduction mode",
     description=(
         "Which conduction mode (CCM / BCM / DCM) a PFC stage runs in for a given "
@@ -1464,7 +1497,7 @@ def pfc_mode(spec: dict, inductance: float) -> CallToolResult:
         quantities=quantities)
 
 
-@mcp.tool(
+@_tool(
     title="Run a raw SPICE deck",
     description=(
         "Run any ngspice deck through the IN-PROCESS libngspice, executing its "
@@ -1498,7 +1531,7 @@ def run_deck(deck: str | None = None, timeout_s: float = 600.0,
         diagnostics=measured[-25:] or None)
 
 
-@mcp.tool(
+@_tool(
     title="Bind a part into the design",
     description=(
         "Stamp a chosen candidate's datasheet envelope into one component, returning "
@@ -1530,7 +1563,7 @@ def bind_part(ref: str, envelope: dict, tas: dict | None = None,
                   "mpn": mpn or None, "fidelity": "DATASHEET"}])
 
 
-@mcp.tool(
+@_tool(
     title="Cross-reference a part",
     description=(
         "Deterministic, program-only substitute ranking for an original part — no LLM "
@@ -1587,7 +1620,7 @@ def cross_reference(category: str, original: dict, candidates: list[dict],
 
 # --- tools: EMI filter components ------------------------------------------
 
-@mcp.tool(
+@_tool(
     title="Design a common-mode choke",
     description=(
         "Size a common-mode choke from an EMI spec and return the MAS Inputs for the "
@@ -1628,7 +1661,7 @@ def design_cmc(spec: dict) -> CallToolResult:
         "filter")
 
 
-@mcp.tool(
+@_tool(
     title="Design a differential-mode choke",
     description=(
         "Size a differential-mode choke from an EMI spec and return the MAS Inputs for "
@@ -1673,7 +1706,7 @@ def design_dmc(spec: dict) -> CallToolResult:
         "filter")
 
 
-@mcp.tool(
+@_tool(
     title="Read part of a stored document",
     description=(
         "Read one part of a document held by handle — the MAS Inputs behind a sized filter, "
@@ -1718,7 +1751,7 @@ def fetch_document(ref: str, path: str = "") -> CallToolResult:
         schema="MAS", operation="read", document=node)
 
 
-@mcp.tool(
+@_tool(
     title="Propose a DM filter LC",
     description=(
         "'Help me size it' for a differential-mode filter: the LC pair, cutoff and "
@@ -1748,7 +1781,7 @@ def propose_dmc(spec: dict) -> CallToolResult:
         }))
 
 
-@mcp.tool(
+@_tool(
     title="Verify DM filter attenuation",
     description=(
         "Check a DMC + filter capacitor against the required attenuation at every test "
@@ -1838,7 +1871,7 @@ def verify_dmc(spec: dict, inductance: float, capacitance: float = 0.0) -> CallT
     return _result(summary, payload)
 
 
-@mcp.tool(
+@_tool(
     title="Design a current transformer",
     description=(
         "Size a burden-resistor current-sense transformer and return its MAS Inputs "
