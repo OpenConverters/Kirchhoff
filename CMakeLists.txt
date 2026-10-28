@@ -237,17 +237,34 @@ if (KIRCHHOFF_BUILD_SHARED_API AND NOT EMSCRIPTEN)
     target_compile_definitions(KirchhoffApi PRIVATE KIRCHHOFF_API_EXPORTS)
     target_compile_options(KirchhoffApi PRIVATE -fvisibility=hidden -fvisibility-inlines-hidden)
     # Pull the ENTIRE static core (+ its deps) into the .so so nothing dangles, but keep it all hidden.
-    target_link_libraries(KirchhoffApi PRIVATE
-        -Wl,--whole-archive kirchhoff -Wl,--no-whole-archive
-        RAS CAS SAS AAS CTAS MAS_kirchhoff CIAS nlohmann_json::nlohmann_json)
+    # The linker spellings differ per platform:
+    #   * GNU ld / lld (Linux): --whole-archive/--no-whole-archive, and --exclude-libs,ALL to localize every
+    #     symbol pulled from the linked archives.
+    #   * Apple ld (macOS): no --whole-archive / --exclude-libs. -force_load takes the archive path, and the
+    #     export surface is cut with -exported_symbols_list (only the C++ mangled Kirchhoff::api names).
+    # Every non-Apple platform keeps the original GNU spelling unchanged.
+    if (APPLE)
+        target_link_libraries(KirchhoffApi PRIVATE
+            kirchhoff RAS CAS SAS AAS CTAS MAS_kirchhoff CIAS nlohmann_json::nlohmann_json)
+        set(KIRCHHOFF_EXPORTS_LIST "${CMAKE_CURRENT_BINARY_DIR}/KirchhoffApi.exports")
+        file(WRITE "${KIRCHHOFF_EXPORTS_LIST}" "__ZN9Kirchhoff3api*\n")
+        target_link_options(KirchhoffApi PRIVATE
+            "LINKER:-force_load,$<TARGET_FILE:kirchhoff>"
+            "LINKER:-exported_symbols_list,${KIRCHHOFF_EXPORTS_LIST}")
+        set_property(TARGET KirchhoffApi APPEND PROPERTY LINK_DEPENDS "${KIRCHHOFF_EXPORTS_LIST}")
+    else()
+        target_link_libraries(KirchhoffApi PRIVATE
+            -Wl,--whole-archive kirchhoff -Wl,--no-whole-archive
+            RAS CAS SAS AAS CTAS MAS_kirchhoff CIAS nlohmann_json::nlohmann_json)
+        # the static core was compiled WITHOUT -fvisibility=hidden, so hide its symbols at link with a version
+        # script that exports only the C++ mangled Kirchhoff::api names (and the std/global new/delete the .so
+        # must still export for its own allocations are kept local via the default localizer).
+        target_link_options(KirchhoffApi PRIVATE
+            "-Wl,--exclude-libs,ALL")   # localize every symbol pulled from the linked static archives
+    endif()
     if (ENABLE_NGSPICE AND NGSPICE_LIB)
         target_link_libraries(KirchhoffApi PRIVATE "${NGSPICE_LIB}")
     endif()
-    # the static core was compiled WITHOUT -fvisibility=hidden, so hide its symbols at link with a version
-    # script that exports only the C++ mangled Kirchhoff::api names (and the std/global new/delete the .so
-    # must still export for its own allocations are kept local via the default localizer).
-    target_link_options(KirchhoffApi PRIVATE
-        "-Wl,--exclude-libs,ALL")   # localize every symbol pulled from the linked static archives
 endif()
 
 add_executable(clllc_demo examples/clllc_demo.cpp)
