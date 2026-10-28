@@ -688,3 +688,29 @@ TEST_CASE("extract(NGSPICE): PFC winding voltage and current share one conventio
         CHECK(corr > 0.5);
     }
 }
+
+TEST_CASE("PFC honours a pinned inductance (the web wizard's \"I know the design\")", "[extract][web-wizards][pfc][pinned-inductance]") {
+    // The web PFC wizard's default design with its "I know the design" inductance (250 uH), sent as
+    // designRequirements.magnetizingInductance like every other topology's pinned inductance. The PFC used to
+    // size its own boost inductor from the conduction mode regardless (1.9 mH here).
+    const std::string base = R"KH({"designRequirements":{"inputType":"acSinglePhase","inputVoltage":{"minimum":85,"maximum":265},"switchingFrequency":{"nominal":65000},"outputs":[{"name":"out","voltage":{"nominal":400},"regulation":"voltage"}],"efficiency":0.95,"lineFrequency":{"nominal":50}PIN},"operatingPoints":[{"name":"full_load","inputVoltage":175,"ambientTemperature":25,"outputs":[{"name":"out","power":300}]}],"config":{"currentRippleFraction":0.3,"diodeVoltageDrop":0.6,"topologyVariant":"boost"}})KH";
+    auto spec = [&](const std::string& pin) {
+        std::string s = base;
+        return s.replace(s.find("PIN"), 3, pin);
+    };
+    auto inductanceOf = [](const std::string& out) {
+        INFO(out.substr(0, 300));
+        REQUIRE(out.rfind("Exception:", 0) != 0);
+        return json::parse(out).at("inputs").at("designRequirements").at("magnetizingInductance").at("nominal").get<double>();
+    };
+    const double sized = inductanceOf(Kirchhoff::api::process_converter("pfc", spec(""), "analytical"));
+    const double pinned = inductanceOf(Kirchhoff::api::process_converter(
+        "pfc", spec(R"KH(,"magnetizingInductance":{"nominal":250e-6})KH"), "analytical"));
+    INFO("sized " << sized << " H, pinned " << pinned << " H");
+    CHECK(sized > 1e-3);   // the unpinned CCM sizing (premise: the pin really changes the design)
+    CHECK(pinned == Catch::Approx(250e-6).epsilon(1e-12));
+    // A non-positive pin is refused, not replaced by the sized value.
+    const std::string bad = Kirchhoff::api::process_converter(
+        "pfc", spec(R"KH(,"magnetizingInductance":{"nominal":0})KH"), "analytical");
+    CHECK(bad.rfind("Exception:", 0) == 0);
+}

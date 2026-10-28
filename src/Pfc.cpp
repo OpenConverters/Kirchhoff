@@ -4,6 +4,7 @@
 #include "ComponentRequirements.hpp"
 #include "ConverterAnalytical.hpp"
 #include <cmath>
+#include <optional>
 #include <vector>
 #include <stdexcept>
 #include <string>
@@ -146,7 +147,16 @@ PfcDesign design_pfc(const json& tasInputs) {
     const double pinPhase   = pin   / d.numberOfPhases;        // per-phase input power
     const double iPeakPhase = iPeak / d.numberOfPhases;        // per-phase peak inductor current
     const double ripple     = cfg::get(d.config, "currentRippleFraction", kRippleFraction);
-    if (d.mode == "ccm") {
+    // "I know the design": a pinned inductance (designRequirements.magnetizingInductance, the key every
+    // other topology reads through provided_inductance) IS the boost inductor; only an unpinned design is
+    // sized from the conduction mode. It was ignored, so the web PFC wizard's inductance changed nothing.
+    const std::optional<double> pinnedInductance = req::provided_inductance(dr);
+    if (pinnedInductance) {
+        if (!(*pinnedInductance > 0))
+            throw std::invalid_argument("pfc design: the pinned inductance must be > 0 H, got "
+                                        + std::to_string(*pinnedInductance));
+        d.boostInductance = *pinnedInductance;
+    } else if (d.mode == "ccm") {
         // ΔiL = ripple·iLpeak; L = Vpk·D / (ΔiL·fsw) ≡ the original Vpk·(Vout−Vpk)/(ΔiL·fsw·Vout).
         d.boostInductance = vpeak * dutyPeak / (ripple * iPeakPhase * d.switchingFrequency);
     } else if (d.mode == "dcm") {
