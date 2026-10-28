@@ -1532,9 +1532,24 @@ MAS::OperatingPoint analytical_active_clamp_forward(double inputVoltage,
     const double mainSecondaryTurnsRatio = turnsRatios[0];
     const double period = 1.0 / switchingFrequency;
 
+    // The active clamp resets the core through the clamp capacitor over the WHOLE off-time (Vclamp = D/(1-D)·Vin
+    // balances the magnetizing volt-seconds for any D), so unlike the single-switch forward (whose 1:1 reset
+    // winding needs a reset time equal to t1, hence D <= 0.5) the ACF runs at D > 0.5. Its only limit is D < 1:
+    // the forward interval must leave a reset interval, and Vclamp diverges as D -> 1.
+    auto requireDutyBelowOne = [&](double forwardTime) {
+        const double duty = forwardTime / period;
+        if (!(duty < 1.0)) {
+            std::ostringstream msg;
+            msg << "Active clamp forward: the duty cycle at " << inputVoltage << " V would be " << duty
+                << " (>= 1); the turns ratio is too high for this input voltage: lower Np/Ns or raise the minimum "
+                   "input voltage.";
+            throw std::invalid_argument(msg.str());
+        }
+    };
+    if (!(inputVoltage > 0))
+        throw std::invalid_argument("analytical_active_clamp_forward: input voltage must be positive");
     double t1 = period * (mainOutputVoltage + diodeVoltageDrop) / (inputVoltage / mainSecondaryTurnsRatio);
-    if (t1 > period / 2)
-        throw std::invalid_argument("analytical_active_clamp_forward: T1 cannot be larger than period/2, wrong topology configuration");
+    requireDutyBelowOne(t1);
 
     double magnetizationCurrent = inputVoltage * t1 / inductance;
     double minimumPrimaryCurrent = -magnetizationCurrent / 2;
@@ -1558,8 +1573,7 @@ MAS::OperatingPoint analytical_active_clamp_forward(double inputVoltage,
         if (sqrtArg < 0)
             throw std::invalid_argument("analytical_active_clamp_forward: negative value under sqrt in DCM t1 calculation");
         t1 = std::sqrt(sqrtArg);
-        if (t1 > period / 2)
-            throw std::invalid_argument("analytical_active_clamp_forward: T1 cannot be larger than period/2, wrong topology configuration");
+        requireDutyBelowOne(t1);
         // DCM of the OUTPUT inductor only: the active clamp still resets the core with -Vclamp over the whole
         // off-time (Vclamp = D/(1-D)·Vin holds the magnetizing volt-seconds), so the magnetizing current stays
         // the symmetric ±m/2 triangle of the DCM on-time; the secondary current rises 0 -> ripple during t1.
@@ -1575,9 +1589,7 @@ MAS::OperatingPoint analytical_active_clamp_forward(double inputVoltage,
         }
     }
 
-    const double denom = 1 - t1 * switchingFrequency;
-    if (std::fabs(denom) < 1e-12)
-        throw std::invalid_argument("analytical_active_clamp_forward: clamp voltage undefined when duty cycle equals 1");
+    const double denom = 1 - t1 * switchingFrequency;   // > 0: requireDutyBelowOne(t1) held above
     const double clampVoltage = t1 * switchingFrequency / denom * inputVoltage;
 
     const double actualDutyCycle = t1 * switchingFrequency;

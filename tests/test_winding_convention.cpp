@@ -698,6 +698,71 @@ TEST_CASE("convention: analytical winding orientation matches the ngspice deck",
     }
 }
 
+// Active-clamp forward above D = 0.5 (the reported web design: 24 V, Np/Ns 1, 13 V / 24 A, 140 kHz, Lm 50 uH,
+// 0.7 V rectifier -> D = 0.571). The analytical solver used to refuse t1 > T/2, the single-switch forward's
+// reset-winding limit; the active clamp resets over the whole off-time. The ngspice deck must agree with the
+// analytical transformer excitation: +Vin for D·T, -Vclamp = -D/(1-D)·Vin for the rest, and the magnetizing
+// current (Ip - Is/n) peak-to-peak Vin·D·T/Lm.
+TEST_CASE("convention: active-clamp forward at D > 0.5 matches the ngspice deck", "[convention][ngspice][acf]") {
+    if (!Kirchhoff::ngspice_in_process_available()) {
+        FAIL("libngspice is not linked into this build; the active-clamp cross-check cannot run");
+    }
+    const double vin = 24.0, vout = 13.0, iout = 24.0, fs = 140e3, lm = 50e-6, n = 1.0, vd = 0.7;
+    nlohmann::json spec;
+    spec["designRequirements"]["inputType"] = "dc";
+    spec["designRequirements"]["inputVoltage"] = {{"minimum", vin}, {"nominal", vin}, {"maximum", 125.0}};
+    spec["designRequirements"]["switchingFrequency"]["nominal"] = fs;
+    nlohmann::json o; o["name"] = "out"; o["voltage"]["nominal"] = vout; o["regulation"] = "voltage";
+    spec["designRequirements"]["outputs"] = nlohmann::json::array({o});
+    spec["designRequirements"]["magnetizingInductance"]["nominal"] = lm;
+    spec["designRequirements"]["turnsRatios"] = nlohmann::json::array({{{"nominal", n}}});
+    nlohmann::json op; op["name"] = "full_load"; op["inputVoltage"] = vin; op["ambientTemperature"] = 25;
+    nlohmann::json oo; oo["name"] = "out"; oo["power"] = vout * iout;
+    op["outputs"] = nlohmann::json::array({oo});
+    spec["operatingPoints"] = nlohmann::json::array({op});
+    spec["config"]["diodeVoltageDrop"] = vd;
+    const std::string out = Kirchhoff::api::design_tas("acf", spec.dump());
+    INFO(out.substr(0, 300));
+    REQUIRE(out.rfind("Exception", 0) != 0);
+    const nlohmann::json tas = nlohmann::json::parse(out);
+
+    const double D = (vout + vd) * n / vin;
+    const double vclamp = D / (1.0 - D) * vin;
+    const double mPkPk = vin * D / fs / lm;
+    struct Levels { double vHigh, vLow, duty, magPkPk; };
+    auto levels = [&](const MAS::OperatingPoint& x) {
+        const auto& e = x.get_excitations_per_winding();
+        REQUIRE(e.size() == 2);
+        const double T = 1.0 / e[0].get_frequency();
+        const auto v = sample(*e[0].get_voltage()->get_waveform(), T);
+        const auto ip = sample(*e[0].get_current()->get_waveform(), T);
+        const auto is = sample(*e[1].get_current()->get_waveform(), T);
+        double hi = 0, lo = 0; int nHi = 0, nLo = 0;
+        for (double x1 : v) {
+            if (x1 > 0.5 * vin) { hi += x1; ++nHi; }
+            else if (x1 < -0.5 * vclamp) { lo += x1; ++nLo; }
+        }
+        double magMax = -1e300, magMin = 1e300;
+        for (int j = 0; j < kSamples; ++j) {
+            const double m = ip[j] - is[j] / n;
+            magMax = std::max(magMax, m); magMin = std::min(magMin, m);
+        }
+        return Levels{nHi ? hi / nHi : 0.0, nLo ? lo / nLo : 0.0, static_cast<double>(nHi) / kSamples, magMax - magMin};
+    };
+    const MAS::OperatingPoint a = Kirchhoff::extract_operating_point(tas, Kirchhoff::ExtractEngine::ANALYTICAL, "T1");
+    const MAS::OperatingPoint s = Kirchhoff::extract_operating_point(tas, Kirchhoff::ExtractEngine::NGSPICE, "T1");
+    const Levels la = levels(a), ls = levels(s);
+    std::printf("[acf D>0.5] closed form: D %.4f  +Vin %.3f  -Vclamp %.3f  Im pk-pk %.3f A\n", D, vin, -vclamp, mPkPk);
+    std::printf("[acf D>0.5] analytical : D %.4f  high %.3f  low %.3f  Im pk-pk %.3f A\n", la.duty, la.vHigh, la.vLow, la.magPkPk);
+    std::printf("[acf D>0.5] ngspice    : D %.4f  high %.3f  low %.3f  Im pk-pk %.3f A\n", ls.duty, ls.vHigh, ls.vLow, ls.magPkPk);
+    CHECK(la.duty == Catch::Approx(D).margin(0.01));
+    CHECK(la.vLow == Catch::Approx(-vclamp).epsilon(0.01));
+    CHECK(ls.duty == Catch::Approx(la.duty).margin(0.05));
+    CHECK(ls.vHigh == Catch::Approx(la.vHigh).epsilon(0.05));
+    CHECK(ls.vLow == Catch::Approx(la.vLow).epsilon(0.10));
+    CHECK(ls.magPkPk == Catch::Approx(la.magPkPk).epsilon(0.15));
+}
+
 // Common-mode choke: every winding primary-side (passive), dotted so common-mode currents add. Differential-mode
 // (line/return) levels must cancel in the core, the common-mode ampere-turns must be the sum of the windings',
 // and Faraday must hold on i_m = Σ i_k.

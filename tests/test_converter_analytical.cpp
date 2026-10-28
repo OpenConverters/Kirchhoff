@@ -412,10 +412,116 @@ TEST_CASE("analytical_active_clamp_forward CCM: 2 windings, secondary peak, clam
     CHECK(voltage_average(op, 0) == Catch::Approx(0.0).margin(0.6));
 }
 
-TEST_CASE("analytical_active_clamp_forward rejects t1 > T/2", "[analytical][solver][acf]") {
+// Active-clamp-forward physics at duty D (single output, CCM): the primary sees +Vin for t1 = D·T and
+// -Vclamp for the rest with Vin·t1 = Vclamp·(T - t1); the magnetizing current Ip - Is/n is the symmetric
+// ±(Vin·t1/Lm)/2 triangle; the secondary conducts during t1 only; the input power is (Vo + Vd)·Io.
+// The stored waveforms are the uniformly resampled ones, so every sample is checked against the closed
+// form except the ones within one sample of an edge (0, t1, T), where the resampling straddles the step.
+static void check_acf_physics(double vin, double vout, double iout, double n, double fsw, double lm,
+                              double lout, double ripple, double vd) {
     using Kirchhoff::analytical::analytical_active_clamp_forward;
-    // n=8 -> t1 = period*5/(48/8) = 0.83*period > period/2.
-    CHECK_THROWS(analytical_active_clamp_forward(48, {5}, {10}, {8}, 100000, 1e-3, 10e-6, 0.3));
+    const MAS::OperatingPoint op = analytical_active_clamp_forward(vin, {vout}, {iout}, {n}, fsw, lm, lout,
+                                                                   ripple, vd);
+    REQUIRE(op.get_excitations_per_winding().size() == 2);
+    const double T = 1.0 / fsw;
+    const double D = (vout + vd) * n / vin;
+    const double t1 = D * T;
+    const double vclamp = D / (1.0 - D) * vin;
+    const double m = vin * t1 / lm;                       // magnetizing peak-to-peak
+    const double isMin = iout * (1 - ripple / 2), isMax = iout * (1 + ripple / 2);
+    const auto& pri = op.get_excitations_per_winding().at(0);
+    const auto& sec = op.get_excitations_per_winding().at(1);
+    const MAS::Waveform vp = *pri.get_voltage()->get_waveform();
+    const MAS::Waveform ip = *pri.get_current()->get_waveform();
+    const MAS::Waveform is = *sec.get_current()->get_waveform();
+    const std::vector<double> tv = *vp.get_time(), ti = *ip.get_time(), ts = *is.get_time();
+    REQUIRE(tv.size() == vp.get_data().size());
+    REQUIRE(ti == ts);   // primary and secondary currents share the sample grid
+    REQUIRE(tv.size() > 16);
+    const double dtS = tv[1] - tv[0];
+
+    // Volt-second balance: Vin·t1 = Vclamp·(T - t1) (closed form), and the processed primary voltage mean is 0.
+    CHECK(vin * t1 == Catch::Approx(vclamp * (T - t1)).epsilon(1e-9));
+    CHECK(voltage_average(op, 0) == Catch::Approx(0.0).margin(0.02 * vin));
+
+    size_t forwardSamples = 0, resetSamples = 0;
+    auto nearEdge = [&](double t) {
+        return t < 1.5 * dtS || std::fabs(t - t1) < 1.5 * dtS || t > T - 1.5 * dtS;
+    };
+    for (size_t k = 0; k < tv.size(); ++k) {
+        const double t = tv[k];
+        if (nearEdge(t)) continue;
+        if (t < t1) CHECK(vp.get_data()[k] == Catch::Approx(vin).epsilon(1e-6));      // +Vin while Q1 conducts
+        else        CHECK(vp.get_data()[k] == Catch::Approx(-vclamp).epsilon(1e-6));  // -Vclamp over the whole reset
+    }
+    for (size_t k = 0; k < ti.size(); ++k) {
+        const double t = ti[k];
+        if (nearEdge(t)) continue;
+        const double ipk = ip.get_data()[k], isk = is.get_data()[k];
+        const double mag = ipk - isk / n;   // ampere-turns: Np·ip - Ns·is = Np·imag
+        if (t < t1) {
+            ++forwardSamples;
+            CHECK(mag == Catch::Approx(-m / 2 + vin * t / lm).margin(1e-6 * m));
+            CHECK(isk == Catch::Approx(isMin + (isMax - isMin) * t / t1).margin(1e-6 * iout));
+        } else {
+            ++resetSamples;
+            CHECK(mag == Catch::Approx(m / 2 - vclamp * (t - t1) / lm).margin(1e-6 * m));
+            CHECK(isk == 0.0);   // the secondary conducts during t1 only
+        }
+    }
+    CHECK(forwardSamples > 4);
+    CHECK(resetSamples > 4);
+    // Magnetizing current is symmetric: it ends the reset at -m/2, where it started the forward interval.
+    CHECK(m / 2 - vclamp * (T - t1) / lm == Catch::Approx(-m / 2).margin(1e-9 * m));
+
+    // Power: the average primary current carries (Vo + Vd)·Io from Vin (the magnetizing triangle averages 0).
+    CHECK(*processed_current(op, 0).get_average() * vin == Catch::Approx((vout + vd) * iout).epsilon(0.02));
+}
+
+TEST_CASE("analytical_active_clamp_forward runs above D = 0.5: the clamp resets over the whole off-time",
+          "[analytical][solver][acf]") {
+    // The web user's design: Vin_min 24 V, Np/Ns 1, 13 V / 24 A, 140 kHz, Lm 50 uH, diode 0.7 V -> D = 0.571.
+    // It threw "T1 cannot be larger than period/2" (the single-switch forward's reset-winding limit).
+    SECTION("D = 0.571 (24 V -> 13 V, n = 1)") { check_acf_physics(24, 13, 24, 1, 140000, 50e-6, 10e-6, 0.4, 0.7); }
+    // n=8 -> t1 = period*5/(48/8) = 0.83*period: a valid active-clamp operating point (Vclamp = 5·Vin).
+    SECTION("D = 0.833 (48 V -> 5 V, n = 8)") { check_acf_physics(48, 5, 10, 8, 100000, 1e-3, 10e-6, 0.3, 0.0); }
+    SECTION("D = 0.40 (48 V -> 5 V, n = 4, 0.8 V)") { check_acf_physics(48, 5, 10, 4, 100000, 1e-3, 10e-6, 0.3, 0.8); }
+}
+
+TEST_CASE("analytical_active_clamp_forward rejects D >= 1 with a plain-language message", "[analytical][solver][acf]") {
+    using Kirchhoff::analytical::analytical_active_clamp_forward;
+    // n=10 -> D = 5·10/48 = 1.04: no reset interval is left.
+    CHECK_THROWS_WITH(analytical_active_clamp_forward(48, {5}, {10}, {10}, 100000, 1e-3, 10e-6, 0.3),
+                      Catch::Matchers::ContainsSubstring("Active clamp forward: the duty cycle at 48 V") &&
+                      Catch::Matchers::ContainsSubstring("lower Np/Ns or raise the minimum input voltage"));
+    // Exactly D = 1 (12 V -> 6 V at n = 2).
+    CHECK_THROWS(analytical_active_clamp_forward(12, {6}, {10}, {2}, 100000, 1e-3, 10e-6, 0.3));
+    CHECK_THROWS(analytical_active_clamp_forward(0, {5}, {10}, {1}, 100000, 1e-3, 10e-6, 0.3));
+}
+
+TEST_CASE("process_converter acf: the web's I-know-the-design spec at D > 0.5 designs and simulates analytically",
+          "[analytical][solver][acf]") {
+    // What the Forward wizard ("Active Clamp Forward", I know the design I want) sends for the reported design:
+    // Vin 24-125 V, one 13 V / 24 A output, Np/Ns 1, 140 kHz, 50 uH. At Vin_min the forward duty is ~0.55.
+    const std::string spec = R"({
+      "designRequirements": {
+        "inputType": "dc", "efficiency": 0.9,
+        "inputVoltage": {"minimum": 24, "maximum": 125},
+        "switchingFrequency": {"nominal": 140000},
+        "outputs": [{"name":"out","voltage":{"nominal":13},"regulation":"voltage"}],
+        "magnetizingInductance": {"nominal": 50e-6},
+        "turnsRatios": [{"nominal": 1}]
+      },
+      "operatingPoints": [{"name":"full_load","inputVoltage":74.5,"ambientTemperature":25,
+        "outputs":[{"name":"out","power":312}]}],
+      "config": {"rippleRatio": 0.3}
+    })";
+    const std::string raw = Kirchhoff::api::process_converter("acf", spec, "analytical");
+    INFO(raw.substr(0, 400));
+    REQUIRE(raw.rfind("Exception", 0) != 0);
+    const nlohmann::json out = nlohmann::json::parse(raw);
+    REQUIRE(out.contains("inputs"));
+    REQUIRE(!out.at("inputs").at("operatingPoints").empty());
 }
 
 // ─── Phase 4: phase-shifted bridge family (structural invariants) ───────────

@@ -54,10 +54,9 @@ AcfDesign design_acf(const json& tasInputs) {
     d.deadFraction = cfg::get(d.config, "deadTimeFraction", kDeadFrac);
 
     // Turns ratio at the MIN-Vin corner with the max duty: n = Vin_min·Dmax/(Vo+Vd) (MKF sizing). The forward
-    // interval the solver derives is t1 = (Vo+Vd)·n·period/Vin, so at Vin_min t1 = Dmax·period < period/2 for
-    // Dmax < 0.5 — i.e. the analytical embed's worst corner (Vin_min) stays inside the reset limit. (Sizing at
-    // NOMINAL Vin, as before, put t1 at exactly Dmax·Vin_nom/Vin_min·period = period/2 for a ±10% range, which
-    // the turns-ratio rounding then tipped over the guard.)
+    // interval the solver derives is t1 = (Vo+Vd)·n·period/Vin, so the maximum duty Dmax lands at Vin_min.
+    // Dmax (0.45 by default) is a design choice, not a limit: the active clamp resets the core over the whole
+    // off-time, so a pinned turns ratio may put the Vin_min corner above 0.5 — only D >= 1 is impossible.
     double n = etaConv * vinMin * Dmax / (Vo + d.diodeDrop);
     // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
     // the duty-derived value so the rest of the stage is sized around the fixed transformer.
@@ -375,6 +374,12 @@ json build_acf_tas(const AcfDesign& d) {
     // Main switch Q1 (duty D, phase 0); clamp switch Sc complementary (on during the reset interval),
     // a dead-band after Q1 turns off and trimmed not to wrap past the period.
     const double D = d.dutyCycle, dt = d.deadFraction;
+    // The clamp switch must get a positive on-time inside the reset interval: (1-D) - 2·dead > 0.
+    if (!((1.0 - D) - 2.0 * dt > 0.0))
+        throw std::invalid_argument("Active clamp forward: the duty cycle at " + std::to_string(d.inputVoltage) +
+                                    " V is " + std::to_string(D) + ", which leaves no time for the clamp switch after "
+                                    "two dead times of " + std::to_string(dt) + " of the period; lower Np/Ns or raise "
+                                    "the input voltage.");
     auto stim = [&](const char* sw, const char* sig, double duty, double phaseDeg) {
         json st; st["stage"] = "acfCell"; st["component"] = sw; st["signal"] = sig;
         st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = fsw;
