@@ -558,12 +558,13 @@ MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vecto
     // [convention]), so the oriented simulation is in that convention too, whichever way round a builder
     // wired a winding.
     const std::vector<MAS::OperatingPointExcitation> analyticalExcs = excs;
-    auto oriented = [&](const MAS::Waveform& sim, const std::optional<MAS::SignalDescriptor>& ref,
-                        size_t w, const char* what) -> MAS::Waveform {
+    // +1 keeps the simulated signal as the deck reports it, -1 negates it.
+    auto orientation = [&](const MAS::Waveform& sim, const std::optional<MAS::SignalDescriptor>& ref,
+                           size_t w, const char* what) -> int {
         // A winding whose analytical excitation is processed data only (a label with peak/rms/offset, as
         // the AHB flyback and current-doubler windings carry) has no reference shape: its simulated signal
         // stays in the deck's own, stated convention — current into the start pin, voltage V(start) − V(end).
-        if (!ref || !ref->get_waveform() || ref->get_waveform()->get_data().size() < 2) return sim;
+        if (!ref || !ref->get_waveform() || ref->get_waveform()->get_data().size() < 2) return 1;
         // get_waveform() returns the optional BY VALUE: keep a copy, never a reference into the temporary.
         const MAS::Waveform refWf = *ref->get_waveform();
         const std::vector<double> rd = refWf.get_data();
@@ -571,13 +572,12 @@ MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vecto
         if (refWf.get_time() && refWf.get_time()->size() == rd.size())
             rt = *refWf.get_time();
         else { rt.resize(rd.size()); for (size_t k = 0; k < rd.size(); ++k) rt[k] = period * k / rd.size(); }
-        // A reference that is not one period of the SAME cycle cannot orient anything: the PFC's
-        // analytical excitation is the whole line cycle (two of them, 40 ms at 50 Hz) while the
-        // simulated window is one switching period at the line peak. Like a processed-only
-        // reference, it leaves the signal in the deck's stated convention.
+        // A reference that is not one period of the SAME cycle as the simulated window cannot orient
+        // anything (the PFC's analytical excitation once spanned two line cycles while the window was one).
+        // Like a processed-only reference, it leaves the signal in the deck's stated convention.
         if (rt.size() >= 2) {
             const double refSpan = rt.back() - rt.front();
-            if (std::abs(refSpan - period) > 0.25 * period) return sim;
+            if (std::abs(refSpan - period) > 0.25 * period) return 1;
         }
         const auto& sd = sim.get_data();
         const std::vector<double> st = *sim.get_time();   // get_time() returns the optional by value
@@ -599,7 +599,7 @@ MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vecto
         }
         double ns = 0.0, nr = 0.0;
         for (size_t k = 0; k < kGrid; ++k) { ns += sg[k] * sg[k]; nr += rg[k] * rg[k]; }
-        if (!(ns > 0) || !(nr > 0)) return sim;   // an all-zero winding has no orientation to fix
+        if (!(ns > 0) || !(nr > 0)) return 1;   // an all-zero winding has no orientation to fix
         // The two periods are normally aligned (both start at the switching cycle), and then the zero-
         // shift correlation decides. Searching every shift unconditionally is wrong: a near-symmetric
         // square wave (flyback, push-pull windings) half a period away is almost exactly its own
@@ -624,13 +624,25 @@ MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vecto
                                      + " of winding " + std::to_string(w) + " of magnetic '" + mags[idx].name
                                      + "' against the analytical one (best correlation over every phase shift "
                                      + std::to_string(corr) + ")");
-        if (corr > 0) return sim;
+        return corr > 0 ? 1 : -1;
+    };
+    auto oriented = [](const MAS::Waveform& sim, int sign) -> MAS::Waveform {
+        if (sign > 0) return sim;
         MAS::Waveform flipped = sim;
-        std::vector<double> neg(sd.size());
-        for (size_t k = 0; k < sd.size(); ++k) neg[k] = -sd[k];
+        std::vector<double> neg = sim.get_data();
+        for (double& x : neg) x = -x;
         flipped.set_data(neg);
         return flipped;
     };
+    // An AC-input magnetic whose analytical excitation is the whole LINE cycle (the PFC since fd07d98: one
+    // line period stamped with the line frequency) is extracted over the last line cycle, in bins of many
+    // switching periods. Its winding current keeps the line envelope, which orients it reliably, but the bin
+    // average of the volt-second-balanced winding voltage is only the slow L·di/dt of that envelope, with no
+    // switching shape left to correlate (-0.26 natively, -0.09 in the browser, which threw on every PFC
+    // Simulated run, and a sign flip even when it passed). Current and voltage are read on the SAME terminal
+    // pair in the passive convention (branch current into the start pin, V(start) − V(end)), as are the
+    // analytical ones, so the voltage takes the orientation its own winding's current established.
+    const bool lineCycleExcitation = acInput && std::abs(period - linePeriod) <= 0.25 * period;
     for (size_t w = 0; w < excs.size(); ++w) {
         const std::string suffix = (w == 0 ? std::string("pri") : "sec" + std::to_string(w));
         const std::string token = magTok + suffix;
@@ -648,7 +660,9 @@ MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vecto
                                      + "' for winding " + std::to_string(w) + " of magnetic '" + mags[idx].name
                                      + "'. Available branches:" + avail);
         }
-        excs[w].set_current(to_signal(oriented(resample_last_period(*sig), analyticalExcs[w].get_current(), w, "current")));
+        const MAS::Waveform simCurrent = resample_last_period(*sig);
+        const int currentSign = orientation(simCurrent, analyticalExcs[w].get_current(), w, "current");
+        excs[w].set_current(to_signal(oriented(simCurrent, currentSign)));
 
         // Winding voltage = difference of the two terminal node voltages.
         const std::string posPin = (w == 0 ? "primary_start" : "secondary" + std::to_string(w) + "_start");
@@ -666,7 +680,11 @@ MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vecto
         std::vector<double> vdiff(r.time.size());
         for (size_t i = 0; i < vdiff.size(); ++i)
             vdiff[i] = (i < A.size() ? A[i] : 0.0) - (i < B.size() ? B[i] : 0.0);
-        excs[w].set_voltage(to_signal(oriented(resample_last_period(vdiff), analyticalExcs[w].get_voltage(), w, "voltage")));
+        const MAS::Waveform simVoltage = resample_last_period(vdiff);
+        const int voltageSign = lineCycleExcitation
+            ? currentSign
+            : orientation(simVoltage, analyticalExcs[w].get_voltage(), w, "voltage");
+        excs[w].set_voltage(to_signal(oriented(simVoltage, voltageSign)));
     }
     return op;
 }

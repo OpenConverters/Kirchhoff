@@ -630,3 +630,61 @@ TEST_CASE("extract(NGSPICE): the web wizards' simulated operating points extract
         REQUIRE(out.rfind("Exception:", 0) != 0);
     }
 }
+
+// ─── PFC simulated winding: voltage and current in ONE convention (2026-10-28) ───────────────────────
+// The PFC's analytical excitation is one whole line cycle at the line frequency (fd07d98), so the NGSPICE
+// extraction resamples the last line cycle into 128 bins of ~10 switching periods each. A bin average of
+// the volt-second-balanced inductor voltage is only the slow L·di/dt of the line envelope (a few volts),
+// with no switching shape left to correlate against the analytical 16384-point waveform: the voltage's
+// correlation was noise (-0.26 natively, -0.09 in the browser, which threw "cannot orient the simulated
+// voltage" on every PFC Simulated run). Its sign must follow the current's: both are measured on the same
+// terminal pair in the passive convention. Checked through the physics both share: the running integral of
+// the winding voltage is L times the current's change, so the two correlate positively.
+TEST_CASE("extract(NGSPICE): PFC winding voltage and current share one convention", "[extract][web-wizards][pfc]") {
+    if (!Kirchhoff::ngspice_in_process_available()) {
+        WARN("libngspice not linked — PFC orientation skipped");
+        return;
+    }
+    // The web PFC wizard's default design, as the web runtime sends it (before and after it forwarded the
+    // ripple ratio and the diode drop to the keys Kirchhoff reads).
+    const std::vector<std::string> specs = {
+        R"KH({"designRequirements":{"inputType":"acSinglePhase","inputVoltage":{"minimum":85,"maximum":265},"switchingFrequency":{"nominal":65000},"outputs":[{"name":"out","voltage":{"nominal":400},"regulation":"voltage"}],"efficiency":0.95,"lineFrequency":{"nominal":50}},"operatingPoints":[{"name":"full_load","inputVoltage":175,"ambientTemperature":25,"outputs":[{"name":"out","power":300}]}],"config":{"rippleRatio":0.3,"topologyVariant":"boost"}})KH",
+        R"KH({"designRequirements":{"inputType":"acSinglePhase","inputVoltage":{"minimum":85,"maximum":265},"switchingFrequency":{"nominal":65000},"outputs":[{"name":"out","voltage":{"nominal":400},"regulation":"voltage"}],"efficiency":0.95,"lineFrequency":{"nominal":50}},"operatingPoints":[{"name":"full_load","inputVoltage":175,"ambientTemperature":25,"outputs":[{"name":"out","power":300}]}],"config":{"currentRippleFraction":0.3,"diodeVoltageDrop":0.6,"topologyVariant":"boost"}})KH",
+    };
+    for (const auto& spec : specs) {
+        INFO(spec);
+        const std::string out = Kirchhoff::api::process_converter("pfc", spec, "ngspice");
+        INFO(out.substr(0, 300));
+        REQUIRE(out.rfind("Exception:", 0) != 0);
+        const json j = json::parse(out);
+        const double L = j.at("inputs").at("designRequirements").at("magnetizingInductance").at("nominal").get<double>();
+        REQUIRE(L > 0);
+        const json& ex = j.at("operatingPoint").at("excitationsPerWinding").at(0);
+        const std::vector<double> i = ex.at("current").at("waveform").at("data").get<std::vector<double>>();
+        const std::vector<double> v = ex.at("voltage").at("waveform").at("data").get<std::vector<double>>();
+        const std::vector<double> t = ex.at("voltage").at("waveform").at("time").get<std::vector<double>>();
+        REQUIRE(i.size() == v.size());
+        REQUIRE(t.size() == v.size());
+        REQUIRE(v.size() > 8);
+        // flux(t) = ∫v dt and L·(i(t) − i(0)), both mean-removed, must point the same way.
+        std::vector<double> flux(v.size(), 0.0), li(v.size(), 0.0);
+        for (size_t k = 1; k < v.size(); ++k) {
+            flux[k] = flux[k - 1] + 0.5 * (v[k] + v[k - 1]) * (t[k] - t[k - 1]);
+            li[k] = L * (i[k] - i[0]);
+        }
+        double mf = 0.0, ml = 0.0;
+        for (size_t k = 0; k < v.size(); ++k) { mf += flux[k]; ml += li[k]; }
+        mf /= v.size(); ml /= v.size();
+        double dot = 0.0, nf = 0.0, nl = 0.0;
+        for (size_t k = 0; k < v.size(); ++k) {
+            dot += (flux[k] - mf) * (li[k] - ml);
+            nf += (flux[k] - mf) * (flux[k] - mf);
+            nl += (li[k] - ml) * (li[k] - ml);
+        }
+        REQUIRE(nf > 0);
+        REQUIRE(nl > 0);
+        const double corr = dot / std::sqrt(nf * nl);
+        INFO("correlation of the voltage's flux with L*di: " << corr);
+        CHECK(corr > 0.5);
+    }
+}
