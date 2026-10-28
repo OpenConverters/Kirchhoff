@@ -282,7 +282,7 @@ json build_pfc_tas(const PfcDesign& d) {
     namespace AN = Kirchhoff::analytical;
     const MAS::OperatingPoint aopPfc = AN::analytical_pfc(d.inputVoltageRms, d.outputVoltage, d.outputPower,
                                                           d.lineFrequency, d.switchingFrequency,
-                                                          d.boostInductance, d.efficiency,
+                                                          d.boostInductance, AN::pfc_conduction_mode(d.mode), d.efficiency,
                                                           req::analytical_rectifier_drop(d.config));
     const double IpkL  = AN::winding_current(aopPfc, 0, "peak");
     cfg::check_maximum_switch_current(d.config, IpkL, "build_pfc_tas");
@@ -464,7 +464,7 @@ static json build_pfc_totempole_tas(const PfcDesign& d) {
     namespace AN = Kirchhoff::analytical;
     const MAS::OperatingPoint aopPfc = AN::analytical_pfc(d.inputVoltageRms, d.outputVoltage, d.outputPower,
                                                           d.lineFrequency, d.switchingFrequency,
-                                                          d.boostInductance, d.efficiency,
+                                                          d.boostInductance, AN::pfc_conduction_mode(d.mode), d.efficiency,
                                                           req::analytical_rectifier_drop(d.config), /*bipolar*/ true);
     const double IpkL  = AN::winding_current(aopPfc, 0, "peak");
     cfg::check_maximum_switch_current(d.config, IpkL, "build_pfc_tas");
@@ -665,7 +665,7 @@ static json build_pfc_interleaved_tas(const PfcDesign& d) {
     const double poutPhase = d.outputPower / N;
     const MAS::OperatingPoint aopPfc = AN::analytical_pfc(d.inputVoltageRms, d.outputVoltage, poutPhase,
                                                           d.lineFrequency, d.switchingFrequency,
-                                                          d.boostInductance, d.efficiency,
+                                                          d.boostInductance, AN::pfc_conduction_mode(d.mode), d.efficiency,
                                                           req::analytical_rectifier_drop(d.config));
     const double IpkL  = AN::winding_current(aopPfc, 0, "peak");
     cfg::check_maximum_switch_current(d.config, IpkL, "build_pfc_tas");
@@ -864,7 +864,7 @@ static json build_pfc_buckboost_tas(const PfcDesign& d) {
     namespace AN = Kirchhoff::analytical;
     const MAS::OperatingPoint aopPfc = AN::analytical_pfc(d.inputVoltageRms, d.outputVoltage, d.outputPower,
                                                           d.lineFrequency, d.switchingFrequency,
-                                                          d.boostInductance, d.efficiency,
+                                                          d.boostInductance, AN::pfc_conduction_mode(d.mode), d.efficiency,
                                                           req::analytical_rectifier_drop(d.config));
     const double IpkL  = AN::winding_current(aopPfc, 0, "peak");
     cfg::check_maximum_switch_current(d.config, IpkL, "build_pfc_tas");

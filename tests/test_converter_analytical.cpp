@@ -1071,6 +1071,7 @@ TEST_CASE("analytical_vienna rejects non-positive line/bus/fsw/L and over-modula
 // volt-second-balanced (zero-mean) inductor voltage, and the throw guards. Design point: 230 V RMS line
 // → 400 V bus, 3 kW, 50 Hz line, 65 kHz sw, L = 500 µH, η = 1.
 namespace {
+constexpr auto kCcm = Kirchhoff::analytical::PfcConductionMode::CONTINUOUS;
 constexpr double kPfcVrms = 230.0, kPfcVout = 400.0, kPfcPo = 3000.0;
 constexpr double kPfcFline = 50.0, kPfcFsw = 65000.0, kPfcL = 500e-6;
 // Closed form (MKF PowerFactorCorrection::process_operating_points): Pin = Po/η;
@@ -1085,7 +1086,7 @@ const double kPfcMean  = (2.0 / M_PI) * kPfcIpk;                           // re
 TEST_CASE("analytical_pfc: 1 winding, rectified-sine envelope peak = I_pk, non-zero rectified mean",
           "[analytical][solver][pfc]") {
     using Kirchhoff::analytical::analytical_pfc;
-    MAS::OperatingPoint op = analytical_pfc(kPfcVrms, kPfcVout, kPfcPo, kPfcFline, kPfcFsw, kPfcL);
+    MAS::OperatingPoint op = analytical_pfc(kPfcVrms, kPfcVout, kPfcPo, kPfcFline, kPfcFsw, kPfcL, kCcm);
 
     REQUIRE(op.get_excitations_per_winding().size() == 1);   // single boost inductor
     const auto& exc = op.get_excitations_per_winding()[0];
@@ -1129,7 +1130,7 @@ TEST_CASE("analytical_pfc bipolar (totem-pole): TRUE sine inductor current, zero
     // rectifier, so it carries a TRUE bipolar sine — reaching BOTH +I_pk and −I_pk with a ~zero mean —
     // instead of the bridged boost's rectified-sine (unipolar, (2/π)·I_pk mean). Same design point.
     using Kirchhoff::analytical::analytical_pfc;
-    MAS::OperatingPoint op = analytical_pfc(kPfcVrms, kPfcVout, kPfcPo, kPfcFline, kPfcFsw, kPfcL,
+    MAS::OperatingPoint op = analytical_pfc(kPfcVrms, kPfcVout, kPfcPo, kPfcFline, kPfcFsw, kPfcL, kCcm,
                                             /*efficiency*/1.0, /*Vd*/0.0, /*bipolar*/true);
     REQUIRE(op.get_excitations_per_winding().size() == 1);
     const auto cur = processed_current(op, 0);
@@ -1147,17 +1148,17 @@ TEST_CASE("analytical_pfc bipolar (totem-pole): TRUE sine inductor current, zero
 TEST_CASE("analytical_pfc rejects non-positive line/bus/power/fsw/L and infeasible step-up",
           "[analytical][solver][pfc]") {
     using Kirchhoff::analytical::analytical_pfc;
-    CHECK_THROWS(analytical_pfc(0.0,      kPfcVout, kPfcPo, kPfcFline, kPfcFsw, kPfcL));  // Vrms=0
-    CHECK_THROWS(analytical_pfc(kPfcVrms, 0.0,      kPfcPo, kPfcFline, kPfcFsw, kPfcL));  // Vout=0
-    CHECK_THROWS(analytical_pfc(kPfcVrms, kPfcVout, 0.0,    kPfcFline, kPfcFsw, kPfcL));  // Po=0
-    CHECK_THROWS(analytical_pfc(kPfcVrms, kPfcVout, kPfcPo, 0.0,       kPfcFsw, kPfcL));  // fLine=0
-    CHECK_THROWS(analytical_pfc(kPfcVrms, kPfcVout, kPfcPo, kPfcFline, 0.0,     kPfcL));  // fsw=0
-    CHECK_THROWS(analytical_pfc(kPfcVrms, kPfcVout, kPfcPo, kPfcFline, kPfcFsw, 0.0));    // L=0
+    CHECK_THROWS(analytical_pfc(0.0,      kPfcVout, kPfcPo, kPfcFline, kPfcFsw, kPfcL, kCcm));  // Vrms=0
+    CHECK_THROWS(analytical_pfc(kPfcVrms, 0.0,      kPfcPo, kPfcFline, kPfcFsw, kPfcL, kCcm));  // Vout=0
+    CHECK_THROWS(analytical_pfc(kPfcVrms, kPfcVout, 0.0,    kPfcFline, kPfcFsw, kPfcL, kCcm));  // Po=0
+    CHECK_THROWS(analytical_pfc(kPfcVrms, kPfcVout, kPfcPo, 0.0,       kPfcFsw, kPfcL, kCcm));  // fLine=0
+    CHECK_THROWS(analytical_pfc(kPfcVrms, kPfcVout, kPfcPo, kPfcFline, 0.0,     kPfcL, kCcm));  // fsw=0
+    CHECK_THROWS(analytical_pfc(kPfcVrms, kPfcVout, kPfcPo, kPfcFline, kPfcFsw, 0.0, kCcm));    // L=0
     // Infeasible step-up: Vout = 300 V < √2·230 = 325 V peak line (boost can only step up).
-    CHECK_THROWS(analytical_pfc(kPfcVrms, 300.0,    kPfcPo, kPfcFline, kPfcFsw, kPfcL));
+    CHECK_THROWS(analytical_pfc(kPfcVrms, 300.0,    kPfcPo, kPfcFline, kPfcFsw, kPfcL, kCcm));
     // efficiency out of (0,1].
-    CHECK_THROWS(analytical_pfc(kPfcVrms, kPfcVout, kPfcPo, kPfcFline, kPfcFsw, kPfcL, 1.5));
-    CHECK_THROWS(analytical_pfc(kPfcVrms, kPfcVout, kPfcPo, kPfcFline, kPfcFsw, kPfcL, 0.0));
+    CHECK_THROWS(analytical_pfc(kPfcVrms, kPfcVout, kPfcPo, kPfcFline, kPfcFsw, kPfcL, kCcm, 1.5));
+    CHECK_THROWS(analytical_pfc(kPfcVrms, kPfcVout, kPfcPo, kPfcFline, kPfcFsw, kPfcL, kCcm, 0.0));
 }
 
 // ─── Volt-second balance of the line-cycle boost-inductor waveforms (ABT #1586) ─────────────────────────
@@ -1299,7 +1300,7 @@ TEST_CASE("analytical_pfc: inductor voltage volt-second balanced per switching c
           "[analytical][solver][pfc][voltsecond]") {
     using Kirchhoff::analytical::analytical_pfc;
     const double vd = 0.8;   // a diode drop, so the OFF level is Vin − (Vout + Vd)
-    const MAS::OperatingPoint op = analytical_pfc(kVsVrms, kVsVout, kVsPo, kVsFline, kVsFsw, kVsL, kVsEff, vd);
+    const MAS::OperatingPoint op = analytical_pfc(kVsVrms, kVsVout, kVsPo, kVsFline, kVsFsw, kVsL, kCcm, kVsEff, vd);
     REQUIRE(op.get_excitations_per_winding().size() == 1);
     const double vPeak = std::sqrt(2.0) * kVsVrms;
     const double iPeak = std::sqrt(2.0) * kVsPo / kVsEff / kVsVrms;
@@ -1316,7 +1317,7 @@ TEST_CASE("analytical_pfc bipolar (totem-pole): volt-second balanced in both hal
           "[analytical][solver][pfc][voltsecond]") {
     using Kirchhoff::analytical::analytical_pfc;
     const double vd = 1.0;   // must take the half-cycle's polarity, like the bus
-    const MAS::OperatingPoint op = analytical_pfc(kPfcVrms, kPfcVout, kPfcPo, kPfcFline, kPfcFsw, kPfcL,
+    const MAS::OperatingPoint op = analytical_pfc(kPfcVrms, kPfcVout, kPfcPo, kPfcFline, kPfcFsw, kPfcL, kCcm,
                                                   /*efficiency*/1.0, vd, /*bipolar*/true);
     REQUIRE(op.get_excitations_per_winding().size() == 1);
     const double vPeak = std::sqrt(2.0) * kPfcVrms;
@@ -1443,7 +1444,7 @@ TEST_CASE("line-cycle volt-second report (ABT #1586)", "[.][voltsecond-report]")
         const auto t0 = Clock::now();
         const int reps = 20;
         MAS::OperatingPoint op;
-        for (int r = 0; r < reps; ++r) op = analytical_pfc(kVsVrms, kVsVout, kVsPo, kVsFline, kVsFsw, kVsL, kVsEff, 0.0);
+        for (int r = 0; r < reps; ++r) op = analytical_pfc(kVsVrms, kVsVout, kVsPo, kVsFline, kVsFsw, kVsL, kCcm, kVsEff, 0.0);
         std::cout << "analytical_pfc pfc-650w-370v: " << ms_since(t0) / reps << " ms per call\n";
         report("  pfc-650w-370v", op.get_excitations_per_winding()[0], kVsFsw, kVsL);
     }
@@ -1696,8 +1697,8 @@ TEST_CASE("all solvers scale with load (no load-blind regression)", "[analytical
         CHECK(hi > 1.5 * lo);
     }
     {
-        double lo = *analytical_pfc(230,400,1500,50,65000,500e-6).get_excitations_per_winding()[0].get_current()->get_processed()->get_peak();
-        double hi = *analytical_pfc(230,400,3000,50,65000,500e-6).get_excitations_per_winding()[0].get_current()->get_processed()->get_peak();
+        double lo = *analytical_pfc(230,400,1500,50,65000,500e-6,kCcm).get_excitations_per_winding()[0].get_current()->get_processed()->get_peak();
+        double hi = *analytical_pfc(230,400,3000,50,65000,500e-6,kCcm).get_excitations_per_winding()[0].get_current()->get_processed()->get_peak();
         CHECK(hi > 1.5 * lo);
     }
     // Current transformer: secondary scales with primary (ampere-turn balance).

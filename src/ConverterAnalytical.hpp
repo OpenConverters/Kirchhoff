@@ -700,12 +700,40 @@ MAS::OperatingPoint analytical_vienna(double linePhaseVoltageRms,
 // sine (signed current envelope, signed off-time bus polarity) instead of the bridged |sin| envelope, so
 // its excitation carries no rectified DC offset. INTERLEAVED_BOOST reuses this solver per phase with the
 // per-phase power (outputPower/N); SEPIC/Ćuk (buck-boost class) remain unported.
+//
+// CONDUCTION MODE (ABT #2143) — the boost diode blocks reverse current, so the inductor current is never
+// negative (the bridged/unipolar cell; the totem-pole's synchronous switches are noted per mode):
+//   * CONTINUOUS — average-current control at the fixed switching frequency: each switching cycle's average
+//     is the line envelope. A cycle whose CCM ripple fits under the envelope over the whole cycle (ΔI/2 ≤ its
+//     lowest envelope value) is the continuous triangle above, unchanged. A cycle whose ripple fits under its
+//     average but not under the envelope everywhere (the cycle at a line zero crossing) keeps the continuous
+//     triangle around that constant average instead of the moving envelope, so its valley stays ≥ 0. Where
+//     the inductance is too small even for that (ΔI/2 > the cycle average: near the line zero crossings, or
+//     over the whole line cycle for a small pinned L) the cycle is DISCONTINUOUS: from zero, ON for t_on = √(2·L·Tsw·I_avg·(Vout+Vd−Vin)/(Vin·(Vout+Vd))), the diode
+//     conducts for t_on·Vin/(Vout+Vd−Vin) back to zero, then idle — the same cycle average I_avg. The
+//     bipolar totem-pole keeps the continuous triangle everywhere (its synchronous switch carries reverse
+//     current).
+//   * DISCONTINUOUS — the classic DCM boost PFC: fixed switching frequency and ONE on-time over the whole
+//     line cycle, so each cycle averages Vin·t_on²·(Vout+Vd)/(2·L·Tsw·(Vout+Vd−Vin)) (not a pure sine). The
+//     on-time is the one whose line-cycle average power is Pin. THROWS if some cycle does not return to zero
+//     within its switching period (the inductance is too large for discontinuous conduction there).
+//   * CRITICAL — boundary (transition-mode) control: ONE on-time t_on = 2·L·I_linePeak/Vpk over the line
+//     cycle and the next cycle starts the instant the current reaches zero, so the peak current is twice
+//     the line current and the switching frequency varies over the line cycle (1/(t_on·(Vout+Vd)/
+//     (Vout+Vd−Vin))); switchingFrequency then only sets the sample density.
+enum class PfcConductionMode { CONTINUOUS, DISCONTINUOUS, CRITICAL };
+
+// The PfcConductionMode of a design_pfc mode string ("ccm" | "dcm" | "crm" | "transition"); throws on any
+// other.
+PfcConductionMode pfc_conduction_mode(const std::string& mode);
+
 MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
                                    double outputVoltage,
                                    double outputPower,
                                    double lineFrequency,
                                    double switchingFrequency,
                                    double boostInductance,
+                                   PfcConductionMode mode,
                                    double efficiency = 1.0,
                                    double diodeVoltageDrop = 0.0,
                                    bool bipolar = false);

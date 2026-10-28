@@ -8,6 +8,7 @@
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -3021,11 +3022,31 @@ static double vienna_line_peak_current(double power, double vPhaseRms, double ef
 // One switching cycle of a line-modulated two-level boost cell: the inductor sees `vOn` for duty·Tsw, then
 // `vOff` for the rest of the cycle. The converter equations pick the duty so that
 // vOn·duty + vOff·(1 − duty) = 0 (steady-state volt-second balance of every switching cycle).
+//
+// A boost cell with a diode cannot carry reverse current, so its inductor current cannot always ride the
+// line envelope as a zero-mean triangle: when the ripple exceeds twice the local average the diode turns
+// off at i = 0 and the cycle conducts DISCONTINUOUSLY. Such a cycle starts from zero current: ON for
+// duty·Tc at vOn, the diode conducts for offDuty·Tc at vOff until the current is back at zero, and the rest
+// of the cycle the inductor idles at zero current and zero volts. Volt-second balance is then
+// vOn·duty + vOff·offDuty = 0. A critical-conduction (boundary) cycle is the discontinuous one with no idle
+// interval (duty + offDuty = 1); a variable-frequency controller (CrM) also sets each cycle's own period.
 struct SwitchingCycleLevels {
     double vOn;
     double vOff;
     double duty;
+    double offDuty;                  // fraction of the cycle at vOff; exactly 1 − duty when continuous
+    bool discontinuous;              // the cycle starts and ends at zero inductor current
+    std::optional<double> period;    // this cycle's own period (variable frequency); unset = 1/switchingFrequency
+    // A continuous cycle whose ripple rides this constant average instead of the moving line envelope: the
+    // cycle at a line zero crossing, where the envelope starts from zero inside the cycle and the triangle
+    // around it would dip below zero although the cycle average still carries the ripple.
+    std::optional<double> heldAverage;
 };
+
+// A continuous-conduction cycle of a fixed-frequency cell: ON for duty, OFF for the rest.
+static SwitchingCycleLevels continuous_cycle(double vOn, double vOff, double duty) {
+    return SwitchingCycleLevels{vOn, vOff, duty, 1.0 - duty, false, std::nullopt, std::nullopt};
+}
 
 // Lower bound on the emitted samples per switching period. The voltage samples are exact cell averages,
 // so the volt-seconds they carry do not depend on it; it sets how finely the current ripple (and its peak)
@@ -3036,26 +3057,37 @@ constexpr double kLineCycleMinimumSamplesPerSwitchingPeriod = 8.0;
 // Builds ONE line period [0, 1/lineFrequency] of the boost-inductor current and voltage on a uniform grid
 // of N points (N a power of two, endpoint included, h = T/(N−1)).
 //
-// Switching cycle k spans [k·Tsw, (k+1)·Tsw) with Tsw = 1/switchingFrequency (exact, not rounded to the
-// grid) and holds the levels `levelsAtCycleMidpoint((k+½)·Tsw)`: the line voltage is taken constant over
-// one switching cycle. Its edges are exact times (k·Tsw and k·Tsw + duty·Tsw), never snapped to the grid.
+// Fixed frequency: switching cycle k spans [k·Tsw, (k+1)·Tsw) with Tsw = 1/switchingFrequency (exact, not
+// rounded to the grid) and holds the levels `levelsAtCycleMidpoint((k+½)·Tsw)`: the line voltage is taken
+// constant over one switching cycle. Its edges are exact times (k·Tsw, k·Tsw + duty·Tsw and, when it is
+// discontinuous, k·Tsw + (duty + offDuty)·Tsw), never snapped to the grid.
+// Variable frequency (every cycle sets `period`, as a critical-conduction controller does): each cycle starts
+// where the previous one ended and lasts its own period Tc; its levels are those at its own midpoint, found
+// by evaluating at tStart + ½·Tc of the previous cycle and then once more at tStart + ½·Tc of the result
+// (the period follows the slowly varying line voltage, so the second evaluation is the midpoint to well
+// within a switching cycle). The sample density stays the nominal one (switchingFrequency).
 //
 // VOLTAGE sample j = the exact average of that switched voltage over [t_j, t_j + h) (a cell average), so the
 // running volt-second integral of the samples equals the exact one at every grid point and every switching
-// cycle is volt-second balanced to rounding. The emitted period holds fsw/fLine switching cycles; when that
-// ratio is not an integer the last cycle is cut by the line period, so the period mean is the cut cycle's
-// volt-seconds over T (bounded by one switching cycle's ON volt-seconds, not growing with the line period).
+// cycle is volt-second balanced to rounding. The emitted period holds the line period's switching cycles;
+// the last one is cut by the line period, so the period mean is the cut cycle's volt-seconds over T (bounded
+// by one switching cycle's ON volt-seconds, not growing with the line period).
 //
-// CURRENT sample j = envelopeAt(t_j) + ripple(t_j), where ripple is the running volt-second integral of the
-// SAME switched voltage divided by L, shifted to zero mean over its switching cycle (it ramps between
-// −ΔI/2 and +ΔI/2, ΔI = vOn·duty·Tsw/L). The envelope is the line-frequency current the control imposes; the
-// L·di/dt it needs (≤ ω·L·I_pk, a few volts) is not added to the switched voltage, which stays balanced
-// cycle by cycle.
+// CURRENT sample j:
+//   * continuous cycle: envelopeAt(t_j) (or the cycle's heldAverage) + ripple(t_j), where ripple is the running volt-second integral of
+//     the SAME switched voltage divided by L, shifted to zero mean over its switching cycle (it ramps between
+//     −ΔI/2 and +ΔI/2, ΔI = vOn·duty·Tsw/L). The envelope is the line-frequency current the control imposes;
+//     the L·di/dt it needs (≤ ω·L·I_pk, a few volts) is not added to the switched voltage, which stays
+//     balanced cycle by cycle.
+//   * discontinuous / critical cycle: the running volt-second integral divided by L, from zero at the cycle
+//     start (the diode stops conducting at i = 0, so the current is never negative). The caller's on-time
+//     sets the cycle's average current; the envelope is not used.
 //
-// THROWS on lineFrequency ≤ 0, switchingFrequency ≤ lineFrequency, L ≤ 0, a duty outside [0, 1], or a
-// cycle whose levels are not volt-second balanced (|vOn·duty + vOff·(1−duty)| > 1e-9·(|vOn| + |vOff|), a
-// rounding-level bound: the converter equations make the balance exact, so a larger residual means the
-// caller's equations are wrong).
+// THROWS on lineFrequency ≤ 0, switchingFrequency ≤ lineFrequency, L ≤ 0, a duty or offDuty outside [0, 1],
+// duty + offDuty > 1, a continuous cycle with an idle interval or a variable period, a mix of fixed and
+// variable-period cycles, a non-positive cycle period, or a cycle whose levels are not volt-second balanced
+// (|vOn·duty + vOff·offDuty| > 1e-9·(|vOn| + |vOff|), a rounding-level bound: the converter equations make the
+// balance exact, so a larger residual means the caller's equations are wrong).
 static std::pair<MAS::Waveform, MAS::Waveform> build_line_cycle_switched_waveforms(
     const std::string& who, double lineFrequency, double switchingFrequency, double L,
     const std::function<SwitchingCycleLevels(double)>& levelsAtCycleMidpoint,
@@ -3074,50 +3106,113 @@ static std::pair<MAS::Waveform, MAS::Waveform> build_line_cycle_switched_wavefor
     while (static_cast<double>(N - 1) < minimumIntervals) N *= 2;
     const double h = T / static_cast<double>(N - 1);
 
-    // The checked levels of every switching cycle the grid touches (the last cell ends at T + h).
-    const size_t cycleCount = static_cast<size_t>(std::floor((T + h) / Tsw)) + 2;
-    std::vector<SwitchingCycleLevels> cycles;
-    cycles.reserve(cycleCount);
-    for (size_t k = 0; k < cycleCount; ++k) {
-        const double tMid = (static_cast<double>(k) + 0.5) * Tsw;
-        const SwitchingCycleLevels lv = levelsAtCycleMidpoint(tMid);
+    auto checked = [&](const SwitchingCycleLevels& lv, double tMid) {
+        const std::string at = " at t = " + std::to_string(tMid) + " s";
         if (!(lv.duty >= 0.0 && lv.duty <= 1.0))
-            throw std::logic_error(who + ": switching-cycle duty " + std::to_string(lv.duty) +
-                                   " outside [0, 1] at t = " + std::to_string(tMid) + " s");
-        const double imbalance = lv.vOn * lv.duty + lv.vOff * (1.0 - lv.duty);
+            throw std::logic_error(who + ": switching-cycle duty " + std::to_string(lv.duty) + " outside [0, 1]" + at);
+        if (!(lv.offDuty >= 0.0 && lv.offDuty <= 1.0))
+            throw std::logic_error(who + ": switching-cycle off duty " + std::to_string(lv.offDuty) +
+                                   " outside [0, 1]" + at);
+        if (lv.duty + lv.offDuty > 1.0 + 1e-12)
+            throw std::logic_error(who + ": switching cycle" + at + " is ON " + std::to_string(lv.duty) +
+                                   " and OFF " + std::to_string(lv.offDuty) + " of its period, more than all of it");
+        if (!lv.discontinuous && (lv.period || lv.offDuty != 1.0 - lv.duty))
+            throw std::logic_error(who + ": continuous switching cycle" + at +
+                                   " must be fixed-frequency and OFF for the whole rest of the cycle");
+        if (lv.discontinuous && lv.heldAverage)
+            throw std::logic_error(who + ": discontinuous switching cycle" + at +
+                                   " starts from zero current and cannot hold an average");
+        if (lv.period && !(*lv.period > 0.0))
+            throw std::logic_error(who + ": switching-cycle period " + std::to_string(*lv.period) + " s" + at);
+        const double imbalance = lv.vOn * lv.duty + lv.vOff * lv.offDuty;
         if (std::abs(imbalance) > 1e-9 * (std::abs(lv.vOn) + std::abs(lv.vOff)))
-            throw std::logic_error(who + ": switching cycle at t = " + std::to_string(tMid) +
-                                   " s is not volt-second balanced (vOn=" + std::to_string(lv.vOn) +
-                                   " V, vOff=" + std::to_string(lv.vOff) + " V, duty=" + std::to_string(lv.duty) +
-                                   ", mean " + std::to_string(imbalance) + " V)");
-        cycles.push_back(lv);
+            throw std::logic_error(who + ": switching cycle" + at + " is not volt-second balanced (vOn=" +
+                                   std::to_string(lv.vOn) + " V, vOff=" + std::to_string(lv.vOff) +
+                                   " V, duty=" + std::to_string(lv.duty) + ", offDuty=" +
+                                   std::to_string(lv.offDuty) + ", mean " + std::to_string(imbalance) + " V)");
+        return lv;
+    };
+
+    // The checked levels of every switching cycle the grid touches (the last cell ends at T + h), with the
+    // start time and period of each.
+    std::vector<SwitchingCycleLevels> cycles;
+    std::vector<double> starts, periods;
+    const SwitchingCycleLevels first = checked(levelsAtCycleMidpoint(0.5 * Tsw), 0.5 * Tsw);
+    const bool variablePeriod = first.period.has_value();
+    if (!variablePeriod) {
+        const size_t cycleCount = static_cast<size_t>(std::floor((T + h) / Tsw)) + 2;
+        cycles.reserve(cycleCount);
+        for (size_t k = 0; k < cycleCount; ++k) {
+            const double tMid = (static_cast<double>(k) + 0.5) * Tsw;
+            const SwitchingCycleLevels lv = (k == 0) ? first : checked(levelsAtCycleMidpoint(tMid), tMid);
+            if (lv.period)
+                throw std::logic_error(who + ": switching cycle at t = " + std::to_string(tMid) +
+                                       " s sets its own period inside a fixed-frequency line cycle");
+            cycles.push_back(lv);
+        }
+    } else {
+        double tStart = 0.0, previousPeriod = Tsw;
+        while (tStart <= T + h) {
+            SwitchingCycleLevels lv = levelsAtCycleMidpoint(tStart + 0.5 * previousPeriod);
+            if (!lv.period)
+                throw std::logic_error(who + ": switching cycle at t = " + std::to_string(tStart) +
+                                       " s has no period inside a variable-frequency line cycle");
+            const double tMid = tStart + 0.5 * *lv.period;
+            lv = checked(levelsAtCycleMidpoint(tMid), tMid);
+            if (!lv.period)
+                throw std::logic_error(who + ": switching cycle at t = " + std::to_string(tMid) +
+                                       " s has no period inside a variable-frequency line cycle");
+            cycles.push_back(lv);
+            starts.push_back(tStart);
+            periods.push_back(*lv.period);
+            previousPeriod = *lv.period;
+            tStart += *lv.period;
+        }
+        starts.push_back(tStart);   // end of the last cycle
     }
-    // The levels of the switching cycle holding t, and t's offset `tau` into that cycle.
-    auto cycle_at = [&](double t, double& tau) -> const SwitchingCycleLevels& {
-        const double k = std::floor(t / Tsw);
-        tau = t - k * Tsw;
-        const size_t index = static_cast<size_t>(k);
-        if (k < 0.0 || index >= cycles.size())
+    // The levels of the switching cycle holding t, t's offset `tau` into that cycle, and its period `Tc`.
+    auto cycle_at = [&](double t, double& tau, double& Tc) -> const SwitchingCycleLevels& {
+        if (!variablePeriod) {
+            const double k = std::floor(t / Tsw);
+            tau = t - k * Tsw;
+            Tc = Tsw;
+            const size_t index = static_cast<size_t>(k);
+            if (k < 0.0 || index >= cycles.size())
+                throw std::logic_error(who + ": t = " + std::to_string(t) + " s is outside the built switching cycles");
+            return cycles[index];
+        }
+        const size_t after = static_cast<size_t>(std::upper_bound(starts.begin(), starts.end(), t) - starts.begin());
+        if (after == 0 || after >= starts.size())
             throw std::logic_error(who + ": t = " + std::to_string(t) + " s is outside the built switching cycles");
-        return cycles[index];
+        tau = t - starts[after - 1];
+        Tc = periods[after - 1];
+        return cycles[after - 1];
     };
     // Volt-seconds from the start of the cycle to `tau` into it. Every cycle is balanced, so this is zero at
     // each cycle boundary and therefore IS the running volt-second integral from t = 0.
-    auto volt_seconds = [&](const SwitchingCycleLevels& lv, double tau) {
-        const double tOn = lv.duty * Tsw;
-        return (tau <= tOn) ? lv.vOn * tau : lv.vOn * tOn + lv.vOff * (tau - tOn);
+    auto volt_seconds = [&](const SwitchingCycleLevels& lv, double tau, double Tc) {
+        const double tOn = lv.duty * Tc;
+        if (tau <= tOn) return lv.vOn * tau;
+        if (!lv.discontinuous) return lv.vOn * tOn + lv.vOff * (tau - tOn);
+        // Discontinuous: balanced (vOn·tOn = −vOff·tOff), so while the diode conducts the integral is
+        // −vOff·(time left until the current is back at zero) — written that way it cannot round to the
+        // wrong sign — and it is exactly zero over the idle interval.
+        const double tZero = tOn + lv.offDuty * Tc;
+        return (tau < tZero) ? -lv.vOff * (tZero - tau) : 0.0;
     };
 
     std::vector<double> time(N), current(N), voltage(N);
     for (size_t j = 0; j < N; ++j) {
         const double t = static_cast<double>(j) * h;
-        double tau = 0.0, tauNext = 0.0;
-        const SwitchingCycleLevels& lv     = cycle_at(t, tau);
-        const SwitchingCycleLevels& lvNext = cycle_at(t + h, tauNext);
-        const double phi = volt_seconds(lv, tau);
+        double tau = 0.0, tauNext = 0.0, Tc = 0.0, TcNext = 0.0;
+        const SwitchingCycleLevels& lv     = cycle_at(t, tau, Tc);
+        const SwitchingCycleLevels& lvNext = cycle_at(t + h, tauNext, TcNext);
+        const double phi = volt_seconds(lv, tau, Tc);
         time[j]    = t;
-        voltage[j] = (volt_seconds(lvNext, tauNext) - phi) / h;
-        current[j] = envelopeAt(t) + (phi - 0.5 * lv.vOn * lv.duty * Tsw) / L;
+        voltage[j] = (volt_seconds(lvNext, tauNext, TcNext) - phi) / h;
+        current[j] = lv.discontinuous
+            ? phi / L
+            : (lv.heldAverage ? *lv.heldAverage : envelopeAt(t)) + (phi - 0.5 * lv.vOn * lv.duty * Tsw) / L;
     }
 
     MAS::Waveform currentWaveform, voltageWaveform;
@@ -3213,7 +3308,7 @@ MAS::OperatingPoint analytical_vienna(double linePhaseVoltageRms,
                     [&](double tc) {
                         const double vPhase = V_phase_peak * std::sin(omegaLine * tc + phaseOffset);
                         const double halfBus = (vPhase >= 0.0) ? Vhalf : -Vhalf;
-                        return SwitchingCycleLevels{vPhase, vPhase - halfBus, 1.0 - std::abs(vPhase) / Vhalf};
+                        return continuous_cycle(vPhase, vPhase - halfBus, 1.0 - std::abs(vPhase) / Vhalf);
                     },
                     [&](double t) { return I_pk_ch * std::sin(omegaLine * t + phaseOffset); });
                 currentWaveform = waveforms.first;
@@ -3267,12 +3362,21 @@ MAS::OperatingPoint analytical_vienna(double linePhaseVoltageRms,
 //   effective_diode_voltage_drop    → diodeVoltageDrop param
 // See ConverterAnalytical.hpp for the full omitted/throws contract.
 // ─────────────────────────────────────────────────────────────────────────────
+PfcConductionMode pfc_conduction_mode(const std::string& mode) {
+    if (mode == "ccm") return PfcConductionMode::CONTINUOUS;
+    if (mode == "dcm") return PfcConductionMode::DISCONTINUOUS;
+    if (mode == "crm" || mode == "transition") return PfcConductionMode::CRITICAL;
+    throw std::invalid_argument("pfc_conduction_mode: unknown PFC conduction mode '" + mode +
+                                "' (expected ccm | dcm | crm | transition)");
+}
+
 MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
                                    double outputVoltage,
                                    double outputPower,
                                    double lineFrequency,
                                    double switchingFrequency,
                                    double boostInductance,
+                                   PfcConductionMode mode,
                                    double efficiency,
                                    double diodeVoltageDrop,
                                    bool bipolar) {
@@ -3324,24 +3428,104 @@ MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
         const double s = std::sin(omegaLine * t);
         return bipolar ? s : std::abs(s);
     };
-    auto levelsAt = [&](double tc) {
+    const double Tsw = 1.0 / switchingFrequency;
+    // The instantaneous line voltage of the cycle centred on tc: signed (Vin) and its magnitude (|Vin|).
+    auto lineVoltageAt = [&](double tc, double& vinInst, double& vinAbsInst) {
         const double vinShape = lineShape(tc);
-        double vinInst    = vinPeakMin * vinShape;
-        double vinAbsInst = vinPeakMin * std::abs(vinShape);
+        vinInst    = vinPeakMin * vinShape;
+        vinAbsInst = vinPeakMin * std::abs(vinShape);
         // Floor |Vin| near the line zero-crossing so the boost duty stays bounded.  MKF :399-404
         if (bipolar && vinAbsInst < vinPeakMin * 0.05) {
             vinAbsInst = vinPeakMin * 0.05;
             vinInst    = std::copysign(vinAbsInst, vinShape);
         }
-        // Boost duty D = 1 − |Vin|/(Vout+Vd)  (MKF :543-547). It lies in (0, 1] without clipping: the
-        // step-up guard above makes Vout+Vd exceed every |Vin|.
-        const double D = 1.0 - vinAbsInst / vOutPlusDrop;
-        // ON: L sees +Vin (MKF :570-572). OFF: L discharges into the bus through the diode, Vin − (Vout+Vd);
-        // for totem-pole the bus AND the diode drop take the half-cycle's polarity (MKF :579-585 signed only
-        // Vout, leaving the drop unsigned, which unbalances the negative half-cycle by 2·Vd·(1−D)).
-        const double busSigned = bipolar ? std::copysign(vOutPlusDrop, vinInst) : vOutPlusDrop;
-        return SwitchingCycleLevels{vinInst, vinInst - busSigned, D};
     };
+    // ON: L sees +Vin (MKF :570-572). OFF: L discharges into the bus through the diode, Vin − (Vout+Vd);
+    // for totem-pole the bus AND the diode drop take the half-cycle's polarity (MKF :579-585 signed only
+    // Vout, leaving the drop unsigned, which unbalances the negative half-cycle by 2·Vd·(1−D)).
+    auto offLevel = [&](double vinInst) {
+        return vinInst - (bipolar ? std::copysign(vOutPlusDrop, vinInst) : vOutPlusDrop);
+    };
+    // A cycle that starts from zero current: ON for tOn, then the diode conducts until the current is back at
+    // zero (tOn·|Vin|/(Vout+Vd−|Vin|)), within a cycle of period Tc (the rest idles at zero current).
+    auto fromZeroCycle = [&](double vinInst, double vinAbsInst, double tOn, double Tc, std::optional<double> period) {
+        const double tOff = tOn * vinAbsInst / (vOutPlusDrop - vinAbsInst);
+        return SwitchingCycleLevels{vinInst, offLevel(vinInst), tOn / Tc, tOff / Tc, true, period, std::nullopt};
+    };
+
+    std::function<SwitchingCycleLevels(double)> levelsAt;
+    if (mode == PfcConductionMode::CONTINUOUS) {
+        // Average-current control at fixed frequency: each cycle averages the line envelope at its midpoint.
+        // The continuous triangle where its valley stays at or above zero, else a discontinuous cycle with
+        // the on-time that gives the same average (the |sin| line shape cancels from it: I_avg/|Vin| is
+        // iLinePeak/Vpk all along the line cycle).
+        // A continuous cycle keeps the moving envelope (the waveform this model always emitted) where the
+        // envelope stays above the half ripple over the whole cycle; at a line zero crossing it holds the
+        // cycle's average instead, so its valley stays at or above zero.
+        const double conductance = iLinePeak / vinPeakMin;
+        const double halfLine    = 0.5 / lineFrequency;
+        auto lowestEnvelope = [&](double from, double to) {   // min of iLinePeak·|sin| over [from, to]
+            if (std::floor(from / halfLine) != std::floor(to / halfLine)) return 0.0;   // a zero crossing inside
+            return iLinePeak * std::min(std::abs(lineShape(from)), std::abs(lineShape(to)));
+        };
+        levelsAt = [&, conductance, lowestEnvelope](double tc) {
+            double vinInst = 0.0, vinAbsInst = 0.0;
+            lineVoltageAt(tc, vinInst, vinAbsInst);
+            // Boost duty D = 1 − |Vin|/(Vout+Vd)  (MKF :543-547). It lies in (0, 1] without clipping: the
+            // step-up guard above makes Vout+Vd exceed every |Vin|.
+            const double D = 1.0 - vinAbsInst / vOutPlusDrop;
+            if (bipolar) return continuous_cycle(vinInst, offLevel(vinInst), D);
+            const double averageCurrent = iLinePeak * std::abs(lineShape(tc));
+            const double halfRipple = 0.5 * vinAbsInst * D * Tsw / L;
+            if (lowestEnvelope(tc - 0.5 * Tsw, tc + 0.5 * Tsw) >= halfRipple)
+                return continuous_cycle(vinInst, offLevel(vinInst), D);
+            if (averageCurrent >= halfRipple) {
+                SwitchingCycleLevels held = continuous_cycle(vinInst, offLevel(vinInst), D);
+                held.heldAverage = averageCurrent;
+                return held;
+            }
+            const double tOn = std::sqrt(2.0 * L * Tsw * conductance * (vOutPlusDrop - vinAbsInst) / vOutPlusDrop);
+            return fromZeroCycle(vinInst, vinAbsInst, tOn, Tsw, std::nullopt);
+        };
+    } else if (mode == PfcConductionMode::DISCONTINUOUS) {
+        // One on-time over the line cycle (fixed frequency). A cycle averages
+        // |Vin|·tOn²·(Vout+Vd)/(2·L·Tsw·(Vout+Vd−|Vin|)), so the line-cycle input power is
+        // tOn²/(2·L·Tsw)·<Vin²·(Vout+Vd)/(Vout+Vd−|Vin|)>, averaged here over the emitted cycle midpoints.
+        double shapeSum = 0.0;
+        size_t shapeCount = 0;
+        for (size_t k = 0; (static_cast<double>(k) + 0.5) * Tsw < 1.0 / lineFrequency; ++k, ++shapeCount) {
+            double vinInst = 0.0, vinAbsInst = 0.0;
+            lineVoltageAt((static_cast<double>(k) + 0.5) * Tsw, vinInst, vinAbsInst);
+            shapeSum += vinAbsInst * vinAbsInst * vOutPlusDrop / (vOutPlusDrop - vinAbsInst);
+        }
+        if (shapeCount == 0 || !(shapeSum > 0.0))
+            throw std::logic_error("analytical_pfc: no switching cycle inside the line period");
+        const double tOn = std::sqrt(2.0 * L * Tsw * pinAvg / (shapeSum / static_cast<double>(shapeCount)));
+        // The longest cycle is at the line peak, where the diode conducts longest.
+        const double longestCycle = tOn * vOutPlusDrop / (vOutPlusDrop - vinPeakMin);
+        if (longestCycle > Tsw)
+            throw std::invalid_argument(
+                "analytical_pfc: discontinuous conduction is impossible with L = " + std::to_string(L * 1e6) +
+                " uH: delivering " + std::to_string(pinAvg) + " W needs an on-time of " + std::to_string(tOn * 1e6) +
+                " us, and at the line peak the current then takes " + std::to_string(longestCycle * 1e6) +
+                " us to return to zero, longer than the " + std::to_string(Tsw * 1e6) +
+                " us switching period (the inductance is too large for DCM at this operating point)");
+        levelsAt = [&, tOn](double tc) {
+            double vinInst = 0.0, vinAbsInst = 0.0;
+            lineVoltageAt(tc, vinInst, vinAbsInst);
+            return fromZeroCycle(vinInst, vinAbsInst, tOn, Tsw, std::nullopt);
+        };
+    } else {
+        // Critical conduction: one on-time, the next cycle starting at zero current. The cycle peak
+        // |Vin|·tOn/L is twice the line current iLinePeak·|sin|, so tOn = 2·L·iLinePeak/Vpk.
+        const double tOn = 2.0 * L * iLinePeak / vinPeakMin;
+        levelsAt = [&, tOn](double tc) {
+            double vinInst = 0.0, vinAbsInst = 0.0;
+            lineVoltageAt(tc, vinInst, vinAbsInst);
+            const double period = tOn * vOutPlusDrop / (vOutPlusDrop - vinAbsInst);
+            return fromZeroCycle(vinInst, vinAbsInst, tOn, period, period);
+        };
+    }
     // Current envelope: the line current the PFC control imposes, signed for totem-pole.  MKF :549
     auto envelopeAt = [&](double t) { return iLinePeak * lineShape(t); };
 

@@ -278,6 +278,9 @@ target_link_libraries(pfc_demo PRIVATE kirchhoff)
 
 add_executable(test_pfc tests/test_pfc.cpp src/KirchhoffApi.cpp)  # api::determine_pfc_mode test
 target_link_libraries(test_pfc PRIVATE kirchhoff Catch2::Catch2WithMain)
+# CrM/DCM boost-inductor current vs each conduction mode's closed form (ABT #2143).
+add_executable(test_pfc_conduction tests/test_pfc_conduction.cpp)
+target_link_libraries(test_pfc_conduction PRIVATE kirchhoff Catch2::Catch2WithMain)
 
 add_executable(test_ngspice_runner tests/test_ngspice_runner.cpp)
 target_link_libraries(test_ngspice_runner PRIVATE kirchhoff Catch2::Catch2WithMain)
@@ -392,7 +395,7 @@ if (NOT MSVC)
     foreach(_kh_warn_target
             test_advanced test_analytical test_control_stage test_converter_analytical test_diagnostics
             test_extract test_ltspice_backend test_mkf_equivalence test_ngspice_runner test_nrmse_gate
-            test_pfc test_ptp test_real_fidelity test_real_magnetic test_requirements
+            test_pfc test_pfc_conduction test_ptp test_real_fidelity test_real_magnetic test_requirements
             test_resonant_validation test_settings test_vienna
             flyback_demo tas_flyback_demo boost_demo psfb_demo ahb_demo acf_demo fsbb_demo pshb_demo
             clllc_demo pfc_demo vienna_demo api_consumer)
