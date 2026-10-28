@@ -323,7 +323,14 @@ are emitted as `{nominal}` only (no min/max triplet); `operatingPoints[0]` suppl
 **PFC conduction mode & topology variant (ABT #92):** `config.mode` ∈ {`ccm`(default), `dcm`, `crm`,
 `transition`} drives the boost-inductor sizing (MKF `calculate_inductance_ccm`/`_dcm`/`_crcm`; `crm` and
 `transition` share the boundary formula). The hysteretic current band follows the sized inductor's actual
-peak ripple, so CCM is byte-identical to the original. `config.topologyVariant` ∈ {`boost`(default),
+peak ripple, so CCM is byte-identical to the original. In the boost-family deck (boost, bridgeless,
+semiBridgeless) the mode also selects the inner current law (`pfc_inner_current_law`, ABT #2146): `crm`/
+`transition` = peak-current latch (off at 2·i_ref, on at zero current: variable frequency), `dcm` = the same
+latch set by a fixed-frequency clock (constant on-time), `ccm` = the hysteretic band, or fixed-frequency
+average-current control when a pinned inductance is too small for continuous conduction at the line peak.
+The latch, clock and sawtooth are TDAS time-base atoms (`timeBase` latch/timer/oscillator), lowered by
+`TasAssembler` to their CIAS elements. Totem-pole and interleaved decks still run the hysteretic band in
+every mode. `config.topologyVariant` ∈ {`boost`(default),
 `interleaved`, `totemPole`, `sepic`, `cuk`}:
 - **interleaved** — N (=`numberOfPhases`, 2 or 3) phase-shifted boost legs sharing one bridge and bus cap;
   each leg carries 1/N of the line current, so its inductor is N× larger and the per-phase reference gain is

@@ -3370,6 +3370,54 @@ PfcConductionMode pfc_conduction_mode(const std::string& mode) {
                                 "' (expected ccm | dcm | crm | transition)");
 }
 
+double pfc_discontinuous_on_time(double inputVoltageRms,
+                                 double outputVoltage,
+                                 double outputPower,
+                                 double lineFrequency,
+                                 double switchingFrequency,
+                                 double boostInductance,
+                                 double efficiency,
+                                 double diodeVoltageDrop,
+                                 bool bipolar) {
+    if (!(inputVoltageRms > 0) || !(outputPower > 0) || !(lineFrequency > 0) || !(switchingFrequency > lineFrequency) ||
+        !(boostInductance > 0) || !(efficiency > 0 && efficiency <= 1.0))
+        throw std::invalid_argument("pfc_discontinuous_on_time: inputVoltageRms, outputPower, lineFrequency, "
+                                    "boostInductance must be > 0, switchingFrequency > lineFrequency, efficiency in (0, 1]");
+    const double vinPeakMin   = inputVoltageRms * std::sqrt(2.0);
+    const double vOutPlusDrop = outputVoltage + diodeVoltageDrop;
+    if (!(vOutPlusDrop > vinPeakMin))
+        throw std::invalid_argument("pfc_discontinuous_on_time: outputVoltage must exceed the peak input voltage");
+    const double L      = boostInductance;
+    const double pinAvg = outputPower / efficiency;
+    const double Tsw    = 1.0 / switchingFrequency;
+    const double omegaLine = 2.0 * M_PI * lineFrequency;
+    // A cycle averages |Vin|·tOn²·(Vout+Vd)/(2·L·Tsw·(Vout+Vd−|Vin|)), so the line-cycle input power is
+    // tOn²/(2·L·Tsw)·<Vin²·(Vout+Vd)/(Vout+Vd−|Vin|)>, averaged here over the switching-cycle midpoints (the
+    // line voltage of a cycle is the one at its midpoint, floored at 5 % of the peak for the bipolar cell as in
+    // analytical_pfc).
+    double shapeSum = 0.0;
+    size_t shapeCount = 0;
+    for (size_t k = 0; (static_cast<double>(k) + 0.5) * Tsw < 1.0 / lineFrequency; ++k, ++shapeCount) {
+        const double s = std::sin(omegaLine * ((static_cast<double>(k) + 0.5) * Tsw));
+        double vinAbsInst = vinPeakMin * std::abs(bipolar ? s : std::abs(s));
+        if (bipolar && vinAbsInst < vinPeakMin * 0.05) vinAbsInst = vinPeakMin * 0.05;
+        shapeSum += vinAbsInst * vinAbsInst * vOutPlusDrop / (vOutPlusDrop - vinAbsInst);
+    }
+    if (shapeCount == 0 || !(shapeSum > 0.0))
+        throw std::logic_error("pfc_discontinuous_on_time: no switching cycle inside the line period");
+    const double tOn = std::sqrt(2.0 * L * Tsw * pinAvg / (shapeSum / static_cast<double>(shapeCount)));
+    // The longest cycle is at the line peak, where the diode conducts longest.
+    const double longestCycle = tOn * vOutPlusDrop / (vOutPlusDrop - vinPeakMin);
+    if (longestCycle > Tsw)
+        throw std::invalid_argument(
+            "analytical_pfc: discontinuous conduction is impossible with L = " + std::to_string(L * 1e6) +
+            " uH: delivering " + std::to_string(pinAvg) + " W needs an on-time of " + std::to_string(tOn * 1e6) +
+            " us, and at the line peak the current then takes " + std::to_string(longestCycle * 1e6) +
+            " us to return to zero, longer than the " + std::to_string(Tsw * 1e6) +
+            " us switching period (the inductance is too large for DCM at this operating point)");
+    return tOn;
+}
+
 MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
                                    double outputVoltage,
                                    double outputPower,
@@ -3488,28 +3536,10 @@ MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
             return fromZeroCycle(vinInst, vinAbsInst, tOn, Tsw, std::nullopt);
         };
     } else if (mode == PfcConductionMode::DISCONTINUOUS) {
-        // One on-time over the line cycle (fixed frequency). A cycle averages
-        // |Vin|·tOn²·(Vout+Vd)/(2·L·Tsw·(Vout+Vd−|Vin|)), so the line-cycle input power is
-        // tOn²/(2·L·Tsw)·<Vin²·(Vout+Vd)/(Vout+Vd−|Vin|)>, averaged here over the emitted cycle midpoints.
-        double shapeSum = 0.0;
-        size_t shapeCount = 0;
-        for (size_t k = 0; (static_cast<double>(k) + 0.5) * Tsw < 1.0 / lineFrequency; ++k, ++shapeCount) {
-            double vinInst = 0.0, vinAbsInst = 0.0;
-            lineVoltageAt((static_cast<double>(k) + 0.5) * Tsw, vinInst, vinAbsInst);
-            shapeSum += vinAbsInst * vinAbsInst * vOutPlusDrop / (vOutPlusDrop - vinAbsInst);
-        }
-        if (shapeCount == 0 || !(shapeSum > 0.0))
-            throw std::logic_error("analytical_pfc: no switching cycle inside the line period");
-        const double tOn = std::sqrt(2.0 * L * Tsw * pinAvg / (shapeSum / static_cast<double>(shapeCount)));
-        // The longest cycle is at the line peak, where the diode conducts longest.
-        const double longestCycle = tOn * vOutPlusDrop / (vOutPlusDrop - vinPeakMin);
-        if (longestCycle > Tsw)
-            throw std::invalid_argument(
-                "analytical_pfc: discontinuous conduction is impossible with L = " + std::to_string(L * 1e6) +
-                " uH: delivering " + std::to_string(pinAvg) + " W needs an on-time of " + std::to_string(tOn * 1e6) +
-                " us, and at the line peak the current then takes " + std::to_string(longestCycle * 1e6) +
-                " us to return to zero, longer than the " + std::to_string(Tsw * 1e6) +
-                " us switching period (the inductance is too large for DCM at this operating point)");
+        // One on-time over the line cycle (fixed frequency), from the power balance.
+        const double tOn = pfc_discontinuous_on_time(inputVoltageRms, outputVoltage, outputPower, lineFrequency,
+                                                     switchingFrequency, boostInductance, efficiency,
+                                                     diodeVoltageDrop, bipolar);
         levelsAt = [&, tOn](double tc) {
             double vinInst = 0.0, vinAbsInst = 0.0;
             lineVoltageAt(tc, vinInst, vinAbsInst);

@@ -81,8 +81,56 @@ bool contains_ci(const std::string& s, const std::string& sub) {
     return a.find(b) != std::string::npos;
 }
 
+// TDAS time base (oscillator / timer / latch, PEAS-RFC 0001 §7) -> a one-atom CIAS leaf carrying the family's
+// `behavioral` block; the CIAS circuit converter realises that atom (PULSE / phase-accumulator source, astable
+// or monostable timer, self-holding latch). TDAS is a schema-only package, so there is no family library to
+// call: the leaf is the whole lowering, as AAS's single_atom_leaf is for its analog blocks. The exposed pins
+// are the ones CIAS realises for that family and mode.
+json timebase_to_leaf(const json& data) {
+    const json& tb = data.at("timeBase");
+    std::string fam;
+    for (const char* k : {"oscillator", "timer", "latch"})
+        if (tb.contains(k)) { fam = k; break; }
+    if (fam.empty())
+        throw std::runtime_error("TasAssembler: timeBase component has no oscillator/timer/latch family");
+    const json& block = tb.at(fam);
+    if (!block.contains("behavioral") || !block.at("behavioral").is_object())
+        throw std::runtime_error("TasAssembler: timeBase " + fam + " has no behavioral block — a datasheet-only "
+                                 "part cannot be realized as an ideal element");
+    const json& b = block.at("behavioral");
+    std::vector<std::string> pins;
+    if (fam == "latch") {
+        pins = {"setPlus", "setMinus", "resetPlus", "resetMinus", "outPlus", "outMinus"};
+    } else if (fam == "oscillator") {
+        pins = {"outPlus", "outMinus"};
+        if (b.contains("frequencyControl")) { pins.push_back("ctrlPlus"); pins.push_back("ctrlMinus"); }
+    } else {
+        if (!b.contains("mode") || !b.at("mode").is_string())
+            throw std::runtime_error("TasAssembler: timeBase timer behavioral block has no 'mode'");
+        const std::string mode = b.at("mode").get<std::string>();
+        if (mode == "astable")         pins = {"outPlus", "outMinus"};
+        else if (mode == "monostable") pins = {"trgPlus", "trgMinus", "outPlus", "outMinus"};
+        else throw std::runtime_error("TasAssembler: timeBase timer has unknown mode '" + mode +
+                                      "' (expected astable/monostable)");
+    }
+    json atom;
+    atom["timeBase"][fam]["behavioral"] = b;
+    json leaf;
+    leaf["name"] = fam;
+    leaf["ports"] = json::array();
+    leaf["components"] = json::array({ json{{"name", "C"}, {"data", atom}} });
+    leaf["connections"] = json::array();
+    for (const auto& p : pins) {
+        leaf["ports"].push_back(json{{"name", p}});
+        leaf["connections"].push_back(json{{"name", p}, {"endpoints", json::array({
+            json{{"component", "C"}, {"pin", p}}, json{{"port", p}} })}});
+    }
+    return leaf;
+}
+
 // Dispatch a PEAS component to its family to_cias generator (decision 5: the orchestrator expands).
-// AAS (analog) and CTAS (controller) now have real converter libs, exactly like RAS/CAS/SAS/MAS.
+// AAS (analog) and CTAS (controller) now have real converter libs, exactly like RAS/CAS/SAS/MAS; a TDAS time
+// base lowers to its single CIAS atom (timebase_to_leaf).
 json component_to_leaf(const json& data, const PEAS::Fidelity& f) {
     if (data.contains("resistor"))      return RAS::ras_to_cias(data, f);
     if (data.contains("capacitor"))     return CAS::cas_to_cias(data, f);
@@ -90,8 +138,9 @@ json component_to_leaf(const json& data, const PEAS::Fidelity& f) {
     if (data.contains("magnetic"))      return MAS::mas_to_cias(data, f);
     if (data.contains("analog"))        return AAS::aas_to_cias(data, f);    // AAS analog block
     if (data.contains("controller"))    return CTAS::ctas_to_cias(data, f);  // CTAS controller
+    if (data.contains("timeBase"))      return timebase_to_leaf(data);       // TDAS time base
     throw std::runtime_error("TasAssembler: component data has no PEAS discriminator "
-                             "(resistor/capacitor/semiconductor/magnetic/analog/controller)");
+                             "(resistor/capacitor/semiconductor/magnetic/analog/controller/timeBase)");
 }
 
 double op_input_voltage(const json& inputs) {

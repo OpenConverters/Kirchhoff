@@ -54,7 +54,17 @@ struct PfcDesign {
     double couplingCapacitance; // Cs (energy-transfer cap), resonance placed a decade below fsw
 };
 
-/** Design a single-phase current-mode (hysteretic) boost PFC. */
+/** The inner current-control law of the boost-family PFC deck (ABT #2146). */
+enum class PfcCurrentLaw {
+    HYSTERETIC,       // CCM: hysteretic band of the design ripple around the line-current reference
+    AVERAGE_CURRENT,  // CCM mode, L too small for continuous conduction at the line peak: fixed-frequency PWM
+    CRITICAL,         // CrM / transition: constant on-time, turn-on at zero inductor current
+    DISCONTINUOUS,    // DCM: constant on-time, fixed-frequency turn-on
+};
+/** The law build_pfc_tas uses for a design (throws on an unknown mode). */
+PfcCurrentLaw pfc_inner_current_law(const PfcDesign& d);
+
+/** Design a single-phase current-mode boost PFC (inner current law per pfc_inner_current_law). */
 PfcDesign design_pfc(const nlohmann::json& tasInputs);
 // Boost and its boost-equivalent bridgeless variants (bridgeless, semiBridgeless): one unipolar boost
 // inductor on the rectified side, same sizing and deck.

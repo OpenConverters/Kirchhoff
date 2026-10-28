@@ -19,6 +19,16 @@ constexpr double kSenseResistance   = 0.1;     // input-current sense [Ω]
 constexpr double kRippleFraction    = 0.30;    // hysteretic current ripple as a fraction of peak iL
 constexpr double kOutputCapacitance = 220e-6;  // bus cap
 constexpr double kPi                = 3.14159265358979323846;
+// Zero-current detector threshold of the CrM latch, as a fraction of the local line-current reference (the
+// boost diode holds the current at zero once it gets there, so the switch turns on within a few ns of it).
+// 1e-3, not 1e-2: at 1 % the switch closed while the boost diode still carried that last 1 %, i.e. a hard
+// turn-on of the 400 V switching node, and ngspice took the diode's turn-off and the switch's turn-on in one
+// step after a line zero crossing, draining ~0.7 J from Cout in 46 ns (a numerical loss of ~65 W on every
+// other half line cycle of the 284 µH web design). At 0.1 % the turn-on is at true zero current.
+constexpr double kZeroCurrentFraction = 1e-3;
+// Width of the DCM set clock's pulse, as a fraction of the switching period: short against any on-time, so
+// the reset-dominant latch cannot re-arm inside one pulse.
+constexpr double kClockPulseDuty    = 0.01;
 
 std::string to_lower(std::string s) {
     for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -66,6 +76,18 @@ std::string normalize_pfc_variant(const std::string& raw) {
 
 // Boost and the two boost-equivalent bridgeless variants: one unipolar boost inductor on the rectified
 // side, sized and simulated identically (see normalize_pfc_variant).
+// The inner current law the boost-family deck runs (ABT #2146): the conduction mode's own controller, and
+// for a CCM-mode design the hysteretic band unless the inductance is too small for continuous conduction at
+// the line peak (half the ripple above the line-peak current: the band's lower edge would sit below zero,
+// where the diode never lets the current go, and the loop would stall).
+PfcCurrentLaw pfc_inner_current_law(const PfcDesign& d) {
+    if (d.mode == "crm" || d.mode == "transition") return PfcCurrentLaw::CRITICAL;
+    if (d.mode == "dcm") return PfcCurrentLaw::DISCONTINUOUS;
+    if (d.mode != "ccm") throw std::invalid_argument("pfc_inner_current_law: unknown mode '" + d.mode + "'");
+    const double iPeakSense = d.inputVoltageRms * std::sqrt(2.0) * d.referenceGain;   // line-peak iL·Rsense
+    return (d.currentHysteresis > iPeakSense) ? PfcCurrentLaw::AVERAGE_CURRENT : PfcCurrentLaw::HYSTERETIC;
+}
+
 bool is_unipolar_boost_family(const std::string& topologyVariant) {
     return topologyVariant == "boost" || topologyVariant == "bridgeless" || topologyVariant == "semiBridgeless";
 }
@@ -218,8 +240,9 @@ static json build_pfc_interleaved_tas(const PfcDesign& d);
 static json build_pfc_buckboost_tas(const PfcDesign& d);   // sepic + cuk
 
 json build_pfc_tas(const PfcDesign& d) {
-    // Deck router (ABT #92). The mode (ccm/dcm/crm/transition) only changes the boost-inductor VALUE, so it
-    // is common to every deck; the topology VARIANT changes the switching cell, so it selects the builder.
+    // Deck router (ABT #92). The topology VARIANT changes the switching cell, so it selects the builder. The
+    // mode (ccm/dcm/crm/transition) sizes the boost inductor and, in this boost-family deck, selects the inner
+    // current law (pfc_inner_current_law, ABT #2146).
     if (d.topologyVariant == "totemPole") return build_pfc_totempole_tas(d);
     if (d.topologyVariant == "interleaved") return build_pfc_interleaved_tas(d);
     if (d.topologyVariant == "sepic" || d.topologyVariant == "cuk") return build_pfc_buckboost_tas(d);
@@ -354,18 +377,122 @@ json build_pfc_tas(const PfcDesign& d) {
         comp("Rv1", resBrick(rv1, d.outputVoltage / (rv1 + rv2) * d.outputVoltage / (rv1 + rv2) * rv1)), comp("Rv2", resBrick(rv2, d.outputVoltage / (rv1 + rv2) * d.outputVoltage / (rv1 + rv2) * rv2)),
         comp("Iv", integrator(d.integralGain, ivInit, vref, ivLo, ivHi)),
         comp("Sgv", summer(1.0, kp)),     // gv = Iv + kp·voutScaled (PI: integral + proportional paths)
-        comp("Mv", multiplier()),
-        comp("Cmp", comparator(d.currentHysteresis))});
+        comp("Mv", multiplier())});
     ccell["connections"] = json::array({
         conn("vout",      {pin("Rv1","1"), prt("vout")}),
         conn("voutScaled",{pin("Rv1","2"), pin("Rv2","1"), pin("Iv","in"), pin("Sgv","inB")}),
         conn("gnd",       {pin("Rv2","2"), prt("gnd")}),
         conn("ivout",     {pin("Iv","out"), pin("Sgv","inA")}),
-        conn("gv",        {pin("Sgv","out"), pin("Mv","inB")}),
-        conn("busP",      {pin("Mv","inA"), prt("busP")}),
-        conn("vth",       {pin("Mv","out"), pin("Cmp","inMinus")}),
-        conn("nL",        {pin("Cmp","inPlus"), prt("nL")}),
-        conn("g",         {pin("Cmp","out"), prt("g")})});
+        conn("gv",        {pin("Sgv","out"), pin("Mv","inB")})});
+    // INNER current loop by conduction mode (ABT #2146). Every law below tracks the same per-cycle line
+    // current reference i_ref = V(busP)·(1−gv)/Rsense, so the outer voltage loop above is common.
+    json& ccomps = ccell["components"];
+    json& cconns = ccell["connections"];
+    auto latch = [&](double setThreshold) { json j; json& e = j["timeBase"]["latch"]["behavioral"];
+        e["setThreshold"] = setThreshold; e["resetThreshold"] = 0.0; e["outputHigh"] = 5.0; e["outputLow"] = 0.0;
+        e["dominance"] = "reset";
+        j["inputs"]["designRequirements"]["deviceType"] = "latch";   // PEAS seed (TDAS designRequirements)
+        return j; };
+    const double vpeakLine = d.inputVoltageRms * std::sqrt(2.0);
+    switch (pfc_inner_current_law(d)) {
+    case PfcCurrentLaw::HYSTERETIC:
+        // A hysteretic comparator on V(nL)−V(vth) = Rsense·(i_ref − iL), band ±currentHysteresis: holds iL
+        // within the design ripple of the reference (continuous conduction).
+        ccomps.push_back(comp("Cmp", comparator(d.currentHysteresis)));
+        cconns.push_back(conn("busP", {pin("Mv","inA"), prt("busP")}));
+        cconns.push_back(conn("vth",  {pin("Mv","out"), pin("Cmp","inMinus")}));
+        cconns.push_back(conn("nL",   {pin("Cmp","inPlus"), prt("nL")}));
+        cconns.push_back(conn("g",    {pin("Cmp","out"), prt("g")}));
+        break;
+    case PfcCurrentLaw::CRITICAL:
+    case PfcCurrentLaw::DISCONTINUOUS: {
+        // Peak-current latch: the switch turns OFF when iL·Rsense reaches kpk·V(busP)·(1−gv). The inductor
+        // current rises from zero at V(busP)/L, so that peak is reached after the CONSTANT on-time
+        // kpk·L·(1−gv)/Rsense over the whole line cycle (the voltage loop sets it through gv).
+        //   CRITICAL: kpk = 2 (peak = twice the line current, t_on = 2·L·I_linePeak/Vpk at gv = g0); the switch
+        //   turns ON again when the inductor current is back at zero (zero-current detection), so the
+        //   switching frequency varies over the line cycle.
+        //   DISCONTINUOUS: kpk from the power-balance on-time at gv = g0 (pfc_discontinuous_on_time), the
+        //   switch turned ON by a fixed-frequency clock.
+        // Reset (turn-off) on V(ipk) − V(nL) = iL·Rsense − kpk·V(busP)·(1−gv) > 0, with V(ipk) = kpk·vth +
+        // (1−kpk)·V(busP); reset dominates, so at a line zero crossing (reference ≈ 0) the switch stays off.
+        const bool critical = pfc_inner_current_law(d) == PfcCurrentLaw::CRITICAL;
+        double kpk = 2.0;
+        if (!critical) {
+            const double tOn = AN::pfc_discontinuous_on_time(d.inputVoltageRms, d.outputVoltage, d.outputPower,
+                                                             d.lineFrequency, d.switchingFrequency,
+                                                             d.boostInductance, d.efficiency,
+                                                             req::analytical_rectifier_drop(d.config), false);
+            kpk = d.senseResistance * tOn / (d.boostInductance * kref);
+        }
+        ccomps.push_back(comp("Spk", summer(kpk, 1.0 - kpk)));
+        if (critical) {
+            // Zero-current detection: set while iL < kZeroCurrentFraction·i_ref, i.e. V(nL) − V(izc) =
+            // kz·V(busP)·(1−gv) − iL·Rsense > 0 with V(izc) = kz·vth + (1−kz)·V(busP). The threshold follows the
+            // reference (a fixed fraction of the LOCAL line current, not of its peak), so near a line zero
+            // crossing, where the commanded peak is tiny, the detector still waits for the current to come back
+            // down to (nearly) zero instead of re-arming at once from a current above the peak — that re-arm
+            // chatters the switch at the latch's own nanosecond delay. The diode holds iL at 0 once it gets there.
+            ccomps.push_back(comp("Szc", summer(kZeroCurrentFraction, 1.0 - kZeroCurrentFraction)));
+            ccomps.push_back(comp("Lat", latch(0.0)));
+            cconns.push_back(conn("busP", {pin("Mv","inA"), pin("Spk","inB"), pin("Szc","inB"), prt("busP")}));
+            cconns.push_back(conn("vth",  {pin("Mv","out"), pin("Spk","inA"), pin("Szc","inA")}));
+            cconns.push_back(conn("ipk",  {pin("Spk","out"), pin("Lat","resetPlus")}));
+            cconns.push_back(conn("izc",  {pin("Szc","out"), pin("Lat","setMinus")}));
+            cconns.push_back(conn("nL",   {pin("Lat","resetMinus"), pin("Lat","setPlus"), prt("nL")}));
+        } else {
+            json clk; json& e = clk["timeBase"]["timer"]["behavioral"];
+            e["mode"] = "astable"; e["period"] = 1.0 / d.switchingFrequency; e["dutyCycle"] = kClockPulseDuty;
+            e["outputHigh"] = 5.0; e["outputLow"] = 0.0;
+            clk["inputs"]["designRequirements"]["deviceType"] = "timer";
+            ccomps.push_back(comp("Clk", clk));
+            ccomps.push_back(comp("Lat", latch(2.5)));
+            cconns.push_back(conn("busP", {pin("Mv","inA"), pin("Spk","inB"), prt("busP")}));
+            cconns.push_back(conn("vth",  {pin("Mv","out"), pin("Spk","inA")}));
+            cconns.push_back(conn("ipk",  {pin("Spk","out"), pin("Lat","resetPlus")}));
+            cconns.push_back(conn("nL",   {pin("Lat","resetMinus"), prt("nL")}));
+            cconns.push_back(conn("clk",  {pin("Clk","outPlus"), pin("Lat","setPlus")}));
+            cconns[2]["endpoints"].push_back(pin("Clk","outMinus"));
+            cconns[2]["endpoints"].push_back(pin("Lat","setMinus"));
+        }
+        cconns[2]["endpoints"].push_back(pin("Lat","outMinus"));
+        cconns.push_back(conn("g", {pin("Lat","outPlus"), prt("g")}));
+        break;
+    }
+    case PfcCurrentLaw::AVERAGE_CURRENT: {
+        // Average-current control at the fixed switching frequency: an integrating current amplifier
+        // drives Ve = Ki·∫Rsense·(i_ref − iL)dt and a trailing-edge PWM comparator turns the switch on at
+        // each sawtooth reset and off when the sawtooth (0..1 V) crosses Ve, so every switching cycle
+        // averages i_ref. Used for a CCM-mode design whose inductance is too small for continuous conduction
+        // at the line peak (the hysteretic band cannot reach below zero there): every cycle is then
+        // discontinuous, its average a static function of the duty, and the integrator alone closes a
+        // first-order loop. Ki puts its crossover a decade and a half below fsw: d(i_avg)/dVe = 2·i_avg/Ve
+        // for a discontinuous cycle; with Ve at most the continuous duty (1 − Vpk/Vout) at the line peak,
+        // Ki = ωc·D/(2·Rsense·I_pk) keeps the crossover at or below ωc = 2π·fsw/20.
+        const double rampAmplitude = 1.0;
+        const double dutyPeak = 1.0 - vpeakLine / d.outputVoltage;
+        const double iPeakPhase = vpeakLine * kref / d.senseResistance;
+        const double wc = 2.0 * kPi * d.switchingFrequency / 20.0;
+        const double ki = wc * rampAmplitude * dutyPeak / (2.0 * d.senseResistance * iPeakPhase);
+        json osc; json& e = osc["timeBase"]["oscillator"]["behavioral"];
+        e["shape"] = "sawtooth"; e["frequency"] = d.switchingFrequency; e["amplitude"] = rampAmplitude;
+        e["offset"] = 0.0;
+        osc["inputs"]["designRequirements"]["deviceType"] = "oscillator";
+        ccomps.push_back(comp("Se", summer(1.0, -1.0)));      // e = V(nL) − vth = Rsense·(i_ref − iL)
+        ccomps.push_back(comp("Ic", integrator(ki, 0.0, 0.0, 0.0, rampAmplitude)));
+        ccomps.push_back(comp("Osc", osc));
+        ccomps.push_back(comp("Cpwm", comparator(0.0)));
+        cconns.push_back(conn("busP", {pin("Mv","inA"), prt("busP")}));
+        cconns.push_back(conn("vth",  {pin("Mv","out"), pin("Se","inB")}));
+        cconns.push_back(conn("nL",   {pin("Se","inA"), prt("nL")}));
+        cconns.push_back(conn("ierr", {pin("Se","out"), pin("Ic","in")}));
+        cconns.push_back(conn("ve",   {pin("Ic","out"), pin("Cpwm","inPlus")}));
+        cconns.push_back(conn("saw",  {pin("Osc","outPlus"), pin("Cpwm","inMinus")}));
+        cconns[2]["endpoints"].push_back(pin("Osc","outMinus"));
+        cconns.push_back(conn("g",    {pin("Cpwm","out"), prt("g")}));
+        break;
+    }
+    }
 
     json tas;
     json& dreq = tas["inputs"]["designRequirements"];

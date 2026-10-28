@@ -47,8 +47,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -58,6 +60,7 @@
 
 #include "ConverterAnalytical.hpp"
 #include "Kirchhoff.hpp"
+#include "NgspiceRunner.hpp"
 #include "Pfc.hpp"
 
 using nlohmann::json;
@@ -176,11 +179,13 @@ struct ClosedForm {
     double peakRisingSlope, peakFallingSlope;   // the slopes at the line-peak cycle's apex [A/s]
     double peakCyclePeriod;                     // that cycle's period [s]
     double apexRate;                            // ⟨Ipk/Tc⟩: Σ over the line cycle's apexes of Ipk, per second [A/s]
+    double onTimeAtPeak;                        // the switch on-time of the line-peak cycle [s]
+    std::function<double(double)> cycleMean;    // a switching cycle's mean current at line phase |sin θ| = s [A]
 };
 
-ClosedForm closed_form(const Kirchhoff::PfcDesign& d, size_t gridPoints) {
+// The closed form at input power `pin` (the design's own Pout/η unless a simulation's measured power is given).
+ClosedForm closed_form(const Kirchhoff::PfcDesign& d, size_t gridPoints, double pin) {
     const double L = d.boostInductance, Tsw = 1.0 / d.switchingFrequency;
-    const double pin = d.outputPower / d.efficiency;
     const double vpk = d.inputVoltageRms * std::sqrt(2.0), ilpk = pin / d.inputVoltageRms * std::sqrt(2.0);
     const double vo = d.outputVoltage + kDiodeDrop;
     const size_t n = 64 * gridPoints;
@@ -194,6 +199,8 @@ ClosedForm closed_form(const Kirchhoff::PfcDesign& d, size_t gridPoints) {
         c.rms  = ilpk * std::sqrt(2.0 / 3.0);
         c.peakCyclePeriod = tOn * vo / (vo - vpk);
         c.apexRate = line_average([&](double s) { return 2.0 * ilpk * s * (vo - vpk * s) / (tOn * vo); }, n);
+        c.onTimeAtPeak = tOn;
+        c.cycleMean = [ilpk](double s) { return ilpk * s; };
         return c;
     }
     // Discontinuous cycles from zero: peak Ip = |Vin|·tOn/L, conducting tOn·Vo'/(Vo'−|Vin|) of Tsw;
@@ -204,16 +211,25 @@ ClosedForm closed_form(const Kirchhoff::PfcDesign& d, size_t gridPoints) {
         const double tOn = std::sqrt(2.0 * L * Tsw * pin / shape);
         tOnAt = [tOn](double) { return tOn; };
     } else {   // ccm control with an L too small for continuous conduction at the line peak (premise below)
-        tOnAt = [&](double s) { return std::sqrt(2.0 * L * Tsw * (ilpk / vpk) * (vo - vpk * s) / vo); };
+        tOnAt = [=](double s) { return std::sqrt(2.0 * L * Tsw * (ilpk / vpk) * (vo - vpk * s) / vo); };
     }
-    auto ip   = [&](double s) { return vpk * s * tOnAt(s) / L; };
-    auto cond = [&](double s) { return tOnAt(s) * vo / (vo - vpk * s); };
+    auto ip   = [=](double s) { return vpk * s * tOnAt(s) / L; };
+    auto cond = [=](double s) { return tOnAt(s) * vo / (vo - vpk * s); };
     c.peak = ip(1.0);
     c.mean = line_average([&](double s) { return ip(s) * cond(s) / (2.0 * Tsw); }, n);
     c.rms  = std::sqrt(line_average([&](double s) { return ip(s) * ip(s) * cond(s) / (3.0 * Tsw); }, n));
     c.peakCyclePeriod = Tsw;
     c.apexRate = line_average(ip, n) / Tsw;
+    c.onTimeAtPeak = tOnAt(1.0);
+    // DCM: every cycle discontinuous. CCM control: each cycle averages the line envelope (a continuous cycle by
+    // construction, a discontinuous one through its on-time above).
+    if (d.mode == "dcm") c.cycleMean = [=](double s) { return ip(s) * cond(s) / (2.0 * Tsw); };
+    else                 c.cycleMean = [ilpk](double s) { return ilpk * s; };
     return c;
+}
+
+ClosedForm closed_form(const Kirchhoff::PfcDesign& d, size_t gridPoints) {
+    return closed_form(d, gridPoints, d.outputPower / d.efficiency);
 }
 
 uint64_t fnv1a(const std::vector<double>& v) {
@@ -370,5 +386,135 @@ TEST_CASE("PFC CCM: analytical line cycle unchanged by the conduction-mode work"
         CHECK(st.rms == Catch::Approx(base[k].rms).epsilon(1e-7));
         CHECK(st.mean == Catch::Approx(base[k].mean).epsilon(2e-6));
         CHECK(st.min >= 0.0);
+    }
+}
+
+// ── The ngspice deck (ABT #2146) ───────────────────────────────────────────────────────────────────────────
+// build_pfc_tas runs each conduction mode's own inner current law (pfc_inner_current_law): CrM a peak-current
+// latch (off at 2·i_ref, on at zero current), DCM the same latch set by a fixed-frequency clock, a CCM-mode
+// design whose L is too small for continuous conduction at the line peak fixed-frequency average-current
+// control. The hysteretic band of the CCM design cannot run a CrM/DCM inductor: it switched only where the
+// reference exceeded half the band, conducting 2.7-6.8 ms of every 10 ms half line cycle.
+//
+// Oracle: the closed form above, evaluated at the input power the SIMULATION measured (mean of V(busP)·iL over
+// the last line cycle), so the comparison is of the waveform's shape, not of the deck's losses. Tolerances:
+//   * δ, the 100 Hz modulation of the commanded current: the outer loop's proportional path passes the bus
+//     ripple, so (1 − gv) — and with it the CrM peak, the DCM on-time and the average-current reference —
+//     swings by δ = kp·kv·(Vmax − Vmin)/2/kref about its mean (V from the run itself; ~5 % here, the
+//     measured DCM on-time swings 5.28-5.93 µs). A CrM / average-current cycle's mean is linear in it, a DCM
+//     cycle's quadratic (t_on²).
+//   * j = h/t_on, the latch's timestep jitter: the B-source latch switches on the first ngspice step past its
+//     threshold (h = 0.2 µs maximum step), so a cycle's on-time runs long by up to one step (~3.5 %).
+//   * the average-current loop's tracking: its crossover is fsw/20, so it lags the 100 Hz rectified reference
+//     by f_line2/fc = 2·f_line·20/fsw (3 %); its PWM resolves the duty to h·fsw (1.3 %).
+//   * 1 % for the rectifier drop the closed form does not carry (Pin is measured after the bridge).
+// Asserted per 1 ms bin of the last line cycle (≥ 15 switching cycles each), which also proves conduction
+// over the whole half line cycle (the hysteretic deck's dead bins were 30-70 % below the closed form there).
+// Line-cycle peak/mean/rms: the peak takes the bin bound (it sits wherever the 100 Hz ripple puts it); mean
+// and rms are line averages of a modulation that averages out to first order: measured ≤ 2 %, asserted 3 %.
+
+namespace {
+
+struct SimRun { std::vector<double> t, i; double inputPower; double ripple; };
+
+// The boost inductor's raw branch current over the LAST line cycle of the design's own deck, run by
+// Kirchhoff's in-process libngspice (never the ngspice binary), with the input power mean(V(busP)·iL) and the
+// bus ripple Vmax − Vmin over the same window.
+SimRun simulate(const Kirchhoff::PfcDesign& d) {
+    PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
+    std::string deck = Kirchhoff::tas_to_ngspice(Kirchhoff::build_pfc_tas(d), ideal);
+    for (std::string::size_type at; (at = deck.find(" savecurrents")) != std::string::npos; )
+        deck.erase(at, std::string(" savecurrents").size());
+    const Kirchhoff::NgspiceRunResult r = Kirchhoff::run_ngspice_in_process(deck);
+    if (!r.success) throw std::runtime_error("ngspice run failed: " + r.error);
+    const std::vector<double>* iL = nullptr;
+    const std::vector<double>* busP = nullptr;
+    const std::vector<double>* vout = nullptr;
+    for (const auto& kv : r.vectors) {
+        std::string k = kv.first;
+        std::transform(k.begin(), k.end(), k.begin(), ::tolower);
+        if (k.find("#branch") != std::string::npos && k.find("ll_pri") != std::string::npos) iL = &kv.second;
+        if (k == "v(busp)" || k == "busp") busP = &kv.second;
+        if (k == "v(vout)" || k == "vout") vout = &kv.second;
+    }
+    if (!iL)   throw std::runtime_error("no boost-inductor branch current (ll_pri#branch) in the ngspice run");
+    if (!busP) throw std::runtime_error("no V(busP) in the ngspice run");
+    if (!vout) throw std::runtime_error("no V(vout) in the ngspice run");
+    const double t0 = r.time.back() - 1.0 / d.lineFrequency;
+    SimRun out{};
+    std::vector<double> pw;
+    double vMin = std::numeric_limits<double>::max(), vMax = std::numeric_limits<double>::lowest();
+    for (size_t k = 0; k < r.time.size(); ++k) {
+        if (r.time[k] < t0) continue;
+        out.t.push_back(r.time[k]);
+        out.i.push_back((*iL)[k]);
+        pw.push_back((*iL)[k] * (*busP)[k]);
+        vMin = std::min(vMin, (*vout)[k]);
+        vMax = std::max(vMax, (*vout)[k]);
+    }
+    out.inputPower = stats_of(out.t, pw).mean;
+    out.ripple = vMax - vMin;
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("PFC deck: each conduction mode's controller reproduces its closed-form current in ngspice",
+          "[pfc][conduction][ngspice]") {
+    REQUIRE(Kirchhoff::ngspice_in_process_available());
+    struct Case { const char* name; const char* mode; double pinnedL; double expectedL; Kirchhoff::PfcCurrentLaw law; };
+    const Case cases[] = {{"crm", "crm", 0.0, 284.4e-6, Kirchhoff::PfcCurrentLaw::CRITICAL},
+                          {"dcm", "dcm", 0.0, 216.9e-6, Kirchhoff::PfcCurrentLaw::DISCONTINUOUS},
+                          {"iknow250uH", "ccm", 250e-6, 250e-6, Kirchhoff::PfcCurrentLaw::AVERAGE_CURRENT}};
+    for (const Case& c : cases) {
+        INFO("case " << c.name);
+        const Kirchhoff::PfcDesign d = Kirchhoff::design_pfc(web_pfc_spec(c.mode, c.pinnedL));
+        // The premises: the design this case describes, and the law the deck runs for it.
+        REQUIRE(d.boostInductance == Catch::Approx(c.expectedL).epsilon(1e-3));
+        REQUIRE(Kirchhoff::pfc_inner_current_law(d) == c.law);
+
+        const SimRun sim = simulate(d);
+        const ClosedForm cf = closed_form(d, 4096, sim.inputPower);
+        const Stats st = stats_of(sim.t, sim.i);
+        const double h = 2e-7;                                    // the deck's maximum timestep
+        const double delta = d.proportionalGain * d.outputDividerGain * 0.5 * sim.ripple / d.referenceGain;
+        const double jitter = h / cf.onTimeAtPeak;
+        const bool dcm = c.law == Kirchhoff::PfcCurrentLaw::DISCONTINUOUS;
+        const bool acm = c.law == Kirchhoff::PfcCurrentLaw::AVERAGE_CURRENT;
+        const double binTol = dcm ? (1.0 + delta) * (1.0 + delta) * (1.0 + jitter) * (1.0 + jitter) - 1.0 + 0.01
+                                  : delta + jitter + 0.01
+                                    + (acm ? 2.0 * d.lineFrequency * 20.0 / d.switchingFrequency + h * d.switchingFrequency : 0.0);
+        INFO("Pin " << sim.inputPower << " W, delta " << delta << ", jitter " << jitter << ", bin tolerance " << binTol);
+        INFO("ngspice pk/mean/rms " << st.peak << "/" << st.mean << "/" << st.rms
+             << "  closed form " << cf.peak << "/" << cf.mean << "/" << cf.rms);
+
+        // A boost's diode blocks reverse current.
+        CHECK(st.min > -1e-6);
+        CHECK(st.peak <= cf.peak * (1.0 + binTol));
+        CHECK(st.peak >= cf.peak * (1.0 - binTol));
+        CHECK(st.mean == Catch::Approx(cf.mean).epsilon(0.03));
+        CHECK(st.rms == Catch::Approx(cf.rms).epsilon(0.03));
+
+        // Shape and conduction over the whole line cycle, 1 ms at a time.
+        const double binWidth = 1e-3;
+        const double tEnd = sim.t.back();
+        const size_t bins = static_cast<size_t>(std::lround((tEnd - sim.t.front()) / binWidth));
+        REQUIRE(bins == 20);
+        for (size_t b = 0; b < bins; ++b) {
+            const double ta = tEnd - static_cast<double>(bins - b) * binWidth, tb = ta + binWidth;
+            std::vector<double> bt, bi;
+            for (size_t k = 0; k < sim.t.size(); ++k)
+                if (sim.t[k] >= ta && sim.t[k] <= tb) { bt.push_back(sim.t[k]); bi.push_back(sim.i[k]); }
+            const double simMean = stats_of(bt, bi).mean;
+            double cfMean = 0.0;
+            const size_t m = 4000;
+            for (size_t k = 0; k < m; ++k) {
+                const double t = ta + (static_cast<double>(k) + 0.5) / static_cast<double>(m) * binWidth;
+                cfMean += cf.cycleMean(std::abs(std::sin(2.0 * kPi * d.lineFrequency * t)));
+            }
+            cfMean /= static_cast<double>(m);
+            INFO("bin " << b << " [" << ta * 1e3 << ", " << tb * 1e3 << "] ms: ngspice " << simMean << " A, closed form " << cfMean << " A");
+            CHECK(simMean == Catch::Approx(cfMean).epsilon(binTol));
+        }
     }
 }

@@ -727,6 +727,20 @@ enum class PfcConductionMode { CONTINUOUS, DISCONTINUOUS, CRITICAL };
 // other.
 PfcConductionMode pfc_conduction_mode(const std::string& mode);
 
+// The single on-time of a DISCONTINUOUS (DCM) PFC: the one whose line-cycle average input power is
+// outputPower/efficiency at fixed switching frequency (see analytical_pfc). THROWS invalid_argument when that
+// on-time does not let the current return to zero within a switching period at the line peak (the inductance
+// is too large for DCM), and on non-physical inputs.
+double pfc_discontinuous_on_time(double inputVoltageRms,
+                                 double outputVoltage,
+                                 double outputPower,
+                                 double lineFrequency,
+                                 double switchingFrequency,
+                                 double boostInductance,
+                                 double efficiency,
+                                 double diodeVoltageDrop,
+                                 bool bipolar);
+
 MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
                                    double outputVoltage,
                                    double outputPower,
