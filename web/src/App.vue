@@ -356,6 +356,11 @@ const targetIsMagnetic = computed(() => waveTarget.value.startsWith('mag:'))
 watch(waveTarget, (t) => { if (t.startsWith('mag:')) waveMagIdx.value = Number(t.slice(4)) })
 
 const deviceRef = computed(() => (waveTarget.value.startsWith('dev:') ? waveTarget.value.slice(4) : null))
+// Picking a component IS the request for its ngspice waveform: an analytical solve has none, so run
+// the component sim on selection instead of parking the pane behind a button.
+watch(deviceRef, (r) => {
+  if (r && result.value && !componentWaves.value && !componentBusy.value) fetchComponentWaves()
+})
 const deviceComp = computed(
   () => componentWaves.value?.components?.find((c) => c.ref === deviceRef.value) ?? null
 )
@@ -577,7 +582,7 @@ provide('kh', {
   waveTarget, waveMagnetics, deviceGroups, targetIsMagnetic, waveOps, waveOpIdx, waveSource,
   waveExcitations, waveMag, ngspiceOps, ngspiceBusy, simulateMagnetic, downloadMagneticInputs,
   exportSelectionCsv, exportDesignCsv, exportDesignJson, runExport, exportError,
-  deviceExcitation, deviceComp, componentBusy, fetchComponentWaves,
+  deviceExcitation, deviceComp, componentWaves, componentBusy, fetchComponentWaves,
   componentStress, stressSummary, verdict, mainExcNames, form,
   deck, deckFlavor, deckFidelity, simStop, simStep, deckBusy, designStop, designStep, periodsShown,
   makeDeck, copyDeck, downloadDeck, si, pct, visualSim, visualScopeSet,

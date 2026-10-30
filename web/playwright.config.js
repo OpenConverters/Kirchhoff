@@ -34,6 +34,8 @@ export default defineConfig({
     { name: 'kelvin', testMatch: /kelvin\.spec\.js/, use: { ...devices['Desktop Chrome'] } },
     // Waveform export: asserted on the bytes the browser downloads, not on what the pane displays.
     { name: 'export', testMatch: /export\.spec\.js/, use: { ...devices['Desktop Chrome'] } },
+    // The waveform picker, read off the rendered pane: every dropdown entry draws simulated V and I.
+    { name: 'waveforms', testMatch: /waveforms\.spec\.js/, use: { ...devices['Desktop Chrome'] } },
     { name: 'visualsim', testMatch: /visualsim\.spec\.js/, use: { ...devices['Desktop Chrome'] } },
     // Measures the schematic in the LIVE app (real stylesheet, real fonts) — every other schematic
     // gate measures a reconstruction of it.

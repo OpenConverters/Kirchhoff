@@ -72,9 +72,8 @@ const missing = computed(() => {
     <WaveformChart v-if="traces.length" :traces="traces" :height="fill ? 150 : 240" :class="{ 'chart-fill': fill }" />
     <div v-if="missing.length" class="wave-empty" style="margin-top: 0.6rem">
       <template v-if="sourceKind === 'ngspice'">
-        The ngspice extraction rebuilds winding <b>currents</b> from the simulation; the
-        {{ missing.join(' and ') }} of this winding is reported through the analytical stress
-        figures below.
+        ngspice returned no {{ missing.join(' or ') }} waveform for this winding — that is an
+        extraction bug, not a model choice; nothing analytical is shown in its place.
       </template>
       <template v-else>
         The {{ missing.join(' and ') }} waveform of this winding carries only analytical stress

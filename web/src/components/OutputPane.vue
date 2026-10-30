@@ -195,6 +195,10 @@ const hasSelectionWaves = computed(() =>
           <KhWaveforms v-if="deviceExcitation" :component-ref="deviceComp.ref" :waves="componentWaves"
                        :periods="form.showPeriods" fill />
           <div v-else-if="componentBusy" class="boot" style="margin-top: 0.6rem"><div class="spin"></div> simulating components…</div>
+          <div v-else-if="componentWaves" class="err-banner">
+            <b>NGSPICE ▸</b> the component run returned no waveform for <code>{{ waveTarget.slice(4) }}</code> — every
+            part in this list must have one; this is an extraction bug.
+          </div>
           <div v-else class="wave-empty">
             Component waveforms need an ngspice run.
             <button class="btn ghost" :disabled="componentBusy" @click="fetchComponentWaves" style="margin-left: 0.3rem">▶ run ngspice</button>
