@@ -46,6 +46,11 @@ struct IsolatedBuckBoostDesign {
     // >=1 entry; secondaries[0] duplicates the secondary* scalars above. Additional entries (ABT #86)
     // are extra isolated rails exposed on external vout<i> ports.
     std::vector<IsolatedBuckBoostSecondaryLeg> secondaries;
+    // config.forcedDutyCycle (ABT #2134): dutyPinned, and the rails as REQUESTED, [0] the primary and [k] the
+    // isolated secondary k (the primary*/secondaries[] fields then carry the rails delivered at the pinned duty;
+    // the worst-corner ratings still use the requested ones).
+    bool dutyPinned = false;
+    std::vector<double> requestedVoltages, requestedPowers;
 };
 
 /**

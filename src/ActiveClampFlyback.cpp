@@ -429,7 +429,7 @@ MAS::OperatingPoint active_clamp_flyback_operating_point(const AcfFlybackSteadyS
         WP::complete_excitation(wave(s.primaryCurrent), wave(s.primaryVoltage), switchingFrequency, "Primary"));
     op.get_mutable_excitations_per_winding().push_back(
         WP::complete_excitation(wave(s.secondaryCurrent), wave(s.secondaryVoltage), switchingFrequency, "Secondary"));
-    return op;
+    return with_model_duty(std::move(op), s.dutyCycle);   // Q1 on-time / period, as solved
 }
 
 } // namespace analytical

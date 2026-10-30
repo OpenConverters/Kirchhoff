@@ -246,6 +246,8 @@ json build_psfb_tas(const PsfbDesign& d) {
         for (int w = 0; w < wpo; ++w)
             xwindings.push_back(req::winding_excitation("bipolarRectangular", fsw, IsecPk, IsecRms, 0.0, dILo, Deff,
                                     vSecPk, vSecRms, 0.0, vSecPkPk));
+        // The inline excitation runs at the design's effective duty: that is the duty diagnostics reports.
+        AN::declare_model_duty("T1", AN::ModelDuty{Deff, std::nullopt});
     }
     json xfmr; xfmr["magnetic"] = json::object();
     xfmr["inputs"] = req::magnetic_inputs(Lm, 0.1, turnsRatios, isoSides, std::nullopt, 25.0, xwindings,

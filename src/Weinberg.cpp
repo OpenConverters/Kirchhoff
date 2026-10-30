@@ -192,6 +192,12 @@ json build_weinberg_tas(const WeinbergDesign& d) {
     MAS::OperatingPoint opL1, opT1;
     opL1.get_mutable_excitations_per_winding().assign(allExc.begin(), allExc.begin() + 2);
     opT1.get_mutable_excitations_per_winding().assign(allExc.begin() + 2, allExc.end());
+    // Both magnetics carry the solver's switch duty (ABT #2134): the split copies keep the samples, not the
+    // registration, so re-register each half under the duty analytical_weinberg ran at.
+    const std::optional<AN::ModelDuty> wDuty = AN::model_duty_of(wOp);
+    if (!wDuty) throw std::runtime_error("build_weinberg_tas: analytical_weinberg registered no model duty");
+    opL1 = AN::with_model_duty(std::move(opL1), *wDuty);
+    opT1 = AN::with_model_duty(std::move(opT1), *wDuty);
     const std::vector<json> wL1 = AN::excitations_processed(opL1, "L1");
     const std::vector<json> wT1 = AN::excitations_processed(opT1, "T1");
 

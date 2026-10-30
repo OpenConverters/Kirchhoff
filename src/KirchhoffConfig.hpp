@@ -21,6 +21,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cctype>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -272,6 +273,35 @@ inline double rds_on_loss_fraction(const json& in, double dflt = 0.01) { return 
 // "tranStopTime" / "tranMaxTimeStep".
 inline double tran_stop_time(const json& in, double dflt = 0.004)   { return get(in, "tranStopTime", dflt); }
 inline double tran_max_timestep(const json& in, double dflt = 5e-8) { return get(in, "tranMaxTimeStep", dflt); }
+
+// "I know the design I want" switch-timing pins (ABT #2134), for the operating point the design evaluates
+// (operatingPoints[0]). config "forcedDutyCycle" (0 < D < 1) makes the main switch run at exactly that duty:
+// the design no longer derives the duty from the requested output voltage; the output voltage the converter
+// then delivers into the requested load is a RESULT (same contract as "driveAtSwitchingFrequency" for the
+// resonant converters). config "forcedDeadTime" (s, >= 0) sets the dead time between complementary switches.
+// Absent -> std::nullopt (the topology derives them). Present but malformed -> THROWS (never ignored).
+inline std::optional<double> forced_duty_cycle(const json& in) {
+    if (!in.is_object() || !in.contains("forcedDutyCycle")) return std::nullopt;
+    const json& v = in.at("forcedDutyCycle");
+    if (!v.is_number())
+        throw std::invalid_argument("Duty Cycle: the value sent is not a number.");
+    const double d = v.get<double>();
+    if (!(d > 0.0 && d < 1.0))
+        throw std::invalid_argument("Duty Cycle: " + std::to_string(d) + " is not a duty cycle; enter a value "
+                                    "between 0 and 1 (for example 0.45).");
+    return d;
+}
+inline std::optional<double> forced_dead_time(const json& in) {
+    if (!in.is_object() || !in.contains("forcedDeadTime")) return std::nullopt;
+    const json& v = in.at("forcedDeadTime");
+    if (!v.is_number())
+        throw std::invalid_argument("Dead Time: the value sent is not a number.");
+    const double t = v.get<double>();
+    if (!(t >= 0.0) || !std::isfinite(t))
+        throw std::invalid_argument("Dead Time: " + std::to_string(t) + " s is not a dead time; enter zero or a "
+                                    "positive time.");
+    return t;
+}
 
 } // namespace cfg
 } // namespace Kirchhoff

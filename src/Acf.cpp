@@ -3,6 +3,7 @@
 #include "ComponentRequirements.hpp"
 #include "ConverterAnalytical.hpp"   // single FHA source: analytical_active_clamp_forward + excitations_processed/winding_current
 #include "KirchhoffConfig.hpp"
+#include "DutyPin.hpp"
 #include <cmath>
 #include <vector>
 
@@ -110,6 +111,25 @@ AcfDesign design_acf(const json& tasInputs) {
         leg.loadResistance = leg.voltage * leg.voltage / leg.power;
         d.outputs.push_back(leg);
     }
+
+    // "I know the design I want" (ABT #2134). config.forcedDeadTime (s) sets the main↔clamp dead time;
+    // config.forcedDutyCycle drives the main switch at exactly that duty, and the rails it delivers into the
+    // requested loads become the result (DutyPin.hpp). The stage above stays sized from the requested rails.
+    if (const auto deadTime = cfg::forced_dead_time(d.config)) {
+        if (d.config.contains("deadTimeFraction"))
+            throw std::invalid_argument("Dead Time: the design states both a dead time and a dead-time fraction; "
+                                        "give only one.");
+        d.deadFraction = *deadTime * Fs;
+    }
+    if (const auto forcedDuty = cfg::forced_duty_cycle(d.config)) {
+        const double Dp = *forcedDuty;
+        if (!((1.0 - Dp) - 2.0 * d.deadFraction > 0.0))
+            throw std::invalid_argument("Duty Cycle: at " + duty_pin::num(Dp) + " with two dead times of " +
+                                        duty_pin::num(d.deadFraction / Fs) + " s the clamp switch gets no on-time "
+                                        "in the period. Lower the Duty Cycle or the Dead Time.");
+        duty_pin::pin_forward_family(d, Dp, ripple, 1.0, "the main switch cannot conduct for the whole period",
+                                     "Active clamp forward");
+    }
     return d;
 }
 
@@ -155,13 +175,26 @@ json build_acf_tas(const AcfDesign& d) {
     // turnsRatios = [n0,n1,…]. The output-filter inductors Lout_i are SEPARATE magnetics (inline excitation);
     // the magnetizing reset current (clamp-switch rating) also stays inline. Worst-case corner (Vin_min)
     // drives the main-switch rating; the declared nominal OP is what the TAS embeds.
-    const MAS::OperatingPoint aopWorst = AN::analytical_active_clamp_forward(d.inputVoltageMin, Vouts, iouts,
+    // A pinned duty (ABT #2134) runs the nominal point open loop on the delivered rails; the Vin_min corner is
+    // still rated on the REQUESTED rails (what the regulated converter carries there), and each rating takes
+    // the larger of the two corners.
+    std::vector<double> worstVouts = Vouts, worstIouts = iouts;
+    if (d.dutyPinned)
+        for (size_t i = 0; i < nOut; ++i) {
+            worstVouts[i] = d.requestedVoltages[i];
+            worstIouts[i] = d.requestedPowers[i] / d.requestedVoltages[i];
+        }
+    const MAS::OperatingPoint aopWorst = AN::analytical_active_clamp_forward(d.inputVoltageMin, worstVouts, worstIouts,
                                             turnsRatios, fsw, Lm, d.outputs[0].outputInductance, ripple, d.outputs[0].diodeDrop);
     const MAS::OperatingPoint aopNom   = AN::analytical_active_clamp_forward(Vin, Vouts, iouts,
                                             turnsRatios, fsw, Lm, d.outputs[0].outputInductance, ripple, d.outputs[0].diodeDrop);
-    const double IpkPri  = AN::winding_current(aopWorst, 0, "peak");   // primary peak (main-switch rating)
+    auto rating = [&](const char* what) {
+        const double worst = AN::winding_current(aopWorst, 0, what);
+        return d.dutyPinned ? std::max(worst, AN::winding_current(aopNom, 0, what)) : worst;
+    };
+    const double IpkPri  = rating("peak");   // primary peak (main-switch rating)
     cfg::check_maximum_switch_current(d.config, IpkPri, "build_acf_tas");
-    const double IrmsPri = AN::winding_current(aopWorst, 0, "rms");    // primary rms (main-switch RdsOn conduction)
+    const double IrmsPri = rating("rms");    // primary rms (main-switch RdsOn conduction)
     const double ImagPk  = Vin * Dn * T / Lm;                          // magnetizing reset peak (clamp-switch rating)
     // Clamp switch conducts during the RESET interval (1-Dn)*T, carrying the magnetizing triangle from
     // ImagPk down to 0; its full-period rms is ImagPk*sqrt((1-Dn)/3).

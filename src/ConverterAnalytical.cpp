@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <deque>
 #include <functional>
 #include <iostream>
 #include <limits>
@@ -98,9 +99,97 @@ std::vector<std::pair<std::string, nlohmann::json>>& captured_registry() {
     static thread_local std::vector<std::pair<std::string, nlohmann::json>> reg;
     return reg;
 }
+
+// The model duty of the operating points the solvers returned (with_model_duty), keyed by the sampled
+// primary-winding current: a solver returns a value-type MAS::OperatingPoint that the builders copy and pass
+// on, so the sampled data identifies it again when a builder captures it. Bounded: a long run of direct
+// solver calls (tests, sweeps) keeps only the most recent entries.
+std::deque<std::pair<std::vector<double>, ModelDuty>>& model_duty_registry() {
+    static thread_local std::deque<std::pair<std::vector<double>, ModelDuty>> reg;
+    return reg;
+}
+std::vector<std::pair<std::string, std::optional<ModelDuty>>>& captured_duty_registry() {
+    static thread_local std::vector<std::pair<std::string, std::optional<ModelDuty>>> reg;
+    return reg;
+}
+std::vector<std::pair<std::string, ModelDuty>>& declared_duty_registry() {
+    static thread_local std::vector<std::pair<std::string, ModelDuty>> reg;
+    return reg;
+}
+std::optional<std::vector<double>> primary_current_samples(const MAS::OperatingPoint& op) {
+    const auto& exc = op.get_excitations_per_winding();
+    if (exc.empty()) return std::nullopt;
+    const auto current = exc.front().get_current();
+    if (!current) return std::nullopt;
+    const auto waveform = current->get_waveform();
+    if (!waveform) return std::nullopt;
+    return waveform->get_data();
+}
 }  // namespace
 
-void clear_captured_operating_points() { captured_registry().clear(); }
+MAS::OperatingPoint with_model_duty(MAS::OperatingPoint op, double dutyCycle,
+                                    std::optional<double> boostLegDutyCycle) {
+    return with_model_duty(std::move(op), ModelDuty{dutyCycle, boostLegDutyCycle});
+}
+
+MAS::OperatingPoint with_model_duty(MAS::OperatingPoint op, const ModelDuty& duty) {
+    const double dutyCycle = duty.dutyCycle;
+    if (!(dutyCycle >= 0.0 && dutyCycle <= 1.0))
+        throw std::runtime_error("with_model_duty: the model duty " + std::to_string(dutyCycle) +
+                                 " is not a duty cycle");
+    if (duty.boostLegDutyCycle && !(*duty.boostLegDutyCycle >= 0.0 && *duty.boostLegDutyCycle <= 1.0))
+        throw std::runtime_error("with_model_duty: the model boost-leg duty " +
+                                 std::to_string(*duty.boostLegDutyCycle) + " is not a duty cycle");
+    const std::optional<std::vector<double>> samples = primary_current_samples(op);
+    if (!samples || samples->empty())
+        throw std::runtime_error("with_model_duty: the operating point has no sampled primary-winding current");
+    auto& reg = model_duty_registry();
+    reg.emplace_back(*samples, duty);
+    constexpr std::size_t kKept = 64;
+    while (reg.size() > kKept) reg.pop_front();
+    return op;
+}
+
+std::optional<ModelDuty> model_duty_of(const MAS::OperatingPoint& op) {
+    const std::optional<std::vector<double>> samples = primary_current_samples(op);
+    if (!samples) return std::nullopt;
+    std::optional<ModelDuty> found;
+    for (const auto& [data, duty] : model_duty_registry()) {
+        if (data != *samples) continue;
+        if (found && !(*found == duty))
+            throw std::runtime_error("model_duty_of: two solver runs with the same primary current report "
+                                     "different duties (" + std::to_string(found->dutyCycle) + ", " +
+                                     std::to_string(duty.dutyCycle) + ")");
+        found = duty;
+    }
+    return found;
+}
+
+const std::vector<std::pair<std::string, std::optional<ModelDuty>>>& captured_model_duties() {
+    return captured_duty_registry();
+}
+
+void declare_model_duty(const std::string& component, const ModelDuty& duty) {
+    if (!(duty.dutyCycle >= 0.0 && duty.dutyCycle <= 1.0))
+        throw std::runtime_error("declare_model_duty: the model duty " + std::to_string(duty.dutyCycle) +
+                                 " of " + component + " is not a duty cycle");
+    if (declared_model_duty(component))
+        throw std::runtime_error("declare_model_duty: " + component + " already has a declared duty");
+    declared_duty_registry().emplace_back(component, duty);
+}
+
+std::optional<ModelDuty> declared_model_duty(const std::string& component) {
+    for (const auto& [name, duty] : declared_duty_registry())
+        if (name == component) return duty;
+    return std::nullopt;
+}
+
+void clear_captured_operating_points() {
+    captured_registry().clear();
+    captured_duty_registry().clear();
+    model_duty_registry().clear();
+    declared_duty_registry().clear();
+}
 
 void restamp_captured_ambient(double ambientTemperature) {
     // Overwrite the ambient the capturing overload stamped (its 25 C default) with the build's real ambient,
@@ -122,6 +211,7 @@ std::vector<nlohmann::json> excitations_processed(const MAS::OperatingPoint& op,
     stamped.get_mutable_conditions().set_ambient_temperature(ambientTemperature);
     nlohmann::json full = stamped;   // MAS-typed serialization: waveforms + harmonics + processed, schema-shaped
     captured_registry().emplace_back(component, std::move(full));
+    captured_duty_registry().emplace_back(component, model_duty_of(op));
     return excitations_processed(op);
 }
 
@@ -218,7 +308,8 @@ MAS::OperatingPoint analytical_buck(double inputVoltage, double outputVoltage, d
     MAS::OperatingPoint operatingPoint;
     operatingPoint.get_mutable_excitations_per_winding().push_back(
         WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Primary"));
-    return operatingPoint;
+    return with_model_duty(std::move(operatingPoint),
+                           minimumCurrent >= 0 ? dutyCycle : tOn * switchingFrequency);
 }
 
 // Ported from MKF converter_models/Boost.cpp.
@@ -270,7 +361,8 @@ MAS::OperatingPoint analytical_boost(double inputVoltage, double outputVoltage, 
     MAS::OperatingPoint operatingPoint;
     operatingPoint.get_mutable_excitations_per_winding().push_back(
         WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Primary"));
-    return operatingPoint;
+    return with_model_duty(std::move(operatingPoint),
+                           primaryCurrentMinimum >= 0 ? dutyCycle : tOn * switchingFrequency);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -286,6 +378,142 @@ static double flyback_total_input_power(const std::vector<double>& outputCurrent
     for (size_t i = 0; i < outputCurrents.size(); ++i)
         totalPower += outputCurrents[i] * (outputVoltages[i] + diodeVoltageDrop);
     return totalPower / efficiency;
+}
+
+// ── Switch timing of the duty-pinnable PWM converters (ABT #2134) ───────────────────────────────────────
+// Bodies lifted verbatim out of the solvers below (which now call them), so the solvers are unchanged and the
+// duty relation exists once.
+
+FlybackTiming flyback_timing(double inputVoltage, const std::vector<double>& outputVoltages,
+                             const std::vector<double>& outputCurrents, const std::vector<double>& turnsRatios,
+                             double switchingFrequency, double inductance, double diodeVoltageDrop,
+                             double efficiency) {
+    double totalOutputPower = flyback_total_input_power(outputCurrents, outputVoltages, 1.0, 0.0);
+    double maximumEffectiveLoadCurrent = totalOutputPower / outputVoltages[0];
+    double maximumEffectiveLoadCurrentReflected = maximumEffectiveLoadCurrent / turnsRatios[0];
+    double totalInputPower = flyback_total_input_power(outputCurrents, outputVoltages, efficiency, 0.0);
+    double averageInputCurrent = totalInputPower / inputVoltage;
+
+    double dCcm = averageInputCurrent / (averageInputCurrent + maximumEffectiveLoadCurrentReflected);
+
+    // CCM/DCM boundary: critical primary inductance (Basso 2nd ed. p.747).
+    double mainOutputVoltageWithDiode = outputVoltages[0] + diodeVoltageDrop;
+    double aux = mainOutputVoltageWithDiode * turnsRatios[0];
+    double criticalInductance = (totalOutputPower > 0)
+        ? efficiency * inputVoltage * inputVoltage * aux * aux
+            / (2.0 * totalOutputPower * switchingFrequency
+               * (inputVoltage + aux) * (aux + efficiency * inputVoltage))
+        : 0.0;
+    bool isDcm = inductance < criticalInductance;
+
+    double dutyCycle = isDcm
+        ? std::sqrt(2.0 * totalInputPower * inductance * switchingFrequency) / inputVoltage  // DCM energy balance
+        : dCcm;
+    return FlybackTiming{dutyCycle, isDcm};
+}
+
+ForwardTiming forward_timing(double inputVoltage, const std::vector<double>& outputVoltages,
+                             const std::vector<double>& outputCurrents,
+                             const std::vector<double>& secondaryTurnsRatios, double switchingFrequency,
+                             double inductance, double mainOutputInductance, double currentRippleRatio,
+                             double diodeVoltageDrop) {
+    const double mainOutputCurrent = outputCurrents[0];
+    const double mainOutputVoltage = outputVoltages[0];
+    const double mainSecondaryTurnsRatio = secondaryTurnsRatios[0];
+    const double period = 1.0 / switchingFrequency;
+    ForwardTiming timing{};
+    timing.t1Ccm = period * (mainOutputVoltage + diodeVoltageDrop) / (inputVoltage / mainSecondaryTurnsRatio);
+    timing.t1 = timing.t1Ccm;
+    const double magnetizationCurrent = inputVoltage * timing.t1Ccm / inductance;
+    double minimumPrimaryCurrent = -magnetizationCurrent / 2;
+    for (size_t i = 0; i < outputVoltages.size(); ++i) {
+        double outputCurrentRipple = currentRippleRatio * outputCurrents[i];
+        double minSec = outputCurrents[i] - outputCurrentRipple / 2;
+        minimumPrimaryCurrent += minSec / secondaryTurnsRatios[i];
+    }
+    timing.dcm = minimumPrimaryCurrent < 0;
+    timing.dcmRadicandNegative = false;
+    if (timing.dcm) {
+        double sqrtArg = 2 * mainOutputCurrent * mainOutputInductance * (mainOutputVoltage + diodeVoltageDrop) /
+                         (switchingFrequency * (inputVoltage / mainSecondaryTurnsRatio - diodeVoltageDrop - mainOutputVoltage) *
+                          (inputVoltage / mainSecondaryTurnsRatio));
+        if (sqrtArg < 0) {
+            timing.dcmRadicandNegative = true;
+            timing.t1 = std::numeric_limits<double>::quiet_NaN();
+        } else {
+            timing.t1 = std::sqrt(sqrtArg);
+        }
+    }
+    return timing;
+}
+
+PushPullTiming push_pull_timing(double inputVoltage, const std::vector<double>& outputVoltages,
+                                const std::vector<double>& outputCurrents, const std::vector<double>& turnsRatios,
+                                double switchingFrequency, double inductance, double mainOutputInductance,
+                                double currentRippleRatio, double diodeVoltageDrop) {
+    const double mainOutputVoltage = outputVoltages[0];
+    const double mainOutputCurrent = outputCurrents[0];
+    const double mainSecondaryTurnsRatio = turnsRatios[0];
+    const double period = 1.0 / switchingFrequency;
+    PushPullTiming timing{};
+    timing.t1Ccm = period / 2 * (mainOutputVoltage + diodeVoltageDrop) / (inputVoltage / mainSecondaryTurnsRatio);
+    timing.t1 = timing.t1Ccm;
+    const double magnetizationCurrent = inputVoltage * timing.t1Ccm / inductance;
+    double minimumPrimaryCurrent = -magnetizationCurrent / 2;
+    for (size_t i = 0; i < outputVoltages.size(); ++i) {
+        const double ripple_i = currentRippleRatio * outputCurrents[i];
+        minimumPrimaryCurrent += (outputCurrents[i] - ripple_i / 2) / turnsRatios[i];
+    }
+    timing.dcm = !(minimumPrimaryCurrent > 0);
+    if (timing.dcm) {
+        timing.t1 = std::sqrt(2 * mainOutputCurrent * mainOutputInductance * (mainOutputVoltage + diodeVoltageDrop) /
+                              (2 * switchingFrequency * (inputVoltage / mainSecondaryTurnsRatio - diodeVoltageDrop - mainOutputVoltage) *
+                               (inputVoltage / mainSecondaryTurnsRatio)));
+    }
+    return timing;
+}
+
+double isolated_buck_duty_cycle(double inputVoltage, double primaryOutputVoltage, double efficiency) {
+    return primaryOutputVoltage / inputVoltage * efficiency;
+}
+
+double isolated_buck_boost_duty_cycle(double inputVoltage, double primaryOutputVoltage, double efficiency) {
+    return primaryOutputVoltage / (inputVoltage + primaryOutputVoltage) * efficiency;
+}
+
+double solve_output_voltage_for_duty(const std::function<double(double)>& dutyAt, double dutyCycle,
+                                     double maximumOutputVoltage, const std::string& context) {
+    if (!(dutyCycle > 0.0 && dutyCycle < 1.0))
+        throw std::invalid_argument(context + ": the Duty Cycle must lie between 0 and 1; got " +
+                                    std::to_string(dutyCycle) + ".");
+    if (!(maximumOutputVoltage > 0.0) || !std::isfinite(maximumOutputVoltage))
+        throw std::invalid_argument(context + ": no output voltage is possible at this input voltage.");
+    // Bisection on the model's own duty relation, which rises with the output voltage (the load resistance is
+    // held, so a higher rail is also a heavier load). lo: duty below the target; hi: at or above it.
+    double lo = 0.0, hi = maximumOutputVoltage * (1.0 - 1e-12);
+    const double dHi = dutyAt(hi);
+    if (!(dHi >= dutyCycle)) {
+        std::ostringstream msg;
+        msg << context << ": the Duty Cycle " << dutyCycle << " is more than this converter can use at this input "
+            << "voltage (it reaches only " << dHi << " before the output would exceed " << maximumOutputVoltage
+            << " V). Lower the Duty Cycle.";
+        throw std::invalid_argument(msg.str());
+    }
+    for (int k = 0; k < 200 && (hi - lo) > 1e-13 * maximumOutputVoltage; ++k) {
+        const double mid = 0.5 * (lo + hi);
+        if (dutyAt(mid) >= dutyCycle) hi = mid; else lo = mid;
+    }
+    const double reached = dutyAt(hi);
+    const double below = (lo > 0.0) ? dutyAt(lo) : 0.0;
+    if (std::abs(reached - dutyCycle) > 1e-9 * std::max(1.0, dutyCycle)) {
+        std::ostringstream msg;
+        msg << context << ": the model has no steady state at a Duty Cycle of " << dutyCycle << ": at an output of "
+            << hi << " V the duty jumps from " << below << " to " << reached
+            << " (the boundary between continuous and discontinuous conduction). Choose a Duty Cycle outside "
+            << "that gap.";
+        throw std::invalid_argument(msg.str());
+    }
+    return hi;
 }
 
 // Ported from MKF converter_models/Flyback.cpp:123 (process_operating_points_for_input_voltage).
@@ -311,25 +539,10 @@ MAS::OperatingPoint analytical_flyback(double inputVoltage,
 
     double totalOutputPower = flyback_total_input_power(outputCurrents, outputVoltages, 1.0, 0.0);
     double maximumEffectiveLoadCurrent = totalOutputPower / outputVoltages[0];
-    double maximumEffectiveLoadCurrentReflected = maximumEffectiveLoadCurrent / turnsRatios[0];
-    double totalInputPower = flyback_total_input_power(outputCurrents, outputVoltages, efficiency, 0.0);
-    double averageInputCurrent = totalInputPower / inputVoltage;
 
-    double dCcm = averageInputCurrent / (averageInputCurrent + maximumEffectiveLoadCurrentReflected);
-
-    // CCM/DCM boundary: critical primary inductance (Basso 2nd ed. p.747).
-    double mainOutputVoltageWithDiode = outputVoltages[0] + diodeVoltageDrop;
-    double aux = mainOutputVoltageWithDiode * turnsRatios[0];
-    double criticalInductance = (totalOutputPower > 0)
-        ? efficiency * inputVoltage * inputVoltage * aux * aux
-            / (2.0 * totalOutputPower * switchingFrequency
-               * (inputVoltage + aux) * (aux + efficiency * inputVoltage))
-        : 0.0;
-    bool isDcm = inductance < criticalInductance;
-
-    double dutyCycle = isDcm
-        ? std::sqrt(2.0 * totalInputPower * inductance * switchingFrequency) / inputVoltage  // DCM energy balance
-        : dCcm;
+    // The duty (CCM steady state, or DCM energy balance below the critical inductance): flyback_timing.
+    double dutyCycle = flyback_timing(inputVoltage, outputVoltages, outputCurrents, turnsRatios, switchingFrequency,
+                                      inductance, diodeVoltageDrop, efficiency).dutyCycle;
     if (dutyCycle > 1)
         throw std::invalid_argument("analytical_flyback: dutyCycle cannot be larger than one: " +
                                     std::to_string(dutyCycle));
@@ -497,7 +710,7 @@ MAS::OperatingPoint analytical_flyback(double inputVoltage,
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Secondary " + std::to_string(i)));
     }
-    return operatingPoint;
+    return with_model_duty(std::move(operatingPoint), dutyCycle);
 }
 
 // Ported from MKF converter_models/SingleSwitchForward.cpp:43.
@@ -519,7 +732,11 @@ MAS::OperatingPoint analytical_forward(double inputVoltage,
     double mainSecondaryTurnsRatio = turnsRatios[1];
 
     const double period = 1.0 / switchingFrequency;
-    double t1 = period * (mainOutputVoltage + diodeVoltageDrop) / (inputVoltage / mainSecondaryTurnsRatio);
+    const ForwardTiming timing = forward_timing(inputVoltage, outputVoltages, outputCurrents,
+                                                std::vector<double>(turnsRatios.begin() + 1, turnsRatios.end()),
+                                                switchingFrequency, inductance, mainOutputInductance,
+                                                currentRippleRatio, diodeVoltageDrop);
+    double t1 = timing.t1Ccm;
     if (t1 > period / 2)
         throw std::invalid_argument("analytical_forward: T1 cannot be larger than period/2, wrong topology configuration");
 
@@ -555,13 +772,10 @@ MAS::OperatingPoint analytical_forward(double inputVoltage,
         maximumPrimaryCurrent += maxSec / turnsRatios[turnsRatioSecondaryIndex];
     }
 
-    if (minimumPrimaryCurrent < 0) {  // DCM
-        double sqrtArg = 2 * mainOutputCurrent * mainOutputInductance * (mainOutputVoltage + diodeVoltageDrop) /
-                         (switchingFrequency * (inputVoltage / mainSecondaryTurnsRatio - diodeVoltageDrop - mainOutputVoltage) *
-                          (inputVoltage / mainSecondaryTurnsRatio));
-        if (sqrtArg < 0)
+    if (minimumPrimaryCurrent < 0) {  // DCM (the same discriminant forward_timing evaluates)
+        if (timing.dcmRadicandNegative)
             throw std::invalid_argument("analytical_forward: negative value under sqrt in DCM t1 calculation");
-        t1 = std::sqrt(sqrtArg);
+        t1 = timing.t1;
         if (t1 > period / 2)
             throw std::invalid_argument("analytical_forward: T1 cannot be larger than period/2, wrong topology configuration");
         magnetizationCurrent = inputVoltage * t1 / inductance;   // the magnetizing ramp of the DCM on-time
@@ -650,7 +864,7 @@ MAS::OperatingPoint analytical_forward(double inputVoltage,
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Secondary " + std::to_string(i)));
     }
-    return operatingPoint;
+    return with_model_duty(std::move(operatingPoint), actualDutyCycle);
 }
 
 // Ported from MKF converter_models/TwoSwitchForward.cpp:41.
@@ -671,7 +885,10 @@ MAS::OperatingPoint analytical_two_switch_forward(double inputVoltage,
     double mainSecondaryTurnsRatio = turnsRatios[0];
 
     const double period = 1.0 / switchingFrequency;
-    double t1 = period * (mainOutputVoltage + diodeVoltageDrop) / (inputVoltage / mainSecondaryTurnsRatio);
+    const ForwardTiming timing = forward_timing(inputVoltage, outputVoltages, outputCurrents, turnsRatios,
+                                                switchingFrequency, inductance, mainOutputInductance,
+                                                currentRippleRatio, diodeVoltageDrop);
+    double t1 = timing.t1Ccm;
     if (t1 > period / 2)
         throw std::invalid_argument("analytical_two_switch_forward: T1 cannot be larger than period/2, wrong topology configuration");
 
@@ -690,13 +907,10 @@ MAS::OperatingPoint analytical_two_switch_forward(double inputVoltage,
         maximumPrimaryCurrent += maxSec / turnsRatios[i];
     }
 
-    if (minimumPrimaryCurrent < 0) {  // DCM
-        double sqrtArg = 2 * mainOutputCurrent * mainOutputInductance * (mainOutputVoltage + diodeVoltageDrop) /
-                         (switchingFrequency * (inputVoltage / mainSecondaryTurnsRatio - diodeVoltageDrop - mainOutputVoltage) *
-                          (inputVoltage / mainSecondaryTurnsRatio));
-        if (sqrtArg < 0)
+    if (minimumPrimaryCurrent < 0) {  // DCM (the same discriminant forward_timing evaluates)
+        if (timing.dcmRadicandNegative)
             throw std::invalid_argument("analytical_two_switch_forward: negative value under sqrt in DCM t1 calculation");
-        t1 = std::sqrt(sqrtArg);
+        t1 = timing.t1;
         if (t1 > period / 2)
             throw std::invalid_argument("analytical_two_switch_forward: T1 cannot be larger than period/2, wrong topology configuration");
         magnetizationCurrent = inputVoltage * t1 / inductance;   // the magnetizing ramp of the DCM on-time
@@ -768,7 +982,7 @@ MAS::OperatingPoint analytical_two_switch_forward(double inputVoltage,
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Secondary " + std::to_string(i)));
     }
-    return operatingPoint;
+    return with_model_duty(std::move(operatingPoint), actualDutyCycle);
 }
 
 // Ported from MKF converter_models/PushPull.cpp:71. Vectorized for N isolated outputs (ABT #86):
@@ -797,7 +1011,10 @@ MAS::OperatingPoint analytical_push_pull(double inputVoltage,
     if (!(mainSecondaryTurnsRatio > 0))
         throw std::invalid_argument("analytical_push_pull: turns ratio must be > 0, got " +
                                     std::to_string(mainSecondaryTurnsRatio));
-    double t1 = period / 2 * (mainOutputVoltage + diodeVoltageDrop) / (inputVoltage / mainSecondaryTurnsRatio);
+    const PushPullTiming timing = push_pull_timing(inputVoltage, outputVoltages, outputCurrents, turnsRatios,
+                                                   switchingFrequency, inductance, mainOutputInductance,
+                                                   currentRippleRatio, diodeVoltageDrop);
+    double t1 = timing.t1Ccm;
     if (t1 > period / 2) {
         // Each switch conducts for t1 per half period; the centre-tapped push-pull delivers
         // Vo + Vd = 2·D·Vin/N with D = t1/T <= 0.5, so this operating point needs D = N(Vo+Vd)/(2·Vin) > 0.5.
@@ -890,9 +1107,7 @@ MAS::OperatingPoint analytical_push_pull(double inputVoltage,
             throw std::invalid_argument("analytical_push_pull: multi-output DCM is not modeled — "
                                         "design the push-pull in CCM (raise load / Lm) or use a single output");
         const double outputVoltage = mainOutputVoltage, outputCurrent = mainOutputCurrent;
-        double t1d = std::sqrt(2 * outputCurrent * outputInductance * (outputVoltage + diodeVoltageDrop) /
-                               (2 * switchingFrequency * (inputVoltage / mainSecondaryTurnsRatio - diodeVoltageDrop - outputVoltage) *
-                                (inputVoltage / mainSecondaryTurnsRatio)));
+        double t1d = timing.t1;   // push_pull_timing's DCM on-time (same discriminant as above)
         double t2 = t1d * (inputVoltage / mainSecondaryTurnsRatio) / (outputVoltage + diodeVoltageDrop) - t1d;
         if (t1d + t2 > period / 2)
             throw std::invalid_argument("analytical_push_pull: T1 + T2 cannot be larger than period/2, wrong topology configuration");
@@ -935,7 +1150,8 @@ MAS::OperatingPoint analytical_push_pull(double inputVoltage,
                    {0, t1, t1, t1 + t2, t1 + t2, period / 2, period / 2, period / 2 + t1, period / 2 + t1, period / 2 + t1 + t2, period / 2 + t1 + t2, period},
                    "Secondary 0 Half 2", false);
     }
-    return operatingPoint;
+    // The per-switch duty: each switch conducts for t1 of the period (t1 <= T/2).
+    return with_model_duty(std::move(operatingPoint), t1 / period);
 }
 
 // Weinberg helpers (ported from MKF Weinberg.cpp:19-112).
@@ -1040,7 +1256,8 @@ MAS::OperatingPoint analytical_weinberg(double inputVoltage, double outputVoltag
     exc.push_back(WP::complete_excitation(wf(iB), wf(negated(vPri)), switchingFrequency, std::string("T1 ") + priDrive + " primary b"));
     exc.push_back(WP::complete_excitation(wf(negated(sA)), wf(negated(vSec)), switchingFrequency, "T1 secondary a"));
     exc.push_back(WP::complete_excitation(wf(sB), wf(negated(vSec)), switchingFrequency, "T1 secondary b"));
-    return operatingPoint;
+    // D is each switch's own duty (>= 0.5: the two conduction intervals overlap).
+    return with_model_duty(std::move(operatingPoint), D);
 }
 
 // SEPIC/Cuk/Zeta share the same CCM duty: D = (Vo+Vd)·n / (Vin·η + (Vo+Vd)·n).
@@ -1072,7 +1289,7 @@ MAS::OperatingPoint analytical_sepic(double inputVoltage, double outputVoltage,
     MAS::Waveform voltageWaveform = WP::create_waveform(Lbl::RECTANGULAR, primaryVoltagePeakToPeak, switchingFrequency, dutyCycle, 0, 0);
     operatingPoint.get_mutable_excitations_per_winding().push_back(
         WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Primary"));
-    return operatingPoint;
+    return with_model_duty(std::move(operatingPoint), dutyCycle);
 }
 
 // Ported from MKF converter_models/Cuk.cpp:174 (V1/V2 non-isolated path).
@@ -1093,7 +1310,7 @@ MAS::OperatingPoint analytical_cuk(double inputVoltage, double outputVoltage,
     MAS::Waveform voltageWaveform = WP::create_waveform(Lbl::RECTANGULAR, primaryVoltagePeakToPeak, switchingFrequency, dutyCycle, 0, 0);
     operatingPoint.get_mutable_excitations_per_winding().push_back(
         WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Primary"));
-    return operatingPoint;
+    return with_model_duty(std::move(operatingPoint), dutyCycle);
 }
 
 // Ported from MKF converter_models/Zeta.cpp:100.
@@ -1112,7 +1329,7 @@ MAS::OperatingPoint analytical_zeta(double inputVoltage, double outputVoltage,
     MAS::Waveform voltageWaveform = WP::create_waveform(Lbl::RECTANGULAR, primaryVoltagePeakToPeak, switchingFrequency, dutyCycle, 0, 0);
     operatingPoint.get_mutable_excitations_per_winding().push_back(
         WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Primary"));
-    return operatingPoint;
+    return with_model_duty(std::move(operatingPoint), dutyCycle);
 }
 
 std::pair<std::vector<double>, std::vector<double>> winding_current_samples(const MAS::OperatingPoint& op,
@@ -1186,7 +1403,7 @@ MAS::OperatingPoint analytical_inverting_buck_boost(double inputVoltage, double 
     MAS::OperatingPoint operatingPoint;
     operatingPoint.get_mutable_excitations_per_winding().push_back(
         WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Primary"));
-    return operatingPoint;
+    return with_model_duty(std::move(operatingPoint), tm.dutyCycle);
 }
 
 // Ported from MKF converter_models/FourSwitchBuckBoost.cpp (BUCK + BOOST branches of
@@ -1247,7 +1464,9 @@ MAS::OperatingPoint analytical_fsbb(double inputVoltage, double outputVoltage,
         MAS::OperatingPoint operatingPoint;
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Inductor"));
-        return operatingPoint;
+        // Two legs, two duties (ABT #2134): dutyCycle is the buck leg's high-side Q1 (t2, the duty that sets Vout
+        // once t1 = κ·D is chosen), boostLegDutyCycle the boost leg's low-side Q4 (t1).
+        return with_model_duty(std::move(operatingPoint), t2, t1);
     }
 
     double dutyForWaveform, dIL, iL_avg, primaryVoltagePtp;
@@ -1301,7 +1520,10 @@ MAS::OperatingPoint analytical_fsbb(double inputVoltage, double outputVoltage,
     MAS::Waveform voltageWaveform = WP::create_waveform(Lbl::RECTANGULAR, primaryVoltagePtp, switchingFrequency, dutyForWaveform, 0, 0);
     operatingPoint.get_mutable_excitations_per_winding().push_back(
         WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Inductor"));
-    return operatingPoint;
+    // Buck mode reports the buck leg's duty, boost mode the boost leg's. In simultaneous buck-boost both legs
+    // switch together at the same D, so the boost leg's duty is reported beside it (ABT #2134).
+    if (simultaneous) return with_model_duty(std::move(operatingPoint), dutyForWaveform, dutyForWaveform);
+    return with_model_duty(std::move(operatingPoint), dutyForWaveform);
 }
 
 // Ported from MKF converter_models/IsolatedBuck.cpp:41 (fly-buck; D = Vpri/Vin·η, calculate_duty_cycle:10).
@@ -1321,7 +1543,7 @@ MAS::OperatingPoint analytical_isolated_buck(double inputVoltage, double primary
         throw std::invalid_argument("analytical_isolated_buck: secondary voltage/current/turnsRatio vectors "
                                     "must be the same length");
     (void)secondaryOutputVoltages;  // structural; the flyback secondary winding voltage is set by Vpri/n.
-    double dutyCycle = primaryOutputVoltage / inputVoltage * efficiency;
+    double dutyCycle = isolated_buck_duty_cycle(inputVoltage, primaryOutputVoltage, efficiency);
     if (dutyCycle >= 1) throw std::invalid_argument("analytical_isolated_buck: duty cycle must be smaller than 1");
     const double period = 1.0 / switchingFrequency;
     double tOn = dutyCycle * period;
@@ -1387,7 +1609,7 @@ MAS::OperatingPoint analytical_isolated_buck(double inputVoltage, double primary
             WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency,
                                     "Secondary " + std::to_string(k)));
     }
-    return operatingPoint;
+    return with_model_duty(std::move(operatingPoint), dutyCycle);
 }
 
 // Scalar (single-secondary) overload — forwards a 1-element vector so single-output output is byte-identical.
@@ -1419,7 +1641,7 @@ MAS::OperatingPoint analytical_isolated_buck_boost(double inputVoltage, double p
         secondaryOutputVoltages.size() != turnsRatios.size())
         throw std::invalid_argument("analytical_isolated_buck_boost: need one current and one turnsRatio per isolated secondary");
     (void)secondaryOutputVoltages;  // structural (per-rail); the secondary winding voltage follows Vpri.
-    double dutyCycle = primaryOutputVoltage / (inputVoltage + primaryOutputVoltage) * efficiency;
+    double dutyCycle = isolated_buck_boost_duty_cycle(inputVoltage, primaryOutputVoltage, efficiency);
     if (dutyCycle >= 1) throw std::invalid_argument("analytical_isolated_buck_boost: duty cycle must be smaller than 1");
     double tOn = dutyCycle / switchingFrequency;
 
@@ -1497,7 +1719,7 @@ MAS::OperatingPoint analytical_isolated_buck_boost(double inputVoltage, double p
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Secondary " + std::to_string(i)));
     }
-    return operatingPoint;
+    return with_model_duty(std::move(operatingPoint), dutyCycle);
 }
 
 // Scalar (single isolated secondary) convenience overload — forwards a 1-element vector so the
@@ -1549,7 +1771,10 @@ MAS::OperatingPoint analytical_active_clamp_forward(double inputVoltage,
     };
     if (!(inputVoltage > 0))
         throw std::invalid_argument("analytical_active_clamp_forward: input voltage must be positive");
-    double t1 = period * (mainOutputVoltage + diodeVoltageDrop) / (inputVoltage / mainSecondaryTurnsRatio);
+    const ForwardTiming timing = forward_timing(inputVoltage, outputVoltages, outputCurrents, turnsRatios,
+                                                switchingFrequency, inductance, mainOutputInductance,
+                                                currentRippleRatio, diodeVoltageDrop);
+    double t1 = timing.t1Ccm;
     requireDutyBelowOne(t1);
 
     double magnetizationCurrent = inputVoltage * t1 / inductance;
@@ -1567,13 +1792,10 @@ MAS::OperatingPoint analytical_active_clamp_forward(double inputVoltage,
         maximumPrimaryCurrent += maxSec / turnsRatios[i];
     }
 
-    if (minimumPrimaryCurrent < 0) {  // DCM
-        double sqrtArg = 2 * mainOutputCurrent * mainOutputInductance * (mainOutputVoltage + diodeVoltageDrop) /
-                         (switchingFrequency * (inputVoltage / mainSecondaryTurnsRatio - diodeVoltageDrop - mainOutputVoltage) *
-                          (inputVoltage / mainSecondaryTurnsRatio));
-        if (sqrtArg < 0)
+    if (minimumPrimaryCurrent < 0) {  // DCM (the same discriminant forward_timing evaluates)
+        if (timing.dcmRadicandNegative)
             throw std::invalid_argument("analytical_active_clamp_forward: negative value under sqrt in DCM t1 calculation");
-        t1 = std::sqrt(sqrtArg);
+        t1 = timing.t1;
         requireDutyBelowOne(t1);
         // DCM of the OUTPUT inductor only: the active clamp still resets the core with -Vclamp over the whole
         // off-time (Vclamp = D/(1-D)·Vin holds the magnetizing volt-seconds), so the magnetizing current stays
@@ -1633,7 +1855,7 @@ MAS::OperatingPoint analytical_active_clamp_forward(double inputVoltage,
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(currentWaveform, voltageWaveform, switchingFrequency, "Secondary " + std::to_string(i)));
     }
-    return operatingPoint;
+    return with_model_duty(std::move(operatingPoint), actualDutyCycle);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1679,6 +1901,8 @@ static MAS::OperatingPoint pwm_bridge_phase_shifted_core(
     // Sabate 1990 duty-cycle loss + effective duty (kernel calls — same as MKF).
     double dcl_duty = PBS::compute_duty_cycle_loss(Vbus, Lr, Io, n, Fs);
     double Deff = PBS::compute_effective_duty_cycle(D_cmd, dcl_duty);
+    // Deff is the model duty diagnostics.dutyCycle reports (ABT #2134): the fraction of the period the primary
+    // sees ±Vbus and power transfers (Vout = Vbus·Deff/n), the commanded phase fraction less the Sabate duty loss.
 
     const double period = 1.0 / Fs;
     const double Thalf = period / 2.0;
@@ -1820,7 +2044,7 @@ static MAS::OperatingPoint pwm_bridge_phase_shifted_core(
     if (rectifier == SrcRectifier::FULL_BRIDGE || rectifier == SrcRectifier::CURRENT_DOUBLER) {
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(wfm(netSecondary), wfm(vSec), Fs, "Secondary 0"));
-        return operatingPoint;
+        return with_model_duty(std::move(operatingPoint), Deff);
     }
     std::vector<double> iA(totalSamples), iB(totalSamples);
     for (int k = 0; k < totalSamples; ++k) {
@@ -1831,7 +2055,7 @@ static MAS::OperatingPoint pwm_bridge_phase_shifted_core(
         WP::complete_excitation(wfm(iA), wfm(vSec), Fs, "Secondary 0a"));
     operatingPoint.get_mutable_excitations_per_winding().push_back(
         WP::complete_excitation(wfm(iB), wfm(vSec), Fs, "Secondary 0b"));
-    return operatingPoint;
+    return with_model_duty(std::move(operatingPoint), Deff);
 }
 
 // Ported from MKF converter_models/PhaseShiftedFullBridge.cpp:359
@@ -2077,7 +2301,7 @@ MAS::OperatingPoint analytical_asymmetric_half_bridge(double inputVoltage,
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(wfm(negated(iSec_b), time), wfm(negated(vSec_b), time), fsw, "Secondary 0b"));
     }
-    return operatingPoint;
+    return with_model_duty(std::move(operatingPoint), D);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2316,7 +2540,8 @@ MAS::OperatingPoint analytical_dab(double inputVoltage,
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(secCurrentWfm, secVoltageWfm, Fs, "Secondary " + std::to_string(secIdx)));
     }
-    return operatingPoint;
+    // The square-wave bridge drives every switch at half the period: the model's switch duty is 0.5.
+    return with_model_duty(std::move(operatingPoint), 0.5);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2437,7 +2662,8 @@ MAS::OperatingPoint analytical_src(double inputVoltage,
                 WP::complete_excitation(iW, vW, fsw, "Secondary " + std::to_string(outputIdx)));
         }
     }
-    return operatingPoint;
+    // The square-wave bridge drives every switch at half the period: the model's switch duty is 0.5.
+    return with_model_duty(std::move(operatingPoint), 0.5);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2741,7 +2967,8 @@ MAS::OperatingPoint analytical_llc(double inputVoltage,
                 WP::complete_excitation(iW, vW, fsw, "Secondary " + std::to_string(outputIdx)));
         }
     }
-    return operatingPoint;
+    // The square-wave bridge drives every switch at half the period: the model's switch duty is 0.5.
+    return with_model_duty(std::move(operatingPoint), 0.5);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2861,7 +3088,8 @@ MAS::OperatingPoint analytical_cllc(double inputVoltage,
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(iW, vW, fsw, "Secondary 0"));
     }
-    return operatingPoint;
+    // The square-wave bridge drives every switch at half the period: the model's switch duty is 0.5.
+    return with_model_duty(std::move(operatingPoint), 0.5);
 }
 
 // ─── Phase 5: CLLLC bidirectional resonant converter — load-aware First-Harmonic Approximation (FHA) ──
@@ -2978,7 +3206,8 @@ MAS::OperatingPoint analytical_clllc(double inputVoltage,
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(iW, vW, fsw, "Secondary 0"));
     }
-    return operatingPoint;
+    // The square-wave bridge drives every switch at half the period: the model's switch duty is 0.5.
+    return with_model_duty(std::move(operatingPoint), 0.5);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3349,7 +3578,10 @@ MAS::OperatingPoint analytical_vienna(double linePhaseVoltageRms,
         }
     }
 
-    return operatingPoint;
+    // diagnostics.dutyCycle is the duty at the line-voltage peak (ABT #2134), the design point: phase A's boost
+    // duty there by the model's own law, D = 1 − |V_phase|/(Vdc/2) = 1 − M. The duty varies along the line, so a
+    // full line-cycle envelope reports the same peak value, never the duty at whatever instant it was sampled.
+    return with_model_duty(std::move(operatingPoint), duty_at_peak);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3573,7 +3805,11 @@ MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
     MAS::OperatingPoint operatingPoint;
     operatingPoint.get_mutable_excitations_per_winding().push_back(
         WP::complete_excitation(currentWaveform, voltageWaveform, lineFrequency, "Boost inductor"));
-    return operatingPoint;
+    // diagnostics.dutyCycle is the duty at the line-voltage peak (ABT #2134), the design point (for a CCM boost
+    // the cycle's minimum, 1 − Vin,pk/(Vout+Vd)): the on-fraction of the switching cycle the model's own law
+    // builds at the peak of the line (t = T_line/4), whatever the conduction mode.
+    const double dutyAtLinePeak = levelsAt(0.25 / lineFrequency).duty;
+    return with_model_duty(std::move(operatingPoint), dutyAtLinePeak);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4050,7 +4286,7 @@ MAS::OperatingPoint analytical_hard_switched_bridge(double inputVoltage, double 
     if (rectifier != SrcRectifier::CENTER_TAPPED) {
         operatingPoint.get_mutable_excitations_per_winding().push_back(
             WP::complete_excitation(wfm(iSecNet), wfm(vSec), switchingFrequency, "Secondary 0"));
-        return operatingPoint;
+        return with_model_duty(std::move(operatingPoint), D);
     }
     // Centre tap: i_a − i_b = iLo and i_a + i_b = net (same split as analytical_pshb). The inductor current
     // repeats at T/2: it rises over each power interval and falls over each dead interval.
@@ -4064,7 +4300,7 @@ MAS::OperatingPoint analytical_hard_switched_bridge(double inputVoltage, double 
         WP::complete_excitation(wfm(iA), wfm(vSec), switchingFrequency, "Secondary 0a"));
     operatingPoint.get_mutable_excitations_per_winding().push_back(
         WP::complete_excitation(wfm(iB), wfm(vSec), switchingFrequency, "Secondary 0b"));
-    return operatingPoint;
+    return with_model_duty(std::move(operatingPoint), D);
 }
 
 } // namespace analytical

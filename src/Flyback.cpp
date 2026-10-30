@@ -9,6 +9,7 @@
 #include "ComponentRequirements.hpp"
 #include "ConverterAnalytical.hpp"   // single FHA source: analytical_flyback + excitations_processed/winding_current
 #include "KirchhoffConfig.hpp"
+#include "DutyPin.hpp"
 
 #include <sstream>
 #include <vector>
@@ -202,6 +203,16 @@ FlybackDesign design_flyback(const json& tasInputs) {
         leg.loadResistance = leg.voltage * leg.voltage / leg.power;
         d.outputs.push_back(leg);
     }
+    // "I know the design I want" (ABT #2134): config.forcedDutyCycle drives the switch at exactly that duty;
+    // the rails it delivers into the requested loads become the result (DutyPin.hpp). A quasi-resonant flyback
+    // has no free duty: its on-time ends where the valley timing puts it.
+    if (const auto forcedDuty = cfg::forced_duty_cycle(d.config)) {
+        if (mode == "qrm")
+            throw std::invalid_argument("Duty Cycle: a quasi-resonant flyback sets its own on-time (it turns on at "
+                                        "the first valley), so its duty cannot be pinned. Choose another mode or "
+                                        "leave the Duty Cycle empty.");
+        duty_pin::pin_flyback(d, *forcedDuty, "Flyback");
+    }
     return d;
 }
 
@@ -354,19 +365,34 @@ json build_flyback_tas(const FlybackDesign& d) {
     // (QRM: d.resonantCapacitance > 0 renders the valley arc + magnetizing ring on the idle tail; at the
     // worst corner Vin_min the converter runs deeper into conduction, the idle vanishes and the ring with it.)
     const double rippleNaN = std::numeric_limits<double>::quiet_NaN();
-    const MAS::OperatingPoint aopWorst = AN::analytical_flyback(d.inputVoltageMin, Vouts, iouts,
+    // A pinned duty (ABT #2134) runs the nominal point open loop on the delivered rails; the Vin_min corner is
+    // still rated on the REQUESTED rails (what the regulated converter carries there), and each rating takes
+    // the larger of the two corners.
+    std::vector<double> worstVouts = Vouts, worstIouts = iouts;
+    if (d.dutyPinned)
+        for (size_t i = 0; i < nOut; ++i) {
+            worstVouts[i] = d.requestedVoltages[i];
+            worstIouts[i] = d.requestedPowers[i] / d.requestedVoltages[i];
+        }
+    const MAS::OperatingPoint aopWorst = AN::analytical_flyback(d.inputVoltageMin, worstVouts, worstIouts,
                                                                ratios, fsw, Lm, d.diodeDrop, d.efficiency,
                                                                rippleNaN, d.resonantCapacitance);
     const MAS::OperatingPoint aopNom   = AN::analytical_flyback(d.inputVoltage,    Vouts, iouts,
                                                                ratios, fsw, Lm, d.diodeDrop, d.efficiency,
                                                                rippleNaN, d.resonantCapacitance);
-    const double IpkPri  = AN::winding_current(aopWorst, 0, "peak");
-    const double IrmsPri = AN::winding_current(aopWorst, 0, "rms");
+    auto rating = [&](size_t winding, const char* what) {
+        const double worst = AN::winding_current(aopWorst, winding, what);
+        return d.dutyPinned ? std::max(worst, AN::winding_current(aopNom, winding, what)) : worst;
+    };
+    const double IpkPri  = rating(0, "peak");
+    const double IrmsPri = rating(0, "rms");
 
     // Primary-switch stresses (the one switch carries every rail's reflected power). VOLTAGES at Vin_max;
     // the reflected voltage n_i·(Vout_i+Vd_i) is the shared Vor, so the main-rail term sizes the drain.
     const double maxTrr    = 0.05 * T;
-    const double VdsStress = d.inputVoltageMax + n * d.outputVoltage;
+    // Pinned duty (ABT #2134): the reflected voltage of whichever main rail is higher, requested or delivered.
+    const double VdsStress = d.inputVoltageMax + n * (d.dutyPinned ? std::max(d.outputVoltage, d.requestedVoltages[0])
+                                                                   : d.outputVoltage);
     cfg::check_maximum_drain_source_voltage(d.config, VdsStress, "build_flyback_tas");
     const double ratedVds  = VdsStress / cfg::v_derate_mosfet(d.config);
     const double maxRdsOn  = 0.01 * totalOutputPower / (IrmsPri * IrmsPri);   // <=1% of total Pout conduction
@@ -470,8 +496,8 @@ json build_flyback_tas(const FlybackDesign& d) {
         const std::string voutPort = "Vout" + sfx;
 
         // rail ratings from its OWN secondary winding (worst corner). Rectifier blocks Vout_i + Vin_max/n_i.
-        const double IpkSec  = AN::winding_current(aopWorst, i + 1, "peak");
-        const double IrmsSec = AN::winding_current(aopWorst, i + 1, "rms");
+        const double IpkSec  = rating(i + 1, "peak");
+        const double IrmsSec = rating(i + 1, "rms");
         const double Iout_i  = leg.power / leg.voltage;
         const double VrStress = leg.voltage + d.inputVoltageMax / leg.turnsRatio;
         const double ratedVr  = VrStress / cfg::v_derate_diode(d.config);

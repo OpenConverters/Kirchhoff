@@ -466,6 +466,9 @@ json build_lcc_tas(const LccDesign& d) {
     for (size_t i = 0; i < ss.time.size(); ++i) vLr[i] = ss.bridgeVoltage[i] - ss.seriesCapacitorVoltage[i] - ss.parallelCapacitorVoltage[i];
     MAS::OperatingPoint opLr;
     opLr.get_mutable_excitations_per_winding().push_back(WP::complete_excitation(wave(ss.tankCurrent), wave(vLr), f, "Primary"));
+    // The steady state is solved for a square-wave bridge: every switch runs at half the period (ABT #2134).
+    constexpr double kModelSwitchDuty = 0.5;
+    opLr = AN::with_model_duty(std::move(opLr), kModelSwitchDuty);
     json lr; lr["magnetic"] = json::object();
     lr["inputs"] = req::magnetic_inputs(d.seriesInductance, 0.05, {}, {"primary"}, std::nullopt, 25.0,
                                         AN::excitations_processed(opLr, "Lr"));
@@ -480,6 +483,7 @@ json build_lcc_tas(const LccDesign& d) {
     MAS::OperatingPoint opT1;
     opT1.get_mutable_excitations_per_winding().push_back(WP::complete_excitation(wave(iPri), wave(ss.parallelCapacitorVoltage), f, "Primary"));
     opT1.get_mutable_excitations_per_winding().push_back(WP::complete_excitation(wave(iSec), wave(vSec), f, "Secondary 0"));
+    opT1 = AN::with_model_duty(std::move(opT1), kModelSwitchDuty);
     json t1; t1["magnetic"] = json::object();
     // Lm is part of the tank (it shunts Cp), so it is a nominal value with a tolerance, not a floor.
     t1["inputs"] = req::magnetic_inputs(d.magnetizingInductance, 0.1, {n}, {"primary", "secondary"}, std::nullopt, 25.0,

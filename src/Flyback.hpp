@@ -58,6 +58,10 @@ struct FlybackDesign {
     std::string mode;              // "ccm" | "dcm" | "bcm" | "qrm"
     double resonantCapacitance;    // F — drain-node C (QRM only; 0 otherwise). Real part: Cres.
     double valleyDeadTime;         // s — π·√(Lm·Cr), the designed idle between diode cutoff and turn-on
+    // config.forcedDutyCycle (ABT #2134): dutyPinned, and the rails as REQUESTED (outputs[] then carry the
+    // rails delivered at the pinned duty; the worst-corner ratings still use the requested ones).
+    bool dutyPinned = false;
+    std::vector<double> requestedVoltages, requestedPowers;
 };
 
 // Design from TAS-style inputs.designRequirements + a chosen operating point.

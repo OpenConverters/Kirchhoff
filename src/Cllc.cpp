@@ -469,6 +469,12 @@ json build_cllc_tas(const CllcDesign& d) {
         } else {
             aopT1 = raw;   // degenerate (shouldn't happen for a full-bridge rectifier) — keep as-is
         }
+        // The reordered operating point is a new one: carry the driving bridge's model duty (registered by the
+        // reflected solve) over to it, so diagnostics.dutyCycle reports it (ABT #2134).
+        const std::optional<AN::ModelDuty> rawDuty = AN::model_duty_of(raw);
+        if (!rawDuty)
+            throw std::runtime_error("build_cllc_tas: the reverse-flow solve registered no switch duty");
+        aopT1 = AN::with_model_duty(std::move(aopT1), *rawDuty);
     }
     json t1; t1["magnetic"] = json::object();
     t1["inputs"] = req::magnetic_inputs(d.magnetizingInductance, 0.1, {n}, isoSides,

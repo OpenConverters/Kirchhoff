@@ -343,6 +343,9 @@ target_link_libraries(test_settings PRIVATE kirchhoff Catch2::Catch2WithMain)
 # test compiles it in directly — the point is to exercise the api choke point every caller passes through.
 add_executable(test_spec_validation tests/test_spec_validation.cpp src/KirchhoffApi.cpp)
 target_link_libraries(test_spec_validation PRIVATE kirchhoff Catch2::Catch2WithMain)
+# "I know the design I want" duty / dead-time pins (ABT #2134), through the same api choke point.
+add_executable(test_duty_pin tests/test_duty_pin.cpp src/KirchhoffApi.cpp)
+target_link_libraries(test_duty_pin PRIVATE kirchhoff Catch2::Catch2WithMain)
 # Lets the test locate the independent Python averaged-model oracle (tests/averaged_model.py).
 target_compile_definitions(test_pfc PRIVATE KIRCHHOFF_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests")
 

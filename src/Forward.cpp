@@ -3,6 +3,7 @@
 #include "ComponentRequirements.hpp"
 #include "ConverterAnalytical.hpp"   // single FHA source: analytical_forward + excitations_processed/winding_current
 #include "KirchhoffConfig.hpp"
+#include "DutyPin.hpp"
 #include <cmath>
 #include <vector>
 
@@ -101,6 +102,10 @@ ForwardDesign design_forward(const json& tasInputs) {
         leg.loadResistance = leg.voltage * leg.voltage / leg.power;
         d.outputs.push_back(leg);
     }
+    // "I know the design I want" (ABT #2134): config.forcedDutyCycle drives the switch at exactly that duty;
+    // the rails it delivers into the requested loads become the result (DutyPin.hpp).
+    if (const auto forcedDuty = cfg::forced_duty_cycle(d.config))
+        duty_pin::pin_forward_family(d, *forcedDuty, ripple, 0.5, "the demagnetizing winding needs the rest of the period to reset the core", "Forward");
     return d;
 }
 

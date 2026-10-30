@@ -3,6 +3,7 @@
 #include "ComponentRequirements.hpp"
 #include "ConverterAnalytical.hpp"   // single FHA source: analytical_isolated_buck_boost + excitations_processed/winding_current
 #include "KirchhoffConfig.hpp"
+#include "DutyPin.hpp"
 #include <cmath>
 #include <algorithm>
 #include <vector>
@@ -98,6 +99,44 @@ const double Vd = req::rectifier_drop(d.config, Ipri);  // DIDEAL Vf at the prim
         }
         d.secondaries.push_back(leg);
     }
+
+    // "I know the design I want" (ABT #2134): config.forcedDutyCycle drives the switch at exactly that duty, and
+    // the rails it delivers into the requested loads (held) become the result. The primary rail follows the
+    // solver's own duty relation D = Vpri/(Vin+Vpri)·η (isolated_buck_boost_duty_cycle), i.e.
+    // Vpri = D·Vin/(η−D); each isolated rail clamps to its winding's flyback voltage (Vpri+Vd)/N_k − Vd, the
+    // voltage analytical_isolated_buck_boost puts across it. The stage above stays sized from the requested rails.
+    if (const auto forcedDuty = cfg::forced_duty_cycle(d.config)) {
+        const double Dp = *forcedDuty, eta = d.efficiency;
+        if (!(Dp < eta))
+            throw std::invalid_argument("Duty Cycle: with an efficiency of " + duty_pin::num(eta) + " the isolated "
+                                        "buck-boost model reaches a duty of " + duty_pin::num(Dp) + " only at an "
+                                        "infinite output voltage. Lower the Duty Cycle.");
+        d.dutyPinned = true;
+        d.requestedVoltages = {d.primaryVoltage};
+        d.requestedPowers = {d.primaryPower};
+        for (const auto& leg : d.secondaries) {
+            d.requestedVoltages.push_back(leg.voltage);
+            d.requestedPowers.push_back(leg.power);
+        }
+        const double vPri = Dp * Vin / (eta - Dp);
+        const double vdRect = req::analytical_rectifier_drop(d.config);
+        d.primaryVoltage = vPri;
+        d.primaryPower = vPri * vPri / d.loadResistance;
+        for (size_t k = 0; k < d.secondaries.size(); ++k) {
+            auto& leg = d.secondaries[k];
+            const double vSec = (vPri + vdRect) / leg.turnsRatio - vdRect;
+            if (!(vSec > 0.0))
+                throw std::invalid_argument("Isolated buck-boost: at a Duty Cycle of " + duty_pin::num(Dp) +
+                                            " isolated output " + std::to_string(k + 1) + " (turns ratio " +
+                                            duty_pin::num(leg.turnsRatio) + ") gets no voltage above its "
+                                            "rectifier drop. Raise the Duty Cycle.");
+            leg.voltage = vSec;
+            leg.power = vSec * vSec / leg.loadResistance;
+        }
+        d.secondaryVoltage = d.secondaries.at(0).voltage;
+        d.secondaryPower = d.secondaries.at(0).power;
+        d.dutyCycle = Dp;
+    }
     return d;
 }
 
@@ -134,14 +173,25 @@ json build_isolated_buck_boost_tas(const IsolatedBuckBoostDesign& d) {
     namespace AN = Kirchhoff::analytical;
     const double IpriLoad = d.primaryPower / d.primaryVoltage;
     const double IsecLoad = d.secondaryPower / d.secondaryVoltage;
-    const MAS::OperatingPoint aopWorst = AN::analytical_isolated_buck_boost(d.inputVoltageMin, d.primaryVoltage,
-                                            IpriLoad, d.secondaryVoltage, IsecLoad, fsw, Lm, N, req::analytical_rectifier_drop(d.config), d.efficiency);
+    // A pinned duty (ABT #2134) runs the nominal point open loop on the delivered rails; the Vin_min corner is
+    // still rated on the REQUESTED rails (what the regulated converter carries there), and each rating takes
+    // the larger of the two corners.
+    const double worstVpri = d.dutyPinned ? d.requestedVoltages.at(0) : d.primaryVoltage;
+    const double worstIpri = d.dutyPinned ? d.requestedPowers.at(0) / d.requestedVoltages.at(0) : IpriLoad;
+    const double worstVsec = d.dutyPinned ? d.requestedVoltages.at(1) : d.secondaryVoltage;
+    const double worstIsec = d.dutyPinned ? d.requestedPowers.at(1) / d.requestedVoltages.at(1) : IsecLoad;
+    const MAS::OperatingPoint aopWorst = AN::analytical_isolated_buck_boost(d.inputVoltageMin, worstVpri,
+                                            worstIpri, worstVsec, worstIsec, fsw, Lm, N, req::analytical_rectifier_drop(d.config), d.efficiency);
     const MAS::OperatingPoint aopNom   = AN::analytical_isolated_buck_boost(d.inputVoltage,    d.primaryVoltage,
                                             IpriLoad, d.secondaryVoltage, IsecLoad, fsw, Lm, N, req::analytical_rectifier_drop(d.config), d.efficiency);
+    auto rating = [&](size_t winding, const char* what) {
+        const double worst = AN::winding_current(aopWorst, winding, what);
+        return d.dutyPinned ? std::max(worst, AN::winding_current(aopNom, winding, what)) : worst;
+    };
     // Primary winding stresses from the worst-case corner (winding 0).
-    const double IpkPri  = AN::winding_current(aopWorst, 0, "peak");
+    const double IpkPri  = rating(0, "peak");
     cfg::check_maximum_switch_current(d.config, IpkPri, "build_isolated_buck_boost_tas");
-    const double IrmsPri = AN::winding_current(aopWorst, 0, "rms");
+    const double IrmsPri = rating(0, "rms");
 
     // --- semiconductor stresses (flyback-class, max-stress corner Vin_max) ---
     // QS1 blocks Vin_max + the reflected primary-rail voltage during OFF (clamp-limited).
@@ -277,13 +327,28 @@ static json build_isolated_buck_boost_tas_multi(const IsolatedBuckBoostDesign& d
         Isecs.push_back(leg.power / leg.voltage);
         Ns.push_back(leg.turnsRatio);
     }
-    const MAS::OperatingPoint aopWorst = AN::analytical_isolated_buck_boost(d.inputVoltageMin, d.primaryVoltage,
-                                            IpriLoad, Vsecs, Isecs, fsw, Lm, Ns, req::analytical_rectifier_drop(d.config), d.efficiency);
+    // Pinned duty (ABT #2134): Vin_min corner on the REQUESTED rails, ratings the larger of the two corners.
+    double worstVpri = d.primaryVoltage, worstIpri = IpriLoad;
+    std::vector<double> worstVsecs = Vsecs, worstIsecs = Isecs;
+    if (d.dutyPinned) {
+        worstVpri = d.requestedVoltages.at(0);
+        worstIpri = d.requestedPowers.at(0) / worstVpri;
+        for (size_t k = 0; k < nSec; ++k) {
+            worstVsecs[k] = d.requestedVoltages.at(1 + k);
+            worstIsecs[k] = d.requestedPowers.at(1 + k) / worstVsecs[k];
+        }
+    }
+    const MAS::OperatingPoint aopWorst = AN::analytical_isolated_buck_boost(d.inputVoltageMin, worstVpri,
+                                            worstIpri, worstVsecs, worstIsecs, fsw, Lm, Ns, req::analytical_rectifier_drop(d.config), d.efficiency);
     const MAS::OperatingPoint aopNom   = AN::analytical_isolated_buck_boost(d.inputVoltage,    d.primaryVoltage,
                                             IpriLoad, Vsecs, Isecs, fsw, Lm, Ns, req::analytical_rectifier_drop(d.config), d.efficiency);
-    const double IpkPri  = AN::winding_current(aopWorst, 0, "peak");
+    auto rating = [&](size_t winding, const char* what) {
+        const double worst = AN::winding_current(aopWorst, winding, what);
+        return d.dutyPinned ? std::max(worst, AN::winding_current(aopNom, winding, what)) : worst;
+    };
+    const double IpkPri  = rating(0, "peak");
     cfg::check_maximum_switch_current(d.config, IpkPri, "build_isolated_buck_boost_tas");
-    const double IrmsPri = AN::winding_current(aopWorst, 0, "rms");
+    const double IrmsPri = rating(0, "rms");
 
     // --- semiconductor stresses (flyback-class, max-stress corner Vin_max) ---
     const double VdsStress = d.inputVoltageMax + d.primaryVoltage;

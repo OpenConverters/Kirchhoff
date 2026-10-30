@@ -58,6 +58,33 @@ void clear_captured_operating_points();
 void restamp_captured_ambient(double ambientTemperature);
 const std::vector<std::pair<std::string, nlohmann::json>>& captured_operating_points();
 
+// The model's exact switch duty (ABT #2134). A solver hands back its operating point through
+// with_model_duty(op, D), D being the duty its own timing law ran the switch at — the value the waveforms were
+// built from, before they are resampled. The capturing excitations_processed(op, component) then records, for
+// every capture and in the same order as captured_operating_points(), the duty registered for that operating
+// point (nullopt when its solver registered none). Cleared with clear_captured_operating_points. The api
+// reports this duty instead of re-measuring the sampled waveform. model_duty_of(op) is the duty a solver
+// registered for this operating point, or nullopt. A converter with two independently switched legs (the
+// four-switch buck-boost in its buck-boost modes) registers the boost leg's duty beside the buck leg's
+// (boostLegDutyCycle); every other solver leaves it unset.
+struct ModelDuty {
+    double dutyCycle;
+    std::optional<double> boostLegDutyCycle;
+    bool operator==(const ModelDuty& o) const {
+        return dutyCycle == o.dutyCycle && boostLegDutyCycle == o.boostLegDutyCycle;
+    }
+};
+MAS::OperatingPoint with_model_duty(MAS::OperatingPoint op, double dutyCycle,
+                                    std::optional<double> boostLegDutyCycle = std::nullopt);
+MAS::OperatingPoint with_model_duty(MAS::OperatingPoint op, const ModelDuty& duty);
+std::optional<ModelDuty> model_duty_of(const MAS::OperatingPoint& op);
+const std::vector<std::pair<std::string, std::optional<ModelDuty>>>& captured_model_duties();
+// A builder whose main magnetic's excitation is written inline (no analytical operating point is captured for
+// it, e.g. the phase-shifted full bridge with a current doubler) declares the duty that excitation was built
+// at here. Cleared with clear_captured_operating_points. declared_model_duty returns it, or nullopt.
+void declare_model_duty(const std::string& component, const ModelDuty& duty);
+std::optional<ModelDuty> declared_model_duty(const std::string& component);
+
 // The same excitation with its current negated (waveform, harmonics and processed data recomputed). Used where
 // a solver's winding roles are swapped onto the physical windings (reverse power flow) and the MAS current
 // convention — primary-side windings PASSIVE, all others SOURCE — therefore flips. Throws when the excitation
@@ -326,6 +353,64 @@ MAS::OperatingPoint analytical_active_clamp_forward(double inputVoltage,
                                                     double switchingFrequency, double inductance,
                                                     double mainOutputInductance, double currentRippleRatio,
                                                     double diodeVoltageDrop = 0.0);
+
+// ── Switch timing of the duty-pinnable PWM converters (ABT #2134) ───────────────────────────────────────
+// Each solver above derives its switch on-time from the operating point; these functions ARE that derivation,
+// called by the solvers themselves, so a design that pins the duty ("I know the design I want") can find the
+// operating point at which the same model runs at the pinned duty (solve_output_voltage_for_duty) instead of
+// re-deriving the physics elsewhere.
+
+// Forward family (single-switch forward, two-switch forward, active-clamp forward). `secondaryTurnsRatios` is
+// one ratio per output (no demagnetization entry). t1Ccm = T·(Vo0+Vd)·n0/Vin; when the reflected load falls
+// below the magnetizing peak (the solvers' shared CCM/DCM discriminant) the output-inductor DCM on-time
+// replaces it. No limit is checked here: each solver applies its own (t1 <= T/2, D < 1, …).
+struct ForwardTiming {
+    double t1Ccm;              // the CCM on-time, s
+    double t1;                 // the on-time the solver runs at (t1Ccm, or the DCM on-time), s
+    bool dcm;                  // the discriminant chose the DCM branch
+    bool dcmRadicandNegative;  // DCM branch with a negative radicand: no DCM on-time exists (t1 is NaN)
+};
+ForwardTiming forward_timing(double inputVoltage, const std::vector<double>& outputVoltages,
+                             const std::vector<double>& outputCurrents,
+                             const std::vector<double>& secondaryTurnsRatios, double switchingFrequency,
+                             double inductance, double mainOutputInductance, double currentRippleRatio,
+                             double diodeVoltageDrop);
+
+// Push-pull: per-switch on-time t1 (D = t1/T <= 0.5). CCM t1 = T/2·(Vo0+Vd)·N0/Vin; when the reflected load
+// does not exceed the magnetizing peak the single-output DCM on-time replaces it. No limit is checked here.
+struct PushPullTiming {
+    double t1Ccm;
+    double t1;
+    bool dcm;
+};
+PushPullTiming push_pull_timing(double inputVoltage, const std::vector<double>& outputVoltages,
+                                const std::vector<double>& outputCurrents, const std::vector<double>& turnsRatios,
+                                double switchingFrequency, double inductance, double mainOutputInductance,
+                                double currentRippleRatio, double diodeVoltageDrop);
+
+// Flyback duty: the CCM steady-state duty, or the DCM energy-balance duty below the critical inductance.
+struct FlybackTiming {
+    double dutyCycle;
+    bool dcm;
+};
+FlybackTiming flyback_timing(double inputVoltage, const std::vector<double>& outputVoltages,
+                             const std::vector<double>& outputCurrents, const std::vector<double>& turnsRatios,
+                             double switchingFrequency, double inductance, double diodeVoltageDrop,
+                             double efficiency);
+
+// Isolated buck-boost (fly-buck-boost) duty D = Vpri/(Vin+Vpri)·η.
+double isolated_buck_boost_duty_cycle(double inputVoltage, double primaryOutputVoltage, double efficiency);
+
+// Isolated buck (fly-buck) duty D = Vpri/Vin·η — the law analytical_isolated_buck runs the switch at.
+double isolated_buck_duty_cycle(double inputVoltage, double primaryOutputVoltage, double efficiency);
+
+// The main-rail output voltage at which a converter whose duty follows `dutyAt(Vo)` (one of the timing
+// functions above, evaluated with the load held: Io = Vo/R) runs at exactly `dutyCycle`. dutyAt must be
+// non-decreasing in Vo on (0, maximumOutputVoltage). Returns the root; THROWS (`context` + plain words) when
+// the duty lies above what the model reaches below maximumOutputVoltage, or inside a jump of the model's duty
+// (the CCM/DCM boundary), where the model has no steady state at that duty.
+double solve_output_voltage_for_duty(const std::function<double(double)>& dutyAt, double dutyCycle,
+                                     double maximumOutputVoltage, const std::string& context);
 
 // Secondary rectifier topology shared by the phase-shifted bridge family and the
 // resonant converters: FULL_BRIDGE emits ONE secondary winding per output (bipolar,

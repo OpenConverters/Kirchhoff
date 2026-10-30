@@ -1,6 +1,7 @@
 #include "PushPull.hpp"
 #include "DimensionJson.hpp"
 #include "KirchhoffConfig.hpp"
+#include "DutyPin.hpp"
 #include "ComponentRequirements.hpp"
 #include "ConverterAnalytical.hpp"   // single FHA source: analytical_push_pull + excitations_processed/winding_current
 #include <cmath>
@@ -140,6 +141,10 @@ PushPullDesign design_push_pull(const json& tasInputs) {
         leg.loadResistance = leg.voltage * leg.voltage / leg.power;
         d.outputs.push_back(leg);
     }
+    // "I know the design I want" (ABT #2134): config.forcedDutyCycle drives each switch at exactly that duty;
+    // the rails it delivers into the requested loads become the result (DutyPin.hpp).
+    if (const auto forcedDuty = cfg::forced_duty_cycle(d.config))
+        duty_pin::pin_push_pull(d, *forcedDuty, ripple, "Push-pull");
     return d;
 }
 
@@ -184,14 +189,27 @@ json build_push_pull_tas(const PushPullDesign& d) {
         turnsN.push_back(leg.turnsRatio);
         totalOutputPower += leg.power;
     }
-    const MAS::OperatingPoint aopWorst = AN::analytical_push_pull(d.inputVoltageMin, Vouts, iouts, turnsN, fsw,
+    // A pinned duty (ABT #2134) runs the nominal point open loop on the delivered rails; the Vin_min corner is
+    // still rated on the REQUESTED rails (what the regulated converter carries there), and each rating takes
+    // the larger of the two corners.
+    std::vector<double> worstVouts = Vouts, worstIouts = iouts;
+    if (d.dutyPinned)
+        for (size_t i = 0; i < nOut; ++i) {
+            worstVouts[i] = d.requestedVoltages[i];
+            worstIouts[i] = d.requestedPowers[i] / d.requestedVoltages[i];
+        }
+    const MAS::OperatingPoint aopWorst = AN::analytical_push_pull(d.inputVoltageMin, worstVouts, worstIouts, turnsN, fsw,
                                             Lm, d.outputInductance, rippleRatio, d.diodeDrop);
     const MAS::OperatingPoint aopNom   = AN::analytical_push_pull(d.inputVoltage,    Vouts, iouts, turnsN, fsw,
                                             Lm, d.outputInductance, rippleRatio, d.diodeDrop);
+    auto rating = [&](const char* what) {
+        const double worst = AN::winding_current(aopWorst, 0, what);
+        return d.dutyPinned ? std::max(worst, AN::winding_current(aopNom, 0, what)) : worst;
+    };
     // Primary-half switch conduction (winding 0 = "Primary Half 1") from the worst-case corner.
-    const double IpkPri  = AN::winding_current(aopWorst, 0, "peak");
+    const double IpkPri  = rating("peak");
     cfg::check_maximum_switch_current(d.config, IpkPri, "build_push_pull_tas");
-    const double IrmsPri = AN::winding_current(aopWorst, 0, "rms");
+    const double IrmsPri = rating("rms");
     // Per-switch operating duty is shared across rails (common primary); the output-inductor volt-seconds
     // (below, per rail) use it directly.
     const double D2 = std::min(1.0, 2.0 * Dn);

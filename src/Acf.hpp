@@ -40,6 +40,10 @@ struct AcfDesign {
     double outputCapacitance;
     std::vector<AcfOutputLeg> outputs;   // >=1 entry; [0] duplicates the scalars above
     nlohmann::json config;
+    // config.forcedDutyCycle (ABT #2134): dutyPinned, and the rails as REQUESTED (outputs[] then carry the
+    // rails delivered at the pinned duty; the worst-corner ratings still use the requested ones).
+    bool dutyPinned = false;
+    std::vector<double> requestedVoltages, requestedPowers;
 };
 
 /**

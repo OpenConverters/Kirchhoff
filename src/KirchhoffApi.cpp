@@ -13,10 +13,14 @@
 #include "Cmc.hpp"                // common-mode choke — a component designer (no TAS), not a topology row
 #include "Dmc.hpp"                // differential-mode choke — component designer + LC propose
 #include "CurrentTransformer.hpp" // current transformer — component designer (burden-resistor sensing)
+#include "KirchhoffConfig.hpp"      // cfg::forced_duty_cycle (ABT #2134)
 #include "JsonUtil.hpp"           // strip_nulls — schema-valid serialization of typed MAS objects
 
 #include <algorithm>
+#include <iterator>
 #include <functional>
+#include <utility>
+#include <vector>
 #include <string>
 #include <unordered_map>
 
@@ -175,8 +179,138 @@ void validate_requirements(const json& spec) {
     }
 }
 
+// "I know the design I want" switch-timing pins (ABT #2134): config.forcedDutyCycle is honoured by the PWM
+// converters whose design drives one main duty (DutyPin.hpp), config.forcedDeadTime only by the active-clamp
+// forward (the one design with a dead time between complementary switches). Any other topology REFUSES them
+// rather than silently designing at a duty the caller did not ask for.
+void validate_switch_timing_pins(const std::string& topology, const json& spec) {
+    const json config = Kirchhoff::cfg::object_of(spec);
+    static const char* const kDutyPinnable[] = {"flyback", "forward", "two_switch_forward", "acf", "push_pull",
+                                                "isolated_buck_boost", "isolated_buck"};
+    if (config.contains("forcedDutyCycle") &&
+        std::none_of(std::begin(kDutyPinnable), std::end(kDutyPinnable),
+                     [&](const char* t) { return topology == t; }))
+        throw std::invalid_argument("Duty Cycle: the " + topology + " design does not take a fixed duty cycle "
+                                    "(it is available for the flyback, forward, two-switch forward, active clamp "
+                                    "forward, push-pull, isolated buck-boost and isolated buck). Leave the Duty "
+                                    "Cycle empty.");
+    if (config.contains("forcedDeadTime") && topology != "acf")
+        throw std::invalid_argument("Dead Time: the " + topology + " design has no dead time to set (only the "
+                                    "active clamp forward takes one). Leave the Dead Time empty.");
+}
+
+// The rails a duty-pinned design delivers, {|V|, P} per requested output in order. Read from the design itself
+// (design_<topo> is deterministic and cheap): the TAS does not list every rail as an output (the isolated
+// buck-boost's and the isolated buck's single secondary is an internal load).
+std::vector<std::pair<double, double>> pinned_rails(const std::string& topology, const json& spec) {
+    auto legs = [](const auto& d) {
+        std::vector<std::pair<double, double>> r;
+        for (const auto& leg : d.outputs) r.emplace_back(leg.voltage, leg.power);
+        return r;
+    };
+    if (topology == "flyback") return legs(Kirchhoff::design_flyback(spec));
+    if (topology == "forward") return legs(Kirchhoff::design_forward(spec));
+    if (topology == "two_switch_forward") return legs(Kirchhoff::design_two_switch_forward(spec));
+    if (topology == "acf") return legs(Kirchhoff::design_acf(spec));
+    if (topology == "push_pull") return legs(Kirchhoff::design_push_pull(spec));
+    if (topology == "isolated_buck_boost") {
+        const auto d = Kirchhoff::design_isolated_buck_boost(spec);
+        std::vector<std::pair<double, double>> r{{d.primaryVoltage, d.primaryPower}};
+        for (const auto& leg : d.secondaries) r.emplace_back(leg.voltage, leg.power);
+        return r;
+    }
+    if (topology == "isolated_buck") {
+        const auto d = Kirchhoff::design_isolated_buck(spec);
+        std::vector<std::pair<double, double>> r{{d.primaryVoltage, d.primaryPower}};
+        for (const auto& leg : d.secondaries) r.emplace_back(leg.voltage, leg.power);
+        return r;
+    }
+    throw std::runtime_error("process_converter: no pinned-duty rails for topology '" + topology + "'");
+}
+
+// The pinned-duty result for the caller (ABT #2134): the duty the switch ran at and, per output, the voltage
+// asked for next to the voltage and power the design delivers at that duty. The delivered voltage carries the
+// sign of the requested one (the design works on magnitudes).
+void add_duty_pin_diagnostics(json& diag, const std::string& topology, const json& spec) {
+    const json config = Kirchhoff::cfg::object_of(spec);
+    const auto duty = Kirchhoff::cfg::forced_duty_cycle(config);
+    if (!duty) return;
+    const json& requested = spec.at("designRequirements").at("outputs");
+    const auto rails = pinned_rails(topology, spec);
+    if (requested.size() != rails.size())
+        throw std::runtime_error("process_converter: the design has " + std::to_string(rails.size()) +
+                                 " output rails for " + std::to_string(requested.size()) + " requested outputs");
+    json outputs = json::array();
+    for (size_t i = 0; i < rails.size(); ++i) {
+        const double asked = PEAS::resolve_dimensional_values(requested.at(i).at("voltage"));
+        json o = json::object();
+        o["name"] = requested.at(i).contains("name") ? requested.at(i).at("name")
+                                                     : json("output " + std::to_string(i + 1));
+        o["requestedVoltage"] = asked;
+        o["voltage"] = (asked < 0.0) ? -rails[i].first : rails[i].first;
+        o["power"] = rails[i].second;
+        outputs.push_back(std::move(o));
+    }
+    diag["forcedDutyCycle"] = *duty;
+    diag["outputs"] = std::move(outputs);
+}
+
+// diagnostics.dutyCycle is the MODEL's switch duty (ABT #2134), not a re-measurement of the resampled waveform
+// (the 128-point resample turned a 0.5 pin into 0.5039, and on the push-pull it measured the dot-reference
+// primary half's current, about 1 − D). The duty is the one the analytical solver registered for the main
+// magnetic's captured operating point — the operating point diagnostics mirrors. A line-frequency envelope
+// (pfc, vienna full line cycle) has no measured duty; its solver registers the duty at the line-voltage peak,
+// which is reported. A main magnetic without a registered duty is an error.
+void report_model_duty(json& diag, const std::string& topology) {
+    const bool measured = diag.contains("dutyCycle");
+    std::string mainName;
+    for (const auto& m : diag.at("magnetics"))
+        if (m.at("isMain").get<bool>()) mainName = m.at("name").get<std::string>();
+    if (mainName.empty())
+        throw std::runtime_error("process_converter: '" + topology + "' diagnostics name no main magnetic");
+    const auto& captures = Kirchhoff::analytical::captured_operating_points();
+    const auto& duties = Kirchhoff::analytical::captured_model_duties();
+    if (captures.size() != duties.size())
+        throw std::runtime_error("process_converter: the capture and duty registries disagree in length");
+    // The LAST capture of the main magnetic is the one in the TAS (a builder that reuses another's build, e.g. the
+    // active-clamp flyback on the flyback, re-captures it) — the same one analyticalWaveforms keeps.
+    for (size_t k = captures.size(); k-- > 0;) {
+        const size_t i = k;
+        if (captures[i].first != mainName) continue;
+        if (Kirchhoff::analytical::declared_model_duty(mainName))
+            throw std::runtime_error("process_converter: '" + topology + "' both captured and declared a duty for " +
+                                     mainName);
+        if (!duties[i].second) {
+            throw std::runtime_error("process_converter: the analytical model of '" + topology +
+                                     "' registered no switch duty for its main magnetic " + mainName);
+        }
+        if (measured) {
+            // The capture must be the operating point diagnostics measured: same sampled primary-current duty.
+            const json& proc = captures[i].second.at("excitationsPerWinding").at(0).at("current").at("processed");
+            if (!proc.contains("dutyCycle") || proc.at("dutyCycle").get<double>() != diag.at("dutyCycle").get<double>())
+                throw std::runtime_error("process_converter: the last captured operating point of " + mainName +
+                                         " is not the one '" + topology + "' diagnostics measured");
+        }
+        diag["dutyCycle"] = duties[i].second->dutyCycle;
+        // A second, independently switched leg (four-switch buck-boost in its buck-boost modes) reports its
+        // own duty beside the first; no other topology carries the key.
+        if (duties[i].second->boostLegDutyCycle) diag["boostLegDutyCycle"] = *duties[i].second->boostLegDutyCycle;
+        return;
+    }
+    // No analytical operating point for the main magnetic: its excitation was written inline, at the duty the
+    // builder declared for it.
+    if (const auto declared = Kirchhoff::analytical::declared_model_duty(mainName)) {
+        diag["dutyCycle"] = declared->dutyCycle;
+        if (declared->boostLegDutyCycle) diag["boostLegDutyCycle"] = *declared->boostLegDutyCycle;
+        return;
+    }
+    throw std::runtime_error("process_converter: '" + topology + "' captured no operating point for its main "
+                             "magnetic " + mainName);
+}
+
 json build_tas_for(const std::string& topology, const json& spec) {
     validate_requirements(spec);
+    validate_switch_timing_pins(topology, spec);
     auto it = tas_builders().find(topology);
     if (it == tas_builders().end())
         throw std::runtime_error("Kirchhoff::api: unknown topology '" + topology + "'");
@@ -483,19 +617,23 @@ std::string determine_pfc_mode(const std::string& spec, double inductance) {
 
 std::string process_converter(const std::string& topology, const std::string& spec, const std::string& engine) {
     return guarded([&] {
-        json tas = build_tas_for(topology, json::parse(spec));
+        const json specJson = json::parse(spec);
+        json tas = build_tas_for(topology, specJson);
         json analyticalWaveforms = captured_waveforms_json();
+        json diag = Kirchhoff::diagnostics(tas);
+        report_model_duty(diag, topology);   // reads this build's capture registry: before anything else runs
         MAS::Inputs mainInputs = Kirchhoff::main_magnetic_inputs(tas);
         MAS::OperatingPoint op = Kirchhoff::extract_operating_point(tas, engine_from(engine));
         json inputsJson = mainInputs;
         json opJson = op;
+        add_duty_pin_diagnostics(diag, topology, specJson);
         // The full TAS is returned, so every extra component (output inductor, resonant Lr/Cr, output Co)
         // is already present as its own stage — no separate extra-components extraction needed in HS.
         return json{
             {"topology", topology},
             {"inputs", std::move(inputsJson)},
             {"operatingPoint", std::move(opJson)},
-            {"diagnostics", Kirchhoff::diagnostics(tas)},
+            {"diagnostics", std::move(diag)},
             // Full analytical waveforms per magnetic (see design_tas_full) — out-of-band from the TAS.
             {"analyticalWaveforms", std::move(analyticalWaveforms)},
             {"tas", std::move(tas)},

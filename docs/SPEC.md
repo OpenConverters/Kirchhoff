@@ -172,6 +172,45 @@ bridge factor 1.0, vs the half-bridge's split-cap ±Vin/2, 0.5; **any other valu
 `deadTimeFraction`, `commandedDuty`, `operatingDutyCycle`, `maxDutyCycle`, `dabPhaseShiftDeg`,
 `qualityFactor`, `inductanceRatio`, `gainHeadroom`, `driveAtSwitchingFrequency`.
 
+**Switch-timing pins ("I know the design I want", ABT #2134).** Absent = the topology derives the timing.
+Present but malformed = **throws** (never ignored).
+
+| key | topologies | meaning |
+|---|---|---|
+| `forcedDutyCycle` | flyback, forward, two_switch_forward, acf, push_pull, isolated_buck_boost, isolated_buck | main-switch duty, `0 < D < 1`, for `operatingPoints[0]` (push_pull: the PER-SWITCH duty, `D < 0.5`; isolated_buck: `D < η`, the primary rail is `D·Vin/η`). The duty becomes the COMMAND: the analytical waveforms, the embedded excitations and the open-loop deck all run at exactly D, and the rail delivered into the requested load (R = Vreq²/Preq, held) is a RESULT. The stage (turns ratios, inductances, capacitors) and the Vin_min ratings are still sized from the REQUESTED rails. Any other topology **throws** |
+| `forcedDeadTime` | acf | dead time between the complementary main/clamp switches [s], `>= 0`. Any other topology **throws** |
+
+With `forcedDutyCycle` set, `diagnostics` carries two extra keys:
+
+| diagnostics key | meaning |
+|---|---|
+| `forcedDutyCycle` | the duty the switch ran at (echo of the pin) |
+| `outputs` | one entry per requested output, in order: `{name, requestedVoltage, voltage, power}` — the voltage asked for next to the voltage [V] and power [W] the design delivers at the pinned duty (`voltage` carries the sign of `requestedVoltage`; `name` is the output's `name`, else `"output <i>"`). The isolated buck-boost and the isolated buck list its primary rail first |
+
+**`diagnostics.dutyCycle` is the model's exact switch duty** (ABT #2134), pinned or not: the duty the analytical
+solver ran the main switch at for the main magnetic's operating point, not a measurement of the (128-point
+resampled) waveform. A 0.5 pin reports 0.5, not 0.5039. Definition per family:
+- the main switch's on-time / period: flyback, forward family, buck/boost family, isolated buck/buck-boost,
+  Weinberg, AHB;
+- **per switch** for the push-pull and the half/full bridge (`< 0.5`, falls as Vin rises);
+- **effective duty** for the phase-shifted bridges (psfb, pshb): the fraction of the period the primary sees the
+  bridge voltage and power transfers (Vout = Vbridge·D_eff/n, n = Np/Ns; TI SLUA107), i.e. the commanded phase fraction
+  (phase / 180°) less the Sabate duty-cycle loss of the leakage inductance, 4·Lr·Io·fs/(n·Vbridge);
+- **0.5** for the resonant and DAB bridges (llc, cllc, clllc, src, lcc, dab): their bridges run 50 % square waves;
+  the control variable is the switching frequency (the phase shift for the DAB), not a duty;
+- fsbb by mode: buck mode the buck leg's duty, boost mode the boost leg's duty; in the buck-boost modes both legs
+  switch, so `dutyCycle` is the buck leg's high-side duty and **`diagnostics.boostLegDutyCycle`** the boost
+  leg's low-side duty (simultaneous: both D = Vo/(Vin+Vo); split-PWM: buck leg t2, boost leg t1).
+  `boostLegDutyCycle` appears only there;
+- **duty at the line-voltage peak** for the AC-input stages (pfc in every variant and conduction mode, vienna in
+  every `samplingStrategy`): the duty varies along the line period, so the reported value is the design point at
+  the peak of the line voltage, by the model's own law — the on-fraction of the switching cycle at the line peak
+  for the pfc (CCM/CrM: 1 − Vin,pk/(Vout+Vd), the minimum duty of the line cycle; DCM: the constant tOn·fs),
+  phase A's 1 − V_phase,peak/(Vout/2) for the vienna. It is never the duty at the instant a waveform was sampled.
+
+The TAS-only `diagnostics(tas)` entry point has no model and still measures the
+sampled primary current.
+
 ---
 
 ## 5. Per-topology tables
