@@ -81,7 +81,12 @@ d.dutyCycle = duty_boost(Vin, Vo + Vd, d.turnsRatio, eta);
         d.inputInductance);   // Lpri_half ≈ L1 (MKF mirrors Lpri to the L1 magnitude)
 
     // Output cap from the 1% ripple target: Co = Iout·D/(ΔVo·Fs), ΔVo = coRipplePct·Vo.
-    d.outputCapacitance = Iout * d.dutyCycle / (cfg::get(d.config, "outputCapRipple", kCoRipplePct) * Vo * Fs);
+    // One design over the whole input range (ABT #2160): sized at the range's worst corner, the largest duty,
+    // i.e. Vin_min (the operating duty law above at Vin_min; a spec without a range gives the operating duty).
+    const double worstDuty = duty_boost(vinMin, Vo + Vd, d.turnsRatio, eta);
+    d.outputCapacitance = Iout * worstDuty / (cfg::get(d.config, "outputCapRipple", kCoRipplePct) * Vo * Fs);
+    // Pinned output capacitor (config.outputCapacitance): the design call's value (ABT #2160).
+    if (const auto pinned = cfg::pinned_part(d.config, "outputCapacitance", "Weinberg")) d.outputCapacitance = *pinned;
     d.loadResistance = Vo / Iout;
     return d;
 }

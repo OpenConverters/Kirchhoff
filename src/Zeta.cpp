@@ -72,11 +72,21 @@ ZetaDesign design_zeta(const json& tasInputs) {
                                                 iL1avg, iL1avg, "design_zeta", d.config.contains("l1RippleRatio"));
     // A pinned magnetizing inductance (the chosen L1 — design around the magnetic) overrides the sizing.
     d.inductanceL1 = req::provided_inductance(dr).value_or(vinMax * dMax / (dIL1 * fsw));
-    // L2, Cc, Cout at the operating point (both inductors see Vin·D during ON).
+    // L2, Cc, Cout from their ripple targets (both inductors see Vin·D during ON). One design over the whole input
+    // range (ABT #2160): each part takes the larger of its two range corners (L2's ripple peaks at Vin_max, Cc's
+    // at Vin_min); a spec without a range (both corners = the operating Vin) is unchanged.
     const double dIL2 = cfg::get(d.config, "l2RippleRatio", kL2RipplePct) * iout;
-    d.inductanceL2 = d.inputVoltage * d.dutyCycle / (dIL2 * fsw);
     const double dVcc = cfg::get(d.config, "couplingCapRipple", kCcRipplePct) * d.outputVoltage;       // VCc = Vout
-    d.couplingCapacitance = iout * d.dutyCycle / (dVcc * fsw);
+    auto l2At = [&](double vin) {
+        return vin * duty(vin, d.outputVoltage, d.diodeDrop, d.efficiency) / (dIL2 * fsw); };
+    auto ccAt = [&](double vin) {
+        return iout * duty(vin, d.outputVoltage, d.diodeDrop, d.efficiency) / (dVcc * fsw); };
+    d.inductanceL2 = std::max(l2At(vinMin), l2At(vinMax));
+    d.couplingCapacitance = std::max(ccAt(vinMin), ccAt(vinMax));
+    // Pins: the design call's L2 and Cc (config.inductanceL2 / config.couplingCapacitance), so an evaluation at
+    // another input voltage keeps them.
+    if (const auto pinned = cfg::pinned_part(d.config, "inductanceL2", "Zeta")) d.inductanceL2 = *pinned;
+    if (const auto pinned = cfg::pinned_part(d.config, "couplingCapacitance", "Zeta")) d.couplingCapacitance = *pinned;
     const double dVo = cfg::get(d.config, "outputCapRipple", kCoRipplePct) * d.outputVoltage;
     d.outputCapacitance = dIL2 / (8.0 * fsw * dVo);
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;

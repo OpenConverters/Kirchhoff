@@ -4,7 +4,9 @@
 // series Lr+Cr only (no parallel resonant Lm branch); the transformer magnetizing inductance is made
 // large (≈10·Lr) so it does not participate in the resonance. A half-bridge drives the Lr-Cr tank into
 // the transformer + center-tapped rectifier. Gain M ≤ 1 (step-down only); operated at fsw = fr where
-// the series resonance gives unity tank gain. Port of MKF Src (Series Resonant; Steigerwald 1988).
+// the series resonance gives unity tank gain — at the range minimum; above it the SRC regulates by
+// frequency, running above resonance where the tank gain falls to Vin_min/Vin (ABT #2160).
+// Port of MKF Src (Series Resonant; Steigerwald 1988).
 //
 // Reuses the LLC half-bridge + tank + CT-rectifier structure (same fidelity caveat: MKF abstracts the
 // bridge to an ideal ±Vbus/2 source + near-ideal diode, Kirchhoff builds the real switching bridge +
@@ -42,7 +44,10 @@ struct SrcDesign {
     double resonantFrequency;         // fr: the series-tank resonance (= switchingFrequency unless
                                       // config.driveAtSwitchingFrequency states config.resonantFrequency, ABT #1539)
     double tankGain;                  // series-tank FHA gain at switchingFrequency (1 at resonance); under a forced
-                                      // drive frequency outputVoltage/outputPower/outputs[] carry the DELIVERED rails
+                                      // drive frequency outputVoltage/outputPower/outputs[] carry the DELIVERED rails.
+                                      // Frequency-regulated above Vin_min (ABT #2160): the gain relative to the
+                                      // reference point, Vin_min/Vin, and switchingFrequency is the frequency the
+                                      // bridge runs at (above the resonance; resonantFrequency keeps fr)
     double switchDuty;                // per-switch on-fraction (~0.45, complementary with dead time)
     double loadResistance;
     double outputCapacitance;

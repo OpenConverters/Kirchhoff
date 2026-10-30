@@ -73,9 +73,12 @@ AcfDesign design_acf(const json& tasInputs) {
     // Magnetizing inductance: Lm = Vin_min * n / (Fs * Io)  (reflected secondary current Io/n).
     d.magnetizingInductance = req::provided_inductance(dr).value_or(
         vinMin * n / (Fs * Io));
-    // Output inductor: Lo = (Vin_max/n - Vd - Vo) * tOn / ripple,  tOn = D/Fs.
-    const double tOn = D / Fs;
-    d.outputInductance = (vinMax / n - d.diodeDrop - Vo) * tOn / cfg::get(d.config, "inductorRippleRatio", kRippleRatio);
+    // Output inductor (ABT #2160): Lo = Vo*(1-D)/(Fs * rippleRatio * Io), the ripple ratio relative to the output
+    // current. The peak-to-peak ripple grows with Vin, so D is the duty at the worst ripple corner, Vin_max:
+    // D(Vin_max) = (Vo+Vd)*n/Vin_max (the solver's forward interval). One inductor for the whole input range.
+    const double ripple = cfg::get(d.config, "inductorRippleRatio", kRippleRatio);
+    const double dutyAtVinMax = (Vo + d.diodeDrop) * n / vinMax;
+    d.outputInductance = Vo * (1.0 - dutyAtVinMax) / (Fs * ripple * Io);
 
     d.clampCapacitance = 10e-6;   // active-clamp capacitor (matches MKF; value sets reset ring, not Vo)
     d.loadResistance = Vo * Vo / d.outputPower;
@@ -83,7 +86,6 @@ AcfDesign design_acf(const json& tasInputs) {
 
     // Per-output legs (multi-output: N isolated secondaries, ABT #86). Each secondary shares the primary
     // volt-seconds, so n_i = Vin_min·Dmax/(Vout_i+Vd_i). outputs[0] reproduces the scalars byte-for-byte.
-    const double ripple = cfg::get(d.config, "inductorRippleRatio", kRippleRatio);
     const size_t nOut = dr.at("outputs").size();
     for (size_t i = 0; i < nOut; ++i) {
         AcfOutputLeg leg{};
@@ -105,11 +107,18 @@ AcfDesign design_acf(const json& tasInputs) {
             double ni = etaConv * vinMin * Dmax / (leg.voltage + leg.diodeDrop);
             ni = std::round(ni * 100.0) / 100.0;
             leg.turnsRatio = req::provided_turns_ratio(dr, i).value_or(ni);
-            leg.outputInductance = (vinMax / leg.turnsRatio - leg.diodeDrop - leg.voltage) * tOn / ripple;
+            // Every rail shares the one switch, so its inductor sees the same worst-corner duty.
+            leg.outputInductance = leg.voltage * (1.0 - dutyAtVinMax) / (Fs * ripple * iout_i);
             leg.outputCapacitance = 100e-6;
         }
         leg.loadResistance = leg.voltage * leg.voltage / leg.power;
         d.outputs.push_back(leg);
+    }
+    // Pinned output inductors (config.outputInductance, one value per output): the design call's values, so an
+    // evaluation at another input voltage keeps them (ABT #2160).
+    if (const auto pinned = cfg::pinned_parts_per_output(d.config, "outputInductance", d.outputs.size(), "Active clamp forward")) {
+        for (size_t i = 0; i < d.outputs.size(); ++i) d.outputs[i].outputInductance = (*pinned)[i];
+        d.outputInductance = d.outputs[0].outputInductance;
     }
 
     // "I know the design I want" (ABT #2134). config.forcedDeadTime (s) sets the main↔clamp dead time;

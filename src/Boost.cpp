@@ -121,6 +121,12 @@ BoostDesign design_boost(const json& tasInputs) {
     d.inductance = req::provided_inductance(dr).value_or(
         vinMax * (d.outputVoltage - vinMax) / (maxCurrentRipple * d.switchingFrequency * d.outputVoltage));
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
+    // One design over the whole input range (ABT #2160): the output capacitor holds its ripple at the range's
+    // worst corner, the largest duty, i.e. Vin_min (the operating duty law above, at Vin_min; a spec without a
+    // range gives the operating duty).
+    const double worstDuty = d.synchronousRectifier
+        ? 1.0 - vinMin * d.efficiency / d.outputVoltage
+        : 1.0 - vinMin * d.efficiency / Vo;
     if (d.levels > 2) {
         // FCML: the inductor sees a Vout/(N−1) step at (N−1)·fs. L for the worst ripple over the input range; Cout as the
         // plain boost (the output is fed by the top pair once per period); each flying capacitor for its charge at the
@@ -141,19 +147,23 @@ BoostDesign design_boost(const json& tasInputs) {
                                         "a whole number there), so there is no ripple to size L from; pin the inductance "
                                         "or widen the input range");
         d.inductance = req::provided_inductance(dr).value_or(vsMax / maxCurrentRipple);
-        d.outputCapacitance = iout * d.dutyCycle / (d.switchingFrequency * cfg::output_ripple_fraction(d.config) * d.outputVoltage);
+        d.outputCapacitance = iout * worstDuty / (d.switchingFrequency * cfg::output_ripple_fraction(d.config) * d.outputVoltage);
         const double cfRipple = cfg::get(d.config, "flyingCapacitorRipple", 0.05);
         if (!(cfRipple > 0)) throw std::invalid_argument("design_boost: flyingCapacitorRipple must be > 0");
         d.flyingCapacitance = qMax / (cfRipple * d.outputVoltage / M);
     } else if (d.phaseCount == 1) {
-        d.outputCapacitance = iout * d.dutyCycle / (d.switchingFrequency * cfg::output_ripple_fraction(d.config) * d.outputVoltage);
+        d.outputCapacitance = iout * worstDuty / (d.switchingFrequency * cfg::output_ripple_fraction(d.config) * d.outputVoltage);
     } else {
-        // Sized from the summed diode currents at every input corner (their ripple partly cancels).
+        // Sized from the summed diode currents at every input corner (their ripple partly cancels). The middle
+        // corner is the range's nominal, not the operating point, so every input voltage gets the same capacitor.
         d.outputCapacitance = 0;
-        for (double vin : {d.inputVoltageMin, d.inputVoltage, d.inputVoltageMax})
+        const double vinNominal = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::NOMINAL);
+        for (double vin : {d.inputVoltageMin, vinNominal, d.inputVoltageMax})
             d.outputCapacitance = std::max(d.outputCapacitance,
                 boost_interleaved_cap_ripple(d, vin).chargePeakToPeak / (cfg::output_ripple_fraction(d.config) * d.outputVoltage));
     }
+    // Pinned output capacitor (config.outputCapacitance): the design call's value (ABT #2160).
+    if (const auto pinned = cfg::pinned_part(d.config, "outputCapacitance", "Boost")) d.outputCapacitance = *pinned;
     return d;
 }
 

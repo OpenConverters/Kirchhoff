@@ -8,12 +8,14 @@
 #include <algorithm>
 #include <vector>
 #include <stdexcept>
+#include <sstream>
 
 namespace Kirchhoff {
 using nlohmann::json;
 
 namespace {
 double nominal(const json& j) { return PEAS::resolve_dimensional_values(j); }
+std::string num(double v) { std::ostringstream o; o << v; return o.str(); }
 constexpr double kBridgeFactor  = 0.5;   // half-bridge: Vo_fha = 0.5·Vin
 constexpr double kQualityFactor = 0.8;   // broader, lower-loss tank (was 2.0: a sharp high-Q tank carries
                                          // large circulating current -> heavy loss-driven Vout sag, abt #62)
@@ -75,13 +77,18 @@ SrcDesign design_src(const json& tasInputs) {
     // headroom divisor.
     const double kBridge = d.fullBridge ? 1.0 : kBridgeFactor;   // half-bridge ±Vin/2 (0.5) | full-bridge ±Vin (1.0)
     const double Vbridge = cfg::get(d.config, "bridgeFactor", kBridge) * Vin;
+    // The turns ratio is sized at the LOWEST input of the range (ABT #2160): the tank can only step down from its
+    // unity peak, so the output reaches its target at Vin_min only if n is sized there; every higher input is
+    // regulated down by moving off resonance. One transformer (and the tank sized from it) for the whole range.
+    // A spec without a range has Vin_min = its operating input, so it is unchanged.
+    const double VbridgeSizing = cfg::get(d.config, "bridgeFactor", kBridge) * vinMin;
     const double Ghr = cfg::get(d.config, "gainHeadroom", kGainHeadroom);
     double n;
     switch (d.rectifierType) {
-        case RectifierType::CenterTapped:   n = etaConv * Vbridge / (Ghr * (Vo + Vd));       break;
-        case RectifierType::FullBridge:     n = etaConv * Vbridge / (Ghr * (Vo + 2.0 * Vd)); break;
+        case RectifierType::CenterTapped:   n = etaConv * VbridgeSizing / (Ghr * (Vo + Vd));       break;
+        case RectifierType::FullBridge:     n = etaConv * VbridgeSizing / (Ghr * (Vo + 2.0 * Vd)); break;
         case RectifierType::CurrentDoubler:
-            n = cfg::get(d.config, "cdOutputFactor", 0.465) * etaConv * Vbridge / (Ghr * (Vo + Vd)); break;
+            n = cfg::get(d.config, "cdOutputFactor", 0.465) * etaConv * VbridgeSizing / (Ghr * (Vo + Vd)); break;
         case RectifierType::VoltageDoubler:
             throw std::runtime_error("Kirchhoff SRC: voltageDoubler rectifier not supported "
                                      "(SRC variants: centerTapped, fullBridge, currentDoubler)");
@@ -171,10 +178,10 @@ SrcDesign design_src(const json& tasInputs) {
     // outputs[0] reproduces the scalars above byte-for-byte.
     auto nForRail = [&](double Vo_i, double Vd_i) -> double {
         switch (d.rectifierType) {
-            case RectifierType::CenterTapped:   return etaConv * Vbridge / (Ghr * (Vo_i + Vd_i));
-            case RectifierType::FullBridge:     return etaConv * Vbridge / (Ghr * (Vo_i + 2.0 * Vd_i));
+            case RectifierType::CenterTapped:   return etaConv * VbridgeSizing / (Ghr * (Vo_i + Vd_i));
+            case RectifierType::FullBridge:     return etaConv * VbridgeSizing / (Ghr * (Vo_i + 2.0 * Vd_i));
             case RectifierType::CurrentDoubler:
-                return cfg::get(d.config, "cdOutputFactor", 0.465) * etaConv * Vbridge / (Ghr * (Vo_i + Vd_i));
+                return cfg::get(d.config, "cdOutputFactor", 0.465) * etaConv * VbridgeSizing / (Ghr * (Vo_i + Vd_i));
             case RectifierType::VoltageDoubler:
                 throw std::runtime_error("Kirchhoff SRC: voltageDoubler rectifier not supported");
         }
@@ -213,7 +220,11 @@ SrcDesign design_src(const json& tasInputs) {
     // impedance against the parallel combination Rac_total = 1/Σ(1/Rac_i), keeping the design Q relative to
     // the TOTAL load (Zr = Q·Rac_total). fr is unchanged (Lr·Cr fixed), so the main rail still resonates at
     // fsw. Guarded on nOut>1 so the single-output tank (Zr = Q·Rac above) stays byte-identical.
-    if (nOut > 1) {
+    // A pinned tank (designRequirements desiredResonantInductance / desiredResonantCapacitance, applied above) is
+    // the tank: it is never re-sized here (ABT #2160 — a design evaluated at another input voltage keeps it).
+    const bool tankPinned = req::provided_resonant_inductance(dr).has_value() ||
+                            req::provided_resonant_capacitance(dr).has_value();
+    if (nOut > 1 && !tankPinned) {
         double gac = 0.0;   // Σ 1/Rac_i  (parallel reflected conductance)
         for (const auto& leg : d.outputs)
             gac += (M_PI * M_PI) / (8.0 * leg.turnsRatio * leg.turnsRatio * leg.loadResistance);
@@ -233,16 +244,9 @@ SrcDesign design_src(const json& tasInputs) {
     // the ratio above is sized from at M = 1/headroom. The load resistance is kept; the power follows V²/R. Below
     // resonance the tank input is capacitive (no ZVS) and outside this model: that throws.
     d.tankGain = 1.0;
-    if (driveAtFsw) {
-        const double fsw = d.switchingFrequency;
-        const double ftank = 1.0 / (2.0 * M_PI * std::sqrt(d.resonantInductance * d.resonantCapacitance));
-        if (fsw < ftank * (1.0 - 1e-6))   // analytical_src's tolerance: fsw == fr is resonance, not below it
-            throw std::invalid_argument("design_src: driven at " + std::to_string(fsw) +
-                                        " Hz, below the series-tank resonance " + std::to_string(ftank) +
-                                        " Hz, the tank input is capacitive (no ZVS): below-resonance operation is not "
-                                        "modelled. Drive at or above the resonance");
-        const double w = 2.0 * M_PI * fsw;
-        const double X = w * d.resonantInductance - 1.0 / (w * d.resonantCapacitance);
+    // The reflected AC load the series tank drives (all rails in parallel; CD reflects through cdOutputFactor²) and
+    // the series-tank FHA gain into it, M(f) = Rac/|Rac + j(ωLr − 1/(ωCr))| — the model analytical_src uses.
+    auto reflectedRac = [&]() {
         double gac = 0.0;
         for (const auto& leg : d.outputs) {
             double rE = leg.loadResistance;   // winding-terminal resistance (CD reflects through cdOutputFactor²)
@@ -252,8 +256,22 @@ SrcDesign design_src(const json& tasInputs) {
             }
             gac += (M_PI * M_PI) / (8.0 * leg.turnsRatio * leg.turnsRatio * rE);
         }
-        const double RacDrive = 1.0 / gac;
-        const double M = RacDrive / std::hypot(RacDrive, X);
+        return 1.0 / gac;
+    };
+    auto tankGainAt = [&](double f, double Rac) {
+        const double w = 2.0 * M_PI * f;
+        return Rac / std::hypot(Rac, w * d.resonantInductance - 1.0 / (w * d.resonantCapacitance));
+    };
+    if (driveAtFsw) {
+        const double fsw = d.switchingFrequency;
+        const double ftank = 1.0 / (2.0 * M_PI * std::sqrt(d.resonantInductance * d.resonantCapacitance));
+        if (fsw < ftank * (1.0 - 1e-6))   // analytical_src's tolerance: fsw == fr is resonance, not below it
+            throw std::invalid_argument("design_src: driven at " + std::to_string(fsw) +
+                                        " Hz, below the series-tank resonance " + std::to_string(ftank) +
+                                        " Hz, the tank input is capacitive (no ZVS): below-resonance operation is not "
+                                        "modelled. Drive at or above the resonance");
+        const double RacDrive = reflectedRac();
+        const double M = tankGainAt(fsw, RacDrive);
         d.tankGain = M;
         for (size_t i = 0; i < d.outputs.size(); ++i) {
             auto& leg = d.outputs[i];
@@ -270,6 +288,64 @@ SrcDesign design_src(const json& tasInputs) {
         }
         d.outputVoltage = d.outputs.at(0).voltage;
         d.outputPower = d.outputs.at(0).power;
+    } else {
+        // ── Frequency regulation over the input range (ABT #2160) ──
+        // The SRC regulates by frequency: the tank gain peaks at resonance and falls monotonically above it (the
+        // inductive, ZVS branch). The design point is the range minimum Vin_min, where the transformer above is sized
+        // and the bridge runs at the reference frequency (the series resonance fr, as before). At a higher input the
+        // same delivered output needs the tank gain scaled by Vin_min/Vin, so the bridge runs above the reference at
+        // the frequency where the FHA gain M(f) (into the design's reflected load) equals M(f_ref)·Vin_min/Vin:
+        //   X = Rac·√(1/M² − 1),  ωLr − 1/(ωCr) = X  ⇒  ω = (X + √(X² + 4Lr/Cr)) / (2Lr).
+        // tankGain carries the RELATIVE gain Vin_min/Vin (1 at the reference, as the stresses always assumed), so the
+        // tank current that carries Pin is Pin/(Vtank1·tankGain). A spec without a range (Vin = Vin_min) keeps the
+        // reference point exactly. An input below Vin_min needs a gain above the resonance peak: no frequency
+        // delivers it, so it throws; so does a solved frequency outside a stated switching band.
+        // Reference: the design frequency, unless a pinned tank resonates above it (design_src accepts a pinned tank
+        // within 1 % of fr; analytical_src refuses any point more than 1e-6 below the tank's resonance) — then the
+        // tank's own resonance (gain 1), the highest-gain point on the regulation branch.
+        const double ftank = tankPinned
+            ? 1.0 / (2.0 * M_PI * std::sqrt(d.resonantInductance * d.resonantCapacitance)) : fr;
+        const double fRef = (d.switchingFrequency >= ftank * (1.0 - 1e-6)) ? d.switchingFrequency : ftank;
+        const double Vin = d.inputVoltage;
+        const double relativeGain = vinMin / Vin;
+        double kMain = 1.0;   // rectifier drops in the main rail's conduction path (FB: 2)
+        if (d.rectifierType == RectifierType::FullBridge) kMain = 2.0;
+        const double VdMain = d.outputs.at(0).diodeDrop;
+        // The main rail's output when the tank gain is g × the reference gain (n·(Vo+k·Vd) scales with the drive).
+        auto railAtRelativeGain = [&](double g) { return (Vo + kMain * VdMain) * g - kMain * VdMain; };
+        if (relativeGain > 1.0)
+            throw std::invalid_argument(
+                "design_src: at the input voltage " + num(Vin) + " V the series tank at its resonance (the SRC's "
+                "maximum gain) delivers only " + num(railAtRelativeGain(1.0 / relativeGain)) + " V of the " + num(Vo) +
+                " V output: the turns ratio " + num(d.turnsRatio) + " is sized for the range minimum " + num(vinMin) +
+                " V, and the SRC can only step down from there");
+        double fOp = fRef;
+        if (relativeGain < 1.0) {
+            const double Rac = reflectedRac();
+            const double Mt = tankGainAt(fRef, Rac) * relativeGain;
+            const double X = Rac * std::sqrt(1.0 / (Mt * Mt) - 1.0);
+            const double Lr = d.resonantInductance, Cr = d.resonantCapacitance;
+            fOp = (X + std::sqrt(X * X + 4.0 * Lr / Cr)) / (2.0 * Lr) / (2.0 * M_PI);
+            if (!(fOp > fRef))
+                throw std::runtime_error("design_src: the regulated frequency " + num(fOp) +
+                                         " Hz is not above the reference " + num(fRef) + " Hz");
+            if (d.config.contains("maxSwitchingFrequency")) {
+                const double fmax = cfg::get(d.config, "maxSwitchingFrequency", 0.0);
+                if (fOp > fmax)
+                    throw std::invalid_argument(
+                        "design_src: at the input voltage " + num(Vin) + " V the output needs the bridge at " +
+                        num(fOp) + " Hz, above the switching band maximum " + num(fmax) + " Hz; at " + num(fmax) +
+                        " Hz the tank still delivers " +
+                        num(railAtRelativeGain(tankGainAt(fmax, Rac) / tankGainAt(fRef, Rac) / relativeGain)) +
+                        " V of the " + num(Vo) + " V output");
+            }
+        }
+        if (d.config.contains("minSwitchingFrequency") && fOp < cfg::get(d.config, "minSwitchingFrequency", 0.0))
+            throw std::invalid_argument("design_src: the operating frequency " + num(fOp) + " Hz at the input voltage " +
+                                        num(Vin) + " V lies below the switching band minimum " +
+                                        num(cfg::get(d.config, "minSwitchingFrequency", 0.0)) + " Hz");
+        d.switchingFrequency = fOp;
+        d.tankGain = relativeGain;
     }
     return d;
 }

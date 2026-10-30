@@ -96,7 +96,20 @@ PfcDesign design_pfc(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     PfcDesign d{};
     d.config = cfg::object_of(tasInputs);
-    d.inputVoltageRms    = nominal(dr.at("inputVoltage"));
+    // The stage is DESIGNED at the spec's nominal line voltage (inductor, compensator, current band) and RUNS at the
+    // operating point's line voltage (operatingPoints[0].inputVoltage, same RMS convention): one design evaluated
+    // at every line voltage of the range (ABT #2160). Without an operating point, it runs at the nominal.
+    d.designInputVoltageRms = nominal(dr.at("inputVoltage"));
+    d.inputVoltageRms = d.designInputVoltageRms;
+    if (tasInputs.contains("operatingPoints") && !tasInputs.at("operatingPoints").empty()) {
+        const json& op = tasInputs.at("operatingPoints").at(0);
+        if (!op.contains("inputVoltage") || !op.at("inputVoltage").is_number())
+            throw std::invalid_argument("pfc design: operatingPoints[0].inputVoltage (the RMS line voltage) is missing");
+        d.inputVoltageRms = op.at("inputVoltage").get<double>();
+        if (!(d.inputVoltageRms > 0.0))
+            throw std::invalid_argument("pfc design: operatingPoints[0].inputVoltage must be > 0 V RMS, got " +
+                                        std::to_string(d.inputVoltageRms));
+    }
     d.lineFrequency      = nominal(dr.at("lineFrequency"));
     d.outputVoltage      = nominal(dr.at("outputs").at(0).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
@@ -140,15 +153,17 @@ PfcDesign design_pfc(const json& tasInputs) {
     const bool buckBoost = (d.topologyVariant == "sepic" || d.topologyVariant == "cuk");
 
     const double pin   = d.outputPower / std::max(d.efficiency, 1e-6);
-    const double vpeak = d.inputVoltageRms * std::sqrt(2.0);
-    const double rEmul = d.inputVoltageRms * d.inputVoltageRms / pin;  // emulated input resistance (total)
+    // Sizing quantities at the DESIGN line voltage; the reference gain below follows the operating line.
+    const double vpeak = d.designInputVoltageRms * std::sqrt(2.0);
+    const double rEmul = d.designInputVoltageRms * d.designInputVoltageRms / pin;  // emulated input resistance (total)
     const double iPeak = vpeak / rEmul;                                // total peak inductor/line current
+    const double rEmulOperating = d.inputVoltageRms * d.inputVoltageRms / pin;
 
     d.senseResistance = cfg::get(d.config, "senseResistance", kSenseResistance);
     // i_ref voltage = kref·V(busP) must equal the PER-PHASE target sense voltage iL_phase·Rsense. Each of the
     // N interleaved phases carries 1/N of the line current, so its emulated resistance is N·rEmul → the
     // per-phase reference gain is Rsense/(N·rEmul). N = 1 for boost/totem-pole (unchanged).
-    d.referenceGain = d.senseResistance / (rEmul * d.numberOfPhases);
+    d.referenceGain = d.senseResistance / (rEmulOperating * d.numberOfPhases);
 
     // ── Conduction mode drives the boost-inductor sizing (MKF PowerFactorCorrection::calculate_inductance_
     // ccm/dcm/crcm, :171/205/218). Every formula evaluates at the line-voltage peak (the worst case). For
@@ -164,6 +179,11 @@ PfcDesign design_pfc(const json& tasInputs) {
             "pfc design: a boost-class PFC needs an output above the line PEAK — asked for "
             + std::to_string(d.outputVoltage) + " V out against a peak line voltage of "
             + std::to_string(vpeak) + " V");
+    if (!buckBoost && d.outputVoltage <= d.inputVoltageRms * std::sqrt(2.0))
+        throw std::invalid_argument(
+            "pfc design: a boost-class PFC needs an output above the line PEAK — at the operating line voltage of "
+            + std::to_string(d.inputVoltageRms) + " V RMS the peak is " + std::to_string(d.inputVoltageRms * std::sqrt(2.0))
+            + " V, not below the " + std::to_string(d.outputVoltage) + " V output");
     const double dutyPeak   = buckBoost ? d.outputVoltage / (d.outputVoltage + vpeak)
                                         : 1.0 - vpeak / d.outputVoltage;
     const double pinPhase   = pin   / d.numberOfPhases;        // per-phase input power
@@ -225,7 +245,7 @@ PfcDesign design_pfc(const json& tasInputs) {
     const double kv = d.outputDividerGain;
     // N interleaved phases each present conductance (1−gv)/Rsense, so the total control-to-power gain scales
     // by N (the plant pole/zero placement is otherwise identical). N = 1 for boost/totem-pole (unchanged).
-    const double K0 = d.numberOfPhases * d.inputVoltageRms * d.inputVoltageRms
+    const double K0 = d.numberOfPhases * d.designInputVoltageRms * d.designInputVoltageRms
                       / (d.senseResistance * d.outputCapacitance * d.outputVoltage);
     const double wp = 2.0 / (d.loadResistance * d.outputCapacitance);   // load pole
     const double wc = 2.0 * kPi * d.lineFrequency / 10.0;               // crossover (ripple-safe)
@@ -498,7 +518,7 @@ json build_pfc_tas(const PfcDesign& d) {
     json& dreq = tas["inputs"]["designRequirements"];
     dreq["efficiency"] = d.efficiency;
     dreq["inputType"] = "acSinglePhase";
-    dreq["inputVoltage"]["nominal"] = d.inputVoltageRms;
+    dreq["inputVoltage"]["nominal"] = d.designInputVoltageRms;
     dreq["lineFrequency"]["nominal"] = d.lineFrequency;
     dreq["switchingFrequency"]["nominal"] = d.switchingFrequency;
     { json o; o["name"] = "out"; o["voltage"]["nominal"] = d.outputVoltage; o["regulation"] = "voltage";
@@ -708,7 +728,7 @@ static json build_pfc_totempole_tas(const PfcDesign& d) {
     json& dreq = tas["inputs"]["designRequirements"];
     dreq["efficiency"] = d.efficiency;
     dreq["inputType"] = "acSinglePhase";
-    dreq["inputVoltage"]["nominal"] = d.inputVoltageRms;
+    dreq["inputVoltage"]["nominal"] = d.designInputVoltageRms;
     dreq["lineFrequency"]["nominal"] = d.lineFrequency;
     dreq["switchingFrequency"]["nominal"] = d.switchingFrequency;
     { json o; o["name"] = "out"; o["voltage"]["nominal"] = d.outputVoltage; o["regulation"] = "voltage";
@@ -899,7 +919,7 @@ static json build_pfc_interleaved_tas(const PfcDesign& d) {
     json& dreq = tas["inputs"]["designRequirements"];
     dreq["efficiency"] = d.efficiency;
     dreq["inputType"] = "acSinglePhase";
-    dreq["inputVoltage"]["nominal"] = d.inputVoltageRms;
+    dreq["inputVoltage"]["nominal"] = d.designInputVoltageRms;
     dreq["lineFrequency"]["nominal"] = d.lineFrequency;
     dreq["switchingFrequency"]["nominal"] = d.switchingFrequency;
     { json o; o["name"] = "out"; o["voltage"]["nominal"] = d.outputVoltage; o["regulation"] = "voltage";
@@ -1111,7 +1131,7 @@ static json build_pfc_buckboost_tas(const PfcDesign& d) {
     json& dreq = tas["inputs"]["designRequirements"];
     dreq["efficiency"] = d.efficiency;
     dreq["inputType"] = "acSinglePhase";
-    dreq["inputVoltage"]["nominal"] = d.inputVoltageRms;
+    dreq["inputVoltage"]["nominal"] = d.designInputVoltageRms;
     dreq["lineFrequency"]["nominal"] = d.lineFrequency;
     dreq["switchingFrequency"]["nominal"] = d.switchingFrequency;
     { json o; o["name"] = "out"; o["voltage"]["nominal"] = d.outputVoltage; o["regulation"] = "voltage";

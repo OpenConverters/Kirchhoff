@@ -289,7 +289,9 @@ json build_psfb_tas(const PsfbDesign& d) {
     // Sized from the ENERGY BUDGET (cfg::snubber_cap = eps·P/(Vin²·fsw)) + cfg::snubber_res so it stores «
     // throughput and does not detune the phase-shift power transfer. REAL refdes (Crc_pri/Rrc_pri, role
     // "snubber") -> NOT matched by the numerical-aid strip (Csn*/Rsn*/Csw*).
-    const double rcSnubC = cfg::snubber_cap(d.config, d.outputPower, Vin, fsw);
+    // At the input range's highest bus voltage: the smallest cap, so the budget holds at every input voltage
+    // (ABT #2160); a spec without a range (Vin_max = the operating Vin) is unchanged.
+    const double rcSnubC = cfg::snubber_cap(d.config, d.outputPower, d.inputVoltageMax, fsw);
     const auto rcSnub = req::snubber(rcSnubC, cfg::snubber_res(d.config), Vin, fsw);
     const json& rcCap = rcSnub.first;
     const json& rcRes = rcSnub.second;

@@ -216,7 +216,9 @@ json build_bridge_tas(const HardSwitchedBridgeDesign& d) {
     // Numerical node caps (ABT #96): an ideal switch node with both switches off has nothing but the primary
     // leakage on it; the cap gives it a finite dV/dt. Energy-budget sized (the bridge's primary current is large
     // enough for the fixed 2.2 nF, but this keeps the turn-off ramp a negligible slice of the dead time).
-    auto nodeSnub = [&]() { json c = cap(cfg::snubber_cap(d.config, d.outputPower, d.inputVoltage, fsw), 3.0 * d.inputVoltage);
+    // Energy budget at the input range's highest bus voltage (the smallest cap, so the budget holds at every input
+    // voltage, ABT #2160); a spec without a range (Vin_max = the operating Vin) is unchanged.
+    auto nodeSnub = [&]() { json c = cap(cfg::snubber_cap(d.config, d.outputPower, d.inputVoltageMax, fsw), 3.0 * d.inputVoltage);
         cfg::mark_numerical_aid(c); return c; };
     // Rectifier node caps: the rectifier's small solver constant, not the 2.2 nF bridge-node one. At every turn-on a
     // centre-tap node swings 2·Vs; through the transformer 2.2 nF there drew an 8–10 A primary spike (4–5× the load

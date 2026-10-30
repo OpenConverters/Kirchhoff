@@ -37,7 +37,8 @@ collapses it with `resolve_dimensional_values(j, preferred)`:
 > **Corner loss warning:** every converter resolves `inputVoltage` at **both** MAXIMUM and MINIMUM to
 > size the inductor and the device ratings. A **scalar** `inputVoltage` makes `min == nominal == max`, so
 > the worst-case corners collapse and ratings are computed at the nominal only. Always send the
-> `{minimum, nominal, maximum}` triplet for DC converters when you have the range.
+> `{minimum, nominal, maximum}` triplet for DC converters when you have the range. With a range, the
+> parts and their sourcing ratings are the same at every operating point of the range (§3.1).
 
 ---
 
@@ -145,6 +146,77 @@ Notes:
   `switchingFrequency`; both pinned: verbatim, the tank resonates where they do. CLLLC pins Lr1/Cr1
   through `config.primarySeriesInductance` / `config.primaryResonantCapacitance` (MAS clllcResonant)
   with the same rule. Both solve the operating frequency from the pinned tank (ABT #1503) or throw.
+
+### 3.1 One design over the input-voltage range (ABT #2160)
+
+The web designs a converter ONCE over `designRequirements.inputVoltage {minimum, nominal, maximum}` and then
+evaluates that converter at every input voltage the user entered (`operatingPoints[0].inputVoltage`). Two rules
+make every evaluation of one spec describe the same physical converter:
+
+**Sizing at the range's worst corner.** A part the engine sizes is sized from the range, never from the
+operating point, so a spec evaluated at Vin_min and at Vin_max gives the same part:
+
+| topology | part | sized at |
+|---|---|---|
+| flyback, two_switch_flyback, active_clamp_flyback | output capacitors `Cout_i` | the worst duty, Vin_min (CCM D = Vor/(Vin_min+Vor); DCM D = √(2·Pin·L·fs)/Vin_min) |
+| boost (single, FCML), weinberg | output capacitor | the duty at Vin_min; interleaved boost evaluates its ripple corners at {minimum, range nominal, maximum} |
+| forward, two_switch_forward, acf | output inductors `Lout_i` | **Lout_i = Vout_i·(1−D)/(fs·rippleRatio·Iout_i)**, the ripple ratio (`inductorRippleRatio`, 0.4) relative to the output current, D = the switch duty at the worst ripple corner Vin_max (forward/2sw: n·(Vout+Vd)/Vin_max; acf: (Vout+Vd)·n/Vin_max). Every rail uses the one switch duty. Forward/2sw cap the duty-derived n at the range NOMINAL, not at the operating point |
+| sepic, zeta, cuk | second inductor L2, coupling capacitor (cuk also the isolated C1b and the transformer Lm) | the larger of the formula at Vin_min and at Vin_max |
+| push_pull, half_bridge, full_bridge, dab, psfb, pshb (ahb `Crc_pri`) | energy-budget snubbers (and the DAB bias resistor) | Vin_max (largest blocking voltage) |
+| src | turns ratio n (and the series tank sized from it) | Vin_min: the tank can only step down from its unity peak, so the output reaches its target at the lowest input only if n is sized there. Above Vin_min the SRC **regulates by frequency** (below) |
+| pfc, vienna | boost inductor(s), compensator, current band, reference sizing | the nominal line voltage (`designRequirements.inputVoltage` nominal); the stage RUNS at the operating point's line voltage (`operatingPoints[0].inputVoltage`, RMS). With an operating point that lacks `inputVoltage`, or a non-positive one, the design **throws**; a boost PFC whose operating line peak is not below Vout **throws** |
+
+**SRC frequency regulation.** With the tank (designed or pinned Lr/Cr) and n fixed, the bridge runs at Vin_min at
+the reference frequency — the series resonance `switchingFrequency`, as before (a pinned tank that resonates
+above it, within design_src's 1 % acceptance, runs at its own resonance instead). At a higher operating input the
+bridge runs above resonance at the frequency where the series-tank FHA gain into the reflected load,
+M(f) = Rac/|Rac + j(ωLr − 1/(ωCr))|, equals M(f_ref)·Vin_min/Vin (closed form), so the delivered output is the
+one of the resonant point at Vin_min. That frequency is the TAS `designRequirements.switchingFrequency`, the
+gate stimulus frequency, the controller seed's `switchingFrequency` and `diagnostics.switchingFrequency`, and
+the stresses use the relative tank gain Vin_min/Vin. An operating input below Vin_min (it needs a gain above the
+resonance peak) **throws** naming the input voltage and the output the resonant tank reaches; a regulated
+frequency above `config.maxSwitchingFrequency` (or below `minSwitchingFrequency`) **throws** with the output
+reached at the band edge. `config.driveAtSwitchingFrequency` (forced drive, the output is the result) is not
+regulated. Example, 36–72 V → 12 V/5 A, 100 kHz: 100 kHz at 36 V, 192.8 kHz at 54 V, 257.2 kHz at 72 V; primary
+RMS 6.07 / 6.09 / 6.09 A (unregulated at resonance it was 12.15 A at 72 V).
+
+`lcc` is not range-sized yet: its whole tank is sized at the operating point and it refuses a pinned main
+inductance.
+
+**Sourcing ratings over the range.** Every semiconductor, capacitor and resistor in the TAS is rated for the
+worst case over the input range. The api layer (every entry point: `process_converter`, `design_tas`,
+`design_tas_full`) builds the design at the range's corners (minimum, nominal, maximum, resolved with the PEAS
+resolver) besides the operating point, and keeps per component the largest of `ratedVoltage`,
+`ratedDrainSourceVoltage`, `ratedContinuousDrainCurrent`, `ratedReverseVoltage`, `ratedForwardCurrent`,
+`powerRating`, `minimumRippleCurrent` and the smallest (strictest) of `maximumOnResistance`, `maximumEsr`,
+`maximumForwardVoltage`, `maximumReverseRecoveryTime`, `maximumJunctionTemperature`. The operating point's own
+waveforms, operating point and captured `analyticalWaveforms` are those of the operating point. A spec without a
+range (minimum == maximum) builds once and is rated at its one voltage. A design that runs at its operating point
+but cannot be evaluated at a corner of its range **throws** `rating the parts over the input range: the design
+cannot be evaluated at the input voltage <V> V: <reason>` (a spec refused at its own operating point keeps its
+own message). A controller seed's `switchingFrequency` is the operating point's (resonant controllers move it
+with Vin) and is not folded. Rated components are matched at each corner by stage and component name (a rated
+component missing at a corner throws); a component with no rating (a behavioural control block such as the
+PFC's average-current oscillator, present only under the control law the operating point selects) is not
+folded.
+
+**Design pins.** The parts the web pins back from the design call so that later evaluations reuse them
+(`config`, absent = sized as above; present but not a positive, finite number **throws**):
+
+| key | topologies | value |
+|---|---|---|
+| `config.outputCapacitance` | flyback, two_switch_flyback, active_clamp_flyback | F; a number for a single output, else an array with one value per output (wrong length throws) |
+| `config.outputCapacitance` | boost, weinberg | F, a number |
+| `config.outputInductance` | forward, two_switch_forward, acf | H; a number for a single output, else an array with one value per output (wrong length throws) |
+| `config.outputInductance` | psfb, pshb, ahb | H (pre-existing pin) |
+| `config.inductanceL2` | sepic, zeta, cuk | H |
+| `config.couplingCapacitance` | sepic, zeta, cuk | F |
+| `config.snubberCap` | every energy-budget snubber (push_pull, half_bridge, full_bridge, dab, psfb, pshb, ahb, …) | F, one value for every such snubber; now validated (a non-positive or non-numeric value throws) |
+| `config.dcBlockingCapacitance` | ahb | F (pre-existing pin) |
+| `designRequirements.desiredSeriesInductance` | dab, psfb, pshb | H (pre-existing pin) |
+| `designRequirements.desiredResonantInductance` / `desiredResonantCapacitance` | llc, src, cllc | H / F (pre-existing pins); SRC now honours them on a multi-output design too (the tank is no longer re-sized for N reflected loads when pinned) |
+
+The main magnetic is pinned through `designRequirements.magnetizingInductance` and `turnsRatios` (§3 table).
 
 ---
 
@@ -346,7 +418,8 @@ default (doubled) turns ratio it still meets spec. Separately, LLC pins its driv
 by default (M(fn=1)=1 → exactly spec, the KH improvement over MKF's off-resonance rectifier-test config);
 `driveAtSwitchingFrequency=true` instead drives at the requested `switchingFrequency` and embeds the FHA gain
 at that frequency, so above/below-resonance operating points are produced (below `fr` boosts, M>1; above
-`fr` bucks, M<1). SRC already operates at series resonance (`fr = switchingFrequency`), so it has no such flag.
+`fr` bucks, M<1). SRC operates at series resonance (`fr = switchingFrequency`) at the range minimum and
+regulates by frequency above it (§3.1); `driveAtSwitchingFrequency` forces its drive frequency instead (ABT #1539).
 
 ### PFC (AC input) — `inputVoltage` is LINE RMS, emitted `{nominal}` only
 
@@ -356,8 +429,9 @@ at that frequency, so above/below-resonance operating points are produced (below
 | **vienna** (3-φ) | 1.0 | — | `busCapacitance`(470e-6), `balanceModulation`(4.0), `senseResistance`(0.1), `numberOfChannels`/`phaseCount`(1), `samplingStrategy`(`"fullLineCycle"`) | `inputType:"acThreePhase"`; **`inputVoltage` = per-phase line RMS**; `outputs[0].voltage` = full bus; switches block half bus, diodes full bus. `numberOfChannels`>1 interleaves each phase across N parallel channel inductors (analytical current split by 1/N; deck unchanged); `samplingStrategy` ∈ `fullLineCycle`\|`peakOfLineOnly`\|`peakOfLinePlusSectors` (last adds the six DPWM sector operating points) |
 
 **PFC/Vienna spec differences from DC converters:** `inputVoltage`/`lineFrequency`/`switchingFrequency`
-are emitted as `{nominal}` only (no min/max triplet); `operatingPoints[0]` supplies only
-`outputs[0].power` (no `inputVoltage`).
+are emitted as `{nominal}` only (no min/max triplet); `operatingPoints[0]` supplies `outputs[0].power` and
+the operating line voltage `inputVoltage` (RMS; **required** when `operatingPoints` is given — the stage is
+designed at the nominal line and runs at this one, §3.1).
 
 **PFC conduction mode & topology variant (ABT #92):** `config.mode` ∈ {`ccm`(default), `dcm`, `crm`,
 `transition`} drives the boost-inductor sizing (MKF `calculate_inductance_ccm`/`_dcm`/`_crcm`; `crm` and

@@ -174,7 +174,13 @@ FlybackDesign design_flyback(const json& tasInputs) {
 
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
     const double iout = d.outputPower / d.outputVoltage;
-    d.outputCapacitance = iout * d.dutyCycle / (d.switchingFrequency * 0.01 * d.outputVoltage);
+    // One design over the whole input range (ABT #2160): the output capacitors hold the 1 % ripple at the
+    // range's worst corner, the largest duty, i.e. Vin_min — the same duty law as the operating point above,
+    // evaluated at Vin_min. A spec without a range (Vin_min = the operating Vin) gives the operating duty.
+    const double worstDuty = (mode == "ccm")
+        ? Vor / (vinMin + Vor)
+        : std::sqrt(2.0 * (d.outputPower / d.efficiency) * d.magnetizingInductance * d.switchingFrequency) / vinMin;
+    d.outputCapacitance = iout * worstDuty / (d.switchingFrequency * 0.01 * d.outputVoltage);
     d.inputCapacitance = 10e-6;
 
     // Per-output legs (multi-output: N isolated secondaries, ABT #86). All secondaries see the same
@@ -198,10 +204,16 @@ FlybackDesign design_flyback(const json& tasInputs) {
             double ni = Vor0 / (leg.voltage + leg.diodeDrop);
             ni = std::round(ni * 100.0) / 100.0;
             leg.turnsRatio = req::provided_turns_ratio(dr, i).value_or(ni);
-            leg.outputCapacitance = iout_i * d.dutyCycle / (d.switchingFrequency * 0.01 * leg.voltage);
+            leg.outputCapacitance = iout_i * worstDuty / (d.switchingFrequency * 0.01 * leg.voltage);
         }
         leg.loadResistance = leg.voltage * leg.voltage / leg.power;
         d.outputs.push_back(leg);
+    }
+    // Pinned output capacitors (config.outputCapacitance, one value per output): the design call's values, so an
+    // evaluation at another input voltage keeps them (ABT #2160).
+    if (const auto pinned = cfg::pinned_parts_per_output(d.config, "outputCapacitance", d.outputs.size(), "Flyback")) {
+        for (size_t i = 0; i < d.outputs.size(); ++i) d.outputs[i].outputCapacitance = (*pinned)[i];
+        d.outputCapacitance = d.outputs[0].outputCapacitance;
     }
     // "I know the design I want" (ABT #2134): config.forcedDutyCycle drives the switch at exactly that duty;
     // the rails it delivers into the requested loads become the result (DutyPin.hpp). A quasi-resonant flyback

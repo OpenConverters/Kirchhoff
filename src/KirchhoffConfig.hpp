@@ -24,6 +24,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace Kirchhoff {
 namespace cfg {
@@ -118,7 +119,15 @@ constexpr double kTranIterLimit     = 100;    // ngspice itl4: transient Newton 
 // Scales correctly with power, blocking voltage and frequency (unlike a fixed 100 pF / 1 nF / 2.2 nF).
 inline double snubber_cap(const json& in, double P, double Vblock, double fsw) {
     const double eps = get(in, "snubberEnergyFrac", kSnubberEnergyFrac);
-    return get(in, "snubberCap", eps * P / (Vblock * Vblock * fsw));
+    // config.snubberCap pins every energy-budget snubber to one value (ABT #2160: a design evaluated at another
+    // input voltage keeps its snubbers). A pin that is not a positive, finite number throws.
+    if (in.is_object() && in.contains("snubberCap")) {
+        const json& v = in.at("snubberCap");
+        if (!v.is_number() || !(v.get<double>() > 0.0) || !std::isfinite(v.get<double>()))
+            throw std::invalid_argument("config.snubberCap must be a positive, finite capacitance in F, got " + v.dump());
+        return v.get<double>();
+    }
+    return eps * P / (Vblock * Vblock * fsw);
 }
 
 // Explicit numerical-aid marker (ABT #96). A numerical convergence snubber / loop-breaker exists ONLY to
@@ -301,6 +310,46 @@ inline std::optional<double> forced_dead_time(const json& in) {
         throw std::invalid_argument("Dead Time: " + std::to_string(t) + " s is not a dead time; enter zero or a "
                                     "positive time.");
     return t;
+}
+
+// Design pins for one-design-many-voltages evaluation (ABT #2160). The web designs a converter once over the
+// whole input-voltage range and then evaluates THAT converter at each input voltage the user entered; every
+// part the design would otherwise size from the operating point is pinned back to the design call's value
+// through config. A pin is a positive, finite value (F or H); present but malformed -> THROWS (never ignored).
+// `context` names the topology and `what` the part, so the message says which pin is wrong.
+inline double checked_pin_value(const json& v, const std::string& context, const std::string& key) {
+    if (!v.is_number())
+        throw std::invalid_argument(context + ": config." + key + " must be a number, got " + v.dump());
+    const double x = v.get<double>();
+    if (!(x > 0.0) || !std::isfinite(x))
+        throw std::invalid_argument(context + ": config." + key + " must be a positive, finite value, got " + v.dump());
+    return x;
+}
+inline std::optional<double> pinned_part(const json& in, const char* key, const std::string& context) {
+    if (!in.is_object() || !in.contains(key)) return std::nullopt;
+    return checked_pin_value(in.at(key), context, key);
+}
+// A per-output part (one output filter per rail): a single number pins a single-output design; an array pins
+// every rail, one value per output, in output order. A number for a multi-output design, or an array of the
+// wrong length, cannot be honoured and throws.
+inline std::optional<std::vector<double>> pinned_parts_per_output(const json& in, const char* key, size_t outputs,
+                                                                  const std::string& context) {
+    if (!in.is_object() || !in.contains(key)) return std::nullopt;
+    const json& v = in.at(key);
+    std::vector<double> out;
+    if (v.is_array()) {
+        if (v.size() != outputs)
+            throw std::invalid_argument(context + ": config." + std::string(key) + " has " + std::to_string(v.size()) +
+                                        " values but the design has " + std::to_string(outputs) +
+                                        " outputs; give one value per output");
+        for (const auto& x : v) out.push_back(checked_pin_value(x, context, key));
+        return out;
+    }
+    if (outputs != 1)
+        throw std::invalid_argument(context + ": config." + std::string(key) + " is a single value but the design has " +
+                                    std::to_string(outputs) + " outputs; give an array with one value per output");
+    out.push_back(checked_pin_value(v, context, key));
+    return out;
 }
 
 } // namespace cfg

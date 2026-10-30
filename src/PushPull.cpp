@@ -274,7 +274,9 @@ json build_push_pull_tas(const PushPullDesign& d) {
     // while keeping the open-loop Vout on the analytical target. Overridable via config "snubberCap".
     auto snub = [&]() { json c; c["capacitor"] = json::object();
         c["inputs"]["designRequirements"]["capacitance"]["nominal"] =
-            cfg::snubber_cap(d.config, totalOutputPower, 2.0 * d.inputVoltage, d.switchingFrequency);
+            // Energy budget at the input range's highest blocking voltage (the smallest cap, so the budget holds at
+            // every input voltage, ABT #2160); a spec without a range (Vin_max = the operating Vin) is unchanged.
+            cfg::snubber_cap(d.config, totalOutputPower, 2.0 * d.inputVoltageMax, d.switchingFrequency);
         c["inputs"]["designRequirements"]["ratedVoltage"] = (d.inputVoltage + d.outputVoltage) * 3;
         cfg::mark_numerical_aid(c);   // dV/dt convergence aid — tagged for the real-fidelity strip (ABT #96)
         return c; };

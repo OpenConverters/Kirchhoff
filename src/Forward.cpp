@@ -55,16 +55,25 @@ ForwardDesign design_forward(const json& tasInputs) {
     // (t1 > T/2). Cap n at the largest 2-dp ratio keeping D_nom <= maxDuty. For a spec with real
     // input range this is slack (D_nom < maxDuty by headroom) and leaves n untouched, so the golden
     // MKF-equivalence designs are byte-unchanged; it only bites the degenerate no-headroom case.
-    n = std::min(n, std::floor((etaConv * maxDuty * d.inputVoltage / (d.outputVoltage + d.diodeDrop)) * 100.0) / 100.0);
+    // The cap is taken at the range MINIMUM, where the duty is largest (ABT #2160): the 2-dp rounding of n off
+    // Vin_min can tip D(Vin_min) just past maxDuty, and the design must run at every input of its range (its
+    // parts are rated over the range by building it at the corners). Taken at the operating point or at the
+    // range nominal, a ratio rounded up made the design throw t1 > T/2 at its own range minimum. A spec without a
+    // range (Vin_min = its nominal) is unchanged.
+    const double vinDesign = vinMin;
+    n = std::min(n, std::floor((etaConv * maxDuty * vinDesign / (d.outputVoltage + d.diodeDrop)) * 100.0) / 100.0);
     // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
     // the duty-derived value so the rest of the stage is sized around the fixed transformer.
     d.turnsRatio = req::provided_turns_ratio(dr, 1).value_or(n);
     // Magnetizing inductance: Lm = Vin_min / (fsw * reflected secondary current), reflected = Iout/n.
     d.magnetizingInductance = req::provided_inductance(dr).value_or(
         vinMin * n / (d.switchingFrequency * iout));
-    // Output inductor: Lout = (Vin_max/n - Vd - Vout) * tOn / rippleRatio,  tOn = D_max/fsw.
-    const double tOn = cfg::get(d.config, "maxDutyCycle", kMaxDuty) / d.switchingFrequency;
-    d.outputInductance = (vinMax / n - d.diodeDrop - d.outputVoltage) * tOn / cfg::get(d.config, "inductorRippleRatio", kRippleRatio);
+    // Output inductor (ABT #2160): Lout = Vout*(1-D)/(fsw * rippleRatio * Iout), the ripple ratio relative to the
+    // output current. The peak-to-peak ripple grows with Vin, so D is the switch duty at the worst ripple corner,
+    // Vin_max: D(Vin_max) = n*(Vout+Vd)/Vin_max (the deck's duty law). One inductor for the whole input range.
+    const double ripple = cfg::get(d.config, "inductorRippleRatio", kRippleRatio);
+    const double dutyAtVinMax = d.turnsRatio * (d.outputVoltage + d.diodeDrop) / vinMax;
+    d.outputInductance = d.outputVoltage * (1.0 - dutyAtVinMax) / (d.switchingFrequency * ripple * iout);
     // Operating (deck) duty at the nominal input.
     d.dutyCycle = n * (d.outputVoltage + d.diodeDrop) / d.inputVoltage;
     d.loadResistance = d.outputVoltage * d.outputVoltage / d.outputPower;
@@ -74,7 +83,6 @@ ForwardDesign design_forward(const json& tasInputs) {
     // volt-seconds, so each rail's turns ratio scales with its own (Vout_i+Vd_i): n_i = Vin_min·D_max/(Vout_i+Vd_i)
     // — i.e. each output regulates to its own Vout at the shared max duty. Rectifier/output-filter sizing
     // repeats the main-output formulas per rail. outputs[0] reproduces the scalars above byte-for-byte.
-    const double ripple = cfg::get(d.config, "inductorRippleRatio", kRippleRatio);
     const size_t nOut = dr.at("outputs").size();
     for (size_t i = 0; i < nOut; ++i) {
         ForwardOutputLeg leg{};
@@ -96,11 +104,18 @@ ForwardDesign design_forward(const json& tasInputs) {
             double ni = etaConv * vinMin * cfg::get(d.config, "maxDutyCycle", kMaxDuty) / (leg.voltage + leg.diodeDrop);
             ni = std::round(ni * 100.0) / 100.0;
             leg.turnsRatio = req::provided_turns_ratio(dr, 1 + i).value_or(ni);
-            leg.outputInductance = (vinMax / leg.turnsRatio - leg.diodeDrop - leg.voltage) * tOn / ripple;
+            // Every rail shares the one switch, so its inductor sees the same worst-corner duty.
+            leg.outputInductance = leg.voltage * (1.0 - dutyAtVinMax) / (d.switchingFrequency * ripple * iout_i);
             leg.outputCapacitance = 100e-6;
         }
         leg.loadResistance = leg.voltage * leg.voltage / leg.power;
         d.outputs.push_back(leg);
+    }
+    // Pinned output inductors (config.outputInductance, one value per output): the design call's values, so an
+    // evaluation at another input voltage keeps them (ABT #2160).
+    if (const auto pinned = cfg::pinned_parts_per_output(d.config, "outputInductance", d.outputs.size(), "Forward")) {
+        for (size_t i = 0; i < d.outputs.size(); ++i) d.outputs[i].outputInductance = (*pinned)[i];
+        d.outputInductance = d.outputs[0].outputInductance;
     }
     // "I know the design I want" (ABT #2134): config.forcedDutyCycle drives the switch at exactly that duty;
     // the rails it delivers into the requested loads become the result (DutyPin.hpp).

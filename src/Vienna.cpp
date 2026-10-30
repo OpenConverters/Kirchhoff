@@ -27,7 +27,20 @@ ViennaDesign design_vienna(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
     ViennaDesign d{};
     d.config = cfg::object_of(tasInputs);
-    d.inputVoltageRms    = nominal(dr.at("inputVoltage"));
+    // DESIGNED at the spec's nominal per-phase voltage (inductor, current band, compensator) and RUN at the operating
+    // point's (operatingPoints[0].inputVoltage, same per-phase RMS convention): one design evaluated at every line
+    // voltage of the range (ABT #2160). Without an operating point, it runs at the nominal.
+    d.designInputVoltageRms = nominal(dr.at("inputVoltage"));
+    d.inputVoltageRms = d.designInputVoltageRms;
+    if (tasInputs.contains("operatingPoints") && !tasInputs.at("operatingPoints").empty()) {
+        const json& op = tasInputs.at("operatingPoints").at(0);
+        if (!op.contains("inputVoltage") || !op.at("inputVoltage").is_number())
+            throw std::invalid_argument("design_vienna: operatingPoints[0].inputVoltage (the per-phase RMS voltage) is missing");
+        d.inputVoltageRms = op.at("inputVoltage").get<double>();
+        if (!(d.inputVoltageRms > 0.0))
+            throw std::invalid_argument("design_vienna: operatingPoints[0].inputVoltage must be > 0 V RMS, got " +
+                                        std::to_string(d.inputVoltageRms));
+    }
     d.lineFrequency      = nominal(dr.at("lineFrequency"));
     d.outputVoltage      = nominal(dr.at("outputs").at(0).at("voltage"));
     d.switchingFrequency = nominal(dr.at("switchingFrequency"));
@@ -38,13 +51,13 @@ ViennaDesign design_vienna(const json& tasInputs) {
         d.outputPower = nominal(dr.at("outputs").at(0).at("power"));
 
     const double pin   = d.outputPower / std::max(d.efficiency, 1e-6);
-    const double vpeak = d.inputVoltageRms * std::sqrt(2.0);
+    const double vpeak = d.designInputVoltageRms * std::sqrt(2.0);
     // MAS vienna.powerFactor (target input PF, default unity here) and currentRippleRatio (boost-inductor
     // ripple as a fraction of the per-phase peak, default 0.3).
     const double powerFactor = cfg::get(d.config, "powerFactor", 1.0);
     if (!(powerFactor > 0.0 && powerFactor <= 1.0))
         throw std::invalid_argument("design_vienna: powerFactor must be in (0, 1]");
-    const double iPeak = pin * std::sqrt(2.0) / (3.0 * d.inputVoltageRms * powerFactor);  // per-phase peak (3φ)
+    const double iPeak = pin * std::sqrt(2.0) / (3.0 * d.designInputVoltageRms * powerFactor);  // per-phase peak (3φ)
     const double dIL   = cfg::get(d.config, "inductorRippleRatio", 0.3) * std::max(iPeak, 1e-3);
     // MAS vienna.viennaVariant / switchType / synchronousRectifier: realisations of the per-leg bidirectional
     // switch and the rectifier. The boost-inductor excitation does not depend on them, but the deck models the
@@ -80,7 +93,7 @@ ViennaDesign design_vienna(const json& tasInputs) {
     // The common term is bounded to ±50% of the per-phase current-reference peak (anti-windup rail).
     const double wBal = 2.0 * kPi * d.lineFrequency / 6.0;
     d.balanceGain  = wBal * wBal * d.busCapacitance * d.senseResistance / cfg::get(d.config, "balanceModulation", kBalanceModulation);
-    d.balanceClamp = 0.5 * d.referenceGain * vpeak;
+    d.balanceClamp = 0.5 * d.referenceGain * (d.inputVoltageRms * std::sqrt(2.0));   // the operating reference peak
 
     // ── Outer voltage loop: a DESIGNED PI compensator (mirrors design_pfc; derived from the plant). The
     // per-phase hysteretic current loop makes each leg emulate a conductance Ge = g/Rsense (g the dynamic
@@ -96,7 +109,7 @@ ViennaDesign design_vienna(const json& tasInputs) {
     d.outputDividerGain = cfg::get(d.config, "outputDividerGain", 0.005);   // kv: ~4 V at 800 V
     const double kv  = d.outputDividerGain;
     const double Ceff = 0.5 * d.busCapacitance;                            // two rail caps in series
-    const double K0v = 3.0 * d.inputVoltageRms * d.inputVoltageRms
+    const double K0v = 3.0 * d.designInputVoltageRms * d.designInputVoltageRms
                        / (d.senseResistance * Ceff * d.outputVoltage);
     const double wpv = 2.0 / (d.loadResistance * Ceff);                    // load pole
     // Crossover: a 3-phase bus has only a tiny 6·fline ripple (no 2·fline term to fight, unlike single-phase
@@ -327,7 +340,7 @@ json build_vienna_tas(const ViennaDesign& d) {
     json& dreq = tas["inputs"]["designRequirements"];
     dreq["efficiency"] = d.efficiency;
     dreq["inputType"] = "acThreePhase";
-    dreq["inputVoltage"]["nominal"] = d.inputVoltageRms;
+    dreq["inputVoltage"]["nominal"] = d.designInputVoltageRms;
     dreq["lineFrequency"]["nominal"] = d.lineFrequency;
     dreq["switchingFrequency"]["nominal"] = d.switchingFrequency;
     { json o; o["name"]="out"; o["voltage"]["nominal"]=d.outputVoltage; o["regulation"]="voltage";

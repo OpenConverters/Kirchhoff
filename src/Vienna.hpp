@@ -22,7 +22,8 @@
 namespace Kirchhoff {
 
 struct ViennaDesign {
-    double inputVoltageRms;     // per-phase (line-to-neutral) RMS
+    double inputVoltageRms;     // per-phase (line-to-neutral) RMS at the operating point (operatingPoints[0])
+    double designInputVoltageRms;   // per-phase RMS the stage is designed at: the spec's nominal (ABT #2160)
     double lineFrequency;
     double outputVoltage;       // full DC bus, +bus to −bus (split ±Vdc/2 about ground)
     double outputPower;

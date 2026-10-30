@@ -26,7 +26,8 @@
 namespace Kirchhoff {
 
 struct PfcDesign {
-    double inputVoltageRms;     // mains RMS line voltage
+    double inputVoltageRms;     // mains RMS line voltage at the operating point (operatingPoints[0])
+    double designInputVoltageRms;   // the line voltage the stage is designed at: the spec's nominal (ABT #2160)
     double lineFrequency;       // mains frequency (Hz)
     double outputVoltage;       // boosted DC bus
     double outputPower;

@@ -116,20 +116,35 @@ CukDesign design_cuk(const json& tasInputs) {
     const double dIL1 = cfg::get(d.config, "l1RippleRatio", kRippleRatioL1) * iL1avg;
     // A pinned magnetizing inductance (the chosen L1 — design around the magnetic) overrides the sizing.
     d.inductanceL1 = req::provided_inductance(dr).value_or(vinMax * dMax / (dIL1 * fsw));
-    // L2, C1, Cout at the operating point.
+    // L2, C1, Cout from their ripple targets. One design over the whole input range (ABT #2160): each part takes
+    // the larger of its two range corners (the operating-point formula at Vin_min and at Vin_max); a spec without
+    // a range (both corners = the operating Vin) is unchanged.
     const double dIL2 = cfg::get(d.config, "l2RippleRatio", kL2RipplePct) * iout;
-    d.inductanceL2 = d.outputVoltageMag * (1.0 - d.dutyCycle) / (dIL2 * fsw);
-    const double VC1 = d.inputVoltage / (1.0 - d.dutyCycle);   // = Vin + |Vo|
-    const double dVC1 = cfg::get(d.config, "couplingCapRipple", kC1RipplePct) * VC1;
-    d.couplingCapacitance = iout * d.dutyCycle / (dVC1 * fsw);
+    auto dutyAt = [&](double vin) {
+        return duty(d.reverse ? d.outputVoltageMag : vin, d.reverse ? vin : (d.outputVoltageMag * n),
+                    d.diodeDrop, d.efficiency); };
+    auto l2At = [&](double vin) { return d.outputVoltageMag * (1.0 - dutyAt(vin)) / (dIL2 * fsw); };
+    auto vc1At = [&](double vin) { return vin / (1.0 - dutyAt(vin)); };   // = Vin + |Vo|
+    auto c1At = [&](double vin) {
+        const double dVC1 = cfg::get(d.config, "couplingCapRipple", kC1RipplePct) * vc1At(vin);
+        return iout * dutyAt(vin) / (dVC1 * fsw); };
+    auto worst = [&](auto&& f) { return std::max(f(vinMin), f(vinMax)); };
+    d.inductanceL2 = worst(l2At);
+    d.couplingCapacitance = worst(c1At);
+    // Pins: the design call's L2 and C1 (config.inductanceL2 / config.couplingCapacitance), so an evaluation at
+    // another input voltage keeps them.
+    if (const auto pinned = cfg::pinned_part(d.config, "inductanceL2", "Cuk")) d.inductanceL2 = *pinned;
+    if (const auto pinned = cfg::pinned_part(d.config, "couplingCapacitance", "Cuk")) d.couplingCapacitance = *pinned;
     const double dVo = cfg::get(d.config, "outputCapRipple", kCoRipplePct) * d.outputVoltageMag;
     d.outputCapacitance = dIL2 / (8.0 * fsw * dVo);
     d.loadResistance = d.outputVoltageMag * d.outputVoltageMag / d.outputPower;
     if (d.isolated) {
         // Secondary coupling cap C1b (holds ~|Vo|/D on the secondary side) — same ripple fraction as C1.
-        const double VC1b = d.outputVoltageMag / std::max(d.dutyCycle, 1e-3);
-        const double dVC1b = cfg::get(d.config, "couplingCapRipple", kC1RipplePct) * VC1b;
-        d.secondaryCouplingCapacitance = iout * (1.0 - d.dutyCycle) / (dVC1b * fsw);
+        auto c1bAt = [&](double vin) {
+            const double VC1b = d.outputVoltageMag / std::max(dutyAt(vin), 1e-3);
+            const double dVC1b = cfg::get(d.config, "couplingCapRipple", kC1RipplePct) * VC1b;
+            return iout * (1.0 - dutyAt(vin)) / (dVC1b * fsw); };
+        d.secondaryCouplingCapacitance = worst(c1bAt);
         // An explicit secondary coupling capacitance (MAS cuk.couplingCapacitanceSecondary) is used as given.
         if (d.config.contains("couplingCapacitanceSecondary")) {
             const double cb = cfg::get(d.config, "couplingCapacitanceSecondary", 0.0);
@@ -142,7 +157,8 @@ CukDesign design_cuk(const json& tasInputs) {
         // the coupling caps). ΔIm = VC1·D·T/Lm ≤ ImagFrac·(iout/n).
         const double ImagFrac = cfg::get(d.config, "magnetizingCurrentFraction", 0.10);
         const double IrefLoad = iout / n;
-        d.magnetizingInductance = VC1 * d.dutyCycle / (std::max(ImagFrac * IrefLoad, 1e-3) * fsw);
+        d.magnetizingInductance = worst([&](double vin) {
+            return vc1At(vin) * dutyAt(vin) / (std::max(ImagFrac * IrefLoad, 1e-3) * fsw); });
     }
     return d;
 }

@@ -255,7 +255,9 @@ json build_pshb_tas(const PshbDesign& d) {
     // numerical Csn* node caps). The primary swings ±Vhb and rings at each NPC commutation; a damper across
     // the winding tames it. Sized from the ENERGY BUDGET (cfg::snubber_cap = eps·P/(Vhb²·fsw)) +
     // cfg::snubber_res so it stores « throughput. REAL refdes (Crc_pri/Rrc_pri) -> not matched by the strip.
-    const double rcSnubC = cfg::snubber_cap(d.config, d.outputPower, Vhb, fsw);
+    // At the input range's highest half-bus voltage: the smallest cap, so the budget holds at every input voltage
+    // (ABT #2160); a spec without a range (Vin_max = the operating Vin) is unchanged.
+    const double rcSnubC = cfg::snubber_cap(d.config, d.outputPower, 0.5 * d.inputVoltageMax, fsw);
     const auto rcSnub = req::snubber(rcSnubC, cfg::snubber_res(d.config), Vhb, fsw);
     const json& rcCap = rcSnub.first;
     const json& rcRes = rcSnub.second;

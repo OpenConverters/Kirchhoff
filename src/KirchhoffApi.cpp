@@ -17,6 +17,7 @@
 #include "JsonUtil.hpp"           // strip_nulls — schema-valid serialization of typed MAS objects
 
 #include <algorithm>
+#include <optional>
 #include <iterator>
 #include <functional>
 #include <utility>
@@ -308,21 +309,186 @@ void report_model_duty(json& diag, const std::string& topology) {
                              "magnetic " + mainName);
 }
 
+// ── Sourcing ratings over the whole input range (ABT #2160) ──────────────────────────────────────────────────
+// A converter is designed once and evaluated at every input voltage the user entered, so the parts it is
+// sourced with must be the same at every one of those voltages: each semiconductor, capacitor and resistor is
+// rated for the worst case over designRequirements.inputVoltage, never for the one operating point being run.
+// The builders rate a part at the operating point they are given; the api layer therefore builds the design
+// at the range's corners (minimum, nominal, maximum) and keeps, per rating, the worst value of those builds and
+// the operating point's own: the largest stress rating and the strictest limit. A spec without a range (one
+// input voltage) builds once and is unchanged.
+struct RatingRule { const char* key; bool largestIsWorst; };
+constexpr RatingRule kRatingRules[] = {
+    // stresses the part must withstand: the largest over the range
+    {"ratedVoltage", true}, {"ratedDrainSourceVoltage", true}, {"ratedContinuousDrainCurrent", true},
+    {"ratedReverseVoltage", true}, {"ratedForwardCurrent", true}, {"powerRating", true},
+    {"minimumRippleCurrent", true},
+    // limits the part must meet: the strictest (smallest) over the range
+    {"maximumOnResistance", false}, {"maximumEsr", false}, {"maximumForwardVoltage", false},
+    {"maximumReverseRecoveryTime", false}, {"maximumJunctionTemperature", false},
+};
+
+// The sourcing requirements of a non-magnetic TAS component (semiconductor, capacitor, resistor, controller),
+// or nullptr. A magnetic's inputs are its MAS operating points, which describe the operating point by design.
+json* sourcing_requirements(json& component) {
+    if (!component.contains("data") || !component.at("data").is_object()) return nullptr;
+    json& data = component.at("data");
+    if (data.contains("magnetic")) return nullptr;
+    if (!data.contains("inputs") || !data.at("inputs").is_object()) return nullptr;
+    json& inputs = data.at("inputs");
+    if (!inputs.contains("designRequirements") || !inputs.at("designRequirements").is_object()) return nullptr;
+    return &inputs.at("designRequirements");
+}
+
+// The input voltages the ratings are taken over: the range's minimum, nominal and maximum (resolved with the
+// PEAS resolver), without repeats. Empty when the spec states no range (minimum == maximum).
+std::vector<double> input_range_corners(const json& spec) {
+    const json& iv = spec.at("designRequirements").at("inputVoltage");
+    const double lo = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::MINIMUM);
+    const double hi = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::MAXIMUM);
+    if (!(lo < hi)) return {};
+    const double nom = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::NOMINAL);
+    std::vector<double> corners{lo};
+    if (nom != lo && nom != hi) corners.push_back(nom);
+    corners.push_back(hi);
+    return corners;
+}
+
+// The spec evaluated at input voltage `vin`: operatingPoints[0] (the one the designs read) at that voltage.
+// A spec without operating points is designed at its nominal requirements; its corner operating point carries
+// the nominal outputs of designRequirements.
+json spec_at_input_voltage(const json& spec, double vin) {
+    json s = spec;
+    if (s.contains("operatingPoints") && s.at("operatingPoints").is_array() && !s.at("operatingPoints").empty()) {
+        s["operatingPoints"][0]["inputVoltage"] = vin;
+        return s;
+    }
+    const json& dr = spec.at("designRequirements");
+    if (!dr.contains("outputs") || !dr.at("outputs").is_array())
+        throw std::invalid_argument("rating the parts over the input range: designRequirements.outputs missing");
+    json op;
+    op["name"] = "inputVoltageCorner";
+    op["inputVoltage"] = vin;
+    op["ambientTemperature"] = spec_ambient(spec);
+    op["outputs"] = json::array();
+    size_t i = 0;
+    for (const json& o : dr.at("outputs")) {
+        if (!o.contains("voltage") || !o.contains("power"))
+            throw std::invalid_argument("rating the parts over the input range: designRequirements.outputs[" +
+                                        std::to_string(i) + "] needs a voltage and a power");
+        json oo;
+        oo["name"] = o.value("name", "output" + std::to_string(i));
+        oo["voltage"] = PEAS::resolve_dimensional_values(o.at("voltage"));
+        oo["power"] = PEAS::resolve_dimensional_values(o.at("power"));
+        op["outputs"].push_back(oo);
+        ++i;
+    }
+    s["operatingPoints"] = json::array({op});
+    return s;
+}
+
+// Fold the corner builds' ratings into the operating point's TAS. Every RATED component (one carrying a rating
+// key above) is matched at each corner by stage name and component name; one missing at a corner means the rated
+// parts change with the input voltage, which the one-design rule cannot rate, so it throws. A component with no
+// rating (a behavioural controller block, e.g. the PFC's average-current oscillator, which exists only when the
+// operating point selects that control law) has nothing to fold and is not looked for.
+void rate_over_input_range(json& tas, const std::vector<std::pair<double, json>>& corners) {
+    if (!tas.contains("topology") || !tas.at("topology").contains("stages")) return;
+    auto named = [](const json& list, const std::string& name) -> const json* {
+        for (const auto& e : list)
+            if (e.is_object() && e.value("name", std::string()) == name) return &e;
+        return nullptr;
+    };
+    json& stages = tas.at("topology").at("stages");
+    for (json& stage : stages) {
+        if (!stage.contains("circuit") || !stage.at("circuit").is_object() ||
+            !stage.at("circuit").contains("components"))
+            continue;
+        const std::string stageName = stage.value("name", std::string());
+        for (json& component : stage.at("circuit").at("components")) {
+            json* req = sourcing_requirements(component);
+            if (!req) continue;
+            const bool rated = std::any_of(std::begin(kRatingRules), std::end(kRatingRules),
+                                           [&](const RatingRule& r) { return req->contains(r.key); });
+            if (!rated) continue;
+            const std::string componentName = component.value("name", std::string());
+            const std::string where = "component '" + componentName + "' of stage '" + stageName + "'";
+            for (const auto& [vin, cornerTas] : corners) {
+                const std::string at = " at the input voltage " + std::to_string(vin) + " V";
+                const json* cornerStage = named(cornerTas.at("topology").at("stages"), stageName);
+                if (!cornerStage)
+                    throw std::runtime_error("rating the parts over the input range: the design has no stage '" +
+                                             stageName + "'" + at);
+                const json* cornerComponentPtr = named(cornerStage->at("circuit").at("components"), componentName);
+                if (!cornerComponentPtr)
+                    throw std::runtime_error("rating the parts over the input range: the design has no " + where + at);
+                json cornerComponent = *cornerComponentPtr;
+                const json* creq = sourcing_requirements(cornerComponent);
+                for (const auto& rule : kRatingRules) {
+                    if (!req->contains(rule.key)) continue;
+                    if (!req->at(rule.key).is_number())
+                        throw std::runtime_error(std::string("rating the parts over the input range: ") + rule.key +
+                                                 " of the " + where + " is not a number");
+                    if (!creq || !creq->contains(rule.key) || !creq->at(rule.key).is_number())
+                        throw std::runtime_error(std::string("rating the parts over the input range: the ") + where +
+                                                 " has no numeric " + rule.key + at);
+                    const double mine = req->at(rule.key).get<double>();
+                    const double theirs = creq->at(rule.key).get<double>();
+                    (*req)[rule.key] = rule.largestIsWorst ? std::max(mine, theirs) : std::min(mine, theirs);
+                }
+            }
+        }
+    }
+}
+
+// One build of the design for `spec`: clears and refills the full-waveform registry.
+json build_tas_once(const TasBuilder& builder, const json& spec) {
+    // Every build starts with an empty full-waveform registry; the builders' named
+    // excitations_processed(op, component) calls fill it as they bake the TAS.
+    Kirchhoff::analytical::clear_captured_operating_points();
+    json tas = builder(spec);
+    // Thread the spec's ambient (default 25 °C) through the artifacts the builders stamped at 25: the TAS
+    // operating points, every magnetic's operating-point conditions, and the captured full-waveform registry.
+    const double ambientC = spec_ambient(spec);
+    apply_ambient(tas, ambientC);
+    Kirchhoff::analytical::restamp_captured_ambient(ambientC);
+    return tas;
+}
+
 json build_tas_for(const std::string& topology, const json& spec) {
     validate_requirements(spec);
     validate_switch_timing_pins(topology, spec);
     auto it = tas_builders().find(topology);
     if (it == tas_builders().end())
         throw std::runtime_error("Kirchhoff::api: unknown topology '" + topology + "'");
-    // Every build starts with an empty full-waveform registry; the builders' named
-    // excitations_processed(op, component) calls fill it as they bake the TAS.
-    Kirchhoff::analytical::clear_captured_operating_points();
-    json tas = it->second(spec);
-    // Thread the spec's ambient (default 25 °C) through the artifacts the builders stamped at 25: the TAS
-    // operating points, every magnetic's operating-point conditions, and the captured full-waveform registry.
-    const double ambientC = spec_ambient(spec);
-    apply_ambient(tas, ambientC);
-    Kirchhoff::analytical::restamp_captured_ambient(ambientC);
+    // The range corners are built FIRST: each build clears the registry, and the operating point's own build
+    // (last) is the one whose captured waveforms the callers read.
+    std::vector<std::pair<double, json>> corners;
+    const bool hasOp = spec.contains("operatingPoints") && spec.at("operatingPoints").is_array() &&
+                       !spec.at("operatingPoints").empty();
+    const auto designVin = [&]() -> std::optional<double> {
+        if (hasOp) {
+            const json& op0 = spec.at("operatingPoints").at(0);
+            if (op0.contains("inputVoltage") && op0.at("inputVoltage").is_number())
+                return op0.at("inputVoltage").get<double>();
+            return std::nullopt;
+        }
+        return PEAS::resolve_dimensional_values(spec.at("designRequirements").at("inputVoltage"));
+    }();
+    for (const double vin : input_range_corners(spec)) {
+        if (designVin && *designVin == vin) continue;   // the operating point's own build rates this corner
+        try {
+            corners.emplace_back(vin, build_tas_once(it->second, spec_at_input_voltage(spec, vin)));
+        } catch (const std::exception& e) {
+            // A spec the design refuses at its own operating point reports that refusal as it always did; only a
+            // design that runs at the operating point but not at a corner of its range fails with the corner.
+            build_tas_once(it->second, spec);
+            throw std::runtime_error("rating the parts over the input range: the design cannot be evaluated at "
+                                     "the input voltage " + std::to_string(vin) + " V: " + e.what());
+        }
+    }
+    json tas = build_tas_once(it->second, spec);
+    rate_over_input_range(tas, corners);
     return tas;
 }
 

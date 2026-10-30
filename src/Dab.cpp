@@ -329,8 +329,10 @@ json build_dab_tas(const DabDesign& d) {
     //          time. R = bias-loss rule (<= biasLossFrac of rated P at Vin); a small R would bleed Vin²/R
     //          (~kW at 800 V), starving Vout. A switch's Coss does NOT provide a DC bias path, so this is
     //          NOT a snubber — named "Rbias" precisely so the snubber strip never removes it.
-    const double snubCval = cfg::snubber_cap(d.config, d.outputPower, d.inputVoltage, d.switchingFrequency);
-    const double snubRval = cfg::bias_res(d.config, d.inputVoltage, d.outputPower);
+    // Both rules at the input range's highest bus voltage (the smallest snubber cap and the largest bias resistor,
+    // so each loss budget holds at every input voltage, ABT #2160); a spec without a range is unchanged.
+    const double snubCval = cfg::snubber_cap(d.config, d.outputPower, d.inputVoltageMax, d.switchingFrequency);
+    const double snubRval = cfg::bias_res(d.config, d.inputVoltageMax, d.outputPower);
     auto biasR = [&]() { json c; c["resistor"] = json::object();
         auto& dr = c["inputs"]["designRequirements"];
         dr["deviceType"] = "resistor";
