@@ -188,7 +188,7 @@ const hasSelectionWaves = computed(() =>
           </template>
           <div class="wave-readout">
             <span class="i"><b>—</b> current{{ waveSource.kind === 'ngspice' ? ' · measured' : '' }}</span>
-            <span class="v"><b>—</b> voltage{{ waveSource.voltageKind === 'analytical' ? ' · analytical' : '' }}</span>
+            <span class="v"><b>—</b> voltage{{ waveSource.kind === 'ngspice' ? ' · measured' : '' }}</span>
           </div>
         </template>
         <template v-else>

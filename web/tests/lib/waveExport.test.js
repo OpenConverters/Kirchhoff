@@ -160,12 +160,11 @@ test('an export with no operating conditions throws rather than inventing an amb
   assert.throws(() => x.designExcitationsJson(ctx), /will not invent one/)
 })
 
-test('resolveExcitations splices the analytical voltage into an ngspice current-only extraction', () => {
+test('resolveExcitations never splices an analytical voltage into an ngspice view', () => {
   const analytical = { T1: { excitationsPerWinding: [{ frequency: 1e5, current: sampled([9, 9]), voltage: sampled([5, 6]) }] } }
   const ngspiceOps = { T1: { excitationsPerWinding: [{ frequency: 1e5, current: sampled([1, 2]), voltage: {} }] } }
   const r = x.resolveExcitations('T1', { analyticalWaveforms: analytical, ngspiceOps })
   assert.equal(r.kind, 'ngspice')
-  assert.equal(r.voltageKind, 'analytical')
   assert.deepEqual(r.excitations[0].current.waveform.data, [1, 2])
-  assert.deepEqual(r.excitations[0].voltage.waveform.data, [5, 6])
+  assert.equal(r.excitations[0].voltage.waveform, undefined)
 })

@@ -24,6 +24,7 @@ const trackEvent = kh.track
 const cf = useConverterForm({ engine: kh, onReset: () => {
   bomRows.value = []
   waveMagnetics.value = []
+  magGen++                       // an in-flight magnetic sweep belongs to the previous design
   ngspiceOps.value = {}
   componentWaves.value = null
   realizedTas.value = null
@@ -72,6 +73,7 @@ function onMagneticModel({ ref: ref_, model }) {
   magneticModels.value = next
   ngspiceOps.value = {}
   componentWaves.value = null
+  if (form.engine === 'ngspice') fetchMagneticOps()
   fetchComponentWaves()
   if (paneA.value === 'netlist' || paneB.value === 'netlist') makeDeck()
 }
@@ -102,12 +104,12 @@ async function solve() {
     waveMagnetics.value = await topologyWaveforms(res.tas)
     waveMagIdx.value = Math.max(0, waveMagnetics.value.findIndex((m) => m.isMain))
     waveOpIdx.value = 0
-    // an ngspice solve already simulated the main magnetic — cache its operating point, and pull
-    // every non-magnetic component's V/I from the same simulator in one more call.
+    // an ngspice solve shows ngspice everywhere: every magnetic (not only the main one) and every
+    // non-magnetic component is simulated against the same TAS + fidelity. Fire-and-forget; each
+    // fills its part of the waveform picker when it lands.
     if (form.engine === 'ngspice') {
-      const main = waveMagnetics.value.find((m) => m.isMain)
-      if (main) ngspiceOps.value = { [main.name]: res.operatingPoint }
-      fetchComponentWaves()   // fire-and-forget; fills the component picker when it lands
+      fetchMagneticOps()
+      fetchComponentWaves()
     }
     bomRows.value = enrichBom(extractBom(res.tas), res.analyticalWaveforms)
     // a topology without a schematic sketch: show the BOM in the left pane instead
@@ -125,6 +127,27 @@ async function solve() {
 // only that generation may write the shared state — so a slower run from a superseded solve is dropped
 // (rather than clobbering the current design's data or stranding it behind a `busy` flag).
 let cwGen = 0
+// Every magnetic's simulated operating point (winding currents AND voltages from ngspice), one run per
+// magnetic against simTas/simFidelity — the same design the component run simulates. A failure is
+// shown, never replaced by the analytical waveform.
+let magGen = 0
+async function fetchMagneticOps() {
+  if (!result.value) return
+  const gen = ++magGen
+  ngspiceBusy.value = true
+  try {
+    for (const m of waveMagnetics.value) {
+      const op = await extractOperatingPoint(simTas.value, 'ngspice', m.name, simFidelity.value)
+      if (gen !== magGen) return             // superseded by a newer solve / model change — discard
+      ngspiceOps.value = { ...ngspiceOps.value, [m.name]: op }
+    }
+  } catch (e) {
+    if (gen === magGen) runError.value = e.message
+  } finally {
+    if (gen === magGen) ngspiceBusy.value = false
+  }
+}
+
 async function fetchComponentWaves() {
   if (!result.value) return
   const gen = ++cwGen
@@ -152,6 +175,7 @@ watch(() => form.models, async (m) => {
   realizedTas.value = m === 'datasheet' ? await realizeTas(result.value.tas) : null
   ngspiceOps.value = {}          // per-magnetic sims were run against the other model set
   componentWaves.value = null
+  if (form.engine === 'ngspice') fetchMagneticOps()
   fetchComponentWaves()
 })
 
@@ -261,6 +285,7 @@ async function onBound({ tas }) {
     bomRows.value = enrichBom(extractBom(tas), result.value.analyticalWaveforms)
     ngspiceOps.value = {}
     componentWaves.value = null
+    if (form.engine === 'ngspice') fetchMagneticOps()
     fetchComponentWaves()   // fills the verdict table from a fresh sim of the bound design
   } catch (e) {
     runError.value = e.message

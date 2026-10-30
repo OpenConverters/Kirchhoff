@@ -68,29 +68,20 @@ export function traceOf(signal, frequency, periods = 1) {
 }
 
 // The excitation-source hierarchy for one magnetic: simulated (ngspice) > full analytical capture >
-// the stripped TAS excitations. The ngspice extraction rebuilds winding CURRENTS only, so the
-// analytical voltage is spliced back in per winding and labelled — current measured, voltage
-// predicted, never silently mixed. App.vue's waveSource and every export call THIS, so the pane and
-// the file can never disagree about which source they are showing.
+// the stripped TAS excitations. An ngspice operating point carries simulated winding currents AND
+// voltages (the extraction throws when it cannot build a winding voltage), so the ngspice view is
+// ngspice end to end — nothing analytical is spliced into it. App.vue's waveSource and every export
+// call THIS, so the pane and the file can never disagree about which source they are showing.
 export function resolveExcitations(name, { analyticalWaveforms, ngspiceOps, operatingPoint } = {}) {
-  if (!name) return { excitations: [], kind: 'none', voltageKind: null }
-  const analyticalFull = analyticalWaveforms?.[name]?.excitationsPerWinding
+  if (!name) return { excitations: [], kind: 'none' }
   const sim = ngspiceOps?.[name]
-  if (sim) {
-    const excitations = (sim.excitationsPerWinding ?? []).map((e, i) => {
-      const av = analyticalFull?.[i]?.voltage
-      const hasSimV = e.voltage?.waveform?.data?.length > 1
-      if (!hasSimV && av?.waveform?.data?.length > 1) return { ...e, voltage: av }
-      return e
-    })
-    return { excitations, kind: 'ngspice', voltageKind: analyticalFull ? 'analytical' : null }
-  }
+  if (sim) return { excitations: sim.excitationsPerWinding ?? [], kind: 'ngspice' }
+  const analyticalFull = analyticalWaveforms?.[name]?.excitationsPerWinding
   if (analyticalFull?.length)
-    return { excitations: analyticalFull, kind: 'analytical (full waveforms)', voltageKind: null }
+    return { excitations: analyticalFull, kind: 'analytical (full waveforms)' }
   return {
     excitations: operatingPoint?.excitationsPerWinding ?? [],
     kind: 'analytical (processed)',
-    voltageKind: null,
   }
 }
 
@@ -290,10 +281,10 @@ export function designExcitationsJson(ctx) {
   const sources = {}
 
   const mag = magnetics.map((m) => {
-    const { excitations, kind, voltageKind } = resolveExcitations(m.name, {
+    const { excitations, kind } = resolveExcitations(m.name, {
       analyticalWaveforms, ngspiceOps, operatingPoint: m.inputs?.operatingPoints?.[opIdx],
     })
-    sources[m.name] = voltageKind ? `${kind} (voltage: ${voltageKind})` : kind
+    sources[m.name] = kind
     const opName = m.inputs?.operatingPoints?.[opIdx]?.name
     return {
       name: m.name,
