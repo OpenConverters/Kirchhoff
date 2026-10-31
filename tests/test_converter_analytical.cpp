@@ -2103,6 +2103,51 @@ TEST_CASE("LLC pinned turns ratio: the operating point is solved in the band, me
     }
 }
 
+TEST_CASE("LLC half bridge whose pinned ratio covers its whole input range: diagnostics, excitations and power balance (ABT #2171)",
+          "[analytical][llc][abt1503][abt2171]") {
+    // Alf 2026-10-31 ("Throw + new half-bridge case"): the n=3 half-bridge case of the ABT #1503 test above is now
+    // refused at 350 V (it needs gain 1.62, the band reaches 1.40), which took its diagnostics, excitation and
+    // power-balance checks with it. This SEPARATE design carries them: the same llc_1503_spec tank, band and load
+    // (350-425 V -> 90 V / 3300 W, Lm 29 uH, Ln 4.8, fr 180 kHz, band 100-300 kHz, half bridge) with n = 1.8, which
+    // needs M = n·(Vout + 2·Vd)/(η·0.5·Vin) ≈ 0.97 at 350 V and ≈ 0.80 at 425 V, inside the band at both ends (with
+    // this tank n 1.5-1.9 covers the range; from n 2.0 the 350 V end needs more gain than the band reaches).
+    const double n = 1.8, k = 0.5;
+    const nlohmann::json spec = llc_1503_spec(n, "halfBridge");
+    const Kirchhoff::LlcDesign d = Kirchhoff::design_llc(spec);
+    const double Vin = 425.0, Vout = 90.0, Pout = 3300.0, eta = 0.97, Iout = Pout / Vout;
+    const double Vd = Kirchhoff::req::rectifier_drop(spec.at("config"), Iout);
+
+    CHECK(d.turnsRatio == Catch::Approx(n));
+    CHECK(d.resonantFrequency == Catch::Approx(180e3));
+    CHECK(d.resonantCapacitance == Catch::Approx(129.4e-9).epsilon(0.002));
+    CHECK(d.operatingFrequency >= 100e3);
+    CHECK(d.operatingFrequency <= 300e3);
+    const double Rac = 8.0 / (M_PI * M_PI) * n * n * Vout / Iout;
+    const double M = Kirchhoff::analytical::llc_fha_tank(d.operatingFrequency, d.magnetizingInductance,
+                                                         d.resonantInductance, d.resonantCapacitance, Rac).gain();
+    CHECK(M * eta * k * Vin / n - 2.0 * Vd == Catch::Approx(Vout).epsilon(0.001));
+
+    // Both ends of the range are evaluated by process_converter; neither refuses.
+    const std::string raw = Kirchhoff::api::process_converter("llc", spec.dump(), "analytical");
+    INFO(raw.substr(0, 400));
+    REQUIRE(raw.rfind("Exception:", 0) != 0);
+    const nlohmann::json out = nlohmann::json::parse(raw);
+    CHECK(out.at("diagnostics").at("switchingFrequency").get<double>() == Catch::Approx(d.operatingFrequency));
+    CHECK(out.at("diagnostics").at("computed").at("resonantCapacitance").get<double>() ==
+          Catch::Approx(129.4e-9).epsilon(0.002));
+
+    const auto& exc = out.at("operatingPoint").at("excitationsPerWinding");
+    REQUIRE(exc.size() == 2);   // primary + one full-bridge secondary
+    const WindingPower pri = winding_power(exc.at(0));
+    const WindingPower sec = winding_power(exc.at(1));
+    INFO("fsw " << d.operatingFrequency << " Hz, M " << M << ", P_pri " << pri.power << " W, P_sec " << sec.power
+         << " W, I_sec,rms " << sec.currentRms << " A, Vd " << Vd << " V");
+    // The same balance (and tolerances) as the ABT #1503 cases above.
+    CHECK(sec.power == Catch::Approx(Pout).epsilon(0.02));
+    CHECK(pri.power == Catch::Approx(Pout / eta * (1.0 + 2.0 * Vd / Vout)).epsilon(0.02));
+    CHECK(sec.currentRms == Catch::Approx(M_PI / (2.0 * std::sqrt(2.0)) * Iout).epsilon(0.03));
+}
+
 // ─── ABT #1503 (CLLC / CLLLC): the two-sided resonant tanks regulate by frequency too, or refuse ──────────────
 // Both were always driven at fr = the requested switching frequency, where a symmetric tank's FHA gain is 1 for any
 // ratio. The CLLC's engine-sized ratio carries a 1.08 gain headroom (at fr it would deliver 1.08·Vout) and a pinned
