@@ -1,6 +1,7 @@
 #include "Pshb.hpp"
 #include "DimensionJson.hpp"
 #include "KirchhoffConfig.hpp"
+#include "JsonUtil.hpp"
 #include "ComponentRequirements.hpp"
 #include "ConverterAnalytical.hpp"
 #include <cmath>
@@ -25,6 +26,7 @@ constexpr double kDeadFrac      = 0.01;
 
 PshbDesign design_pshb(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
+    require_one_output(tasInputs, "phase-shifted half bridge");
     PshbDesign d{};
     d.config = cfg::object_of(tasInputs);
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));

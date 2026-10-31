@@ -1,6 +1,7 @@
 #include "Ahb.hpp"
 #include "DimensionJson.hpp"
 #include "KirchhoffConfig.hpp"
+#include "JsonUtil.hpp"
 #include "ComponentRequirements.hpp"
 #include "ConverterAnalytical.hpp"
 #include <cmath>
@@ -34,6 +35,7 @@ constexpr double kRippleRatio = 0.30;  // output-inductor current ripple
 
 AhbDesign design_ahb(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
+    require_one_output(tasInputs, "asymmetric half bridge");
     AhbDesign d{};
     d.config = cfg::object_of(tasInputs);
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));

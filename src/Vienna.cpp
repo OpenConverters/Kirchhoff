@@ -1,6 +1,7 @@
 #include "Vienna.hpp"
 #include "DimensionJson.hpp"
 #include "KirchhoffConfig.hpp"
+#include "JsonUtil.hpp"
 #include "ComponentRequirements.hpp"
 #include "ConverterAnalytical.hpp"
 #include <cmath>
@@ -25,6 +26,7 @@ constexpr double kBalanceModulation = 4.0;
 
 ViennaDesign design_vienna(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
+    require_one_output(tasInputs, "Vienna rectifier");
     ViennaDesign d{};
     d.config = cfg::object_of(tasInputs);
     // DESIGNED at the spec's nominal per-phase voltage (inductor, current band, compensator) and RUN at the operating

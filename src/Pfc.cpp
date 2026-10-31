@@ -1,6 +1,7 @@
 #include "Pfc.hpp"
 #include "DimensionJson.hpp"
 #include "KirchhoffConfig.hpp"
+#include "JsonUtil.hpp"
 #include "ComponentRequirements.hpp"
 #include "ConverterAnalytical.hpp"
 #include <cmath>
@@ -94,6 +95,7 @@ bool is_unipolar_boost_family(const std::string& topologyVariant) {
 
 PfcDesign design_pfc(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
+    require_one_output(tasInputs, "PFC");
     PfcDesign d{};
     d.config = cfg::object_of(tasInputs);
     // The stage is DESIGNED at the spec's nominal line voltage (inductor, compensator, current band) and RUNS at the

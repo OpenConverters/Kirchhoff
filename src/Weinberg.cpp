@@ -1,6 +1,7 @@
 #include "Weinberg.hpp"
 #include "DimensionJson.hpp"
 #include "KirchhoffConfig.hpp"
+#include "JsonUtil.hpp"
 #include "ComponentRequirements.hpp"
 #include "ConverterAnalytical.hpp"
 #include <stdexcept>
@@ -28,6 +29,7 @@ double duty_boost(double Vin, double Vo, double n, double eta) {
 
 WeinbergDesign design_weinberg(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
+    require_one_output(tasInputs, "Weinberg");
     WeinbergDesign d{};
     d.config = cfg::object_of(tasInputs);
     // Primary-drive + rectifier variants (config-gated, no schema change; defaults = MKF V1 classic).

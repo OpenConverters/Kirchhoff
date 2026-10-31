@@ -1,6 +1,7 @@
 #include "Cllc.hpp"
 #include "DimensionJson.hpp"
 #include "KirchhoffConfig.hpp"
+#include "JsonUtil.hpp"
 #include "ComponentRequirements.hpp"
 #include "ConverterAnalytical.hpp"
 #include <cmath>
@@ -55,6 +56,7 @@ static std::pair<std::optional<double>, std::optional<double>> two_sided_band(co
 
 CllcDesign design_cllc(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
+    require_one_output(tasInputs, "CLLC");
     CllcDesign d{};
     d.config = cfg::object_of(tasInputs);
     // Rail polarity (ABT #904): reject a negative setpoint loudly. Without this it would flow

@@ -2,6 +2,7 @@
 #include "Cllc.hpp"   // two_sided_resonant_operating_point (shared CLLC/CLLLC operating-frequency solve)
 #include "DimensionJson.hpp"
 #include "KirchhoffConfig.hpp"
+#include "JsonUtil.hpp"
 #include "ComponentRequirements.hpp"
 #include "ConverterAnalytical.hpp"
 #include <cmath>
@@ -23,6 +24,7 @@ constexpr double kSenseHysteresis = 5e-3;  // SR comparator hysteresis on the iÂ
 
 ClllcDesign design_clllc(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
+    require_one_output(tasInputs, "CLLLC");
     ClllcDesign d{};
     d.config = cfg::object_of(tasInputs);
     // Rail polarity (ABT #904): reject a negative setpoint loudly. Without this it would flow

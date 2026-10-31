@@ -3,6 +3,7 @@
 #include "ComponentRequirements.hpp"
 #include "ConverterAnalytical.hpp"
 #include "KirchhoffConfig.hpp"
+#include "JsonUtil.hpp"
 #include <cmath>
 #include <limits>
 #include <algorithm>
@@ -38,6 +39,7 @@ constexpr double kSwitchDuty  = 0.48;   // 200ns dead time at Fs=100kHz (T=10us)
 
 PsfbDesign design_psfb(const json& tasInputs) {
     const json& dr = tasInputs.at("designRequirements");
+    require_one_output(tasInputs, "phase-shifted full bridge");
     PsfbDesign d{};
     d.config = cfg::object_of(tasInputs);
     d.outputVoltage = nominal(dr.at("outputs").at(0).at("voltage"));

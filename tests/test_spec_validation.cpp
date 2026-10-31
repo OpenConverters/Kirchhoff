@@ -12,6 +12,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <vector>
 #include "KirchhoffApi.hpp"
 
 using json = nlohmann::json;
@@ -116,5 +117,76 @@ TEST_CASE("a single-output cell refuses a multi-output request instead of droppi
         REQUIRE(refused(s, topology));
         // ...and it says what it cannot do, rather than failing somewhere downstream by accident.
         REQUIRE(why(s, topology).find("single output rail") != std::string::npos);
+    }
+}
+
+namespace {
+
+// A one-output DC spec for an isolated cell: Vin, one rail Vout delivering P, switching at fsw.
+json dc_spec(double vin, double vout, double power, double fsw) {
+    return json{
+        {"designRequirements", {
+            {"efficiency", 1.0},
+            {"inputType", "dc"},
+            {"inputVoltage", {{"nominal", vin}, {"minimum", 0.95 * vin}, {"maximum", 1.05 * vin}}},
+            {"switchingFrequency", {{"nominal", fsw}}},
+            {"outputs", json::array({ json{{"name", "out"}, {"voltage", {{"nominal", vout}}}, {"regulation", "voltage"}} })},
+        }},
+        {"operatingPoints", json::array({ json{
+            {"name", "full_load"}, {"inputVoltage", vin}, {"ambientTemperature", 25.0},
+            {"outputs", json::array({ json{{"name", "out"}, {"power", power}} })}} })},
+    };
+}
+
+// A one-output AC-input (PFC-type) spec: line RMS voltage, line frequency, DC bus Vout delivering P.
+json ac_spec(const std::string& inputType, double vrms, double vout, double power, double fsw) {
+    return json{
+        {"designRequirements", {
+            {"efficiency", 1.0},
+            {"inputType", inputType},
+            {"inputVoltage", {{"nominal", vrms}}},
+            {"lineFrequency", {{"nominal", 50.0}}},
+            {"switchingFrequency", {{"nominal", fsw}}},
+            {"outputs", json::array({ json{{"name", "out"}, {"voltage", {{"nominal", vout}}}} })},
+        }},
+        {"operatingPoints", json::array({ json{
+            {"inputVoltage", vrms}, {"outputs", json::array({ json{{"name", "out"}, {"power", power}} })}} })},
+    };
+}
+
+}  // namespace
+
+// psfb, pshb, ahb, weinberg, cllc, clllc, pfc and vienna design outputs[0] only. They used to drop any further
+// output without a word (the caller got a one-output converter back for a two-output request); they must refuse
+// it and say so. The one-output spec of each is checked to design first, so the refusal is the extra rail's.
+TEST_CASE("single-rail topologies refuse a second output instead of dropping it", "[validation][single-output]") {
+    struct Case { const char* topology; const char* label; json spec; };
+    const std::vector<Case> cases = {
+        {"psfb",     "phase-shifted full bridge", dc_spec(400.0, 12.0, 600.0, 100e3)},
+        {"pshb",     "phase-shifted half bridge", dc_spec(400.0, 12.0, 600.0, 100e3)},
+        {"ahb",      "asymmetric half bridge",    dc_spec(100.0, 12.0, 192.0, 100e3)},
+        {"weinberg", "Weinberg",                  dc_spec(42.0, 100.0, 500.0, 100e3)},
+        {"cllc",     "CLLC",                      dc_spec(400.0, 48.0, 480.0, 200e3)},
+        {"clllc",    "CLLLC",                     dc_spec(400.0, 48.0, 480.0, 200e3)},
+        {"pfc",      "PFC",                       ac_spec("acSinglePhase", 230.0, 400.0, 500.0, 100e3)},
+        {"vienna",   "Vienna rectifier",          ac_spec("acThreePhase", 230.0, 700.0, 5000.0, 20e3)},
+    };
+    for (const auto& c : cases) {
+        INFO(c.topology << " one output: " << why(c.spec, c.topology));
+        REQUIRE_FALSE(refused(c.spec, c.topology));
+
+        json two = c.spec;
+        two["designRequirements"]["outputs"].push_back(
+            json{{"name", "out2"}, {"voltage", {{"nominal", 5.0}}}, {"regulation", "voltage"}});
+        two["operatingPoints"][0]["outputs"].push_back(json{{"name", "out2"}, {"power", 20.0}});
+        const std::string expected = std::string(c.label) + " supports one output; the spec has 2";
+        INFO(c.topology << " two outputs: " << why(two, c.topology));
+        REQUIRE(why(two, c.topology).find(expected) != std::string::npos);
+
+        // The operating point alone carrying a second rail is the same request and is refused the same way.
+        json opOnly = c.spec;
+        opOnly["operatingPoints"][0]["outputs"].push_back(json{{"name", "out2"}, {"power", 20.0}});
+        INFO(c.topology << " operating point with two outputs: " << why(opOnly, c.topology));
+        REQUIRE(why(opOnly, c.topology).find(expected) != std::string::npos);
     }
 }
