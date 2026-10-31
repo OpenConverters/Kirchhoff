@@ -532,14 +532,50 @@ double dab_series_inductance_for_power(double V1, double V2, double N, double D3
 
 // ── Phase 5: resonant converter family (FHA) ────────────────────────────────
 
-// Series Resonant Converter (SRC) via First-Harmonic Approximation (FHA), ABOVE-RESONANCE only
-// (Λ = fsw/fr ≥ 1; the capacitive/hard-switching region throws, matching MKF Phase 2). The series
-// Lr-Cr tank is driven by the bridge square wave; FHA reduces it to a sinusoidal divider:
-// Rac = (8/π²)·n²·Rload, Zin = √(Rac² + X²), X = ωLr − 1/(ωCr), ILr_pk = (4/π)·k_bridge·Vin / Zin,
-// φ = atan2(X, Rac). `bridgeVoltageFactor` k_bridge = 1.0 (full bridge) or 0.5 (half bridge). Pushes
-// Primary (sinusoidal tank current + square bridge voltage) + per output either one full-bridge
-// Secondary i or two center-tapped "Secondary i Half {1,2}" half-windings. Ported from MKF
-// Src.cpp:338. Throws on Λ < 1, non-positive fsw / Lr / Cr / turns ratio.
+// ── Series Resonant Converter: the EXACT steady state (state plane), ABOVE resonance ──
+// The ONE SRC tank model: design_src solves its operating frequency with it and analytical_src emits its
+// waveforms from it (ABT #2173; it replaced the First-Harmonic Approximation, which overstates the gain above
+// resonance — at Q 0.8 the deck delivered 14 % less than FHA predicted).
+// The bridge applies ±Vg (Vg = k_bridge·Vin) to the series Lr-Cr tank, and the rectifier presents ±V (the output
+// reflected to the primary) in phase with the tank current. Normalised with Vg, R0 = √(Lr/Cr), ω0 = 1/√(LrCr):
+// gain M = V/Vg, frequency ratio F = fs/f0, half switching period γ = π/F (radians of the resonance), load
+// current J = <|i|>·R0/Vg (the rectified tank current, i.e. the reflected output current). Above resonance
+// (F > 1) the SRC runs in continuous conduction, each half period in two arcs of the state plane: after the
+// bridge transition the current is still negative (the antiparallel diode conducts, the tank sees 1 + M), it
+// crosses zero at θ1 and the tank sees 1 − M until the next transition. Half-wave antisymmetry gives, with
+// Vc = |vCr| at the zero crossing (the capacitor's peak), Vc = J·γ/2 and
+//   θ1 = acos((1 + M + M·Vc)/(1 + M + Vc)),  θ2 = acos((1 − M − M·Vc)/(1 − M + Vc)),  θ1 + θ2 = γ,
+//   i(0) = −√(Vc·(1 − M²)·(2 + Vc)),  vCr(0) = −M·Vc  (Erickson & Maksimović ch. 19, Witulski & Erickson 1985).
+// At resonance (F = 1) M = 1 for every load and the current is a sine. Below resonance the SRC runs
+// discontinuous / capacitive (no ZVS) modes this model does not cover: it throws. The load is the reflected
+// RESISTANCE Re (the rectifier's DC resistance referred to the primary, Re = π²/8·Rac), so J = M·R0/Re and the
+// tank point is solved self-consistently, as the FHA divider was.
+struct SrcExactTank {
+    double frequencyRatio;    // F = fs/f0 (>= 1)
+    double gain;              // M = V/Vg
+    double capacitorPeak;     // Vc, normalised (|vCr| at the current zero crossing)
+    double initialCurrent;    // i at the bridge transition, normalised (<= 0: the tank current lags, ZVS)
+    double firstArc;          // θ1: radians of the resonance from the bridge transition to the current zero
+    double halfPeriod;        // γ = π/F
+    // Tank current at τ = ω0·t radians after the positive bridge transition, normalised (×Vg/R0 for amperes).
+    double current(double tau) const;
+    double currentRms() const;    // normalised
+    double currentPeak() const;   // normalised
+};
+// The tank point at frequency ratio F into the normalised reflected load conductance r = R0/Re (> 0).
+// Throws below resonance (F < 1 − 1e-6; F within 1e-6 below 1 is the resonance itself, as fsw = fr recomputed
+// from Lr·Cr rounding is).
+SrcExactTank src_exact_tank(double frequencyRatio, double loadConductance);
+// The frequency ratio F >= 1 at which the tank delivers gain M (0 < M <= 1) into r = R0/Re. M = 1 is the resonance.
+double src_exact_frequency_ratio(double gain, double loadConductance);
+
+// Series Resonant Converter (SRC) operating point from the exact tank solution above (ABOVE resonance only;
+// below resonance throws). The tank current is the state-plane solution at fsw into the reflected load
+// 1/Re = Σ_i 1/(n_i²·Rload_i) (Rload_i = outputVoltages[i]/outputCurrents[i]); the transformer winding voltage
+// is ±n·Vout in phase with the tank current (the rectifier clamp). `bridgeVoltageFactor` k_bridge = 1.0 (full
+// bridge) or 0.5 (half bridge). Pushes Primary (tank current + ±n·Vout) + per output either one full-bridge
+// Secondary i or two center-tapped "Secondary i Half {1,2}" half-windings. Throws on fsw below the tank
+// resonance, non-positive fsw / Lr / Cr / turns ratio / load.
 MAS::OperatingPoint analytical_src(double inputVoltage,
                                    const std::vector<double>& outputVoltages,
                                    const std::vector<double>& outputCurrents,

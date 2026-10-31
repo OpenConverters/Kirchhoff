@@ -11,6 +11,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "Kirchhoff.hpp"
 #include "KirchhoffApi.hpp"
@@ -471,6 +472,19 @@ TEST_CASE("extract(NGSPICE): a run that ends inside start-up is extended to stea
         {"weinberg",           R"KH({"designRequirements":{"inputType":"dc","inputVoltage":{"minimum":20,"maximum":30},"switchingFrequency":{"nominal":200000},"outputs":[{"name":"out","voltage":{"nominal":48},"regulation":"voltage"}],"efficiency":0.9,"turnsRatios":[{"nominal":1},{"nominal":0.5}]},"operatingPoints":[{"name":"full_load","inputVoltage":25,"ambientTemperature":25,"outputs":[{"name":"out","power":96}]}],"config":{"rippleRatio":0.4,"tranStopTime":0.000035}})KH"},
     };
     for (const auto& [topo, spec] : cases) {
+        if (topo == "weinberg") {
+            // Alf 2026-10-30: a design that cannot run at an end of its own input range throws (ABT #2171). The web
+            // Weinberg spec's range is 20-30 V with turns ratios [1, 0.5]: at 30 V the operating point needs D = 0.444,
+            // the buck regime, which the classic Weinberg model does not cover. Both engines refuse the spec, so the
+            // steady-state extension is no longer exercised on this deck.
+            for (const char* engine : {"analytical", "ngspice"}) {
+                const std::string out = Kirchhoff::api::process_converter(topo, spec, engine);
+                INFO("topology=" << topo << " engine=" << engine << " out=" << out.substr(0, 300));
+                REQUIRE(out.rfind("Exception:", 0) == 0);
+                CHECK_THAT(out, Catch::Matchers::ContainsSubstring("cannot be evaluated at the input voltage 30 V"));
+            }
+            continue;
+        }
         const double analytical = primary_peak(topo, spec, "analytical");
         const double simulated  = primary_peak(topo, spec, "ngspice");
         INFO("topology=" << topo << " analytical peak=" << analytical << " simulated peak=" << simulated);

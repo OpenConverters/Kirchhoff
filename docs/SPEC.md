@@ -169,16 +169,31 @@ operating point, so a spec evaluated at Vin_min and at Vin_max gives the same pa
 **SRC frequency regulation.** With the tank (designed or pinned Lr/Cr) and n fixed, the bridge runs at Vin_min at
 the reference frequency — the series resonance `switchingFrequency`, as before (a pinned tank that resonates
 above it, within design_src's 1 % acceptance, runs at its own resonance instead). At a higher operating input the
-bridge runs above resonance at the frequency where the series-tank FHA gain into the reflected load,
-M(f) = Rac/|Rac + j(ωLr − 1/(ωCr))|, equals M(f_ref)·Vin_min/Vin (closed form), so the delivered output is the
+bridge runs above resonance at the frequency where the series tank's EXACT steady-state gain (ABT #2173) into the
+reflected load equals M(f_ref)·Vin_min/Vin, so the delivered output is the
 one of the resonant point at Vin_min. That frequency is the TAS `designRequirements.switchingFrequency`, the
 gate stimulus frequency, the controller seed's `switchingFrequency` and `diagnostics.switchingFrequency`, and
 the stresses use the relative tank gain Vin_min/Vin. An operating input below Vin_min (it needs a gain above the
 resonance peak) **throws** naming the input voltage and the output the resonant tank reaches; a regulated
 frequency above `config.maxSwitchingFrequency` (or below `minSwitchingFrequency`) **throws** with the output
 reached at the band edge. `config.driveAtSwitchingFrequency` (forced drive, the output is the result) is not
-regulated. Example, 36–72 V → 12 V/5 A, 100 kHz: 100 kHz at 36 V, 192.8 kHz at 54 V, 257.2 kHz at 72 V; primary
-RMS 6.07 / 6.09 / 6.09 A (unregulated at resonance it was 12.15 A at 72 V).
+regulated. Example, 36–72 V → 12 V/5 A, 100 kHz: 100 kHz at 36 V, 171.7 kHz at 54 V, 232.5 kHz at 72 V; primary
+RMS 6.07 / 6.17 / 6.27 A (unregulated at resonance it was 12.15 A at 72 V).
+
+**The SRC tank model (exact, state plane — ABT #2173).** One model sizes the regulated frequency, the Lr/switch
+stresses and the embedded transformer waveforms (`analytical_src`), so all of them describe the current the
+ngspice deck carries. It replaced the First-Harmonic Approximation M = Rac/|Rac + j(ωLr − 1/(ωCr))|, which
+overstates the gain above resonance (at Q 0.8 the deck delivered 14 % less than FHA predicted). Normalised with
+the bridge amplitude Vg (Vin/2 half bridge, Vin full bridge), R0 = √(Lr/Cr) and f0 = 1/(2π√(LrCr)): gain
+M = V/Vg (V = the output reflected to the primary), F = fs/f0, half period γ = π/F, load r = R0/Re with Re the
+rectifier's DC resistance referred to the primary (Re = 1/Σ 1/(n_i²·R_i) = π²/8·Rac). Above resonance the tank
+runs in continuous conduction, two state-plane arcs per half period (the antiparallel diode conducts, then the
+switch); half-wave antisymmetry gives, with Vc the capacitor peak (Vc = J·γ/2, J = M·r):
+θ1 = acos((1 + M + M·Vc)/(1 + M + Vc)), θ2 = acos((1 − M − M·Vc)/(1 − M + Vc)), θ1 + θ2 = γ, solved for M
+(Erickson & Maksimović ch. 19). At resonance M = 1 for every load and the current is a sine. The tank current
+rms/peak come from the same arcs (crest factor √2 only at resonance); the magnetizing Lm (10·Lr) is kept out of
+the tank and adds its triangle in rms. Below resonance (discontinuous / capacitive modes, no ZVS) the model does
+not apply: an operating frequency below f0 **throws**.
 
 `lcc` is not range-sized yet: its whole tank is sized at the operating point and it refuses a pinned main
 inductance.
@@ -412,7 +427,7 @@ reflected about the tank (driver = the LV winding). The reverse open-loop gain a
 **LLC / SRC full-bridge primary + LLC off-resonance (`config.bridgeType` / `driveAtSwitchingFrequency`, ABT
 #91).** Both LLC and SRC default to a split-cap **half-bridge** primary (tank driven at ±Vin/2, bridge factor
 0.5). `bridgeType="fullBridge"` emits a **4-MOSFET** primary (Q1..Q4, diagonal pairs (Q1,Q4)/(Q2,Q3) on the
-two gate nets) that drives the tank at ±Vin (factor 1.0); the embedded FHA excitation and the turns-ratio
+two gate nets) that drives the tank at ±Vin (factor 1.0); the embedded excitation (FHA for LLC, the exact tank for SRC, §3.1) and the turns-ratio
 sizing both switch to 1.0, so for the same turns ratio the full bridge delivers ~2× the output, and with the
 default (doubled) turns ratio it still meets spec. Separately, LLC pins its drive to the tank resonance `fr`
 by default (M(fn=1)=1 → exactly spec, the KH improvement over MKF's off-resonance rectifier-test config);

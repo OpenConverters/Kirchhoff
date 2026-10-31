@@ -2548,7 +2548,101 @@ MAS::OperatingPoint analytical_dab(double inputVoltage,
 // Phase 5: resonant converter family (First-Harmonic Approximation).
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Ported from MKF converter_models/Src.cpp:338 (process_operating_point_for_input_voltage).
+// ── SRC exact tank (state plane), see ConverterAnalytical.hpp ──
+namespace {
+// θ1, θ2 of the two state-plane arcs of a half period for gain M (0 <= M <= 1) and capacitor peak Vc >= 0.
+// The acos arguments are clamped to [-1, 1] against rounding only: mathematically they lie inside for these ranges.
+std::pair<double, double> src_arcs(double M, double Vc) {
+    auto acosc = [](double x) { return std::acos(std::max(-1.0, std::min(1.0, x))); };
+    return {acosc((1.0 + M + M * Vc) / (1.0 + M + Vc)), acosc((1.0 - M - M * Vc) / (1.0 - M + Vc))};
+}
+constexpr double kSrcResonanceTolerance = 1e-6;   // F within this below 1 is the resonance (fr from Lr·Cr rounding)
+}  // namespace
+
+double SrcExactTank::current(double tau) const {
+    // Half-wave antisymmetry: the second half period is the first, negated.
+    double t = std::fmod(tau, 2.0 * halfPeriod);
+    if (t < 0) t += 2.0 * halfPeriod;
+    double sign = 1.0;
+    if (t >= halfPeriod) { t -= halfPeriod; sign = -1.0; }
+    const double M = gain, Vc = capacitorPeak;
+    if (t < firstArc) {
+        // Arc 1: the tank sees 1 + M; it reaches i = 0 at θ1 with radius 1 + M + Vc.
+        return sign * (1.0 + M + Vc) * std::sin(t - firstArc);
+    }
+    // Arc 2: the tank sees 1 − M, starting from i = 0 with radius 1 − M + Vc.
+    return sign * (1.0 - M + Vc) * std::sin(t - firstArc);
+}
+
+double SrcExactTank::currentRms() const {
+    const double M = gain, Vc = capacitorPeak;
+    const double r1 = 1.0 + M + Vc, r2 = 1.0 - M + Vc;
+    const double a1 = firstArc, a2 = halfPeriod - firstArc;
+    const double s1 = r1 * r1 * (a1 / 2.0 - std::sin(2.0 * a1) / 4.0);   // ∫ r1²·sin²(τ − θ1) over arc 1
+    const double s2 = r2 * r2 * (a2 / 2.0 - std::sin(2.0 * a2) / 4.0);   // ∫ r2²·sin²(τ') over arc 2
+    return std::sqrt((s1 + s2) / halfPeriod);
+}
+
+double SrcExactTank::currentPeak() const {
+    // Arc 1's |i| falls from |i(0)| to 0 (θ1 < π/2); arc 2 peaks at r2 if it reaches π/2, else ends at |i(0)|.
+    const double r2 = 1.0 - gain + capacitorPeak, a2 = halfPeriod - firstArc;
+    return std::max(std::abs(initialCurrent), a2 >= M_PI / 2.0 ? r2 : r2 * std::sin(a2));
+}
+
+SrcExactTank src_exact_tank(double frequencyRatio, double loadConductance) {
+    if (!(frequencyRatio > 0.0) || !(loadConductance > 0.0))
+        throw std::invalid_argument("src_exact_tank: the frequency ratio and the load conductance must be > 0");
+    if (frequencyRatio < 1.0 - kSrcResonanceTolerance)
+        throw std::invalid_argument("src_exact_tank: below-resonance operation (fs/f0 = " + std::to_string(frequencyRatio) +
+                                    " < 1) is not modelled (discontinuous / capacitive modes, no ZVS)");
+    SrcExactTank t{};
+    t.frequencyRatio = std::max(frequencyRatio, 1.0);   // within the tolerance below 1: the resonance itself
+    t.halfPeriod = M_PI / t.frequencyRatio;
+    const double g = t.halfPeriod, r = loadConductance;
+    if (t.frequencyRatio == 1.0) {
+        t.gain = 1.0;   // at resonance M = 1 for every load; the current is a half sine
+    } else {
+        // θ1 + θ2 − γ rises monotonically with M (both arcs grow with M and with Vc = M·r·γ/2): −γ at M = 0,
+        // π − γ > 0 at M = 1. Bisection to the double resolution.
+        auto excess = [&](double M) { const auto a = src_arcs(M, M * r * g / 2.0); return a.first + a.second - g; };
+        double lo = 0.0, hi = 1.0;
+        for (int it = 0; it < 200 && hi - lo > 1e-15; ++it) {
+            const double mid = 0.5 * (lo + hi);
+            if (excess(mid) < 0.0) lo = mid; else hi = mid;
+        }
+        t.gain = 0.5 * (lo + hi);
+    }
+    const double M = t.gain;
+    t.capacitorPeak = M * r * g / 2.0;
+    t.firstArc = src_arcs(M, t.capacitorPeak).first;
+    t.initialCurrent = -std::sqrt(std::max(0.0, t.capacitorPeak * (1.0 - M * M) * (2.0 + t.capacitorPeak)));
+    return t;
+}
+
+double src_exact_frequency_ratio(double gain, double loadConductance) {
+    if (!(gain > 0.0) || gain > 1.0)
+        throw std::invalid_argument("src_exact_frequency_ratio: the series tank's gain lies in (0, 1]; asked for " +
+                                    std::to_string(gain));
+    if (!(loadConductance > 0.0))
+        throw std::invalid_argument("src_exact_frequency_ratio: the load conductance must be > 0");
+    if (gain == 1.0) return 1.0;
+    const double M = gain, r = loadConductance;
+    // θ1 + θ2 − γ over γ ∈ (0, π]: positive for small γ (the arcs grow as √γ), π·(...) − π < 0 at γ = π for M < 1;
+    // one crossing (checked over the gain/load plane). Bisection to the double resolution.
+    auto excess = [&](double g) { const auto a = src_arcs(M, M * r * g / 2.0); return a.first + a.second - g; };
+    double lo = 0.0, hi = M_PI;
+    if (!(excess(hi) < 0.0))
+        throw std::invalid_argument("src_exact_frequency_ratio: gain " + std::to_string(M) +
+                                    " is not reached above the resonance");
+    for (int it = 0; it < 200 && hi - lo > 1e-15 * hi; ++it) {
+        const double mid = 0.5 * (lo + hi);
+        if (excess(mid) > 0.0) lo = mid; else hi = mid;
+    }
+    return M_PI / (0.5 * (lo + hi));
+}
+
+// Ported from MKF converter_models/Src.cpp:338 (process_operating_point_for_input_voltage); the tank is now the
+// exact state-plane solution (ABT #2173), not the FHA divider.
 MAS::OperatingPoint analytical_src(double inputVoltage,
                                    const std::vector<double>& outputVoltages,
                                    const std::vector<double>& outputCurrents,
@@ -2566,31 +2660,29 @@ MAS::OperatingPoint analytical_src(double inputVoltage,
     const double Lr = resonantInductance, Cr = resonantCapacitance;
     if (Lr <= 0 || Cr <= 0) throw std::invalid_argument("analytical_src: resonant Lr/Cr must be > 0");
     const double k_bridge = bridgeVoltageFactor;
+    if (!(k_bridge > 0) || !(inputVoltage > 0))
+        throw std::invalid_argument("analytical_src: the input voltage and the bridge factor must be > 0");
 
     const double fr = 1.0 / (2.0 * M_PI * std::sqrt(Lr * Cr));
     const double Lambda = fsw / fr;
-    // At-resonance (Λ = 1, X = 0, φ = 0) is the canonical SRC operating point; allow a small tolerance
-    // so fsw == fr (with fr recomputed from Lr·Cr rounding) is not misread as below-resonance. Genuine
-    // below-resonance (capacitive / hard-switching) still throws.
-    if (Lambda < 1.0 - 1e-6)
+    if (Lambda < 1.0 - kSrcResonanceTolerance)
         throw std::invalid_argument("analytical_src: below-resonance operation (Lambda = " +
                                     std::to_string(Lambda) + " < 1) not supported (capacitive / hard-switching)");
 
     const size_t nOutputs = outputVoltages.size();
     const double n_main = turnsRatios[0];
     if (n_main <= 0) throw std::invalid_argument("analytical_src: turns ratio must be > 0");
-    const double Rload = outputVoltages[0] / outputCurrents[0];
-    const double Rac = (8.0 * n_main * n_main) / (M_PI * M_PI) * Rload;   // canonical FHA Rac
-
-    const double w = 2.0 * M_PI * fsw;
-    const double XLr = w * Lr;
-    const double XCr = 1.0 / (w * Cr);
-    const double X = XLr - XCr;                  // > 0 above resonance (inductive)
-    const double Zin = std::sqrt(Rac * Rac + X * X);
-
-    const double Vbridge_pk_fund = (4.0 / M_PI) * k_bridge * inputVoltage;
-    const double ILr_pk = Vbridge_pk_fund / Zin;
-    const double phi = std::atan2(X, Rac);
+    // The reflected load: every rail's rectifier DC resistance referred through its ratio, in parallel.
+    double reflectedConductance = 0.0;
+    for (size_t i = 0; i < nOutputs; ++i) {
+        if (!(outputVoltages[i] > 0) || !(outputCurrents[i] > 0) || !(turnsRatios[i] > 0))
+            throw std::invalid_argument("analytical_src: output " + std::to_string(i) +
+                                        " needs a positive voltage, current and turns ratio");
+        reflectedConductance += outputCurrents[i] / (outputVoltages[i] * turnsRatios[i] * turnsRatios[i]);
+    }
+    const double R0 = std::sqrt(Lr / Cr), Vg = k_bridge * inputVoltage;
+    const SrcExactTank tank = src_exact_tank(Lambda, R0 * reflectedConductance);
+    const double w0 = 2.0 * M_PI * fr;
 
     const int N = 256;
     const int totalSamples = N + 1;              // closed period (last == first)
@@ -2599,18 +2691,17 @@ MAS::OperatingPoint analytical_src(double inputVoltage,
     std::vector<double> time_full(totalSamples), ILr_full(totalSamples), Vpri_full(totalSamples);
     for (int k = 0; k < totalSamples; ++k) {
         double t = k * dt;
-        double theta = w * t;
         time_full[k] = t;
-        ILr_full[k] = ILr_pk * std::sin(theta - phi);
+        // t = 0 is the positive bridge transition; the tank current there is still negative (lagging, ZVS).
+        ILr_full[k] = tank.current(w0 * t) * Vg / R0;
         // The transformer primary TERMINAL voltage (dot reference): the rectifier clamps every secondary at
         // ±Vout in phase with the tank current, so the ideal transformer's primary sees ±n·Vout with the SAME
-        // phase. The bridge square ±k·Vin is not the winding voltage — it includes the Lr/Cr tank drop and
-        // leads the winding voltage by the tank angle phi.
+        // phase. The bridge square ±k·Vin is not the winding voltage — it includes the Lr/Cr tank drop.
         Vpri_full[k] = (ILr_full[k] >= 0.0) ? +n_main * outputVoltages[0] : -n_main * outputVoltages[0];
     }
 
     MAS::OperatingPoint operatingPoint;
-    // Primary: sinusoidal tank current, ±n·Vout transformer voltage in phase with it.
+    // Primary: the exact tank current, ±n·Vout transformer voltage in phase with it.
     {
         MAS::Waveform iW; iW.set_ancillary_label(Lbl::CUSTOM); iW.set_data(ILr_full); iW.set_time(time_full);
         MAS::Waveform vW; vW.set_ancillary_label(Lbl::CUSTOM); vW.set_data(Vpri_full); vW.set_time(time_full);
@@ -2618,18 +2709,15 @@ MAS::OperatingPoint analytical_src(double inputVoltage,
             WP::complete_excitation(iW, vW, fsw, "Primary"));
     }
 
+    // Every output's voltage, current and ratio is positive (checked above).
     double total_g = 0.0;
-    for (size_t i = 0; i < nOutputs; ++i)
-        if (outputVoltages[i] > 0 && outputCurrents[i] > 0) total_g += outputCurrents[i] / outputVoltages[i];
-    if (total_g <= 0) total_g = 1.0;
+    for (size_t i = 0; i < nOutputs; ++i) total_g += outputCurrents[i] / outputVoltages[i];
 
     for (size_t outputIdx = 0; outputIdx < nOutputs; ++outputIdx) {
-        double n_i = turnsRatios[outputIdx];
-        if (n_i <= 0) n_i = 1.0;
+        const double n_i = turnsRatios[outputIdx];
         const double Vout_i = outputVoltages[outputIdx];
         const double Iout_i = outputCurrents[outputIdx];
-        const double share = (Vout_i > 0 && Iout_i > 0) ? (Iout_i / Vout_i) / total_g
-                                                        : (outputIdx == 0 ? 1.0 : 0.0);
+        const double share = (Iout_i / Vout_i) / total_g;
 
         if (rectifier == SrcRectifier::CENTER_TAPPED) {
             for (size_t halfIdx = 0; halfIdx < 2; ++halfIdx) {

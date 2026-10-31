@@ -786,6 +786,94 @@ TEST_CASE("analytical_src center-tapped rectifier: 3 windings", "[analytical][so
     CHECK(*processed_current(op, 2).get_positive_peak() <= 0.05);
 }
 
+// ─── ABT #2173: the exact series-resonant tank (state plane) ────────────────────────────────────────────────
+// An independent check of the closed form: integrate the normalised tank (dv/dτ = i, di/dτ = ±1 − M·sgn(i) − v,
+// the bridge square against a rectifier clamp of fixed M) to steady state and read its rectified current J = <|i|>
+// and rms. The closed form at the same frequency, into the load conductance J/M that current implies, must give
+// back the gain M and the same rms.
+namespace {
+struct TankSim { double J, rms, peak; };
+TankSim simulate_src_tank(double F, double M) {
+    const double g = M_PI / F;
+    const int steps = 2000;
+    const double h = g / steps;
+    double v = 0.0, i = 0.0, sumAbs = 0.0, sumSq = 0.0, peak = 0.0, span = 0.0;
+    const int cycles = 600;
+    for (int c = 0; c < cycles; ++c)
+        for (const double drive : {1.0, -1.0})
+            for (int k = 0; k < steps; ++k) {
+                auto f = [&](double vv, double ii, double& dv, double& di) {
+                    dv = ii; di = drive - M * (ii > 0 ? 1.0 : (ii < 0 ? -1.0 : drive)) - vv; };
+                double k1v, k1i, k2v, k2i, k3v, k3i, k4v, k4i;
+                f(v, i, k1v, k1i);
+                f(v + h / 2 * k1v, i + h / 2 * k1i, k2v, k2i);
+                f(v + h / 2 * k2v, i + h / 2 * k2i, k3v, k3i);
+                f(v + h * k3v, i + h * k3i, k4v, k4i);
+                v += h / 6 * (k1v + 2 * k2v + 2 * k3v + k4v);
+                i += h / 6 * (k1i + 2 * k2i + 2 * k3i + k4i);
+                if (c >= cycles - 20) { sumAbs += std::abs(i) * h; sumSq += i * i * h; span += h; peak = std::max(peak, std::abs(i)); }
+            }
+    return {sumAbs / span, std::sqrt(sumSq / span), peak};
+}
+}  // namespace
+
+TEST_CASE("SRC exact tank: the state-plane closed form matches a time-domain integration of the tank (ABT #2173)",
+          "[analytical][solver][src][abt2173]") {
+    using Kirchhoff::analytical::src_exact_tank;
+    using Kirchhoff::analytical::src_exact_frequency_ratio;
+    for (const auto& [F, M] : std::vector<std::pair<double, double>>{{1.05, 0.95}, {1.2, 0.8}, {1.5, 0.5}, {2.3, 0.4}}) {
+        DYNAMIC_SECTION("F " << F << ", M " << M) {
+            const TankSim sim = simulate_src_tank(F, M);
+            const auto t = src_exact_tank(F, sim.J / M);
+            INFO("simulated J " << sim.J << ", rms " << sim.rms << ", peak " << sim.peak << "; closed form M " << t.gain
+                 << ", rms " << t.currentRms() << ", peak " << t.currentPeak());
+            CHECK(t.gain == Catch::Approx(M).epsilon(2e-4));
+            CHECK(t.currentRms() == Catch::Approx(sim.rms).epsilon(1e-3));
+            CHECK(t.currentPeak() == Catch::Approx(sim.peak).epsilon(1e-3));
+            // The rectified current the closed form carries is the simulated one: J = 2·Vc/γ.
+            CHECK(2.0 * t.capacitorPeak / t.halfPeriod == Catch::Approx(sim.J).epsilon(1e-3));
+            // The tank current lags the bridge (ZVS): negative at the positive transition, zero at θ1.
+            CHECK(t.initialCurrent < 0.0);
+            CHECK(t.current(t.firstArc) == Catch::Approx(0.0).margin(1e-12));
+            // The frequency solve is the inverse of the gain solve.
+            CHECK(src_exact_frequency_ratio(t.gain, sim.J / M) == Catch::Approx(F).epsilon(1e-9));
+        }
+    }
+    SECTION("at resonance the gain is 1 for every load and the current is a sine of mean |i| = J") {
+        for (const double r : {0.1, 1.0, 5.0}) {
+            const auto t = src_exact_tank(1.0, r);
+            CHECK(t.gain == 1.0);
+            CHECK(t.initialCurrent == 0.0);
+            CHECK(t.currentPeak() == Catch::Approx(M_PI / 2.0 * r));
+            CHECK(t.currentRms() == Catch::Approx(M_PI / (2.0 * std::sqrt(2.0)) * r));
+        }
+        CHECK(src_exact_frequency_ratio(1.0, 0.7) == 1.0);
+    }
+    SECTION("below resonance, or a gain the tank cannot give, throws") {
+        CHECK_THROWS_WITH(src_exact_tank(0.9, 1.0), Catch::Matchers::ContainsSubstring("below-resonance"));
+        CHECK_THROWS(src_exact_frequency_ratio(1.2, 1.0));
+        CHECK_THROWS(src_exact_tank(1.2, 0.0));
+    }
+}
+
+TEST_CASE("analytical_src emits the exact tank current: rms, peak and power above resonance (ABT #2173)",
+          "[analytical][solver][src][abt2173]") {
+    // 400 V full bridge -> 48 V / 5 A through n 7.5, Lr 40 uH / Cr 63.3 nF (fr 100.0 kHz), driven at 125 kHz.
+    const double Lr = 40e-6, Cr = 63.3e-9, Vin = 400.0, Vo = 48.0, Io = 5.0, n = 7.5, fsw = 125e3;
+    const MAS::OperatingPoint op = Kirchhoff::analytical::analytical_src(Vin, {Vo}, {Io}, {n}, fsw, Lr, Cr);
+    const double R0 = std::sqrt(Lr / Cr), f0 = 1.0 / (2.0 * M_PI * std::sqrt(Lr * Cr));
+    const auto t = Kirchhoff::analytical::src_exact_tank(fsw / f0, R0 / (n * n * Vo / Io));
+    const double scale = Vin / R0;
+    INFO("exact M " << t.gain << ", rms " << t.currentRms() * scale << " A, peak " << t.currentPeak() * scale << " A");
+    CHECK(*processed_current(op, 0).get_rms() == Catch::Approx(t.currentRms() * scale).epsilon(0.005));
+    CHECK(*op.get_excitations_per_winding()[0].get_current()->get_processed()->get_peak() ==
+          Catch::Approx(t.currentPeak() * scale).epsilon(0.01));
+    // FHA's sinusoid at the same point carries a different current: the test separates the two models.
+    const double w = 2.0 * M_PI * fsw, Rac = 8.0 / (M_PI * M_PI) * n * n * Vo / Io;
+    const double fhaRms = (4.0 / M_PI) * Vin / std::hypot(Rac, w * Lr - 1.0 / (w * Cr)) / std::sqrt(2.0);
+    CHECK(std::abs(fhaRms / (t.currentRms() * scale) - 1.0) > 0.03);
+}
+
 TEST_CASE("analytical_src rejects below-resonance and bad tank", "[analytical][solver][src]") {
     using Kirchhoff::analytical::analytical_src;
     CHECK_THROWS(analytical_src(400, {48}, {5}, {8}, 80000, 40e-6, 63.3e-9));   // Lambda=0.8 < 1
@@ -1980,6 +2068,15 @@ TEST_CASE("LLC pinned turns ratio: the operating point is solved in the band, me
 
             const std::string raw = Kirchhoff::api::process_converter("llc", spec.dump(), "analytical");
             INFO(raw.substr(0, 400));
+            if (c.n == 3.0) {
+                // Alf 2026-10-30: a design that cannot run at an end of its own input range throws (ABT #2171).
+                // llc_1503_spec's range is 350-425 V: behind the half bridge n=3 needs a tank gain of 1.62 at 350 V,
+                // above the 1.40 the band reaches, so the converter is refused at that end of its range.
+                REQUIRE(raw.rfind("Exception:", 0) == 0);
+                CHECK_THAT(raw, Catch::Matchers::ContainsSubstring("cannot be evaluated at the input voltage 350 V"));
+                CHECK_THAT(raw, Catch::Matchers::ContainsSubstring("pinned turns ratio 3 cannot deliver 90 V from 350 V"));
+                continue;
+            }
             REQUIRE(raw.rfind("Exception:", 0) != 0);
             const nlohmann::json out = nlohmann::json::parse(raw);
             // The diagnostics report the frequency the converter runs at, and the 180 kHz tank.
@@ -2046,7 +2143,8 @@ double two_sided_gain_at_operating_frequency(const D& d) {
 // Solve checks shared by both topologies: in band, on the expected side of fr, gain meets Vout; then the emitted
 // transformer excitations balance power and the secondary rms is the full-bridge rectifier's.
 template <class D>
-void check_two_sided_operating_point(const char* topology, const D& d, const nlohmann::json& spec, bool belowResonance) {
+void check_two_sided_operating_point(const char* topology, const D& d, const nlohmann::json& spec, bool belowResonance,
+                                     const char* refusedAtRangeEnd = nullptr) {
     const double Vin = 400.0, Vout = 48.0, Pout = 480.0, eta = 0.95, Iout = Pout / Vout;
     CHECK(d.resonantFrequency == Catch::Approx(100e3));
     CHECK(d.operatingFrequency >= 70e3);
@@ -2059,6 +2157,13 @@ void check_two_sided_operating_point(const char* topology, const D& d, const nlo
 
     const std::string raw = Kirchhoff::api::process_converter(topology, spec.dump(), "analytical");
     INFO(raw.substr(0, 400));
+    if (refusedAtRangeEnd) {
+        // Alf 2026-10-30: a design that cannot run at an end of its own input range throws (ABT #2171).
+        REQUIRE(raw.rfind("Exception:", 0) == 0);
+        CHECK_THAT(raw, Catch::Matchers::ContainsSubstring(std::string("cannot be evaluated at the input voltage ") +
+                                                           refusedAtRangeEnd));
+        return;
+    }
     REQUIRE(raw.rfind("Exception:", 0) != 0);
     const nlohmann::json out = nlohmann::json::parse(raw);
     CHECK(out.at("diagnostics").at("switchingFrequency").get<double>() == Catch::Approx(d.operatingFrequency));
@@ -2123,7 +2228,10 @@ TEST_CASE("CLLLC: the unity-gain ratio stays at resonance; a pinned ratio solves
     }
     SECTION("pinned N=8.05 needs gain 1.017, below resonance (this Q=0.4, K=6 tank peaks at ~1.03)") {
         const nlohmann::json spec = two_sided_1503_spec(8.05);
-        check_two_sided_operating_point("clllc", Kirchhoff::design_clllc(spec), spec, true);
+        // Alf 2026-10-30: a design that cannot run at an end of its own input range throws (ABT #2171). The spec's
+        // range is 380-420 V: at 380 V N=8.05 needs gain 1.070, above the ~1.03 peak of this tank in the band.
+        check_two_sided_operating_point("clllc", Kirchhoff::design_clllc(spec), spec, true,
+                                        "380 V: design_clllc: the pinned turns ratio 8.05 cannot deliver 48 V from 380 V");
     }
 }
 
@@ -2264,13 +2372,29 @@ TwoSidedDeckRun run_two_sided_deck(const nlohmann::json& tas, double fsw, double
 //  - the deck's source-to-load efficiency is plausible (ideal parts: above 90 %, and no energy created).
 template <class D>
 void check_two_sided_ngspice(const char* topology, const D& d, const nlohmann::json& spec, const nlohmann::json& tas,
-                             double stopTime = 0.016) {
+                             double stopTime = 0.016, const char* refusedAtRangeEnd = nullptr) {
     const double Vin = 400.0, Vout = 400.0;
     const TwoSidedDeckRun deck = run_two_sided_deck(tas, d.operatingFrequency, Vin, "vvin#branch", "vout",
                                                     d.loadResistance, stopTime);
     const std::string rawSim = Kirchhoff::api::process_converter(topology, spec.dump(), "ngspice");
     const std::string rawAn  = Kirchhoff::api::process_converter(topology, spec.dump(), "analytical");
     INFO(rawSim.substr(0, 400));
+    if (refusedAtRangeEnd) {
+        // Alf 2026-10-30: a design that cannot run at an end of its own input range throws (ABT #2171). Both engines
+        // refuse the spec; the design's own deck at the operating point still runs and is checked on its own.
+        INFO(rawAn.substr(0, 400));
+        for (const std::string* raw : {&rawSim, &rawAn}) {
+            REQUIRE(raw->rfind("Exception:", 0) == 0);
+            CHECK_THAT(*raw, Catch::Matchers::ContainsSubstring(std::string("cannot be evaluated at the input voltage ") +
+                                                                refusedAtRangeEnd));
+        }
+        INFO(topology << ": deck Vout " << deck.vDelivered << " V, Psource " << deck.pSource << " W, Pload "
+             << deck.pLoad << " W");
+        CHECK(deck.vDelivered == Catch::Approx(Vout).epsilon(0.06));
+        CHECK(deck.pLoad / deck.pSource > 0.90);
+        CHECK(deck.pLoad / deck.pSource <= 1.0);
+        return;
+    }
     REQUIRE(rawSim.rfind("Exception:", 0) != 0);
     REQUIRE(rawAn.rfind("Exception:", 0) != 0);
     const nlohmann::json simOut = nlohmann::json::parse(rawSim), anOut = nlohmann::json::parse(rawAn);
@@ -2435,10 +2559,18 @@ void check_tank_in_deck(const D& d, const nlohmann::json& tas) {
 // The design's FHA gain at its operating frequency meets the requirement, and the analytical operating point
 // balances power: the secondary delivers Pout, the primary carries Pout/η (2 %, as the #1503 checks).
 template <class D>
-void check_two_sided_solved(const char* topology, const D& d, const nlohmann::json& spec, double Pout, double eta) {
+void check_two_sided_solved(const char* topology, const D& d, const nlohmann::json& spec, double Pout, double eta,
+                            const char* refusedAtRangeEnd = nullptr) {
     CHECK(two_sided_gain_at_operating_frequency(d) == Catch::Approx(d.requiredGain).epsilon(1e-6));
     const std::string raw = Kirchhoff::api::process_converter(topology, spec.dump(), "analytical");
     INFO(raw.substr(0, 600));
+    if (refusedAtRangeEnd) {
+        // Alf 2026-10-30: a design that cannot run at an end of its own input range throws (ABT #2171).
+        REQUIRE(raw.rfind("Exception:", 0) == 0);
+        CHECK_THAT(raw, Catch::Matchers::ContainsSubstring(std::string("cannot be evaluated at the input voltage ") +
+                                                           refusedAtRangeEnd));
+        return;
+    }
     REQUIRE(raw.rfind("Exception:", 0) != 0);
     const nlohmann::json out = nlohmann::json::parse(raw);
     CHECK(out.at("diagnostics").at("switchingFrequency").get<double>() == Catch::Approx(d.operatingFrequency));
@@ -2496,7 +2628,10 @@ TEST_CASE("CLLC with a pinned turns ratio sizes Ro and the secondary tank with T
     }
     SECTION("the #1503 solve still meets Vout and balances power at the pinned ratio") {
         const auto spec = cllc_web_spec(0.97, 200e-6);
-        check_two_sided_solved("cllc", Kirchhoff::design_cllc(spec), spec, 3300.0, 0.97);
+        // Alf 2026-10-30: a design that cannot run at an end of its own input range throws (ABT #2171).
+        // The spec's range is 380-420 V: at 380 V n 0.97 needs gain 1.053, above the 1.008 this tank reaches.
+        check_two_sided_solved("cllc", Kirchhoff::design_cllc(spec), spec, 3300.0, 0.97,
+                               "380 V: design_cllc: the pinned turns ratio 0.97 cannot deliver 400 V from 380 V");
     }
 }
 
@@ -2517,7 +2652,10 @@ TEST_CASE("CLLC ngspice with a pinned turns ratio: the symmetric tank reaches th
     const auto tas = Kirchhoff::build_cllc_tas(d);
     check_tank_in_deck(d, tas);
     CHECK(deck_element_value(deck_of(tas), "Lr2") == Catch::Approx(40e-6 / (0.97 * 0.97)).epsilon(1e-4));
-    check_two_sided_ngspice("cllc", d, spec, tas);
+        // Alf 2026-10-30: a design that cannot run at an end of its own input range throws (ABT #2171).
+    // The spec's range is 380-420 V: at 380 V n 0.97 needs gain 1.053, above the 1.008 this tank reaches.
+    check_two_sided_ngspice("cllc", d, spec, tas, 0.016,
+                            "380 V: design_cllc: the pinned turns ratio 0.97 cannot deliver 400 V from 380 V");
 }
 
 TEST_CASE("CLLC honours pinned tank values and solves the operating frequency from them, or throws (ABT #1538)",
@@ -2550,7 +2688,10 @@ TEST_CASE("CLLC honours pinned tank values and solves the operating frequency fr
         CHECK(d.primaryResonantCapacitance == 40e-9);
         CHECK(d.magnetizingInductance == 200e-6);
         CHECK(d.secondaryResonantInductance == Catch::Approx(45e-6 / (0.97 * 0.97)));
-        check_two_sided_solved("cllc", d, spec, 3300.0, 0.97);
+        // Alf 2026-10-30: a design that cannot run at an end of its own input range throws (ABT #2171).
+        // The spec's range is 380-420 V: at 380 V n 0.97 needs gain 1.053, above the 1.008 this tank reaches.
+        check_two_sided_solved("cllc", d, spec, 3300.0, 0.97,
+                               "380 V: design_cllc: the pinned turns ratio 0.97 cannot deliver 400 V from 380 V");
     }
     SECTION("only Lr1 pinned: Cr1 follows so the tank still resonates at fr") {
         auto spec = cllc_web_spec(0.0, 0.0);
@@ -2603,7 +2744,12 @@ TEST_CASE("CLLLC honours pinned primarySeriesInductance and primaryResonantCapac
         CHECK(d.resonantFrequency == Catch::Approx(1.0 / (2.0 * M_PI * std::sqrt(50e-6 * 33e-9))));
         CHECK(d.operatingFrequency >= 90e3);
         CHECK(d.operatingFrequency <= 150e3);
-        check_two_sided_solved("clllc", d, spec, 480.0, 0.95);
+        // Alf 2026-10-30: a design that cannot run at an end of its own input range throws (ABT #2171). The spec's
+        // range is 380-420 V: at 420 V N 8 needs gain 0.962406, and the FHA gain falls monotonically above resonance to
+        // 0.962485 at the 150 kHz band maximum (evaluated at the band edge itself, not a sampling artefact): the
+        // output needs ~150.06 kHz, just outside the band.
+        check_two_sided_solved("clllc", d, spec, 480.0, 0.95,
+                               "420 V: design_clllc: the pinned turns ratio 8 cannot deliver 48 V from 420 V");
         check_tank_in_deck(d, Kirchhoff::build_clllc_tas(d));
     }
     SECTION("a stated primaryResonantFrequency must agree with the pinned tank") {
@@ -2647,7 +2793,10 @@ TEST_CASE("CLLC / CLLLC ngspice with pinned tank values: the pins reach the deck
         // 30 ms: the pinned tank (characteristic impedance ~39 ohm against a ~32-39 ohm reflected load, Q ~1) rings
         // against the output capacitor longer than the engine-sized one; at 16 ms the output is still settling and
         // the source-to-load average reads a few 0.01 % above 1.
-        check_two_sided_ngspice("clllc", d, spec, tas, 0.030);
+        // Alf 2026-10-30: a design that cannot run at an end of its own input range throws (ABT #2171). The spec's
+        // range is 380-420 V: at 380 V N 0.95 needs gain 1.031, above the 1.004 this tank reaches.
+        check_two_sided_ngspice("clllc", d, spec, tas, 0.030,
+                                "380 V: design_clllc: the pinned turns ratio 0.95 cannot deliver 400 V from 380 V");
     }
 }
 
@@ -2898,22 +3047,27 @@ TEST_CASE("SRC driveAtSwitchingFrequency: the tank resonates at config.resonantF
             CHECK(1.0 / (2.0 * M_PI * std::sqrt(d.resonantInductance * d.resonantCapacitance)) == Catch::Approx(100e3));
             CHECK(d.switchingFrequency == fsw);
             CHECK(d.loadResistance == Catch::Approx(Rload));
-            // Series-tank FHA gain into the reflected design load (centre-tapped: n·(Vo + Vd) = M·η·k·Vin).
-            const double w = 2.0 * M_PI * fsw, Rac = 8.0 / (M_PI * M_PI) * n * n * Rload;
-            const double X = w * d.resonantInductance - 1.0 / (w * d.resonantCapacitance);
-            const double M = Rac / std::hypot(Rac, X);
+            // The series tank's exact steady-state gain into the reflected design load (ABT #2173: the state-plane
+            // solution replaced the FHA divider Rac/|Rac + jX|; the load is the rectifier's DC resistance referred to the
+            // primary, n²·Rload). Centre-tapped: n·(Vo + Vd) = M·η·k·Vin.
+            const double R0 = std::sqrt(d.resonantInductance / d.resonantCapacitance);
+            const auto tank = Kirchhoff::analytical::src_exact_tank(fsw / 100e3, R0 / (n * n * Rload));
+            const double M = tank.gain;
             CHECK(d.tankGain == Catch::Approx(M));
             CHECK(d.outputVoltage == Catch::Approx(M * eta * k * Vin / n - Vd).epsilon(1e-9));
             CHECK(d.outputPower == Catch::Approx(d.outputVoltage * d.outputVoltage / Rload).epsilon(1e-9));
             // At resonance the tank gain is 1 and the rail carries the design's 1.08 gain headroom; above it the series
-            // tank steps down from there (M < 1). With that headroom 115 kHz still sits above 48 V (50.6 V).
-            if (fsw == 100e3) CHECK(d.outputVoltage == Catch::Approx(1.08 * (48.0 + Vd) - Vd).epsilon(1e-3));
-            else { CHECK(M < 1.0); CHECK(d.outputVoltage < 1.08 * (48.0 + Vd) - Vd); }
+            // tank steps down from there (M < 1). The turns ratio is sized at the range minimum 380 V (ABT #2160), so
+            // driven at 400 V the resonant rail is 400/380 above the headroom point: 1.08·(48 + Vd)·400/380 − Vd = 54.7 V
+            // (it was 1.08·(48 + Vd) − Vd = 51.9 V with n sized at the 400 V operating point).
+            const double resonantRail = 1.08 * (48.0 + Vd) * 400.0 / 380.0 - Vd;
+            if (fsw == 100e3) CHECK(d.outputVoltage == Catch::Approx(resonantRail).epsilon(1e-3));
+            else { CHECK(M < 1.0); CHECK(d.outputVoltage < resonantRail); }
 
             const nlohmann::json tas = Kirchhoff::build_src_tas(d);
             CHECK(stimulus_frequency(tas) == fsw);
-            // The resonant inductor carries the tank current, which lags the bridge by arg(Zin): the in-phase part
-            // carries Pin, so |I| = Pin/(Vtank1·cos) with cos = Rac/|Zin| = M (plus the small magnetizing term).
+            // The resonant inductor carries the exact tank current (ABT #2173; it was the FHA sinusoid Pin/(Vtank1·M)):
+            // its rms from the state-plane solution, plus the small magnetizing term.
             {
                 const nlohmann::json* lr = nullptr;
                 std::function<void(const nlohmann::json&)> find = [&](const nlohmann::json& j) {
@@ -2927,8 +3081,7 @@ TEST_CASE("SRC driveAtSwitchingFrequency: the tank resonates at config.resonantF
                 REQUIRE(lr != nullptr);
                 const nlohmann::json& exLr = lr->at("inputs").at("operatingPoints").at(0).at("excitationsPerWinding").at(0);
                 const double iLrRms = exLr.at("current").at("processed").at("rms").get<double>();
-                const double Vt = 2.0 * std::sqrt(2.0) * (k * Vin) / M_PI;
-                const double iLoad = d.outputPower / eta / (Vt * M);
+                const double iLoad = tank.currentRms() * k * Vin / R0;
                 const double iMag = (k * Vin) * (0.25 / fsw) / d.magnetizingInductance / std::sqrt(3.0);
                 INFO("Lr rms " << iLrRms << " A, expected " << std::hypot(iLoad, iMag) << " A");
                 CHECK(iLrRms == Catch::Approx(std::hypot(iLoad, iMag)).epsilon(1e-6));
@@ -2985,11 +3138,15 @@ TEST_CASE("SRC: a resonant frequency without the flag, or a forced point below r
         CHECK_THROWS_WITH(Kirchhoff::design_src(src_1539_spec(120e3, false)),
                           Catch::Matchers::ContainsSubstring("differs from the operating switching frequency"));
     }
-    SECTION("the help-me path is unchanged: resonantFrequency equal to switchingFrequency designs and drives at fr") {
+    SECTION("the help-me path: resonantFrequency equal to switchingFrequency designs the tank at fr") {
         const auto d = Kirchhoff::design_src(src_1539_spec(100e3, false));
         CHECK(d.resonantFrequency == Catch::Approx(100e3));
         CHECK(d.outputVoltage == 48.0);
-        CHECK(d.tankGain == 1.0);
+        // The turns ratio is sized at the range minimum 380 V and the 400 V operating point is regulated by frequency
+        // (ABT #2160): the bridge runs above fr where the tank gain is 380/400 of the resonant one (it was driven at fr,
+        // gain 1, when n was sized at the operating point).
+        CHECK(d.tankGain == Catch::Approx(380.0 / 400.0));
+        CHECK(d.switchingFrequency > 100e3);
     }
     SECTION("below the series resonance the tank input is capacitive") {
         CHECK_THROWS_WITH(Kirchhoff::design_src(src_1539_spec(90e3, true)), Catch::Matchers::ContainsSubstring("capacitive"));

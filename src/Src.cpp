@@ -238,14 +238,17 @@ SrcDesign design_src(const json& tasInputs) {
 
     // ── Forced drive frequency (ABT #1539) ──
     // Driven at a forced frequency the output voltage is a RESULT, at resonance too (gain 1 there delivers the
-    // design's gain headroom above the target, which the default path leaves to the closed-loop regulator): the series-tank FHA gain M = Rac/|Rac + j(ωLr − 1/(ωCr))| (the
-    // model analytical_src uses; Lm = 10·Lr stays out of it) into the design load delivers, per rail,
+    // design's gain headroom above the target, which the default path leaves to the closed-loop regulator): the
+    // series tank's exact steady-state gain M (analytical::src_exact_tank, the model analytical_src uses; Lm = 10·Lr
+    // stays out of it) into the design load delivers, per rail,
     // n_i·(Vo_i + k·Vd_i) = c·M·η·Vbridge (CT: c 1, k 1; FB: c 1, k 2; CD: c cdOutputFactor, k 1), the same relation
     // the ratio above is sized from at M = 1/headroom. The load resistance is kept; the power follows V²/R. Below
     // resonance the tank input is capacitive (no ZVS) and outside this model: that throws.
     d.tankGain = 1.0;
     // The reflected AC load the series tank drives (all rails in parallel; CD reflects through cdOutputFactor²) and
-    // the series-tank FHA gain into it, M(f) = Rac/|Rac + j(ωLr − 1/(ωCr))| — the model analytical_src uses.
+    // the series tank's exact steady-state gain into it (ABT #2173: the state-plane solution, which replaced the FHA
+    // divider Rac/|Rac + jX| — FHA overstates the gain above resonance, so the deck delivered less than designed).
+    // The exact model takes the rectifier's DC resistance referred to the primary, Re = π²/8·Rac.
     auto reflectedRac = [&]() {
         double gac = 0.0;
         for (const auto& leg : d.outputs) {
@@ -258,10 +261,10 @@ SrcDesign design_src(const json& tasInputs) {
         }
         return 1.0 / gac;
     };
-    auto tankGainAt = [&](double f, double Rac) {
-        const double w = 2.0 * M_PI * f;
-        return Rac / std::hypot(Rac, w * d.resonantInductance - 1.0 / (w * d.resonantCapacitance));
-    };
+    const double tankF0 = 1.0 / (2.0 * M_PI * std::sqrt(d.resonantInductance * d.resonantCapacitance));
+    const double tankR0 = std::sqrt(d.resonantInductance / d.resonantCapacitance);
+    auto loadConductance = [&]() { return tankR0 / (M_PI * M_PI / 8.0 * reflectedRac()); };   // R0/Re
+    auto tankGainAt = [&](double f) { return analytical::src_exact_tank(f / tankF0, loadConductance()).gain; };
     if (driveAtFsw) {
         const double fsw = d.switchingFrequency;
         const double ftank = 1.0 / (2.0 * M_PI * std::sqrt(d.resonantInductance * d.resonantCapacitance));
@@ -270,8 +273,7 @@ SrcDesign design_src(const json& tasInputs) {
                                         " Hz, below the series-tank resonance " + std::to_string(ftank) +
                                         " Hz, the tank input is capacitive (no ZVS): below-resonance operation is not "
                                         "modelled. Drive at or above the resonance");
-        const double RacDrive = reflectedRac();
-        const double M = tankGainAt(fsw, RacDrive);
+        const double M = tankGainAt(fsw);
         d.tankGain = M;
         for (size_t i = 0; i < d.outputs.size(); ++i) {
             auto& leg = d.outputs[i];
@@ -294,10 +296,9 @@ SrcDesign design_src(const json& tasInputs) {
         // inductive, ZVS branch). The design point is the range minimum Vin_min, where the transformer above is sized
         // and the bridge runs at the reference frequency (the series resonance fr, as before). At a higher input the
         // same delivered output needs the tank gain scaled by Vin_min/Vin, so the bridge runs above the reference at
-        // the frequency where the FHA gain M(f) (into the design's reflected load) equals M(f_ref)·Vin_min/Vin:
-        //   X = Rac·√(1/M² − 1),  ωLr − 1/(ωCr) = X  ⇒  ω = (X + √(X² + 4Lr/Cr)) / (2Lr).
-        // tankGain carries the RELATIVE gain Vin_min/Vin (1 at the reference, as the stresses always assumed), so the
-        // tank current that carries Pin is Pin/(Vtank1·tankGain). A spec without a range (Vin = Vin_min) keeps the
+        // the frequency where the exact tank gain M(f) (into the design's reflected load) equals M(f_ref)·Vin_min/Vin
+        // (analytical::src_exact_frequency_ratio, ABT #2173; FHA put it too high, the deck delivered 14 % less).
+        // tankGain carries the RELATIVE gain Vin_min/Vin (1 at the reference). A spec without a range (Vin = Vin_min) keeps the
         // reference point exactly. An input below Vin_min needs a gain above the resonance peak: no frequency
         // delivers it, so it throws; so does a solved frequency outside a stated switching band.
         // Reference: the design frequency, unless a pinned tank resonates above it (design_src accepts a pinned tank
@@ -321,11 +322,9 @@ SrcDesign design_src(const json& tasInputs) {
                 " V, and the SRC can only step down from there");
         double fOp = fRef;
         if (relativeGain < 1.0) {
-            const double Rac = reflectedRac();
-            const double Mt = tankGainAt(fRef, Rac) * relativeGain;
-            const double X = Rac * std::sqrt(1.0 / (Mt * Mt) - 1.0);
-            const double Lr = d.resonantInductance, Cr = d.resonantCapacitance;
-            fOp = (X + std::sqrt(X * X + 4.0 * Lr / Cr)) / (2.0 * Lr) / (2.0 * M_PI);
+            const double Mref = tankGainAt(fRef);
+            const double Mt = Mref * relativeGain;
+            fOp = analytical::src_exact_frequency_ratio(Mt, loadConductance()) * tankF0;
             if (!(fOp > fRef))
                 throw std::runtime_error("design_src: the regulated frequency " + num(fOp) +
                                          " Hz is not above the reference " + num(fRef) + " Hz");
@@ -336,7 +335,7 @@ SrcDesign design_src(const json& tasInputs) {
                         "design_src: at the input voltage " + num(Vin) + " V the output needs the bridge at " +
                         num(fOp) + " Hz, above the switching band maximum " + num(fmax) + " Hz; at " + num(fmax) +
                         " Hz the tank still delivers " +
-                        num(railAtRelativeGain(tankGainAt(fmax, Rac) / tankGainAt(fRef, Rac) / relativeGain)) +
+                        num(railAtRelativeGain(tankGainAt(fmax) / Mref / relativeGain)) +
                         " V of the " + num(Vo) + " V output");
             }
         }
@@ -374,26 +373,43 @@ json build_src_tas(const SrcDesign& d) {
 
     const double n = d.turnsRatio;
 
-    // --- resonant-tank stresses (FHA, evaluated at the nominal point, operated AT series resonance fr) ---
-    // The SRC tank is SINUSOIDAL at fr, so every magnetic excitation is a sine (label "sinusoidal",
-    // vRms=vPk/√2, vPkPk=2·vPk, offset 0). The bridge presents a ±Vdrive square (Vdrive = Vin/2 half-bridge,
-    // Vin full-bridge — ABT #91; fund. rms 2√2·Vdrive/π). Unlike LLC the magnetizing Lm is large (10·Lr) and
-    // kept out of the resonance, so the tank current is essentially the real load current (Pin/Vtank1_rms);
-    // the small magnetizing component is added too.
-    // Evaluated at the frequency the bridge switches at: the series resonance by default, the forced
-    // switchingFrequency under config.driveAtSwitchingFrequency (ABT #1539).
+    // --- resonant-tank stresses: the exact tank solution (ABT #2173), the same one the transformer windings below
+    // are emitted from by analytical_src, so the Lr / switch ratings, the windings and the ngspice deck describe one
+    // current. The bridge presents a ±Vdrive square (Vdrive = Vin/2 half-bridge, Vin full-bridge — ABT #91) to the
+    // series tank, which drives the reflected load Re = 1/Σ(1/(n_i²·R_i)) (the winding-terminal load of each rail). At
+    // resonance the current is a sine; above it, two arcs per half period (analytical::SrcExactTank). Unlike LLC the
+    // magnetizing Lm is large (10·Lr) and kept out of the resonance; its small triangular current is added in rms.
+    // Evaluated at the frequency the bridge switches at: the series resonance at the range minimum, the regulated
+    // frequency above it (ABT #2160), the forced switchingFrequency under config.driveAtSwitchingFrequency (ABT #1539).
+    namespace AN = Kirchhoff::analytical;
     const double fr   = d.switchingFrequency, Tfr = 1.0 / fr;
     const double Vdrive = d.fullBridge ? d.inputVoltage : d.inputVoltage / 2.0;   // bridge-leg amplitude
-    const double Pin  = d.outputPower / d.efficiency;
     const double Iout = d.outputPower / d.outputVoltage;
-    const double Vtank1Rms = 2.0 * std::sqrt(2.0) * Vdrive / M_PI;       // fund. rms of the ±Vdrive square
-    // Tank current: the series tank's input power factor is Rac/|Zin| = the tank gain M, so the current that
-    // carries Pin is Pin/(Vtank1·M) (M = 1 at resonance, the default; below 1 under a forced drive, ABT #1539).
-    const double IloadRms  = Pin / (Vtank1Rms * d.tankGain);
+    // Each rail's winding-terminal voltage and current: CD/VD reflect the winding through an output doubler, so n was
+    // sized against the WINDING terminal (VD: Vo/2 & 2·Iout; CD: Vo/cdF & cdF·Iout); FB/CT feed the winding directly.
+    std::vector<double> vEmbeds, iEmbeds, nEmbeds;
+    for (const auto& leg : d.outputs) {
+        const double iout_i = leg.power / leg.voltage;
+        double vE = leg.voltage, iE = iout_i;
+        if (d.rectifierType == RectifierType::VoltageDoubler) { vE = leg.voltage / 2.0; iE = 2.0 * iout_i; }
+        else if (d.rectifierType == RectifierType::CurrentDoubler) {
+            const double cdF = cfg::get(d.config, "cdOutputFactor", 0.465);
+            vE = leg.voltage / cdF; iE = cdF * iout_i;
+        }
+        vEmbeds.push_back(vE); iEmbeds.push_back(iE); nEmbeds.push_back(leg.turnsRatio);
+    }
+    double reflectedConductance = 0.0;   // 1/Re
+    for (size_t i = 0; i < vEmbeds.size(); ++i)
+        reflectedConductance += iEmbeds[i] / (vEmbeds[i] * nEmbeds[i] * nEmbeds[i]);
+    const double tankR0 = std::sqrt(d.resonantInductance / d.resonantCapacitance);
+    const double tankF0 = 1.0 / (2.0 * M_PI * std::sqrt(d.resonantInductance * d.resonantCapacitance));
+    const AN::SrcExactTank tank = AN::src_exact_tank(fr / tankF0, tankR0 * reflectedConductance);
+    const double IloadRms  = tank.currentRms() * Vdrive / tankR0;
+    const double IloadPk   = tank.currentPeak() * Vdrive / tankR0;
     const double ImagPk    = Vdrive * (Tfr / 4.0) / d.magnetizingInductance;  // Lm triangle pk
     const double ImagRms   = ImagPk / std::sqrt(3.0);
     const double ItankRms  = std::sqrt(IloadRms * IloadRms + ImagRms * ImagRms);  // primary winding current
-    const double ItankPk   = std::sqrt(2.0) * ItankRms;                 // sinusoidal peak
+    const double ItankPk   = ItankRms * (IloadPk / IloadRms);   // the exact current's crest factor (√2 at resonance)
     const double ItankPkPk = 2.0 * ItankPk;
     const int wpo = rectifier_windings_per_output(d.rectifierType);  // 2 (CT) | 1 (FB/CD)
     // Secondary rectifier current peak: a rectified half-sine of the reflected tank current, pk=(π/2)·Iout
@@ -446,28 +462,12 @@ json build_src_tas(const SrcDesign& d) {
         const std::string side = req::isolation_side(1 + i);
         for (int w = 0; w < wpo; ++w) { isoSides.push_back(side); turnsRatios.push_back(d.outputs[i].turnsRatio); }
     }
-    // Transformer (T1) EMBEDDED excitations from the SINGLE FHA source (the SPICE-validated analytical SRC
-    // solver). bridgeVoltageFactor = 0.5 half-bridge | 1.0 full-bridge (ABT #91; analytical_src's own default
-    // is the full-bridge 1.0); turnsRatios/V/I are PER OUTPUT (CENTER_TAPPED splits each into 2 half-windings).
-    // The resonant inductor Lr and the switch/diode ratings keep the inline tank FHA.
-    namespace AN = Kirchhoff::analytical;
+    // Transformer (T1) EMBEDDED excitations from the same exact tank solution (analytical_src), fed the winding-terminal
+    // V/I per rail computed above. bridgeVoltageFactor = 0.5 half-bridge | 1.0 full-bridge (ABT #91; analytical_src's
+    // own default is the full-bridge 1.0); turnsRatios/V/I are PER OUTPUT (CENTER_TAPPED splits each into 2
+    // half-windings).
     const AN::SrcRectifier rect = (d.rectifierType == RectifierType::CenterTapped)
                                   ? AN::SrcRectifier::CENTER_TAPPED : AN::SrcRectifier::FULL_BRIDGE;
-    // CD/VD reflect the winding through an output doubler, so n was sized against the WINDING terminal, not
-    // the output terminal. The solver reflects n·Vout_arg, so it must be fed the winding-terminal V/I
-    // (VD: Vo/2 & 2·Iout; CD: Vo/cdF & cdF·Iout); the raw output V/I would solve the embedded tank/windings
-    // at 2×/~0.47× the real reflected operating point. FB/CT feed the winding directly. Per rail.
-    std::vector<double> vEmbeds, iEmbeds, nEmbeds;
-    for (const auto& leg : d.outputs) {
-        const double iout_i = leg.power / leg.voltage;
-        double vE = leg.voltage, iE = iout_i;
-        if (d.rectifierType == RectifierType::VoltageDoubler) { vE = leg.voltage / 2.0; iE = 2.0 * iout_i; }
-        else if (d.rectifierType == RectifierType::CurrentDoubler) {
-            const double cdF = cfg::get(d.config, "cdOutputFactor", 0.465);
-            vE = leg.voltage / cdF; iE = cdF * iout_i;
-        }
-        vEmbeds.push_back(vE); iEmbeds.push_back(iE); nEmbeds.push_back(leg.turnsRatio);
-    }
     const MAS::OperatingPoint aopT1 = AN::analytical_src(d.inputVoltage, vEmbeds, iEmbeds, nEmbeds, fr,
                                                          d.resonantInductance, d.resonantCapacitance,
                                                          d.fullBridge ? 1.0 : 0.5, rect);

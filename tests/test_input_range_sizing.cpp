@@ -25,6 +25,7 @@
 #include "Pfc.hpp"
 #include "Src.hpp"
 #include "DimensionJson.hpp"
+#include "ConverterAnalytical.hpp"
 
 using json = nlohmann::json;
 using Catch::Matchers::ContainsSubstring;
@@ -219,7 +220,8 @@ TEST_CASE("SRC: the turns ratio is sized at the lowest input of the range", "[in
 TEST_CASE("SRC: frequency regulation delivers the output at every input of the range with the same parts",
           "[input-range][src][regulation]") {
     // 36-72 V -> 12 V / 5 A. The turns ratio is sized at 36 V (the tank only steps down from its unity peak), so
-    // above 36 V the bridge runs above resonance, where the series-tank FHA gain falls to Vin_min/Vin.
+    // above 36 V the bridge runs above resonance, where the series tank's exact steady-state gain (state plane,
+    // ABT #2173) falls to Vin_min/Vin.
     const double vinMin = 36.0, vo = 12.0, eta = 0.9, k = 0.5;
     const json base = ranged_spec(vinMin, 48.0, 72.0, vinMin, {{vo, 5.0}}, 100e3, eta);
     std::map<double, Kirchhoff::SrcDesign> d;
@@ -256,24 +258,30 @@ TEST_CASE("SRC: frequency regulation delivers the output at every input of the r
         REQUIRE(stimuli.size() == 2);
         for (const auto& st : stimuli)
             CHECK(st.at("waveform").at("frequency").get<double>() == d.at(vop).switchingFrequency);
-        // The output reaches its target at every input: the series-tank FHA gain at the operating frequency into
-        // the reflected load delivers the same rail as the resonant point at 36 V (n·(Vo+Vd) = M·η·k·Vin), and
-        // that rail is at least the 12 V target (the 1.08 headroom above it is left to the closed loop).
+        // The output reaches its target at every input: the series tank's exact gain at the operating frequency into
+        // the reflected load (the rectifier's DC resistance referred to the primary, n²·R) delivers the same rail as
+        // the resonant point at 36 V (n·(Vo+Vd) = M·η·k·Vin), and that rail is at least the 12 V target (the 1.08
+        // headroom above it is left to the closed loop).
         const auto& dd = d.at(vop);
         const double n = dd.turnsRatio, Vd = dd.outputs.at(0).diodeDrop;
-        const double w = 2.0 * M_PI * dd.switchingFrequency;
-        const double Rac = 8.0 / (M_PI * M_PI) * n * n * dd.loadResistance;
-        const double M = Rac / std::hypot(Rac, w * dd.resonantInductance - 1.0 / (w * dd.resonantCapacitance));
+        const double R0 = std::sqrt(dd.resonantInductance / dd.resonantCapacitance);
+        const double f0 = 1.0 / (2.0 * M_PI * std::sqrt(dd.resonantInductance * dd.resonantCapacitance));
+        const auto tank = Kirchhoff::analytical::src_exact_tank(dd.switchingFrequency / f0,
+                                                                R0 / (n * n * dd.loadResistance));
+        const double M = tank.gain;
         const double delivered = M * eta * k * vop / n - Vd;
         const double deliveredAtMin = eta * k * vinMin / n - Vd;
         CHECK_THAT(M, WithinRel(vinMin / vop, 1e-9));
         CHECK_THAT(delivered, WithinRel(deliveredAtMin, 1e-9));
         CHECK(delivered >= vo);
         CHECK(dd.outputVoltage == vo);
-        // Regulated, the primary carries the same current at every input (unregulated at resonance it doubled
-        // from 36 V to 72 V: 6.07 A -> 12.15 A).
+        // Regulated, the primary carries the same rectified (load) current at every input (unregulated at resonance it
+        // doubled from 36 V to 72 V: 6.07 A -> 12.15 A rms); its rms is the exact tank current's, a sine at 36 V and
+        // two arcs per half period above (6.07 / 6.17 / 6.27 A at 36 / 54 / 72 V). 1 %: the 256-sample waveform.
         CHECK_THAT(res.at("diagnostics").at("primaryRmsCurrent").get<double>(),
-                   WithinRel(r.at(36.0).at("diagnostics").at("primaryRmsCurrent").get<double>(), 0.01));
+                   WithinRel(tank.currentRms() * k * vop / R0, 0.01));
+        CHECK_THAT(res.at("diagnostics").at("primaryRmsCurrent").get<double>(),
+                   WithinRel(r.at(36.0).at("diagnostics").at("primaryRmsCurrent").get<double>(), 0.04));
     }
     // Below the range minimum no frequency delivers the output: refused, naming the input and what it reaches.
     {
@@ -465,7 +473,7 @@ TEST_CASE("A design that cannot run at a corner of its range is refused, naming 
     json s = customer_acf(74.5);
     const std::string e = run_error("two_switch_forward", s);
     CHECK_THAT(e, ContainsSubstring("rating the parts over the input range"));
-    CHECK_THAT(e, ContainsSubstring("24.000000 V"));
+    CHECK_THAT(e, ContainsSubstring("cannot be evaluated at the input voltage 24 V"));
     // A spec refused at its own operating point keeps its own message.
     const std::string own = run_error("two_switch_forward", at_input_voltage(s, 24.0));
     CHECK_THAT(own, !ContainsSubstring("rating the parts over the input range"));

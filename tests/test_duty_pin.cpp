@@ -340,6 +340,14 @@ TEST_CASE("Phase-shifted bridges report the effective duty: the phase fraction l
 TEST_CASE("Resonant and dual-active bridges report the 50 % square-wave duty", "[duty-pin][resonant]") {
     for (const std::string topology : {"llc", "cllc", "clllc", "src", "dab", "lcc"}) {
         CAPTURE(topology);
+        if (topology == "lcc") {
+            // Alf 2026-10-30: a design that cannot run at an end of its own input range throws (ABT #2171). The LCC
+            // design solved at 400 V does not solve at the 380 V end of its 380-420 V range (solve_lcc refuses it).
+            const std::string out = refusal(topology, spec(380.0, 400.0, 420.0, 400.0, {{48.0, 500.0}}, 100e3,
+                                                           json::object(), json::object()));
+            CHECK_THAT(out, Catch::Matchers::ContainsSubstring("cannot be evaluated at the input voltage 380 V"));
+            continue;
+        }
         const json r = process(topology, spec(380.0, 400.0, 420.0, 400.0, {{48.0, 500.0}}, 100e3, json::object(),
                                               json::object()));
         CHECK(analytical_primary_duty(r) == 0.5);

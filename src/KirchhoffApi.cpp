@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <optional>
+#include <sstream>
 #include <iterator>
 #include <functional>
 #include <utility>
@@ -483,8 +484,9 @@ json build_tas_for(const std::string& topology, const json& spec) {
             // A spec the design refuses at its own operating point reports that refusal as it always did; only a
             // design that runs at the operating point but not at a corner of its range fails with the corner.
             build_tas_once(it->second, spec);
+            std::ostringstream v; v << vin;   // 6 significant digits: "350 V", not "350.000000 V"
             throw std::runtime_error("rating the parts over the input range: the design cannot be evaluated at "
-                                     "the input voltage " + std::to_string(vin) + " V: " + e.what());
+                                     "the input voltage " + v.str() + " V: " + e.what());
         }
     }
     json tas = build_tas_once(it->second, spec);
