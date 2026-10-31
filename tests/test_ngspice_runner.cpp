@@ -146,3 +146,55 @@ TEST_CASE("an .ac deck returns complex vectors with the frequency sweep", "[ngsp
     double db = 20.0 * std::log10(std::hypot(re[corner], im[corner]));
     CHECK(db == Catch::Approx(-3.01).margin(0.1));
 }
+
+#if defined(__GLIBC__)
+#include <malloc.h>
+// Bytes currently handed out by malloc: mallinfo2 sums every arena (libngspice may allocate from a
+// thread arena), uordblks = in-use arena bytes, hblkhd = bytes in mmapped (large) blocks.
+static size_t heap_in_use_bytes() {
+    const struct mallinfo2 mi = mallinfo2();
+    return mi.uordblks + mi.hblkhd;
+}
+
+// Every in-process run used to leave its plot (all simulated vectors) inside libngspice: `remcirc`
+// frees the circuit but not the plot, so the heap grew by the full waveform size per run — ~100 MB per
+// push-pull run in the browser, until the WASM worker died with std::bad_alloc. A run must leave the
+// heap where it found it.
+TEST_CASE("repeated in-process runs do not grow the heap", "[ngspice][leak]") {
+    if (!Kirchhoff::ngspice_in_process_available()) {
+        SKIP("built without libngspice");
+    }
+    // ~200k timepoints x (time + 2 node vectors + 1 branch) doubles: a few MB of plot per run.
+    const std::string deck =
+        "Vsrc in 0 PULSE(0 10 0 1n 1n 5u 10u)\n"
+        "R1 in out 1k\n"
+        "C1 out 0 1n\n"
+        ".options reltol=1e-4\n"
+        ".tran 50n 10m 0 50n\n"
+        ".end\n";
+    auto first = Kirchhoff::run_ngspice_in_process(deck);          // warm-up: one-time ngspice state
+    REQUIRE(first.success);
+    REQUIRE(first.time.size() > 100000);
+    const size_t plotBytes = first.time.size() * sizeof(double) * (1 + first.vectors.size());
+    first = Kirchhoff::NgspiceRunResult{};                          // release our own copy
+    auto second = Kirchhoff::run_ngspice_in_process(deck);
+    REQUIRE(second.success);
+    const size_t samples = second.time.size();
+    second = Kirchhoff::NgspiceRunResult{};
+
+    const size_t before = heap_in_use_bytes();
+    constexpr int runs = 10;
+    for (int i = 0; i < runs; ++i) {
+        auto r = Kirchhoff::run_ngspice_in_process(deck);
+        REQUIRE(r.success);
+        REQUIRE(r.time.size() == samples);
+    }
+    const size_t after = heap_in_use_bytes();
+    const double grownPerRun = (static_cast<double>(after) - static_cast<double>(before)) / runs;
+    INFO("plot size per run " << plotBytes << " B, heap growth per run " << grownPerRun << " B");
+    // A leaked plot costs ~plotBytes (7 MB here) per run, and re-initialising libngspice per run cost
+    // ~120 kB; what remains (~1.5 kB/run) is ngspice's own interpreter keeping each command's control
+    // record (frontend/control.c, "TODO: free old structure"). 16 kB/run separates the two.
+    CHECK(grownPerRun < 16.0 * 1024.0);
+}
+#endif

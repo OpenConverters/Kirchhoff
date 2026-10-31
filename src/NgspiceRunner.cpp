@@ -110,9 +110,17 @@ bool line_is_fatal(const char* out) {
     return false;
 }
 
-extern "C" int kh_send_char(char* out, int /*id*/, void* ud) {
-    if (!out || !ud) return 0;
-    auto* c = static_cast<Capture*>(ud);
+// The capture of the run in progress. libngspice is initialised ONCE per process (see
+// begin_run), so the callbacks cannot receive the per-run state through ngSpice_Init's
+// userData; they read it here instead. Null between runs: output then has nowhere to go and is dropped.
+std::atomic<Capture*> g_runCapture{nullptr};
+
+// Set by controlled_exit: ngspice has left its command loop, so the next run initialises it again.
+std::atomic<bool> g_needsInit{true};
+
+extern "C" int kh_send_char(char* out, int /*id*/, void* /*ud*/) {
+    Capture* c = g_runCapture.load();
+    if (!out || !c) return 0;
     std::lock_guard<std::mutex> lk(c->mtx);
     // Capture the full console stream so run_ngspice_console can return the `.meas`
     // results (libngspice strips a leading "stdout "/"stderr " tag from each line).
@@ -128,14 +136,15 @@ extern "C" int kh_send_char(char* out, int /*id*/, void* ud) {
     return 0;
 }
 
-extern "C" int kh_send_stat(char* out, int /*id*/, void* ud) {
-    if (out && ud && std::strstr(out, "--ready--")) static_cast<Capture*>(ud)->complete = true;
+extern "C" int kh_send_stat(char* out, int /*id*/, void* /*ud*/) {
+    Capture* c = g_runCapture.load();
+    if (out && c && std::strstr(out, "--ready--")) c->complete = true;
     return 0;
 }
 
-extern "C" int kh_controlled_exit(int status, bool /*immediate*/, bool /*quit*/, int /*id*/, void* ud) {
-    if (ud) {
-        auto* c = static_cast<Capture*>(ud);
+extern "C" int kh_controlled_exit(int status, bool /*immediate*/, bool /*quit*/, int /*id*/, void* /*ud*/) {
+    g_needsInit = true;
+    if (Capture* c = g_runCapture.load()) {
         if (status != 0) {
             std::lock_guard<std::mutex> lk(c->mtx);
             c->error = true;
@@ -146,9 +155,9 @@ extern "C" int kh_controlled_exit(int status, bool /*immediate*/, bool /*quit*/,
     return status;
 }
 
-extern "C" int kh_send_data(pvecvaluesall vecs, int /*count*/, int /*id*/, void* ud) {
-    if (!ud || !vecs) return 0;
-    auto* c = static_cast<Capture*>(ud);
+extern "C" int kh_send_data(pvecvaluesall vecs, int /*count*/, int /*id*/, void* /*ud*/) {
+    Capture* c = g_runCapture.load();
+    if (!c || !vecs) return 0;
     std::lock_guard<std::mutex> lk(c->mtx);
     for (int i = 0; i < vecs->veccount; ++i) {
         const char* nm = vecs->vecsa[i]->name;
@@ -170,8 +179,9 @@ extern "C" int kh_send_data(pvecvaluesall vecs, int /*count*/, int /*id*/, void*
 
 extern "C" int kh_send_initdata(pvecinfoall /*info*/, int /*id*/, void* /*ud*/) { return 0; }
 
-extern "C" int kh_bg_running(bool running, int /*id*/, void* ud) {
-    if (ud && !running) static_cast<Capture*>(ud)->complete = true;
+extern "C" int kh_bg_running(bool running, int /*id*/, void* /*ud*/) {
+    Capture* c = g_runCapture.load();
+    if (c && !running) c->complete = true;
     return 0;
 }
 
@@ -179,6 +189,37 @@ extern "C" int kh_bg_running(bool running, int /*id*/, void* ud) {
 // background thread is still (briefly) writing to it. libngspice serializes runs, so a single slot is
 // enough; the next run replaces it only after that run has waited for its own thread to stop.
 std::shared_ptr<Capture> g_activeCapture;
+
+// Make `cap` the run in progress, initialising libngspice first if it is not (yet, or any more).
+// ngSpice_Init is NOT re-run per simulation: it re-creates the interpreter's start-up state (command
+// table, spinit, device list) on top of the old one without freeing it, which leaked ~120 kB per run.
+void begin_run(const std::shared_ptr<Capture>& cap) {
+    g_activeCapture = cap;
+    g_runCapture = cap.get();
+    if (g_needsInit.exchange(false)) {
+        if (ngSpice_Init(kh_send_char, kh_send_stat, kh_controlled_exit,
+                         kh_send_data, kh_send_initdata, kh_bg_running, nullptr) != 0) {
+            g_needsInit = true;
+            throw std::runtime_error("libngspice: ngSpice_Init failed");
+        }
+        // WASM workaround #1: under emscripten there is no /proc/meminfo, so ngspice's available-memory
+        // probe returns 0 and aborts with a false "not enough memory". Disabling the check is harmless on
+        // native (where memory is plentiful) and required for the in-browser run. (Workaround #2 —
+        // treating a non-empty time vector as completion when the sync WASM build's `run` returns without
+        // firing the bg-thread callback — is handled by the wait loop via ngSpice_running() + cap.time.)
+        ngSpice_Command(const_cast<char*>("set no_mem_check"));
+    }
+}
+
+// Release everything a run left inside libngspice. `remcirc` frees the circuit but NOT the plot the run
+// created (every simulated vector, the whole transient): without `destroy all` each run kept its full
+// waveform set alive — ~100 MB per push-pull run in the browser, until the WASM heap hit
+// std::bad_alloc. Our own copy of the data lives in the Capture, so nothing ngspice holds is needed.
+void end_run() {
+    ngSpice_Command(const_cast<char*>("destroy all"));
+    ngSpice_Command(const_cast<char*>("remcirc"));
+    g_runCapture = nullptr;
+}
 
 // Drop a trailing `.control … .endc` block (case-insensitive) — we run via the API, not the deck's
 // interactive block — and keep everything else (circuit + .options/.ic/.tran + .end).
@@ -209,18 +250,7 @@ NgspiceRunResult run_ngspice_in_process(const std::string& deck, double timeoutS
     // drops the previous run's state (whose thread we already waited for) and keeps THIS run's state alive
     // for the whole function — and beyond, if we have to abandon a hung background thread.
     auto cap = std::make_shared<Capture>();
-    g_activeCapture = cap;
-
-    if (ngSpice_Init(kh_send_char, kh_send_stat, kh_controlled_exit,
-                     kh_send_data, kh_send_initdata, kh_bg_running, cap.get()) != 0)
-        throw std::runtime_error("libngspice: ngSpice_Init failed");
-
-    // WASM workaround #1: under emscripten there is no /proc/meminfo, so ngspice's available-memory
-    // probe returns 0 and aborts with a false "not enough memory". Disabling the check is harmless on
-    // native (where memory is plentiful) and required for the in-browser run. (Workaround #2 — treating
-    // a non-empty time vector as completion when the sync WASM build's `run` returns without firing the
-    // bg-thread callback — is handled by the wait loop below via ngSpice_running() + cap.time.)
-    ngSpice_Command(const_cast<char*>("set no_mem_check"));
+    begin_run(cap);
 
     // Build the circuit line array. ngspice treats line 1 as the title, so prepend one so the first
     // real card is not swallowed. Storage must outlive the char* array (no realloc after .data()).
@@ -236,7 +266,7 @@ NgspiceRunResult run_ngspice_in_process(const std::string& deck, double timeoutS
     cir.push_back(nullptr);
 
     if (ngSpice_Circ(cir.data()) != 0) {
-        ngSpice_Command(const_cast<char*>("remcirc"));
+        end_run();
         throw std::runtime_error("libngspice: ngSpice_Circ failed to load the deck");
     }
 
@@ -258,15 +288,15 @@ NgspiceRunResult run_ngspice_in_process(const std::string& deck, double timeoutS
             ngSpice_Command(const_cast<char*>("bg_halt"));
             for (int i = 0; i < 500 && ngSpice_running(); ++i)
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
-            ngSpice_Command(const_cast<char*>("remcirc"));
+            end_run();
             result.error = "timeout after " + std::to_string(timeoutSeconds) + "s";
             return result;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 
-    // Free the circuit so the next run starts clean (libngspice keeps loaded circuits otherwise).
-    ngSpice_Command(const_cast<char*>("remcirc"));
+    // Free the circuit and its plot so the next run starts clean.
+    end_run();
 
     // The thread has stopped (complete set by bg_running(false)/controlled_exit, or ngSpice_running()==false
     // above); copy the captured data out under the lock.
@@ -287,12 +317,7 @@ std::string run_ngspice_console(const std::string& deck, double timeoutSeconds) 
     // `.control … .endc` block, which libngspice executes on load (run/meas/wrdata),
     // and return the captured console text so the caller can parse `.meas` results.
     auto cap = std::make_shared<Capture>();
-    g_activeCapture = cap;
-
-    if (ngSpice_Init(kh_send_char, kh_send_stat, kh_controlled_exit,
-                     kh_send_data, kh_send_initdata, kh_bg_running, cap.get()) != 0)
-        throw std::runtime_error("libngspice: ngSpice_Init failed");
-    ngSpice_Command(const_cast<char*>("set no_mem_check"));
+    begin_run(cap);
 
     // Keep the .control block (do NOT strip it) — that is what runs the sim + meas.
     std::vector<std::string> lines;
@@ -325,13 +350,13 @@ std::string run_ngspice_console(const std::string& deck, double timeoutSeconds) 
     if (ngSpice_Circ(cir.data()) != 0) {
         done = true;
         watchdog.join();
-        ngSpice_Command(const_cast<char*>("remcirc"));
+        end_run();
         throw std::runtime_error("libngspice: ngSpice_Circ failed to load the deck");
     }
     done = true;
     watchdog.join();
 
-    ngSpice_Command(const_cast<char*>("remcirc"));
+    end_run();
 
     std::lock_guard<std::mutex> lk(cap->mtx);
     return cap->console;
