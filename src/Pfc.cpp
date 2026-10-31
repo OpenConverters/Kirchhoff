@@ -21,11 +21,11 @@ constexpr double kOutputCapacitance = 220e-6;  // bus cap
 constexpr double kPi                = 3.14159265358979323846;
 // Zero-current detector threshold of the CrM latch, as a fraction of the local line-current reference (the
 // boost diode holds the current at zero once it gets there, so the switch turns on within a few ns of it).
-// 1e-3, not 1e-2: at 1 % the switch closed while the boost diode still carried that last 1 %, i.e. a hard
-// turn-on of the 400 V switching node, and ngspice took the diode's turn-off and the switch's turn-on in one
-// step after a line zero crossing, draining ~0.7 J from Cout in 46 ns (a numerical loss of ~65 W on every
-// other half line cycle of the 284 µH web design). At 0.1 % the turn-on is at true zero current.
-constexpr double kZeroCurrentFraction = 1e-3;
+// 1 %. It was 0.1 % while CIAS's TDAS latch held an analog V(q): the switch's own turn-off released the reset
+// before q settled, q froze between 0 and 1, and with the hard turn-on at 1 % ngspice drained ~0.7 J from Cout
+// in 46 ns after a line zero crossing (~65 W numerical loss every other half line cycle of the 284 µH web
+// design). CIAS 66526f0 made the latch hold regenerative (ABT #2148); at 1 % the CrM deck loses 2.7 W again.
+constexpr double kZeroCurrentFraction = 1e-2;
 // Width of the DCM set clock's pulse, as a fraction of the switching period: short against any on-time, so
 // the reset-dominant latch cannot re-arm inside one pulse.
 constexpr double kClockPulseDuty    = 0.01;
