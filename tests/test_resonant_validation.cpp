@@ -29,6 +29,7 @@
 #include <iostream>
 #include <limits>
 #include <regex>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -210,4 +211,113 @@ TEST_CASE("resonant validation grid: CLLLC (FHA baseline)", "[resval][clllc]") {
         [](const Kirchhoff::ClllcDesign& x, double vo, double io, double f){
             return Kirchhoff::analytical::analytical_clllc(x.inputVoltage,{vo},{io},{x.turnsRatio},f,x.magnetizingInductance,x.primaryResonantInductance,x.primaryResonantCapacitance,x.secondaryResonantInductance,x.secondaryResonantCapacitance,1.0); },
         "l.xclllcpower.llr1_pri#branch", true, /*worstBound=*/0.75);   // FHA off-resonance worst ~0.57
+}
+
+// ── SRC: the analytical tank agrees with the ngspice deck across the input range (ABT #2179) ──────────────────────
+// Alf 2026-10-31 ("New agreement test"): the SRC design (design_src) runs each input at the frequency that delivers Vo,
+// solving the series tank through the deck's own circuit (src_tank_circuit: Lm and the coupling, the half bridge's
+// split bus caps, the diode drop) — the model analytical_src emits. The deck is the same circuit, open loop, at the
+// design's frequency. The design solves the tank at the efficiency-derated drive η·k·Vin; the deck drives k·Vin and
+// its parts are near-lossless, so the comparison is on the lossless basis: the same model evaluated at the deck's
+// undrated drive k·Vin. Output voltage and primary (Lr) rms current must agree within 1 % at Vin min, nominal and max
+// for (a) the 36-72 V -> 12 V / 5 A design of test_input_range_sizing and (b) test_ptp's SRC (360-440 V -> 48 V / 10 A).
+// Guards both halves: a deck that grows parts the model lacks (the rectifier R‖C snubbers) and a model that drops a
+// part the deck has (Lm) each move one side off the other.
+namespace {
+
+json src_agreement_spec(double vmin, double vnom, double vmax, double vop, double vo, double io, double fsw, double eta,
+                        bool ptpForm) {
+    json s;
+    s["designRequirements"]["efficiency"] = eta;
+    s["designRequirements"]["inputVoltage"] = {{"minimum", vmin}, {"nominal", vnom}, {"maximum", vmax}};
+    s["designRequirements"]["switchingFrequency"]["nominal"] = fsw;
+    if (ptpForm) {
+        // test_ptp's spec_for, with the operating point moved across the range.
+        s["designRequirements"]["outputs"] = json::array({{{"name", "out"}, {"voltage", {{"nominal", vo}}}}});
+        s["operatingPoints"] = json::array({{{"inputVoltage", vop}, {"outputs", json::array({{{"power", vo * io}}})}}});
+    } else {
+        // test_input_range_sizing's ranged_spec.
+        s["designRequirements"]["outputs"] = json::array(
+            {{{"name", "out0"}, {"voltage", {{"nominal", vo}}}, {"power", {{"nominal", vo * io}}}}});
+        s["operatingPoints"] = json::array({{{"name", "op"}, {"inputVoltage", vop}, {"ambientTemperature", 25.0},
+                                             {"outputs", json::array({{{"name", "out0"}, {"voltage", vo},
+                                                                       {"power", vo * io}}})}}});
+    }
+    return s;
+}
+
+std::string src_num(double v) {
+    std::ostringstream o;
+    o.precision(12);
+    o << v;
+    return o.str();
+}
+
+}  // namespace
+
+TEST_CASE("SRC: the analytical tank agrees with the ngspice deck within 1 % across the input range (ABT #2179)",
+          "[src][abt2179][agreement]") {
+    REQUIRE(Kirchhoff::ngspice_in_process_available());
+    struct Case { const char* name; double vmin, vnom, vmax, vo, io, fsw, eta; bool ptpForm; };
+    const std::vector<Case> cases = {
+        {"12V5A 36-72 V", 36.0, 48.0, 72.0, 12.0, 5.0, 100e3, 0.9, false},
+        {"ptp 500W-FB 360-440 V", 360.0, 400.0, 440.0, 48.0, 10.0, 100e3, 1.0, true},
+    };
+    for (const auto& c : cases) {
+        for (const double vop : {c.vmin, c.vnom, c.vmax}) {
+            const Kirchhoff::SrcDesign d = Kirchhoff::design_src(
+                src_agreement_spec(c.vmin, c.vnom, c.vmax, vop, c.vo, c.io, c.fsw, c.eta, c.ptpForm));
+            REQUIRE(d.outputs.size() == 1);
+            const double fsw = d.switchingFrequency, T = 1.0 / fsw;
+            // Model: the design's tank network, at the deck's undrated bridge amplitude k·Vin.
+            const double vg = (d.fullBridge ? 1.0 : 0.5) * d.inputVoltage;
+            const double n = d.turnsRatio, vd = d.outputs.at(0).diodeDrop;
+            const double lr = d.resonantInductance, cr = d.resonantCapacitance;
+            const double r0 = std::sqrt(lr / cr), f0 = 1.0 / (2.0 * M_PI * std::sqrt(lr * cr));
+            const auto network = Kirchhoff::analytical::src_tank_network(Kirchhoff::src_tank_circuit(d), lr, cr, vg, {n});
+            const auto tank = Kirchhoff::analytical::src_exact_tank(fsw / f0, r0 / (n * n * d.loadResistance), network);
+            const double voutModel = tank.gain * vg / n - vd;
+            const double priRmsModel = tank.currentRms() * vg / r0;
+            // Deck: open loop at the design's frequency, settled past 30 output RC constants (>= 400 periods).
+            PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
+            std::string deck = Kirchhoff::tas_to_ngspice(Kirchhoff::build_src_tas(d), ideal);
+            const double rc = d.loadResistance * d.outputCapacitance;
+            const double tstop = std::max(400.0 * T, std::ceil(30.0 * rc / T) * T), tstep = T / 200.0;
+            deck = std::regex_replace(deck, std::regex(R"(\.tran\s+\S+\s+\S+\s+\S+\s+\S+)"),
+                                      ".tran " + src_num(tstep) + " " + src_num(tstop) + " 0 " + src_num(tstep));
+            const Kirchhoff::NgspiceRunResult r = Kirchhoff::run_ngspice_in_process(deck);
+            INFO(c.name << " @ " << vop << " V, fsw " << fsw << " Hz: " << r.error);
+            REQUIRE(r.success);
+            const auto vout = r.average("v(Vout)", tstop - 40.0 * T, tstop);
+            REQUIRE(vout.has_value());
+            std::string lrKey;
+            for (const auto& [k, v] : r.vectors)
+                if (k.find("llr_pri#branch") != std::string::npos) {
+                    REQUIRE(lrKey.empty());
+                    lrKey = k;
+                }
+            REQUIRE(!lrKey.empty());
+            const auto& x = r.vectors.at(lrKey);
+            const auto& t = r.time;
+            REQUIRE(x.size() == t.size());
+            double a2 = 0.0, span = 0.0;
+            for (size_t k = 1; k < t.size(); ++k) {
+                if (t[k - 1] < tstop - 20.0 * T) continue;
+                const double dt = t[k] - t[k - 1];
+                a2 += 0.5 * dt * (x[k] * x[k] + x[k - 1] * x[k - 1]);
+                span += dt;
+            }
+            REQUIRE(span > 19.0 * T);
+            const double priRmsDeck = std::sqrt(a2 / span);
+            const double voutDeck = std::abs(*vout);
+            std::cout << std::setprecision(6) << "[abt2179] " << c.name << " @ " << vop << " V  fsw=" << fsw
+                      << "  Vout model=" << voutModel << " deck=" << voutDeck << " ("
+                      << 100.0 * (voutDeck / voutModel - 1.0) << " %)  priRms model=" << priRmsModel
+                      << " deck=" << priRmsDeck << " (" << 100.0 * (priRmsDeck / priRmsModel - 1.0) << " %)\n";
+            INFO("Vout model " << voutModel << " deck " << voutDeck << "; priRms model " << priRmsModel << " deck "
+                               << priRmsDeck);
+            CHECK(std::abs(voutDeck / voutModel - 1.0) <= 0.01);
+            CHECK(std::abs(priRmsDeck / priRmsModel - 1.0) <= 0.01);
+        }
+    }
 }
