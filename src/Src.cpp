@@ -23,6 +23,41 @@ constexpr double kLmRatio       = 10.0;  // Lm = 10·Lr (large, keeps Lm out of 
 constexpr double kGainHeadroom  = 1.08;  // size n so the fr peak delivers 1.08·Vo, giving the regulator
                                          // room to hit Vo just ABOVE fr (the SRC tank only steps DOWN)
 constexpr double kSwitchDuty    = 0.45;
+constexpr double kTransformerCoupling = 0.999;   // T1 primary-to-secondary coupling (config transformerCoupling)
+constexpr double kBusSplitCap   = 10e-6;   // each half-bridge split bus capacitor (config busSplitCap)
+
+double transformer_coupling(const json& config) { return cfg::get(config, "transformerCoupling", kTransformerCoupling); }
+double bus_split_cap(const json& config) { return cfg::get(config, "busSplitCap", kBusSplitCap); }
+
+} // namespace
+
+// The circuit around the series tank exactly as build_src_tas emits it into the deck (ABT #2179), from the same
+// values: T1's magnetizing inductance and coupling, the half bridge's split bus capacitors (Chi + Clo in series with
+// Cr for the tank current) and the main rail's diode drop. The deck's convergence aids (Csw, the bus bleeders) are
+// not modelled; it carries no rectifier snubbers (Alf 2026-10-31: "Real circuit; fix the deck" — the 100 Ω ∥ 100 pF
+// numerical snubbers across the rectifier diodes loaded the tank by 4-7 % above resonance).
+analytical::SrcCircuit src_tank_circuit(const SrcDesign& d) {
+    analytical::SrcCircuit c;
+    c.magnetizingInductance = d.magnetizingInductance;
+    c.transformerCoupling = transformer_coupling(d.config);
+    if (!d.fullBridge) c.bridgeSeriesCapacitance = 2.0 * bus_split_cap(d.config);
+    switch (d.rectifierType) {
+        case RectifierType::CenterTapped:   c.rectifier = analytical::SrcRectifier::CENTER_TAPPED; break;
+        case RectifierType::FullBridge:     c.rectifier = analytical::SrcRectifier::FULL_BRIDGE; break;
+        case RectifierType::CurrentDoubler: c.rectifier = analytical::SrcRectifier::CURRENT_DOUBLER; break;
+        case RectifierType::VoltageDoubler:
+            throw std::runtime_error("Kirchhoff SRC: voltageDoubler rectifier not supported");
+    }
+    c.diodeDrop = d.outputs.at(0).diodeDrop;
+    return c;
+}
+
+namespace {
+std::vector<double> leg_turns_ratios(const SrcDesign& d) {
+    std::vector<double> n;
+    for (const auto& leg : d.outputs) n.push_back(leg.turnsRatio);
+    return n;
+}
 } // namespace
 
 SrcDesign design_src(const json& tasInputs) {
@@ -239,8 +274,9 @@ SrcDesign design_src(const json& tasInputs) {
     // ── Forced drive frequency (ABT #1539) ──
     // Driven at a forced frequency the output voltage is a RESULT, at resonance too (gain 1 there delivers the
     // design's gain headroom above the target, which the default path leaves to the closed-loop regulator): the
-    // series tank's exact steady-state gain M (analytical::src_exact_tank, the model analytical_src uses; Lm = 10·Lr
-    // stays out of it) into the design load delivers, per rail,
+    // series tank's exact steady-state gain M (analytical::src_exact_tank through the converter circuit, the model
+    // analytical_src uses: Lm, leakage, split caps, diode drop, ABT #2179) into the design load
+    // delivers, per rail,
     // n_i·(Vo_i + k·Vd_i) = c·M·η·Vbridge (CT: c 1, k 1; FB: c 1, k 2; CD: c cdOutputFactor, k 1), the same relation
     // the ratio above is sized from at M = 1/headroom. The load resistance is kept; the power follows V²/R. Below
     // resonance the tank input is capacitive (no ZVS) and outside this model: that throws.
@@ -264,7 +300,14 @@ SrcDesign design_src(const json& tasInputs) {
     const double tankF0 = 1.0 / (2.0 * M_PI * std::sqrt(d.resonantInductance * d.resonantCapacitance));
     const double tankR0 = std::sqrt(d.resonantInductance / d.resonantCapacitance);
     auto loadConductance = [&]() { return tankR0 / (M_PI * M_PI / 8.0 * reflectedRac()); };   // R0/Re
-    auto tankGainAt = [&](double f) { return analytical::src_exact_tank(f / tankF0, loadConductance()).gain; };
+    // The tank sees the bridge at c·η·Vbridge: the efficiency-compensated drive the ratio is sized for (CD: through
+    // its output factor). The circuit around it is the deck's (ABT #2179).
+    double cDrive = 1.0;
+    if (d.rectifierType == RectifierType::CurrentDoubler) cDrive = cfg::get(d.config, "cdOutputFactor", 0.465);
+    const analytical::SrcTankNetwork tankNetwork = analytical::src_tank_network(
+        src_tank_circuit(d), d.resonantInductance, d.resonantCapacitance, cDrive * etaConv * Vbridge, leg_turns_ratios(d));
+    auto tankGainAt = [&](double f) {
+        return analytical::src_exact_tank(f / tankF0, loadConductance(), tankNetwork).gain; };
     if (driveAtFsw) {
         const double fsw = d.switchingFrequency;
         const double ftank = 1.0 / (2.0 * M_PI * std::sqrt(d.resonantInductance * d.resonantCapacitance));
@@ -292,59 +335,49 @@ SrcDesign design_src(const json& tasInputs) {
         d.outputPower = d.outputs.at(0).power;
     } else {
         // ── Frequency regulation over the input range (ABT #2160) ──
-        // The SRC regulates by frequency: the tank gain peaks at resonance and falls monotonically above it (the
-        // inductive, ZVS branch). The design point is the range minimum Vin_min, where the transformer above is sized
-        // and the bridge runs at the reference frequency (the series resonance fr, as before). At a higher input the
-        // same delivered output needs the tank gain scaled by Vin_min/Vin, so the bridge runs above the reference at
-        // the frequency where the exact tank gain M(f) (into the design's reflected load) equals M(f_ref)·Vin_min/Vin
-        // (analytical::src_exact_frequency_ratio, ABT #2173; FHA put it too high, the deck delivered 14 % less).
-        // tankGain carries the RELATIVE gain Vin_min/Vin (1 at the reference). A spec without a range (Vin = Vin_min) keeps the
-        // reference point exactly. An input below Vin_min needs a gain above the resonance peak: no frequency
-        // delivers it, so it throws; so does a solved frequency outside a stated switching band.
-        // Reference: the design frequency, unless a pinned tank resonates above it (design_src accepts a pinned tank
-        // within 1 % of fr; analytical_src refuses any point more than 1e-6 below the tank's resonance) — then the
-        // tank's own resonance (gain 1), the highest-gain point on the regulation branch.
-        const double ftank = tankPinned
-            ? 1.0 / (2.0 * M_PI * std::sqrt(d.resonantInductance * d.resonantCapacitance)) : fr;
-        const double fRef = (d.switchingFrequency >= ftank * (1.0 - 1e-6)) ? d.switchingFrequency : ftank;
+        // The SRC regulates by frequency: the tank gain peaks at resonance (M = 1) and falls monotonically above it
+        // (the inductive, ZVS branch). At EVERY operating input, the range minimum included (Alf 2026-10-31, ABT
+        // #2171), the bridge runs at the frequency that delivers exactly the target output: the main rail needs
+        //   n·(Vo + k·Vd) = c·M·η·Vbridge   ⇒   M = n·(Vo + k·Vd)/(c·η·Vbridge)
+        // (the relation the ratio above is sized from), and the exact tank (analytical::src_exact_frequency_ratio,
+        // ABT #2173) gives the frequency of that gain into the design's reflected load. At Vin_min that gain is the
+        // 1/gainHeadroom the ratio carries, so the bridge runs just above resonance; higher inputs run higher. A
+        // gain above 1 (an input below Vin_min, or a pinned ratio too large) is above the resonance peak: no
+        // frequency delivers it, so it throws; so does a solved frequency outside a stated switching band.
         const double Vin = d.inputVoltage;
-        const double relativeGain = vinMin / Vin;
-        double kMain = 1.0;   // rectifier drops in the main rail's conduction path (FB: 2)
+        double cMain = 1.0, kMain = 1.0;   // CD output factor; rectifier drops in the main rail's path (FB: 2)
         if (d.rectifierType == RectifierType::FullBridge) kMain = 2.0;
+        if (d.rectifierType == RectifierType::CurrentDoubler) cMain = cfg::get(d.config, "cdOutputFactor", 0.465);
         const double VdMain = d.outputs.at(0).diodeDrop;
-        // The main rail's output when the tank gain is g × the reference gain (n·(Vo+k·Vd) scales with the drive).
-        auto railAtRelativeGain = [&](double g) { return (Vo + kMain * VdMain) * g - kMain * VdMain; };
-        if (relativeGain > 1.0)
+        const double nMain = d.outputs.at(0).turnsRatio;
+        // The main rail's output at tank gain M.
+        auto railAtGain = [&](double M) { return cMain * M * etaConv * Vbridge / nMain - kMain * VdMain; };
+        const double Mt = nMain * (Vo + kMain * VdMain) / (cMain * etaConv * Vbridge);
+        if (!(Mt > 0.0))
+            throw std::invalid_argument("design_src: the main rail needs a non-positive tank gain " + num(Mt));
+        const double Mres = tankGainAt(tankF0);   // through the circuit the gain at resonance is not exactly 1
+        if (Mt > Mres)
             throw std::invalid_argument(
                 "design_src: at the input voltage " + num(Vin) + " V the series tank at its resonance (the SRC's "
-                "maximum gain) delivers only " + num(railAtRelativeGain(1.0 / relativeGain)) + " V of the " + num(Vo) +
+                "maximum gain above it) delivers only " + num(railAtGain(Mres)) + " V of the " + num(Vo) +
                 " V output: the turns ratio " + num(d.turnsRatio) + " is sized for the range minimum " + num(vinMin) +
                 " V, and the SRC can only step down from there");
-        double fOp = fRef;
-        if (relativeGain < 1.0) {
-            const double Mref = tankGainAt(fRef);
-            const double Mt = Mref * relativeGain;
-            fOp = analytical::src_exact_frequency_ratio(Mt, loadConductance()) * tankF0;
-            if (!(fOp > fRef))
-                throw std::runtime_error("design_src: the regulated frequency " + num(fOp) +
-                                         " Hz is not above the reference " + num(fRef) + " Hz");
-            if (d.config.contains("maxSwitchingFrequency")) {
-                const double fmax = cfg::get(d.config, "maxSwitchingFrequency", 0.0);
-                if (fOp > fmax)
-                    throw std::invalid_argument(
-                        "design_src: at the input voltage " + num(Vin) + " V the output needs the bridge at " +
-                        num(fOp) + " Hz, above the switching band maximum " + num(fmax) + " Hz; at " + num(fmax) +
-                        " Hz the tank still delivers " +
-                        num(railAtRelativeGain(tankGainAt(fmax) / Mref / relativeGain)) +
-                        " V of the " + num(Vo) + " V output");
-            }
+        const double fOp = analytical::src_exact_frequency_ratio(Mt, loadConductance(), tankNetwork) * tankF0;
+        if (d.config.contains("maxSwitchingFrequency")) {
+            const double fmax = cfg::get(d.config, "maxSwitchingFrequency", 0.0);
+            if (fOp > fmax)
+                throw std::invalid_argument(
+                    "design_src: at the input voltage " + num(Vin) + " V the output needs the bridge at " +
+                    num(fOp) + " Hz, above the switching band maximum " + num(fmax) + " Hz; at " + num(fmax) +
+                    " Hz the tank still delivers " + num(railAtGain(tankGainAt(fmax))) +
+                    " V of the " + num(Vo) + " V output");
         }
         if (d.config.contains("minSwitchingFrequency") && fOp < cfg::get(d.config, "minSwitchingFrequency", 0.0))
             throw std::invalid_argument("design_src: the operating frequency " + num(fOp) + " Hz at the input voltage " +
                                         num(Vin) + " V lies below the switching band minimum " +
                                         num(cfg::get(d.config, "minSwitchingFrequency", 0.0)) + " Hz");
         d.switchingFrequency = fOp;
-        d.tankGain = relativeGain;
+        d.tankGain = Mt;
     }
     return d;
 }
@@ -371,16 +404,15 @@ json build_src_tas(const SrcDesign& d) {
     auto diodeReq  = [](const json& r) { json j; j["semiconductor"]["diode"] = json::object();
         j["inputs"]["designRequirements"] = r; return j; };
 
-    const double n = d.turnsRatio;
-
     // --- resonant-tank stresses: the exact tank solution (ABT #2173), the same one the transformer windings below
     // are emitted from by analytical_src, so the Lr / switch ratings, the windings and the ngspice deck describe one
     // current. The bridge presents a ±Vdrive square (Vdrive = Vin/2 half-bridge, Vin full-bridge — ABT #91) to the
     // series tank, which drives the reflected load Re = 1/Σ(1/(n_i²·R_i)) (the winding-terminal load of each rail). At
     // resonance the current is a sine; above it, two arcs per half period (analytical::SrcExactTank). Unlike LLC the
-    // magnetizing Lm is large (10·Lr) and kept out of the resonance; its small triangular current is added in rms.
-    // Evaluated at the frequency the bridge switches at: the series resonance at the range minimum, the regulated
-    // frequency above it (ABT #2160), the forced switchingFrequency under config.driveAtSwitchingFrequency (ABT #1539).
+    // magnetizing Lm is large (10·Lr); the tank is solved through the deck's circuit (Lm, leakage, split caps, diode drop —
+    // ABT #2179), so the current below is the primary winding's, magnetizing current included.
+    // Evaluated at the frequency the bridge switches at: the regulated frequency that delivers Vo at every input,
+    // Vin_min included (ABT #2160 #2171), the forced switchingFrequency under config.driveAtSwitchingFrequency (ABT #1539).
     namespace AN = Kirchhoff::analytical;
     const double fr   = d.switchingFrequency, Tfr = 1.0 / fr;
     const double Vdrive = d.fullBridge ? d.inputVoltage : d.inputVoltage / 2.0;   // bridge-leg amplitude
@@ -403,13 +435,13 @@ json build_src_tas(const SrcDesign& d) {
         reflectedConductance += iEmbeds[i] / (vEmbeds[i] * nEmbeds[i] * nEmbeds[i]);
     const double tankR0 = std::sqrt(d.resonantInductance / d.resonantCapacitance);
     const double tankF0 = 1.0 / (2.0 * M_PI * std::sqrt(d.resonantInductance * d.resonantCapacitance));
-    const AN::SrcExactTank tank = AN::src_exact_tank(fr / tankF0, tankR0 * reflectedConductance);
-    const double IloadRms  = tank.currentRms() * Vdrive / tankR0;
-    const double IloadPk   = tank.currentPeak() * Vdrive / tankR0;
-    const double ImagPk    = Vdrive * (Tfr / 4.0) / d.magnetizingInductance;  // Lm triangle pk
-    const double ImagRms   = ImagPk / std::sqrt(3.0);
-    const double ItankRms  = std::sqrt(IloadRms * IloadRms + ImagRms * ImagRms);  // primary winding current
-    const double ItankPk   = ItankRms * (IloadPk / IloadRms);   // the exact current's crest factor (√2 at resonance)
+    // Solved through the deck's circuit (ABT #2179): the tank current includes Lm's magnetizing current.
+    const AN::SrcCircuit tankCircuit = src_tank_circuit(d);
+    const AN::SrcExactTank tank = AN::src_exact_tank(
+        fr / tankF0, tankR0 * reflectedConductance,
+        AN::src_tank_network(tankCircuit, d.resonantInductance, d.resonantCapacitance, Vdrive, nEmbeds));
+    const double ItankRms  = tank.currentRms() * Vdrive / tankR0;   // primary winding current
+    const double ItankPk   = tank.currentPeak() * Vdrive / tankR0;
     const double ItankPkPk = 2.0 * ItankPk;
     const int wpo = rectifier_windings_per_output(d.rectifierType);  // 2 (CT) | 1 (FB/CD)
     // Secondary rectifier current peak: a rectified half-sine of the reflected tank current, pk=(π/2)·Iout
@@ -470,12 +502,12 @@ json build_src_tas(const SrcDesign& d) {
                                   ? AN::SrcRectifier::CENTER_TAPPED : AN::SrcRectifier::FULL_BRIDGE;
     const MAS::OperatingPoint aopT1 = AN::analytical_src(d.inputVoltage, vEmbeds, iEmbeds, nEmbeds, fr,
                                                          d.resonantInductance, d.resonantCapacitance,
-                                                         d.fullBridge ? 1.0 : 0.5, rect);
+                                                         d.fullBridge ? 1.0 : 0.5, rect, tankCircuit);
     const std::vector<json> windings = AN::excitations_processed(aopT1, "T1");
     json t1; t1["magnetic"] = json::object();
     t1["inputs"] = req::magnetic_inputs(d.magnetizingInductance, 0.1, turnsRatios, isoSides,
         std::nullopt, 25.0, windings);
-    { const double kCpl = cfg::get(d.config, "transformerCoupling", 0.999);
+    { const double kCpl = transformer_coupling(d.config);
       // ABT #172: ONE leakage entry PER SECONDARY winding — the CIAS emitter maps entry i to
       // secondary i+1 and defaults missing entries to near-ideal coupling, so the old single
       // entry gave a center-tapped transformer asymmetric halves (KT1_01=0.999, KT1_02≈1).
@@ -486,25 +518,13 @@ json build_src_tas(const SrcDesign& d) {
       t1["inputs"]["designRequirements"]["leakageInductance"] = leaks; }
 
     auto busCap = [&]() { json c; c["capacitor"] = json::object();
-        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::get(d.config, "busSplitCap", 10e-6);
+        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = bus_split_cap(d.config);
         c["inputs"]["designRequirements"]["ratedVoltage"] = d.inputVoltage * 2; return c; };
 
     json cout; cout["capacitor"] = json::object();
     cout["inputs"]["designRequirements"]["capacitance"]["nominal"] = d.outputCapacitance;
     cout["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage * 2;
 
-    auto snubC = [&]() { json c; c["capacitor"] = json::object();
-        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::rectifier_snubber_cap(d.config);
-        c["inputs"]["designRequirements"]["ratedVoltage"] = d.outputVoltage * 3;
-        cfg::mark_numerical_aid(c); return c; };   // rectifier dV/dt aid — tagged for the real strip (ABT #96)
-    auto snubR = [&]() { json c; c["resistor"] = json::object();
-        auto& dr = c["inputs"]["designRequirements"];
-        dr["deviceType"] = "resistor";
-        dr["resistance"]["nominal"] = cfg::snubber_res(d.config);
-        // RC-snubber R dissipates the cap energy each cycle: P = C*V^2*f (V = clamped reverse swing).
-        const double vClamp = d.outputVoltage * 3.0;
-        dr["powerRating"] = cfg::rectifier_snubber_cap(d.config) * vClamp * vClamp * d.switchingFrequency;
-        dr["role"] = "snubber"; cfg::mark_numerical_aid(c); return c; };   // RC-snubber R paired with snubC — tagged (ABT #96)
     // Cap-divider BALANCING resistors — give the bus-split midpoint msplit a DC reference at Vbus/2.
     // Without them msplit (Chi/Clo junction + transformer primary) has no DC path -> singular MNA
     // matrix -> garbage Vout at off-design frequencies and the regulator never converges (abt #54).
@@ -545,7 +565,8 @@ json build_src_tas(const SrcDesign& d) {
     // Primary side: series resonant tank + either a split-cap half-bridge or a 4-MOSFET full bridge
     // (config.bridgeType, ABT #91), identical secondary rectifier for both. The half-bridge branch + the CT
     // rectifier reproduce the original validated card ORDER exactly (this split-cap resonant deck is
-    // order-sensitive in ngspice, abt #54): Csw1 between Cout and the snubbers; gate nets last.
+    // order-sensitive in ngspice, abt #54): Csw1 after Cout; gate nets last. The rectifier carries no RC snubbers
+    // (ABT #2179: as numerical aids they loaded the tank by 4-7 % above resonance; ngspice converges without them).
     std::vector<json> comps;
     std::vector<json> conns;
     std::vector<json> gndPrimary;
@@ -621,21 +642,16 @@ json build_src_tas(const SrcDesign& d) {
     switch (d.rectifierType) {
     case RectifierType::CenterTapped: {
         comps.insert(comps.end(), {comp("D1", diodeReq(reqD)), comp("D2", diodeReq(reqD)), comp("Cout", cout),
-            comp("Csw1", swSnub()),
-            comp("Rsn1", snubR()), comp("Csn1", snubC()), comp("Rsn2", snubR()), comp("Csn2", snubC())});
-        conns.push_back(conn("sec_top", {pin("T1", "secondary1_start"), pin("D1", rA),
-                                         pin("Rsn1", "1"), pin("Csn1", "1")}));
-        conns.push_back(conn("sec_bot", {pin("T1", "secondary2_end"), pin("D2", rA),
-                                         pin("Rsn2", "1"), pin("Csn2", "1")}));
-        railEps = {pin("D1", rK), pin("D2", rK),
-                   pin("Rsn1", "2"), pin("Csn1", "2"), pin("Rsn2", "2"), pin("Csn2", "2"),
-                   pin("Cout", "1")};
+            comp("Csw1", swSnub())});
+        conns.push_back(conn("sec_top", {pin("T1", "secondary1_start"), pin("D1", rA)}));
+        conns.push_back(conn("sec_bot", {pin("T1", "secondary2_end"), pin("D2", rA)}));
+        railEps = {pin("D1", rK), pin("D2", rK), pin("Cout", "1")};
         secGndEps = {pin("T1", "secondary1_end"), pin("T1", "secondary2_start"), pin("Cout", "2")};
         break; }
     case RectifierType::FullBridge: {
         comps.insert(comps.end(), {comp("DH1", diodeReq(reqD)), comp("DH2", diodeReq(reqD)),
             comp("DL1", diodeReq(reqD)), comp("DL2", diodeReq(reqD)), comp("Cout", cout),
-            comp("Csw1", swSnub()), comp("Rsn1", snubR()), comp("Csn1", snubC())});
+            comp("Csw1", swSnub())});
         // The LOW-side pair is the mirror of the high-side pair, so it uses the
         // aliases the other way round: a bridge's return diode conducts GROUND ->
         // winding, which puts its winding-facing end at rK and its ground-facing
@@ -645,11 +661,10 @@ json build_src_tas(const SrcDesign& d) {
         // charges. That is what it did — Vout settled at -0.07 V, one diode drop
         // below ground, at an efficiency of 8e-05.
         conns.push_back(conn("sec_a", {pin("T1", "secondary1_start"), pin("DH1", rA),
-                                       pin("DL1", rK), pin("Rsn1", "1"), pin("Csn1", "1")}));
+                                       pin("DL1", rK)}));
         conns.push_back(conn("sec_b", {pin("T1", "secondary1_end"), pin("DH2", rA),
                                        pin("DL2", rK)}));
-        railEps = {pin("DH1", rK), pin("DH2", rK),
-                   pin("Rsn1", "2"), pin("Csn1", "2"), pin("Cout", "1")};
+        railEps = {pin("DH1", rK), pin("DH2", rK), pin("Cout", "1")};
         secGndEps = {pin("DL1", rA), pin("DL2", rA), pin("Cout", "2")};
         break; }
     case RectifierType::CurrentDoubler: {
@@ -701,32 +716,24 @@ json build_src_tas(const SrcDesign& d) {
         std::vector<json> legRail, legGnd;
         switch (d.rectifierType) {
         case RectifierType::CenterTapped: {
-            const std::string D1 = "D1_" + sfx, D2 = "D2_" + sfx, Co = "Cout_" + sfx,
-                Rs1 = "Rsn1_" + sfx, Cs1 = "Csn1_" + sfx, Rs2 = "Rsn2_" + sfx, Cs2 = "Csn2_" + sfx;
+            const std::string D1 = "D1_" + sfx, D2 = "D2_" + sfx, Co = "Cout_" + sfx;
             comps.insert(comps.end(), {comp(D1.c_str(), diodeReq(reqDi)), comp(D2.c_str(), diodeReq(reqDi)),
-                comp(Co.c_str(), couti), comp(Rs1.c_str(), snubR()), comp(Cs1.c_str(), snubC()),
-                comp(Rs2.c_str(), snubR()), comp(Cs2.c_str(), snubC())});
-            conns.push_back(conn(("sec_top" + sfx).c_str(), {pin("T1", wA.c_str()), pin(D1.c_str(), "anode"),
-                                                             pin(Rs1.c_str(), "1"), pin(Cs1.c_str(), "1")}));
-            conns.push_back(conn(("sec_bot" + sfx).c_str(), {pin("T1", wBe.c_str()), pin(D2.c_str(), "anode"),
-                                                             pin(Rs2.c_str(), "1"), pin(Cs2.c_str(), "1")}));
-            legRail = {pin(D1.c_str(), "cathode"), pin(D2.c_str(), "cathode"),
-                       pin(Rs1.c_str(), "2"), pin(Cs1.c_str(), "2"), pin(Rs2.c_str(), "2"), pin(Cs2.c_str(), "2"),
-                       pin(Co.c_str(), "1")};
+                comp(Co.c_str(), couti)});
+            conns.push_back(conn(("sec_top" + sfx).c_str(), {pin("T1", wA.c_str()), pin(D1.c_str(), "anode")}));
+            conns.push_back(conn(("sec_bot" + sfx).c_str(), {pin("T1", wBe.c_str()), pin(D2.c_str(), "anode")}));
+            legRail = {pin(D1.c_str(), "cathode"), pin(D2.c_str(), "cathode"), pin(Co.c_str(), "1")};
             legGnd  = {pin("T1", wAe.c_str()), pin("T1", wB.c_str()), pin(Co.c_str(), "2")};
             break; }
         case RectifierType::FullBridge: {
             const std::string DH1 = "DH1_" + sfx, DH2 = "DH2_" + sfx, DL1 = "DL1_" + sfx, DL2 = "DL2_" + sfx,
-                Co = "Cout_" + sfx, Rs1 = "Rsn1_" + sfx, Cs1 = "Csn1_" + sfx;
+                Co = "Cout_" + sfx;
             comps.insert(comps.end(), {comp(DH1.c_str(), diodeReq(reqDi)), comp(DH2.c_str(), diodeReq(reqDi)),
-                comp(DL1.c_str(), diodeReq(reqDi)), comp(DL2.c_str(), diodeReq(reqDi)), comp(Co.c_str(), couti),
-                comp(Rs1.c_str(), snubR()), comp(Cs1.c_str(), snubC())});
+                comp(DL1.c_str(), diodeReq(reqDi)), comp(DL2.c_str(), diodeReq(reqDi)), comp(Co.c_str(), couti)});
             conns.push_back(conn(("sec_a" + sfx).c_str(), {pin("T1", wA.c_str()), pin(DH1.c_str(), "anode"),
-                                                           pin(DL1.c_str(), "cathode"), pin(Rs1.c_str(), "1"), pin(Cs1.c_str(), "1")}));
+                                                           pin(DL1.c_str(), "cathode")}));
             conns.push_back(conn(("sec_b" + sfx).c_str(), {pin("T1", wAe.c_str()), pin(DH2.c_str(), "anode"),
                                                            pin(DL2.c_str(), "cathode")}));
-            legRail = {pin(DH1.c_str(), "cathode"), pin(DH2.c_str(), "cathode"),
-                       pin(Rs1.c_str(), "2"), pin(Cs1.c_str(), "2"), pin(Co.c_str(), "1")};
+            legRail = {pin(DH1.c_str(), "cathode"), pin(DH2.c_str(), "cathode"), pin(Co.c_str(), "1")};
             legGnd  = {pin(DL1.c_str(), "anode"), pin(DL2.c_str(), "anode"), pin(Co.c_str(), "2")};
             break; }
         default:

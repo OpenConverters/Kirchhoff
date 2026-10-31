@@ -856,6 +856,41 @@ TEST_CASE("SRC exact tank: the state-plane closed form matches a time-domain int
     }
 }
 
+TEST_CASE("SRC exact tank: the solve through a near-bare circuit equals the closed form (ABT #2179)",
+          "[analytical][solver][src][abt2179]") {
+    // The piecewise-linear steady state through the converter circuit (Lm, leakage, split caps, diode drop) is a
+    // separate solver from the bare tank's state-plane closed form. With every circuit part made negligible — Lm 1e9·Lr
+    // (or absent), no leakage (k = 1), a series capacitance 1e9·Cr, ideal diodes — the two must agree.
+    namespace AN = Kirchhoff::analytical;
+    for (const bool withLm : {true, false})
+        for (const auto rect : {AN::SrcRectifier::CENTER_TAPPED, AN::SrcRectifier::FULL_BRIDGE})
+            for (const auto& [F, r] : std::vector<std::pair<double, double>>{{1.05, 0.3}, {1.3, 1.0}, {2.2, 3.0}}) {
+                DYNAMIC_SECTION((withLm ? "Lm 1e9·Lr" : "no Lm") << ", "
+                                << (rect == AN::SrcRectifier::FULL_BRIDGE ? "full bridge" : "centre-tapped")
+                                << ", F " << F << ", r " << r) {
+                    AN::SrcTankNetwork net;
+                    net.capacitanceRatio = 1.0 / (1.0 + 1e-9);
+                    if (withLm) net.magnetizingRatio = 1e9;
+                    net.rectifier = rect;
+                    REQUIRE_FALSE(net.bare());
+                    const auto bare = AN::src_exact_tank(F, r);
+                    const auto t = AN::src_exact_tank(F, r, net);
+                    REQUIRE(t.network != nullptr);   // the circuit solver, not the closed form
+                    INFO("closed form M " << bare.gain << ", rms " << bare.currentRms() << ", peak " << bare.currentPeak()
+                         << "; circuit M " << t.gain << ", rms " << t.currentRms() << ", peak " << t.currentPeak());
+                    CHECK(t.gain == Catch::Approx(bare.gain).epsilon(1e-7));
+                    CHECK(t.currentRms() == Catch::Approx(bare.currentRms()).epsilon(1e-6));
+                    CHECK(t.currentPeak() == Catch::Approx(bare.currentPeak()).epsilon(1e-6));
+                    CHECK(t.initialCurrent == Catch::Approx(bare.initialCurrent).epsilon(1e-6));
+                    for (const double tau : {0.1, 0.4, 0.7}) {
+                        const double x = tau * bare.halfPeriod;
+                        CHECK(t.state(x).i == Catch::Approx(bare.current(x)).margin(1e-6));
+                    }
+                    CHECK(AN::src_exact_frequency_ratio(bare.gain, r, net) == Catch::Approx(F).epsilon(1e-7));
+                }
+            }
+}
+
 TEST_CASE("analytical_src emits the exact tank current: rms, peak and power above resonance (ABT #2173)",
           "[analytical][solver][src][abt2173]") {
     // 400 V full bridge -> 48 V / 5 A through n 7.5, Lr 40 uH / Cr 63.3 nF (fr 100.0 kHz), driven at 125 kHz.
@@ -3094,9 +3129,13 @@ TEST_CASE("SRC driveAtSwitchingFrequency: the tank resonates at config.resonantF
             CHECK(d.loadResistance == Catch::Approx(Rload));
             // The series tank's exact steady-state gain into the reflected design load (ABT #2173: the state-plane
             // solution replaced the FHA divider Rac/|Rac + jX|; the load is the rectifier's DC resistance referred to the
-            // primary, n²·Rload). Centre-tapped: n·(Vo + Vd) = M·η·k·Vin.
+            // primary, n²·Rload), solved through the converter's circuit (Lm, leakage, split caps, diode drop — ABT
+            // #2179) at the derated drive η·k·Vin. Centre-tapped: n·(Vo + Vd) = M·η·k·Vin.
             const double R0 = std::sqrt(d.resonantInductance / d.resonantCapacitance);
-            const auto tank = Kirchhoff::analytical::src_exact_tank(fsw / 100e3, R0 / (n * n * Rload));
+            namespace AN = Kirchhoff::analytical;
+            const auto tank = AN::src_exact_tank(fsw / 100e3, R0 / (n * n * Rload),
+                AN::src_tank_network(Kirchhoff::src_tank_circuit(d), d.resonantInductance, d.resonantCapacitance,
+                                     eta * k * Vin, {n}));
             const double M = tank.gain;
             CHECK(d.tankGain == Catch::Approx(M));
             CHECK(d.outputVoltage == Catch::Approx(M * eta * k * Vin / n - Vd).epsilon(1e-9));
@@ -3112,7 +3151,9 @@ TEST_CASE("SRC driveAtSwitchingFrequency: the tank resonates at config.resonantF
             const nlohmann::json tas = Kirchhoff::build_src_tas(d);
             CHECK(stimulus_frequency(tas) == fsw);
             // The resonant inductor carries the exact tank current (ABT #2173; it was the FHA sinusoid Pin/(Vtank1·M)):
-            // its rms from the state-plane solution, plus the small magnetizing term.
+            // its rms from the state-plane solution through the circuit the deck carries, driven (lossless) at k·Vin, the
+            // magnetizing current included (ABT #2179; it was the bare tank's rms in quadrature with a triangular Lm
+            // current).
             {
                 const nlohmann::json* lr = nullptr;
                 std::function<void(const nlohmann::json&)> find = [&](const nlohmann::json& j) {
@@ -3126,10 +3167,12 @@ TEST_CASE("SRC driveAtSwitchingFrequency: the tank resonates at config.resonantF
                 REQUIRE(lr != nullptr);
                 const nlohmann::json& exLr = lr->at("inputs").at("operatingPoints").at(0).at("excitationsPerWinding").at(0);
                 const double iLrRms = exLr.at("current").at("processed").at("rms").get<double>();
-                const double iLoad = tank.currentRms() * k * Vin / R0;
-                const double iMag = (k * Vin) * (0.25 / fsw) / d.magnetizingInductance / std::sqrt(3.0);
-                INFO("Lr rms " << iLrRms << " A, expected " << std::hypot(iLoad, iMag) << " A");
-                CHECK(iLrRms == Catch::Approx(std::hypot(iLoad, iMag)).epsilon(1e-6));
+                const auto deckTank = AN::src_exact_tank(fsw / 100e3, R0 / (n * n * Rload),
+                    AN::src_tank_network(Kirchhoff::src_tank_circuit(d), d.resonantInductance, d.resonantCapacitance,
+                                         k * Vin, {n}));
+                const double expected = deckTank.currentRms() * k * Vin / R0;
+                INFO("Lr rms " << iLrRms << " A, expected " << expected << " A");
+                CHECK(iLrRms == Catch::Approx(expected).epsilon(1e-6));
             }
             CHECK(tas.at("inputs").at("designRequirements").at("outputs").at(0).at("voltage").at("nominal").get<double>() ==
                   Catch::Approx(d.outputVoltage));
@@ -3144,19 +3187,33 @@ TEST_CASE("SRC driveAtSwitchingFrequency: the tank resonates at config.resonantF
             const WindingPower s1 = winding_power(exc.at(1)), s2 = winding_power(exc.at(2));
             INFO("fsw " << fsw << ": M " << M << ", Vout " << d.outputVoltage << " V, Pout " << d.outputPower
                  << " W, P_pri " << pri.power << " W, P_sec " << s1.power + s2.power << " W");
-            // analytical_src's transformer is lossless (P_sec = P_pri, as on the help-me path) and carries the input
-            // power into the delivered rail and its diodes: Pout/eta*(1 + Vd/Vout).
-            CHECK(s1.power + s2.power == Catch::Approx(pri.power).epsilon(1e-6));
-            CHECK(pri.power == Catch::Approx(d.outputPower / eta * (1.0 + Vd / d.outputVoltage)).epsilon(0.02));
+            // Alf 2026-10-31: the tank model includes Lm (ABT #2179); the primary current is no longer proportional to
+            // the secondary's (it carries Lm's magnetizing current) and the primary terminal voltage (Lm's) steps at the
+            // bridge edges, so the balance is exact only in continuous time. The emitted power is the 256-sample
+            // trapezoid of v·i, whose sampling error is ~1e-3 (0.08 % at 140 kHz): the transformer stays lossless to
+            // within that.
+            CHECK(s1.power + s2.power == Catch::Approx(pri.power).epsilon(1e-3));
+            // Alf 2026-10-31: the tank model includes Lm (ABT #2179); the waveforms are emitted from the network
+            // driven lossless at k·Vin, not at the derated η·k·Vin the design's rail is sized at. That drive's network
+            // gain M' gives the transformer current that drive delivers, Io' = (M'·k·Vin/n − Vd)/Rload, and the
+            // windings are emitted at ±Vout (Vout·w/M', w = ±M' while a diode conducts). Lm and the leakage store no
+            // net energy over the period, so the exact lossless relation is P_pri = Vout·(M'·k·Vin/n − Vd)/Rload.
+            // (With M' = M it is Pout/η·(1 + Vd/Vout) − Pout·Vd/Vout: the diode loss is counted once, through Io'.)
+            const double Mdrive = AN::src_exact_tank(fsw / 100e3, R0 / (n * n * Rload),
+                AN::src_tank_network(Kirchhoff::src_tank_circuit(d), d.resonantInductance, d.resonantCapacitance,
+                                     k * Vin, {n})).gain;
+            const double pLossless = d.outputVoltage * (Mdrive * k * Vin / n - Vd) / Rload;
+            INFO("M' " << Mdrive << ", lossless P_pri " << pLossless << " W");
+            CHECK(pri.power == Catch::Approx(pLossless).epsilon(0.02));
         }
     }
 }
 
 TEST_CASE("SRC driveAtSwitchingFrequency: the ngspice deck switches at the forced frequency and lands on the FHA rail "
           "(ABT #1539)", "[ngspice][src][abt1539]") {
-    // The deck's efficiency is compared with the same tank's help-me deck (driven at its resonance): at REQUIREMENTS
-    // fidelity the 100 ohm rectifier aids sit across each diode and take ~18% at this 480 W point on either path
-    // (ABT #1547, open), so an absolute figure would measure them rather than the forced drive.
+    // The deck's efficiency is compared with the same tank's help-me deck (driven at its resonance). The 100 ohm
+    // rectifier aids that sat across each diode and took ~18% at this 480 W point (ABT #1547) are gone from the deck
+    // (ABT #2179); the comparison stays relative, so the figure measures the forced drive, not the deck's switch model.
     const Kirchhoff::SrcDesign d0 = Kirchhoff::design_src(src_1539_spec(100e3, false));
     const TwoSidedDeckRun r0 = run_two_sided_deck(Kirchhoff::build_src_tas(d0), 100e3, 400.0, "vvin#branch", "vout",
                                                   d0.loadResistance);
@@ -3188,9 +3245,13 @@ TEST_CASE("SRC: a resonant frequency without the flag, or a forced point below r
         CHECK(d.resonantFrequency == Catch::Approx(100e3));
         CHECK(d.outputVoltage == 48.0);
         // The turns ratio is sized at the range minimum 380 V and the 400 V operating point is regulated by frequency
-        // (ABT #2160): the bridge runs above fr where the tank gain is 380/400 of the resonant one (it was driven at fr,
-        // gain 1, when n was sized at the operating point).
-        CHECK(d.tankGain == Catch::Approx(380.0 / 400.0));
+        // (ABT #2160): the bridge runs above fr. Alf 2026-10-31: Vin_min also runs at the frequency that delivers Vo
+        // (ABT #2171), so every input runs at the gain that delivers exactly 48 V, n·(Vo + k·Vd) = M·η·0.5·Vin (it was
+        // 380/400 of the resonant gain, i.e. the resonant point's 1.08 headroom carried to 400 V).
+        const double kd = (d.rectifierType == Kirchhoff::RectifierType::FullBridge) ? 2.0 : 1.0;
+        CHECK(d.tankGain == Catch::Approx(d.turnsRatio * (48.0 + kd * d.outputs.at(0).diodeDrop) / (0.95 * 0.5 * 400.0))
+                                .epsilon(1e-9));
+        CHECK(d.tankGain < 380.0 / 400.0);
         CHECK(d.switchingFrequency > 100e3);
     }
     SECTION("below the series resonance the tank input is capacitive") {

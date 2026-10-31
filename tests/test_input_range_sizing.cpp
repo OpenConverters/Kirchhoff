@@ -237,9 +237,27 @@ TEST_CASE("SRC: frequency regulation delivers the output at every input of the r
         CHECK(d.at(vop).resonantInductance == d.at(36.0).resonantInductance);
         CHECK(d.at(vop).resonantCapacitance == d.at(36.0).resonantCapacitance);
     }
-    // At Vin_min the converter runs exactly at the series resonance (today's operating point, gain 1).
-    CHECK(d.at(36.0).switchingFrequency == 100e3);
-    CHECK(d.at(36.0).tankGain == 1.0);
+    // The tank is solved through the converter's circuit (Lm, leakage, split caps, diode drop — ABT #2179), driven
+    // at the derated bridge amplitude η·k·Vin.
+    auto network = [&](const Kirchhoff::SrcDesign& dd, double vop) {
+        return Kirchhoff::analytical::src_tank_network(Kirchhoff::src_tank_circuit(dd), dd.resonantInductance,
+                                                       dd.resonantCapacitance, eta * k * vop, {dd.turnsRatio});
+    };
+    // Alf 2026-10-31: Vin_min also runs at the frequency that delivers Vo (ABT #2171). The tank resonates at the
+    // 100 kHz design frequency, and at 36 V the bridge runs just above it, at the gain n·(Vo+Vd)/(η·k·Vin_min) — the
+    // 1/1.08 headroom the ratio carries (to its 0.01 rounding).
+    {
+        const double n36 = d.at(36.0).turnsRatio, Vd36 = d.at(36.0).outputs.at(0).diodeDrop;
+        const auto& d36 = d.at(36.0);
+        const double R0 = std::sqrt(d36.resonantInductance / d36.resonantCapacitance);
+        CHECK(d36.switchingFrequency > 100e3);
+        CHECK_THAT(d36.switchingFrequency,
+                   WithinRel(Kirchhoff::analytical::src_exact_frequency_ratio(d36.tankGain, R0 / (n36 * n36 * d36.loadResistance),
+                                                                                network(d36, vinMin)) *
+                                 100e3, 1e-9));
+        CHECK_THAT(d.at(36.0).tankGain, WithinRel(n36 * (vo + Vd36) / (eta * k * vinMin), 1e-12));
+        CHECK(d.at(36.0).tankGain < 1.0);
+    }
     CHECK_THAT(1.0 / (2.0 * M_PI * std::sqrt(d.at(36.0).resonantInductance * d.at(36.0).resonantCapacitance)),
                WithinRel(100e3, 1e-12));
     // The operating frequency rises with the input voltage; the TAS, its stimulus and the diagnostics carry it.
@@ -259,27 +277,28 @@ TEST_CASE("SRC: frequency regulation delivers the output at every input of the r
         for (const auto& st : stimuli)
             CHECK(st.at("waveform").at("frequency").get<double>() == d.at(vop).switchingFrequency);
         // The output reaches its target at every input: the series tank's exact gain at the operating frequency into
-        // the reflected load (the rectifier's DC resistance referred to the primary, n²·R) delivers the same rail as
-        // the resonant point at 36 V (n·(Vo+Vd) = M·η·k·Vin), and that rail is at least the 12 V target (the 1.08
-        // headroom above it is left to the closed loop).
+        // the reflected load (the rectifier's DC resistance referred to the primary, n²·R) delivers exactly the 12 V
+        // target, n·(Vo+Vd) = M·η·k·Vin. Alf 2026-10-31: Vin_min also runs at the frequency that delivers Vo (ABT
+        // #2171) — before, 36 V ran at resonance and every input delivered that point's 1.08 headroom.
         const auto& dd = d.at(vop);
         const double n = dd.turnsRatio, Vd = dd.outputs.at(0).diodeDrop;
         const double R0 = std::sqrt(dd.resonantInductance / dd.resonantCapacitance);
         const double f0 = 1.0 / (2.0 * M_PI * std::sqrt(dd.resonantInductance * dd.resonantCapacitance));
         const auto tank = Kirchhoff::analytical::src_exact_tank(dd.switchingFrequency / f0,
-                                                                R0 / (n * n * dd.loadResistance));
+                                                                R0 / (n * n * dd.loadResistance), network(dd, vop));
         const double M = tank.gain;
         const double delivered = M * eta * k * vop / n - Vd;
-        const double deliveredAtMin = eta * k * vinMin / n - Vd;
-        CHECK_THAT(M, WithinRel(vinMin / vop, 1e-9));
-        CHECK_THAT(delivered, WithinRel(deliveredAtMin, 1e-9));
-        CHECK(delivered >= vo);
+        CHECK_THAT(M, WithinRel(n * (vo + Vd) / (eta * k * vop), 1e-9));
+        CHECK_THAT(delivered, WithinRel(vo, 1e-9));
         CHECK(dd.outputVoltage == vo);
         // Regulated, the primary carries the same rectified (load) current at every input (unregulated at resonance it
         // doubled from 36 V to 72 V: 6.07 A -> 12.15 A rms); its rms is the exact tank current's, a sine at 36 V and
-        // two arcs per half period above (6.07 / 6.17 / 6.27 A at 36 / 54 / 72 V). 1 %: the 256-sample waveform.
+        // two arcs per half period above resonance. 1 %: the 256-sample waveform.
         CHECK_THAT(res.at("diagnostics").at("primaryRmsCurrent").get<double>(),
                    WithinRel(tank.currentRms() * k * vop / R0, 0.01));
+        // Alf 2026-10-31: Vin_min also runs at the frequency that delivers Vo (ABT #2171): 36 V now runs above
+        // resonance too (two arcs, not a sine), and the rms rises with the frequency, 5.35 / 5.51 / 5.54 A at
+        // 36 / 54 / 72 V (it was 6.07 / 6.17 / 6.27 A with 36 V at resonance delivering the 1.08 headroom).
         CHECK_THAT(res.at("diagnostics").at("primaryRmsCurrent").get<double>(),
                    WithinRel(r.at(36.0).at("diagnostics").at("primaryRmsCurrent").get<double>(), 0.04));
     }
@@ -299,11 +318,10 @@ TEST_CASE("SRC: frequency regulation delivers the output at every input of the r
     }
 }
 
-TEST_CASE("SRC: a pinned tank runs at its own resonance when that lies a few ppm above the design frequency",
+TEST_CASE("SRC: a pinned tank whose resonance lies a few ppm above the design frequency runs above its own resonance",
           "[input-range][src][regulation]") {
     // 50 uH / 50.66 nF resonate at 100000.58 Hz: within design_src's 1 % acceptance of the 100 kHz design frequency,
-    // but 5.8 ppm above it, which analytical_src refuses as below-resonance. The reference point is the tank's own
-    // resonance (gain 1), single- and multi-output.
+    // but 5.8 ppm above it, which analytical_src refuses as below-resonance. Single- and multi-output.
     for (const auto& outs : {std::vector<std::pair<double, double>>{{48.0, 500.0 / 48.0}},
                              std::vector<std::pair<double, double>>{{48.0, 500.0 / 48.0}, {12.0, 50.0 / 12.0}}}) {
         json s = ranged_spec(300.0, 300.0, 300.0, 300.0, outs, 100e3, 0.9);
@@ -313,9 +331,13 @@ TEST_CASE("SRC: a pinned tank runs at its own resonance when that lies a few ppm
         const double ftank = 1.0 / (2.0 * M_PI * std::sqrt(5e-5 * 5.066e-8));
         CHECK(d.resonantInductance == 5e-5);
         CHECK(d.resonantCapacitance == 5.066e-8);
-        CHECK(d.switchingFrequency == ftank);
+        // Alf 2026-10-31: Vin_min also runs at the frequency that delivers Vo (ABT #2171): the bridge runs above the
+        // tank's OWN resonance (the gain solve starts from the pinned Lr·Cr, never from the 100 kHz design frequency),
+        // so the pinned tank is not refused as below-resonance; before, it ran exactly at ftank.
+        CHECK(d.switchingFrequency > ftank);
+        CHECK(d.tankGain < 1.0);
         const json res = run("src", s);
-        CHECK(res.at("diagnostics").at("switchingFrequency").get<double>() == ftank);
+        CHECK(res.at("diagnostics").at("switchingFrequency").get<double>() == d.switchingFrequency);
     }
 }
 

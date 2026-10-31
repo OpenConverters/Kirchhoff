@@ -95,13 +95,13 @@ struct Ref {
     std::function<json()> tas;   // design + assemble at this reference point
     double vin, vout, power, fsw;
     double voutTol;              // G1/G2 tolerance
-    double expectedRatio;        // ngspice/analytical Vout ratio expected by design (1.0 except SRC headroom)
+    double expectedRatio;        // ngspice/analytical Vout ratio expected by design (1.0 for every design)
 };
 
 // Reference designs = real datasheet / app-note operating points, transcribed from MKF's
 // *ReferenceDesignsPtp suites (3 per topology where MKF has them; cross-checked here through BOTH KH
-// engines). expectedRatio: SRC carries a deliberate ~8% open-loop gain headroom (abt #62); all else
-// hits target (ratio 1).
+// engines). expectedRatio: every design hits target (ratio 1; the SRC's ~8% gain headroom, abt #62, is now
+// spent by running each input at the frequency that delivers Vo).
 std::vector<Ref> refs() {
     using namespace Kirchhoff;
     std::vector<Ref> v;
@@ -166,7 +166,9 @@ std::vector<Ref> refs() {
     add("llc","Telecom-120W", design_llc, build_llc_tas, 400,12,10,100000);
     add("llc","ATX-240W",     design_llc, build_llc_tas, 400,24,10,100000);
     add("llc","EV-1kW",       design_llc, build_llc_tas, 400,48,20,100000);
-    add("src","500W-FB",      design_src, build_src_tas, 400,48,10,100000, 0.07, 1.08); // 8% headroom
+    // Alf 2026-10-31: every input runs at the frequency that delivers Vo; the model includes Lm, the leakage and the
+    // diode drop, and the deck carries no rectifier snubbers ("Real circuit; fix the deck", ABT #2179).
+    add("src","500W-FB",      design_src, build_src_tas, 400,48,10,100000, 0.07, 1.0);
     return v;
     // Excluded (need special specs/handling, validated in test_mkf_equivalence): isolated_buck /
     // isolated_buck_boost (2-output), DAB (output floats), CLLC / CLLLC (initial-conditions + active SR),

@@ -2559,7 +2559,459 @@ std::pair<double, double> src_arcs(double M, double Vc) {
 constexpr double kSrcResonanceTolerance = 1e-6;   // F within this below 1 is the resonance (fr from Lr·Cr rounding)
 }  // namespace
 
+// ── SRC tank through its circuit (ABT #2179): the exact piecewise-linear periodic steady state ──
+// State z = (i, v, im, w, 1, q): tank current, Cr-series voltage, magnetizing current, rectifier-side winding voltage
+// (all normalised as the tank), the constant 1 (the affine inputs) and q = ∫ output current dτ (exact average). Each
+// conduction mode is linear, so a mode advances exactly by the matrix exponential of its 6×6 system; a mode ends when a
+// diode current or a winding voltage crosses its bound (located to the double resolution). The steady state is the
+// period-periodic state (shooting, Newton) at which the average output current equals the output voltage over the
+// load. Nothing is fitted: the deck's elements, ideal switching diodes with a constant drop.
+namespace {
+using SrcZ = std::array<double, 6>;
+using SrcA = std::array<std::array<double, 6>, 6>;
+enum SrcIdx { kI = 0, kV = 1, kIm = 2, kW = 3, kOne = 4, kQ = 5 };
+// CP / CN: a diode (pair) clamps w at +M / −M. FREE0: no diode conducts: the winding current is 0.
+enum SrcMode { kCP = 0, kCN, kFree0 };
+const char* src_mode_name(int m) {
+    switch (m) {
+        case kCP: return "+ clamp"; case kCN: return "- clamp";
+        default: return "no diode conducting";
+    }
+}
+
+SrcA src_mat_mul(const SrcA& a, const SrcA& b) {
+    SrcA c{};
+    for (int r = 0; r < 6; ++r)
+        for (int k = 0; k < 6; ++k) {
+            const double ark = a[r][k];
+            if (ark == 0.0) continue;
+            for (int col = 0; col < 6; ++col) c[r][col] += ark * b[k][col];
+        }
+    return c;
+}
+SrcZ src_mat_vec(const SrcA& a, const SrcZ& x) {
+    SrcZ y{};
+    for (int r = 0; r < 6; ++r) { double s = 0.0; for (int k = 0; k < 6; ++k) s += a[r][k] * x[k]; y[r] = s; }
+    return y;
+}
+// exp(A·t): scaling and squaring of the Taylor series (‖A·t/2^s‖∞ <= 1/2, terms to the double resolution).
+SrcA src_expm(const SrcA& A, double t) {
+    double nrm = 0.0;
+    for (int r = 0; r < 6; ++r) { double s = 0.0; for (int k = 0; k < 6; ++k) s += std::abs(A[r][k] * t); nrm = std::max(nrm, s); }
+    int sq = 0;
+    if (nrm > 0.5) sq = static_cast<int>(std::ceil(std::log2(nrm / 0.5)));
+    const double scale = t / std::ldexp(1.0, sq);
+    SrcA X{}, E{}, term{};
+    for (int r = 0; r < 6; ++r) for (int k = 0; k < 6; ++k) X[r][k] = A[r][k] * scale;
+    for (int r = 0; r < 6; ++r) { E[r][r] = 1.0; term[r][r] = 1.0; }
+    for (int n = 1; n <= 40; ++n) {
+        term = src_mat_mul(term, X);
+        double big = 0.0;
+        for (int r = 0; r < 6; ++r) for (int k = 0; k < 6; ++k) { term[r][k] /= n; E[r][k] += term[r][k]; big = std::max(big, std::abs(term[r][k])); }
+        if (big < 1e-18) break;
+    }
+    for (int k = 0; k < sq; ++k) E = src_mat_mul(E, E);
+    return E;
+}
+double src_dot(const SrcZ& g, const SrcZ& z) { double s = 0.0; for (int k = 0; k < 6; ++k) s += g[k] * z[k]; return s; }
+
+struct SrcGuard { SrcZ g; int next; };
+struct SrcGuards {   // at most two per mode (no allocation in the stepping loop)
+    std::array<SrcGuard, 2> g{};
+    int n = 0;
+    SrcGuards(std::initializer_list<SrcGuard> l) { for (const auto& x : l) g[n++] = x; }
+    const SrcGuard* begin() const { return g.data(); }
+    const SrcGuard* end() const { return g.data() + n; }
+    int size() const { return n; }
+    const SrcGuard& operator[](int k) const { return g[k]; }
+};
+
+// The tank + network at clamp M: each mode's system matrix and the guards that end it.
+struct SrcPwl {
+    double M, lam, a, l, Ed, eo;
+    bool hasLm, fb;
+    SrcPwl(const SrcTankNetwork& n, double gain) : M(gain) {
+        lam = n.capacitanceRatio;
+        hasLm = n.magnetizingRatio.has_value();
+        a = hasLm ? *n.magnetizingRatio : 0.0;
+        l = n.leakageRatio;
+        fb = n.rectifier == SrcRectifier::FULL_BRIDGE;
+        Ed = n.diodeDrop;
+        eo = M - (fb ? 2.0 : 1.0) * Ed;
+    }
+    // FREE0's winding voltage (the magnetizing share of the tank drive; the whole drive without Lm).
+    double free0_w(double s, double v) const { return hasLm ? a * (s - v) / (1.0 + a) : (s - v); }
+    SrcA matrix(int mode, double s) const {
+        SrcA A{};
+        A[kV][kI] = 1.0 / lam;
+        if (mode == kFree0) {
+            if (hasLm) {
+                const double L = 1.0 + a;   // Lr + Lm in series (the leakage carries no current)
+                A[kI][kV] = -1.0 / L; A[kI][kOne] = s / L;
+                A[kIm][kV] = -1.0 / L; A[kIm][kOne] = s / L;
+                A[kW][kI] = -a / (lam * L);
+            } else {
+                A[kW][kI] = -1.0 / lam;   // i stays 0: w follows the drive minus the capacitor
+            }
+            return A;
+        }
+        // Lr carries i, Lm carries im, the leakage carries i − im: the magnetizing node voltage vP.
+        const double den = 1.0 + l + (hasLm ? l / a : 0.0);
+        const double pV = -l / den, pW = 1.0 / den, pOne = l * s / den;   // vP = pV·v + pW·w + pOne
+        A[kI][kV] = -1.0 - pV; A[kI][kW] = -pW; A[kI][kOne] = s - pOne;
+        if (hasLm) { A[kIm][kV] = pV / a; A[kIm][kW] = pW / a; A[kIm][kOne] = pOne / a; }
+        // The output current is the clamping diode's, |i − im| (w is held at ±M: its row stays 0).
+        const double sign = mode == kCP ? 1.0 : -1.0;
+        A[kQ][kI] = sign; A[kQ][kIm] = -sign;
+        return A;
+    }
+    SrcGuards guards(int mode) const {
+        // A guard g·z >= 0 holds in the mode; its crossing leads to `next`.
+        auto it = [](double ki) { SrcZ z{}; z[kI] = ki; z[kIm] = -ki; return z; };              // the diode current
+        auto wg = [&](double kw) { SrcZ z{}; z[kW] = kw; z[kOne] = M; return z; };              // M ∓ w
+        switch (mode) {
+            case kCP: return {{it(1.0), kFree0}};
+            case kCN: return {{it(-1.0), kFree0}};
+            case kFree0: return {{wg(-1.0), kCP}, {wg(1.0), kCN}};
+        }
+        throw std::logic_error("SRC tank: unknown conduction mode");
+    }
+    // Entering `mode` at state z (the bridge drive s): the clamped / algebraic winding voltage.
+    void enter(int mode, double s, SrcZ& z) const {
+        if (mode == kCP) z[kW] = M;
+        else if (mode == kCN) z[kW] = -M;
+        else if (mode == kFree0) z[kW] = free0_w(s, z[kV]);
+    }
+};
+
+struct SrcSegment { double t0, t1; int mode; double s; SrcZ z0; };
+struct SrcPeriod { SrcZ z; int mode; std::vector<SrcSegment> segments; };
+
+// One period from (z0, mode0) at the positive bridge transition: τ ∈ [0, γ) at s = +1, [γ, 2γ) at s = −1.
+SrcPeriod src_propagate(const SrcPwl& P, double gamma, SrcZ z, int mode, bool record) {
+    constexpr int kStepsPerHalf = 128;   // event bracketing only: every event is located exactly inside its step
+    const double h = gamma / kStepsPerHalf;
+    SrcPeriod out;
+    std::array<SrcA, 12> phiCache{};   // exp(A·h) per (mode, s)
+    std::array<bool, 12> cached{};
+    auto phi = [&](int m, double s) -> const SrcA& {
+        const int key = m * 2 + (s > 0 ? 0 : 1);
+        if (!cached[key]) { phiCache[key] = src_expm(P.matrix(m, s), h); cached[key] = true; }
+        return phiCache[key];
+    };
+    double tSeg = 0.0;
+    SrcZ zSeg = z;
+    auto close = [&](double t, double s) {
+        if (record) out.segments.push_back({tSeg, t, mode, s, zSeg});
+    };
+    // Takes the transitions a just-entered mode violates at once (zero-length modes), then opens the segment.
+    auto settle = [&](double t, double s) {
+        for (int k = 0; k < 8; ++k) {
+            bool moved = false;
+            for (const auto& gd : P.guards(mode)) {
+                if (src_dot(gd.g, z) < -1e-12) {
+                    mode = gd.next; P.enter(mode, s, z); moved = true; break;
+                }
+            }
+            if (!moved) { tSeg = t; zSeg = z; return; }
+        }
+        throw std::invalid_argument(std::string("SRC tank: the rectifier chatters between modes at ") + src_mode_name(mode) +
+                                    " (t " + std::to_string(t) + ", i " + std::to_string(z[kI]) + ", im " + std::to_string(z[kIm]) +
+                                    ", w " + std::to_string(z[kW]) + ", v " + std::to_string(z[kV]) + ", M " + std::to_string(P.M) + ")");
+    };
+    for (int half = 0; half < 2; ++half) {
+        const double s = half == 0 ? 1.0 : -1.0;
+        if (half == 1) { close(gamma, 1.0); }
+        P.enter(mode == kFree0 ? kFree0 : -1, s, z);   // FREE0's w follows the drive across the bridge edge
+        settle(half * gamma, s);
+        for (int step = 0; step < kStepsPerHalf; ++step) {
+            double t = half * gamma + step * h;
+            const double tEnd = half * gamma + (step + 1) * h;
+            bool full = true;   // no event inside this step yet: it advances by the cached exp(A·h)
+            while (t < tEnd) {
+                const double dt = full ? h : tEnd - t;
+                SrcA A = P.matrix(mode, s);
+                const SrcA Phi = full ? phi(mode, s) : src_expm(A, dt);
+                SrcZ z1 = src_mat_vec(Phi, z);
+                // The earliest guard this sub-step violates.
+                const auto gs = P.guards(mode);
+                double best = dt; int bestK = -1;
+                for (int k = 0; k < gs.size(); ++k) {
+                    const double g1 = src_dot(gs[k].g, z1);
+                    if (!(g1 < 0.0)) continue;
+                    // Safeguarded Newton on the crossing time (dG/dτ = G·A·z), bracketed by [lo, hi].
+                    double lo = 0.0, hi = dt;
+                    const double flo = std::max(0.0, src_dot(gs[k].g, z));
+                    double x = (flo > 0.0) ? dt * flo / (flo - g1) : 0.5 * dt, xHit = hi;
+                    for (int it = 0; it < 100; ++it) {
+                        const SrcZ zx = src_mat_vec(src_expm(A, x), z);
+                        const double fx = src_dot(gs[k].g, zx);
+                        if (fx < 0.0) { hi = x; xHit = x; } else { lo = x; }
+                        if (std::abs(fx) < 1e-15 || hi - lo < 1e-15 * std::max(1.0, gamma)) { xHit = x; break; }
+                        const double dfx = src_dot(gs[k].g, src_mat_vec(A, zx));
+                        double xn = (dfx != 0.0) ? x - fx / dfx : 0.5 * (lo + hi);
+                        if (!(xn > lo && xn < hi)) xn = 0.5 * (lo + hi);
+                        x = xn;
+                    }
+                    if (xHit < best || bestK < 0) { best = xHit; bestK = k; }
+                }
+                if (bestK < 0) { z = z1; t = tEnd; continue; }
+                full = false;
+                z = src_mat_vec(src_expm(A, best), z);
+                t += best;
+                close(t, s);
+                mode = gs[bestK].next; P.enter(mode, s, z);
+                settle(t, s);
+                if (t >= tEnd) break;
+            }
+        }
+    }
+    close(2.0 * gamma, -1.0);
+    out.z = z; out.mode = mode;
+    return out;
+}
+
+// Gaussian elimination with partial pivoting (the Newton step); throws on a singular Jacobian.
+std::vector<double> src_solve_linear(std::vector<std::vector<double>> A, std::vector<double> b) {
+    const size_t n = b.size();
+    for (size_t col = 0; col < n; ++col) {
+        size_t piv = col;
+        for (size_t r = col + 1; r < n; ++r) if (std::abs(A[r][col]) > std::abs(A[piv][col])) piv = r;
+        if (!(std::abs(A[piv][col]) > 1e-300)) throw std::runtime_error("SRC tank: singular steady-state Jacobian");
+        std::swap(A[piv], A[col]); std::swap(b[piv], b[col]);
+        for (size_t r = col + 1; r < n; ++r) {
+            const double f = A[r][col] / A[col][col];
+            for (size_t k = col; k < n; ++k) A[r][k] -= f * A[col][k];
+            b[r] -= f * b[col];
+        }
+    }
+    std::vector<double> x(n);
+    for (size_t r = n; r-- > 0;) {
+        double s = b[r];
+        for (size_t k = r + 1; k < n; ++k) s -= A[r][k] * x[k];
+        x[r] = s / A[r][r];
+    }
+    return x;
+}
+}  // namespace
+
+struct SrcTankSolution {
+    SrcTankNetwork net;
+    double M = 0.0, gamma = 0.0, r = 0.0, rms = 0.0, peak = 0.0;
+    std::vector<SrcSegment> segments;
+    SrcExactTank::State state(double tau) const {
+        double t = std::fmod(tau, 2.0 * gamma);
+        if (t < 0) t += 2.0 * gamma;
+        const SrcPwl P(net, M);
+        for (const auto& sg : segments) {
+            if (t <= sg.t1 || &sg == &segments.back()) {
+                const SrcA A = P.matrix(sg.mode, sg.s);
+                const SrcZ z = src_mat_vec(src_expm(A, std::max(0.0, t - sg.t0)), sg.z0);
+                const SrcZ dz = src_mat_vec(A, z);
+                const int clamp = sg.mode == kCP ? 1 : (sg.mode == kCN ? -1 : 0);
+                // The magnetizing node (the primary terminal) is Lm's voltage a·dim/dτ; without Lm it is w.
+                return {z[kI], z[kV], z[kIm], z[kW], P.hasLm ? P.a * dz[kIm] : z[kW], clamp};
+            }
+        }
+        throw std::logic_error("SRC tank: empty steady-state solution");
+    }
+};
+
+namespace {
+// The periodic steady state at (M, γ) for load r, solving either M (γ given) or γ (M given) with it: Newton on the
+// state at the positive bridge transition (i, v, im; see unpack) plus the unknown
+// parameter, residuals = periodicity and the output current balance. Starts from the bare tank's solution.
+std::shared_ptr<SrcTankSolution> src_network_steady_state(const SrcTankNetwork& net, double r, double M, double gamma,
+                                                          bool solveGain) {
+    SrcZ z{}; z[kOne] = 1.0;
+    {
+        // Start: the bare tank's arcs, the magnetizing current at its negative peak, the − clamp.
+        const double Mb = M;
+        const double Vc = std::min(1.0, Mb) * r * gamma / 2.0;
+        z[kI] = -std::sqrt(std::max(0.0, Vc * (1.0 - std::min(1.0, Mb * Mb)) * (2.0 + Vc)));
+        z[kV] = -std::min(1.0, Mb) * Vc;
+        z[kIm] = net.magnetizingRatio ? -Mb * gamma / (2.0 * *net.magnetizingRatio) : 0.0;
+        z[kW] = -M;
+    }
+    int mode0 = kCN;
+    double p = solveGain ? M : gamma;
+    // Unknowns: the tank current (unless FREE0 without Lm, where it is 0), the Cr-series voltage, the magnetizing
+    // current (with Lm, outside FREE0: in FREE0 the winding current is 0, so im = i), the parameter (w is ±M or
+    // algebraic).
+    const bool hasLm = net.magnetizingRatio.has_value();
+    auto iFree = [&]() { return !(mode0 == kFree0 && !hasLm); };
+    auto imFree = [&]() { return hasLm && mode0 != kFree0; };
+    auto unpack = [&](const std::vector<double>& u, SrcZ& zz, double& MM, double& gg) {
+        zz = SrcZ{}; zz[kOne] = 1.0;
+        size_t k = 0;
+        if (iFree()) zz[kI] = u[k++];
+        zz[kV] = u[k++];
+        if (imFree()) zz[kIm] = u[k++];
+        else if (mode0 == kFree0) zz[kIm] = zz[kI];
+        const double pp = u.back();
+        MM = solveGain ? pp : M; gg = solveGain ? gamma : pp;
+        if (mode0 == kCP) zz[kW] = MM;
+        else if (mode0 == kCN) zz[kW] = -MM;
+        else zz[kW] = SrcPwl(net, MM).free0_w(1.0, zz[kV]);   // algebraic in FREE0
+    };
+    auto pack = [&](const SrcZ& zz, double pp) {
+        std::vector<double> u;
+        if (iFree()) u.push_back(zz[kI]);
+        u.push_back(zz[kV]);
+        if (imFree()) u.push_back(zz[kIm]);
+        u.push_back(pp);
+        return u;
+    };
+    // residual: periodicity of the free state components + output current balance; also returns the end mode.
+    auto residual = [&](const std::vector<double>& u, int& endMode) {
+        SrcZ zz; double MM, gg;
+        unpack(u, zz, MM, gg);
+        if (!(MM > 0.0) || !(gg > 0.0)) throw std::invalid_argument("SRC tank: the steady-state solve left the physical "
+                                                                   "range (gain or half period <= 0)");
+        const SrcPwl P(net, MM);
+        const SrcPeriod per = src_propagate(P, gg, zz, mode0, false);
+        endMode = per.mode;
+        std::vector<double> R;
+        if (iFree()) R.push_back(per.z[kI] - zz[kI]);
+        R.push_back(per.z[kV] - zz[kV]);
+        if (imFree()) R.push_back(per.z[kIm] - zz[kIm]);
+        R.push_back(per.z[kQ] / (2.0 * gg) - P.eo * r);
+        return R;
+    };
+    auto norm = [](const std::vector<double>& R) { double m = 0.0; for (double x : R) m = std::max(m, std::abs(x)); return m; };
+    std::vector<double> u = pack(z, p);
+    int endMode = mode0;
+    std::vector<double> R = residual(u, endMode);
+    for (int iter = 0; iter < 80; ++iter) {
+        if (endMode != mode0) {
+            // The period ends in another mode than it started: restart from that mode (the state is continuous).
+            SrcZ zz; double MM, gg; unpack(u, zz, MM, gg);
+            const SrcPwl P(net, MM);
+            const SrcPeriod per = src_propagate(P, gg, zz, mode0, false);
+            const double pp = u.back();
+            mode0 = per.mode;
+            u = pack(per.z, pp);
+            R = residual(u, endMode);
+            continue;
+        }
+        if (norm(R) < 1e-12) break;
+        const size_t n = u.size();
+        std::vector<std::vector<double>> J(R.size(), std::vector<double>(n));
+        for (size_t k = 0; k < n; ++k) {
+            std::vector<double> up = u;
+            const double du = 1e-7 * std::max(1.0, std::abs(u[k]));
+            up[k] += du;
+            int em = 0;
+            const std::vector<double> Rp = residual(up, em);
+            for (size_t rr = 0; rr < R.size(); ++rr) J[rr][k] = (Rp[rr] - R[rr]) / du;
+        }
+        std::vector<double> negR(R.size());
+        for (size_t k = 0; k < R.size(); ++k) negR[k] = -R[k];
+        const std::vector<double> step = src_solve_linear(J, negR);
+        double lambda = 1.0;
+        bool accepted = false;
+        for (int ls = 0; ls < 30; ++ls, lambda *= 0.5) {
+            std::vector<double> un = u;
+            for (size_t k = 0; k < n; ++k) un[k] += lambda * step[k];
+            if (!(un.back() > 0.0)) continue;
+            int em = 0;
+            std::vector<double> Rn;
+            try { Rn = residual(un, em); } catch (const std::invalid_argument&) { continue; }
+            if (norm(Rn) < norm(R) || em != mode0) { u = un; R = Rn; endMode = em; accepted = true; break; }
+        }
+        if (!accepted) break;
+    }
+    if (endMode != mode0 || !(norm(R) < 1e-10))
+        throw std::runtime_error("SRC tank: the periodic steady state through the converter circuit did not converge "
+                                 "(F = " + std::to_string(M_PI / (solveGain ? gamma : u.back())) + ", M = " +
+                                 std::to_string(solveGain ? u.back() : M) + ", residual " + std::to_string(norm(R)) + ")");
+    auto sol = std::make_shared<SrcTankSolution>();
+    sol->net = net; sol->r = r;
+    SrcZ zz; double MM, gg; unpack(u, zz, MM, gg);
+    sol->M = MM; sol->gamma = gg;
+    const SrcPwl P(net, MM);
+    sol->segments = src_propagate(P, gg, zz, mode0, true).segments;
+    // rms and peak of the tank current: Simpson over every segment at <= γ/1024 (smooth inside a segment).
+    double s2 = 0.0, pk = 0.0;
+    for (const auto& sg : sol->segments) {
+        const double len = sg.t1 - sg.t0;
+        if (!(len > 0.0)) continue;
+        int nsub = std::max(2, static_cast<int>(std::ceil(len / (gg / 1024.0))));
+        if (nsub % 2) ++nsub;
+        const double dt = len / nsub;
+        const SrcA Phi = src_expm(P.matrix(sg.mode, sg.s), dt);
+        SrcZ zk = sg.z0;
+        double acc = 0.0;
+        for (int k = 0; k <= nsub; ++k) {
+            const double w = (k == 0 || k == nsub) ? 1.0 : (k % 2 ? 4.0 : 2.0);
+            acc += w * zk[kI] * zk[kI];
+            pk = std::max(pk, std::abs(zk[kI]));
+            zk = src_mat_vec(Phi, zk);
+        }
+        s2 += acc * dt / 3.0;
+    }
+    sol->rms = std::sqrt(s2 / (2.0 * gg));
+    sol->peak = pk;
+    return sol;
+}
+
+SrcExactTank src_network_tank(const std::shared_ptr<SrcTankSolution>& sol) {
+    SrcExactTank t{};
+    t.frequencyRatio = M_PI / sol->gamma;
+    t.halfPeriod = sol->gamma;
+    t.gain = sol->M;
+    t.network = sol;
+    t.initialCurrent = sol->state(0.0).i;
+    // The first upward zero of the tank current in the positive half period (bisection on the exact state).
+    double lo = 0.0, hi = sol->gamma;
+    if (sol->state(lo).i < 0.0 && sol->state(hi).i > 0.0) {
+        for (int it = 0; it < 200 && hi - lo > 1e-15 * sol->gamma; ++it) {
+            const double mid = 0.5 * (lo + hi);
+            if (sol->state(mid).i < 0.0) lo = mid; else hi = mid;
+        }
+        t.firstArc = 0.5 * (lo + hi);
+    } else {
+        t.firstArc = 0.0;   // the current is not negative at the transition: it starts its positive arc there
+    }
+    t.capacitorPeak = std::abs(sol->state(t.firstArc).v);
+    return t;
+}
+}  // namespace
+
+SrcTankNetwork src_tank_network(const SrcCircuit& circuit, double resonantInductance, double resonantCapacitance,
+                                double bridgeVoltage, const std::vector<double>& turnsRatios) {
+    const double Lr = resonantInductance, Cr = resonantCapacitance, Vg = bridgeVoltage;
+    if (!(Lr > 0.0) || !(Cr > 0.0) || !(Vg > 0.0) || turnsRatios.empty())
+        throw std::invalid_argument("src_tank_network: Lr, Cr, the bridge voltage and the turns ratios must be given and > 0");
+    for (double n : turnsRatios)
+        if (!(n > 0.0)) throw std::invalid_argument("src_tank_network: every turns ratio must be > 0");
+    SrcTankNetwork net;
+    net.rectifier = circuit.rectifier;
+    if (circuit.bridgeSeriesCapacitance) {
+        const double Cb = *circuit.bridgeSeriesCapacitance;
+        if (!(Cb > 0.0)) throw std::invalid_argument("src_tank_network: the bridge series capacitance must be > 0");
+        net.capacitanceRatio = Cb / (Cr + Cb);   // Cr in series with Cb, over Cr
+    }
+    const double k = circuit.transformerCoupling;
+    if (!(k > 0.0 && k <= 1.0))
+        throw std::invalid_argument("src_tank_network: the transformer coupling must lie in (0, 1]; got " + std::to_string(k));
+    if (circuit.magnetizingInductance) {
+        const double Lm = *circuit.magnetizingInductance;
+        if (!(Lm > 0.0)) throw std::invalid_argument("src_tank_network: the magnetizing inductance must be > 0");
+        net.magnetizingRatio = Lm / Lr;
+        // The deck couples the primary (L = Lm) to each secondary at k (and the secondaries to each other at k²):
+        // all the leakage sits on the secondary side, Lm·(1/k² − 1) referred to the primary.
+        net.leakageRatio = Lm * (1.0 / (k * k) - 1.0) / Lr;
+    } else if (k < 1.0) {
+        throw std::invalid_argument("src_tank_network: a transformer coupling below 1 needs its magnetizing inductance");
+    }
+    if (!(circuit.diodeDrop >= 0.0)) throw std::invalid_argument("src_tank_network: the diode drop must be >= 0");
+    net.diodeDrop = turnsRatios[0] * circuit.diodeDrop / Vg;
+    return net;
+}
+
 double SrcExactTank::current(double tau) const {
+    if (network) return network->state(tau).i;
     // Half-wave antisymmetry: the second half period is the first, negated.
     double t = std::fmod(tau, 2.0 * halfPeriod);
     if (t < 0) t += 2.0 * halfPeriod;
@@ -2575,6 +3027,7 @@ double SrcExactTank::current(double tau) const {
 }
 
 double SrcExactTank::currentRms() const {
+    if (network) return network->rms;
     const double M = gain, Vc = capacitorPeak;
     const double r1 = 1.0 + M + Vc, r2 = 1.0 - M + Vc;
     const double a1 = firstArc, a2 = halfPeriod - firstArc;
@@ -2583,13 +3036,22 @@ double SrcExactTank::currentRms() const {
     return std::sqrt((s1 + s2) / halfPeriod);
 }
 
+SrcExactTank::State SrcExactTank::state(double tau) const {
+    if (network) return network->state(tau);
+    const double i = current(tau);
+    const double w = i >= 0.0 ? gain : -gain;
+    return {i, 0.0, 0.0, w, w, i >= 0.0 ? 1 : -1};   // v is not tracked by the closed form
+}
+
 double SrcExactTank::currentPeak() const {
+    if (network) return network->peak;
     // Arc 1's |i| falls from |i(0)| to 0 (θ1 < π/2); arc 2 peaks at r2 if it reaches π/2, else ends at |i(0)|.
     const double r2 = 1.0 - gain + capacitorPeak, a2 = halfPeriod - firstArc;
     return std::max(std::abs(initialCurrent), a2 >= M_PI / 2.0 ? r2 : r2 * std::sin(a2));
 }
 
-SrcExactTank src_exact_tank(double frequencyRatio, double loadConductance) {
+namespace {
+SrcExactTank src_bare_tank(double frequencyRatio, double loadConductance) {
     if (!(frequencyRatio > 0.0) || !(loadConductance > 0.0))
         throw std::invalid_argument("src_exact_tank: the frequency ratio and the load conductance must be > 0");
     if (frequencyRatio < 1.0 - kSrcResonanceTolerance)
@@ -2619,7 +3081,7 @@ SrcExactTank src_exact_tank(double frequencyRatio, double loadConductance) {
     return t;
 }
 
-double src_exact_frequency_ratio(double gain, double loadConductance) {
+double src_bare_frequency_ratio(double gain, double loadConductance) {
     if (!(gain > 0.0) || gain > 1.0)
         throw std::invalid_argument("src_exact_frequency_ratio: the series tank's gain lies in (0, 1]; asked for " +
                                     std::to_string(gain));
@@ -2640,6 +3102,94 @@ double src_exact_frequency_ratio(double gain, double loadConductance) {
     }
     return M_PI / (0.5 * (lo + hi));
 }
+}  // namespace
+
+SrcExactTank src_exact_tank(double frequencyRatio, double loadConductance, const SrcTankNetwork& network) {
+    if (network.bare()) return src_bare_tank(frequencyRatio, loadConductance);
+    // The same guards and resonance tolerance as the bare tank; its gain is the Newton start.
+    const SrcExactTank bare = src_bare_tank(frequencyRatio, loadConductance);
+    return src_network_tank(src_network_steady_state(network, loadConductance, bare.gain, bare.halfPeriod, true));
+}
+
+double src_exact_frequency_ratio(double gain, double loadConductance, const SrcTankNetwork& network) {
+    if (network.bare()) return src_bare_frequency_ratio(gain, loadConductance);
+    if (!(gain > 0.0)) throw std::invalid_argument("src_exact_frequency_ratio: the gain must be > 0; asked for " +
+                                                   std::to_string(gain));
+    if (!(loadConductance > 0.0))
+        throw std::invalid_argument("src_exact_frequency_ratio: the load conductance must be > 0");
+    // Through the circuit the gain at the series resonance is not 1 (src_exact_tank(1, r, network).gain): a gain above
+    // it is solved below the resonance, which throws.
+    const double start = gain < 1.0 ? src_bare_frequency_ratio(gain, loadConductance) : 1.0;
+    const auto sol = src_network_steady_state(network, loadConductance, gain, M_PI / start, false);
+    const double F = M_PI / sol->gamma;
+    if (F < 1.0 - kSrcResonanceTolerance)
+        throw std::invalid_argument("src_exact_frequency_ratio: gain " + std::to_string(gain) +
+                                    " is not reached above the resonance (the solve lands at fs/f0 = " +
+                                    std::to_string(F) + "; through the converter circuit the tank delivers " +
+                                    std::to_string(src_exact_tank(1.0, loadConductance, network).gain) + " there)");
+    return F;
+}
+
+namespace {
+// analytical_src's waveforms from a tank solved through its circuit (ABT #2179): the primary carries the tank current
+// (Lm's current included), the windings follow the clamp through each commutation (±n·Vout while a diode conducts,
+// the convention of the bare tank's ±n·Vout square), and each secondary carries its share of the transformer current
+// (centre-tapped: the conducting half's diode; full bridge: the rail's single winding).
+MAS::OperatingPoint analytical_src_through_circuit(const SrcExactTank& tank,
+                                                   const std::vector<double>& outputVoltages,
+                                                   const std::vector<double>& outputCurrents,
+                                                   const std::vector<double>& turnsRatios, double fsw, double w0,
+                                                   double R0, double Vg, SrcRectifier rectifier) {
+    using Lbl = MAS::WaveformLabel;
+    const int N = 256, totalSamples = N + 1;
+    const double dt = 1.0 / fsw / N, M = tank.gain;
+    const size_t nOutputs = outputVoltages.size();
+    std::vector<double> time(totalSamples);
+    std::vector<SrcExactTank::State> st(totalSamples);
+    for (int k = 0; k < totalSamples; ++k) { time[k] = k * dt; st[k] = tank.state(w0 * time[k]); }
+    auto push = [&](MAS::OperatingPoint& op, const std::vector<double>& i, const std::vector<double>& v,
+                    const std::string& name) {
+        MAS::Waveform iW; iW.set_ancillary_label(Lbl::CUSTOM); iW.set_data(i); iW.set_time(time);
+        MAS::Waveform vW; vW.set_ancillary_label(Lbl::CUSTOM); vW.set_data(v); vW.set_time(time);
+        op.get_mutable_excitations_per_winding().push_back(WP::complete_excitation(iW, vW, fsw, name));
+    };
+    MAS::OperatingPoint operatingPoint;
+    {
+        std::vector<double> iP(totalSamples), vP(totalSamples);
+        for (int k = 0; k < totalSamples; ++k) {
+            iP[k] = st[k].i * Vg / R0;
+            vP[k] = turnsRatios[0] * outputVoltages[0] * st[k].vp / M;   // the primary terminal: Lm's voltage
+        }
+        push(operatingPoint, iP, vP, "Primary");
+    }
+    double total_g = 0.0;
+    for (size_t i = 0; i < nOutputs; ++i) total_g += outputCurrents[i] / outputVoltages[i];
+    for (size_t j = 0; j < nOutputs; ++j) {
+        const double n = turnsRatios[j], Vout = outputVoltages[j];
+        const double share = (outputCurrents[j] / outputVoltages[j]) / total_g;
+        if (rectifier == SrcRectifier::CENTER_TAPPED) {
+            std::vector<double> i1(totalSamples), i2(totalSamples), v1(totalSamples), v2(totalSamples);
+            for (int k = 0; k < totalSamples; ++k) {
+                const auto& x = st[k];
+                const double ideal = (x.i - x.im) * Vg / R0 * n * share;        // this rail's transformer current
+                i1[k] = x.clamp > 0 ? ideal : 0.0;
+                i2[k] = x.clamp < 0 ? ideal : 0.0;   // the second half's SOURCE current (dot reference, as the bare tank's)
+                v1[k] = v2[k] = Vout * x.w / M;
+            }
+            push(operatingPoint, i1, v1, "Secondary " + std::to_string(j) + " Half 1");
+            push(operatingPoint, i2, v2, "Secondary " + std::to_string(j) + " Half 2");
+        } else {
+            std::vector<double> iS(totalSamples), vS(totalSamples);
+            for (int k = 0; k < totalSamples; ++k) {
+                iS[k] = (st[k].i - st[k].im) * Vg / R0 * n * share;
+                vS[k] = Vout * st[k].w / M;
+            }
+            push(operatingPoint, iS, vS, "Secondary " + std::to_string(j));
+        }
+    }
+    return with_model_duty(std::move(operatingPoint), 0.5);
+}
+}  // namespace
 
 // Ported from MKF converter_models/Src.cpp:338 (process_operating_point_for_input_voltage); the tank is now the
 // exact state-plane solution (ABT #2173), not the FHA divider.
@@ -2649,7 +3199,8 @@ MAS::OperatingPoint analytical_src(double inputVoltage,
                                    const std::vector<double>& turnsRatios,
                                    double switchingFrequency,
                                    double resonantInductance, double resonantCapacitance,
-                                   double bridgeVoltageFactor, SrcRectifier rectifier) {
+                                   double bridgeVoltageFactor, SrcRectifier rectifier,
+                                   const std::optional<SrcCircuit>& circuit) {
     using Lbl = MAS::WaveformLabel;
     if (outputVoltages.empty() || outputVoltages.size() != outputCurrents.size() ||
         outputVoltages.size() != turnsRatios.size())
@@ -2681,8 +3232,12 @@ MAS::OperatingPoint analytical_src(double inputVoltage,
         reflectedConductance += outputCurrents[i] / (outputVoltages[i] * turnsRatios[i] * turnsRatios[i]);
     }
     const double R0 = std::sqrt(Lr / Cr), Vg = k_bridge * inputVoltage;
-    const SrcExactTank tank = src_exact_tank(Lambda, R0 * reflectedConductance);
+    const SrcExactTank tank = circuit
+        ? src_exact_tank(Lambda, R0 * reflectedConductance, src_tank_network(*circuit, Lr, Cr, Vg, turnsRatios))
+        : src_exact_tank(Lambda, R0 * reflectedConductance);
     const double w0 = 2.0 * M_PI * fr;
+    if (circuit) return analytical_src_through_circuit(tank, outputVoltages, outputCurrents, turnsRatios,
+                                                       fsw, w0, R0, Vg, rectifier);
 
     const int N = 256;
     const int totalSamples = N + 1;              // closed period (last == first)

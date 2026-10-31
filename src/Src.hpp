@@ -43,11 +43,12 @@ struct SrcDesign {
     double magnetizingInductance;     // Lm ≈ 10·Lr (large, non-resonant)
     double resonantFrequency;         // fr: the series-tank resonance (= switchingFrequency unless
                                       // config.driveAtSwitchingFrequency states config.resonantFrequency, ABT #1539)
-    double tankGain;                  // series-tank FHA gain at switchingFrequency (1 at resonance); under a forced
+    double tankGain;                  // series tank's exact gain at switchingFrequency (1 at resonance); under a forced
                                       // drive frequency outputVoltage/outputPower/outputs[] carry the DELIVERED rails.
-                                      // Frequency-regulated above Vin_min (ABT #2160): the gain relative to the
-                                      // reference point, Vin_min/Vin, and switchingFrequency is the frequency the
-                                      // bridge runs at (above the resonance; resonantFrequency keeps fr)
+                                      // Frequency-regulated (ABT #2160, #2171): the exact tank gain that delivers
+                                      // the target output at the operating input (1/gainHeadroom at Vin_min), and
+                                      // switchingFrequency is the frequency the bridge runs at (above the
+                                      // resonance; resonantFrequency keeps fr)
     double switchDuty;                // per-switch on-fraction (~0.45, complementary with dead time)
     double loadResistance;
     double outputCapacitance;
@@ -73,5 +74,13 @@ SrcDesign design_src(const nlohmann::json& tasInputs);
  * @return A TAS document (JSON); pass it to Kirchhoff::tas_to_ngspice() for a runnable deck.
  */
 nlohmann::json build_src_tas(const SrcDesign& d);
+
+namespace analytical { struct SrcCircuit; }
+/**
+ * @brief The circuit around the series tank as build_src_tas emits it into the deck (ABT #2179): T1's magnetizing
+ *        inductance and coupling, the half bridge's split bus capacitors and the main rail's diode drop — the real
+ *        parts the design's frequency solve and analytical_src solve the tank through (include ConverterAnalytical.hpp).
+ */
+analytical::SrcCircuit src_tank_circuit(const SrcDesign& d);
 
 } // namespace Kirchhoff

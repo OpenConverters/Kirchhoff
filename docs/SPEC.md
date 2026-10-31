@@ -166,34 +166,65 @@ operating point, so a spec evaluated at Vin_min and at Vin_max gives the same pa
 | src | turns ratio n (and the series tank sized from it) | Vin_min: the tank can only step down from its unity peak, so the output reaches its target at the lowest input only if n is sized there. Above Vin_min the SRC **regulates by frequency** (below) |
 | pfc, vienna | boost inductor(s), compensator, current band, reference sizing | the nominal line voltage (`designRequirements.inputVoltage` nominal); the stage RUNS at the operating point's line voltage (`operatingPoints[0].inputVoltage`, RMS). With an operating point that lacks `inputVoltage`, or a non-positive one, the design **throws**; a boost PFC whose operating line peak is not below Vout **throws** |
 
-**SRC frequency regulation.** With the tank (designed or pinned Lr/Cr) and n fixed, the bridge runs at Vin_min at
-the reference frequency — the series resonance `switchingFrequency`, as before (a pinned tank that resonates
-above it, within design_src's 1 % acceptance, runs at its own resonance instead). At a higher operating input the
-bridge runs above resonance at the frequency where the series tank's EXACT steady-state gain (ABT #2173) into the
-reflected load equals M(f_ref)·Vin_min/Vin, so the delivered output is the
-one of the resonant point at Vin_min. That frequency is the TAS `designRequirements.switchingFrequency`, the
-gate stimulus frequency, the controller seed's `switchingFrequency` and `diagnostics.switchingFrequency`, and
-the stresses use the relative tank gain Vin_min/Vin. An operating input below Vin_min (it needs a gain above the
-resonance peak) **throws** naming the input voltage and the output the resonant tank reaches; a regulated
-frequency above `config.maxSwitchingFrequency` (or below `minSwitchingFrequency`) **throws** with the output
-reached at the band edge. `config.driveAtSwitchingFrequency` (forced drive, the output is the result) is not
-regulated. Example, 36–72 V → 12 V/5 A, 100 kHz: 100 kHz at 36 V, 171.7 kHz at 54 V, 232.5 kHz at 72 V; primary
-RMS 6.07 / 6.17 / 6.27 A (unregulated at resonance it was 12.15 A at 72 V).
+**SRC frequency regulation.** With the tank (designed or pinned Lr/Cr) and n fixed (n sized at Vin_min with the
+1.08 gain headroom), the bridge runs at EVERY operating input — Vin_min included (Alf 2026-10-31, ABT #2171) — at
+the frequency that delivers exactly the target output: the main rail needs n·(Vo + k·Vd) = c·M·η·Vbridge (k = 2 for a
+full-bridge rectifier, c the current doubler's output factor), and the exact tank solved through the converter's
+circuit (below) gives the frequency of that gain M into the reflected design load. At Vin_min the gain is the
+1/1.08 headroom (to n's 0.01 rounding), so the bridge runs just above resonance; higher inputs run higher. A pinned
+tank whose resonance lies a few ppm above the design frequency runs above its OWN resonance. That frequency is the
+TAS `designRequirements.switchingFrequency`, the gate stimulus frequency, the controller seed's `switchingFrequency`
+and `diagnostics.switchingFrequency`, and `tankGain` is that M. An operating input (or a pinned ratio) whose gain
+exceeds the circuit's gain at resonance **throws** naming the input voltage and the output the resonant tank
+reaches; a regulated frequency above `config.maxSwitchingFrequency` (or below `minSwitchingFrequency`) **throws**
+with the output reached at the band edge. `config.driveAtSwitchingFrequency` (forced drive, the output is the
+result) is not regulated.
 
-**The SRC tank model (exact, state plane — ABT #2173).** One model sizes the regulated frequency, the Lr/switch
-stresses and the embedded transformer waveforms (`analytical_src`), so all of them describe the current the
-ngspice deck carries. It replaced the First-Harmonic Approximation M = Rac/|Rac + j(ωLr − 1/(ωCr))|, which
-overstates the gain above resonance (at Q 0.8 the deck delivered 14 % less than FHA predicted). Normalised with
-the bridge amplitude Vg (Vin/2 half bridge, Vin full bridge), R0 = √(Lr/Cr) and f0 = 1/(2π√(LrCr)): gain
-M = V/Vg (V = the output reflected to the primary), F = fs/f0, half period γ = π/F, load r = R0/Re with Re the
-rectifier's DC resistance referred to the primary (Re = 1/Σ 1/(n_i²·R_i) = π²/8·Rac). Above resonance the tank
-runs in continuous conduction, two state-plane arcs per half period (the antiparallel diode conducts, then the
-switch); half-wave antisymmetry gives, with Vc the capacitor peak (Vc = J·γ/2, J = M·r):
-θ1 = acos((1 + M + M·Vc)/(1 + M + Vc)), θ2 = acos((1 − M − M·Vc)/(1 − M + Vc)), θ1 + θ2 = γ, solved for M
-(Erickson & Maksimović ch. 19). At resonance M = 1 for every load and the current is a sine. The tank current
-rms/peak come from the same arcs (crest factor √2 only at resonance); the magnetizing Lm (10·Lr) is kept out of
-the tank and adds its triangle in rms. Below resonance (discontinuous / capacitive modes, no ZVS) the model does
-not apply: an operating frequency below f0 **throws**.
+**The SRC tank model (exact — ABT #2173, through the converter circuit — ABT #2179).** One model sizes the
+regulated frequency, the Lr/switch stresses and the embedded transformer waveforms (`analytical_src`), so all of
+them describe the current the ngspice deck carries. It replaced the First-Harmonic Approximation
+M = Rac/|Rac + j(ωLr − 1/(ωCr))|, which overstates the gain above resonance (at Q 0.8 the deck delivered 14 % less
+than FHA predicted). Normalised with the bridge amplitude Vg (Vin/2 half bridge, Vin full bridge), R0 = √(Lr/Cr)
+and f0 = 1/(2π√(LrCr)): gain M = V/Vg (V = the output reflected to the primary), F = fs/f0, half period γ = π/F,
+load r = R0/Re with Re the rectifier's DC resistance referred to the primary (Re = 1/Σ 1/(n_i²·R_i) = π²/8·Rac).
+*Bare tank* (Lr–Cr into an ideal diode clamp): above resonance two state-plane arcs per half period; with Vc the
+capacitor peak (Vc = J·γ/2, J = M·r): θ1 = acos((1 + M + M·Vc)/(1 + M + Vc)),
+θ2 = acos((1 − M − M·Vc)/(1 − M + Vc)), θ1 + θ2 = γ (Erickson & Maksimović ch. 19). At resonance M = 1 for every
+load and the current is a sine. *Through the circuit* (`SrcCircuit` → `SrcTankNetwork`, `src_tank_circuit`): the
+real parts the deck carries — T1's magnetizing inductance Lm (10·Lr) across the primary, each secondary's leakage
+Lm·(1/k² − 1) (k = `transformerCoupling`, 0.999) behind Lm, the half bridge's split bus capacitors Chi + Clo
+(`busSplitCap`, 10 µF each) in series with Cr, and a constant forward drop per rectifier diode. The tank is then a
+piecewise-linear circuit with three conduction modes (+ clamp, − clamp, no diode conducting); each advances by the
+exact matrix exponential, each mode change is located where the diode current or the winding voltage crosses its
+bound, and the periodic steady state is solved by Newton on the state at the bridge edge and M (or γ), with the
+average rectified current equal to the output over the load. Nothing is fitted; with every part negligible it
+reproduces the closed form. Lm lifts the gain above resonance (LLC-like) by up to a few percent; the primary
+carries the tank current, magnetizing current included, at Lm's voltage. Below resonance (capacitive, no ZVS) the
+model does not apply: an operating frequency below f0 **throws**.
+
+*The deck's convergence aids.* The REQUIREMENTS-fidelity deck keeps only aids that do not load the tank: a 100 pF
+switching-node capacitor `Csw*` (stripped once a real FET's Coss limits the edge), the 100 kΩ split-cap bleeders
+and the `.options` tolerances. It carries **no rectifier snubbers** (Alf 2026-10-31, "Real circuit; fix the deck"):
+the former 100 Ω ∥ 100 pF across each rectifier diode loaded the tank by 4–7 % above resonance, and ngspice
+converges without them. The model does not include the aids; the residual model/deck difference is +0.3–0.45 % on
+Vout. At 400 V (+0.45 %) about 0.2 % is Csw's edge (0.1 pF instead: 48.218 → 48.115 V) and 0.05 % the 10 % dead time
+(1 %: 48.196 V); the rest is not attributed — it is not the diodes' exponential forward curve against the model's
+constant drop (near-ideal diodes in both: 48.705 model vs 48.902 V deck, still +0.4 %).
+
+Example (open loop, the lossless deck at the design frequency; model = the circuit solve at the deck's drive):
+
+| design | Vin | f | Vout model | Vout ngspice | primary RMS model | primary RMS ngspice |
+|---|---|---|---|---|---|---|
+| 36–72 V → 12 V/5 A, η 0.9, half bridge, CT, 100 kHz | 36 V | 115.50 kHz | 13.424 V | 13.471 V | 5.350 A | 5.322 A |
+| | 54 V | 182.69 kHz | 13.388 V | 13.438 V | 5.498 A | 5.500 A |
+| | 72 V | 252.05 kHz | 13.369 V | 13.430 V | 5.520 A | 5.529 A |
+| test_ptp SRC 500W-FB: 360–440 V → 48 V/10 A, η 1, half bridge, CT | 360 V | 113.70 kHz | 48.000 V | 48.133 V | 3.279 A | 3.277 A |
+| | 400 V | 128.41 kHz | 48.000 V | 48.218 V | 3.312 A | 3.309 A |
+| | 440 V | 142.21 kHz | 48.000 V | 48.134 V | 3.339 A | 3.338 A |
+
+The 12 V rail's deck delivers (12 + Vd)/η − Vd ≈ 13.43 V because the lossless deck is driven at the full bridge
+amplitude while the design derates the drive by η. Before (36 V at resonance, the 1.08 headroom carried to every
+input, the snubbers in the deck): 100 / 171.7 / 232.5 kHz and 14.26 / 13.81 / 13.76 V.
 
 `lcc` is not range-sized yet: its whole tank is sized at the operating point and it refuses a pinned main
 inductance.

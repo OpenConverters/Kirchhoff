@@ -13,6 +13,7 @@
 #include <nlohmann/json.hpp>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -550,24 +551,75 @@ double dab_series_inductance_for_power(double V1, double V2, double N, double D3
 // discontinuous / capacitive (no ZVS) modes this model does not cover: it throws. The load is the reflected
 // RESISTANCE Re (the rectifier's DC resistance referred to the primary, Re = π²/8·Rac), so J = M·R0/Re and the
 // tank point is solved self-consistently, as the FHA divider was.
+// The circuit around the series tank (ABT #2179). The tank above drives an ideal diode clamp; the real converter (and
+// the ngspice deck build_src_tas emits) also has the transformer's magnetizing inductance Lm across the primary, its
+// secondary leakage behind Lm, the half bridge's split bus capacitors in series with Cr and the rectifier diodes'
+// forward drop. At resonance the bare tank's gain is 1 for every load; above it Lm lifts the gain (LLC-like) by up to
+// a few percent. SrcTankNetwork carries those parts normalised like the tank (Lr, Cr, R0 = √(Lr/Cr), ω0 = 1/√(LrCr),
+// Vg). The deck's numerical convergence aids are not part of the converter and not modelled (the deck carries no
+// rectifier snubbers; Alf 2026-10-31: "Real circuit; fix the deck"). Default-constructed it is the bare tank into an
+// ideal clamp, whose exact solution is the closed form above.
+struct SrcTankNetwork {
+    // Cs/Cr: the series tank capacitance, Cr in series with the bridge's own series capacitance (the half bridge's
+    // split bus capacitors Chi ∥ Clo carry the tank current).
+    double capacitanceRatio = 1.0;
+    // Lm/Lr: the magnetizing inductance across the transformer primary. Absent: an ideal transformer.
+    std::optional<double> magnetizingRatio;
+    // The secondary leakage referred to the primary, /Lr, between Lm and the rectifier (needs Lm).
+    double leakageRatio = 0.0;
+    // CENTER_TAPPED / CURRENT_DOUBLER: one diode per polarity; FULL_BRIDGE: two diodes in each path.
+    SrcRectifier rectifier = SrcRectifier::CENTER_TAPPED;
+    // One rectifier diode's forward drop referred to the primary, n·Vd/Vg (0: ideal diodes).
+    double diodeDrop = 0.0;
+    bool bare() const {
+        return capacitanceRatio == 1.0 && !magnetizingRatio && leakageRatio == 0.0 && diodeDrop == 0.0;
+    }
+};
+// The same circuit in physical units, as the converter states it (the deck's values).
+struct SrcCircuit {
+    std::optional<double> magnetizingInductance;    // Lm, H
+    double transformerCoupling = 1.0;               // k primary-to-secondary; each secondary's leakage is Lm·(1/k² − 1)
+    std::optional<double> bridgeSeriesCapacitance;  // F, in series with Cr (half bridge: Chi + Clo)
+    SrcRectifier rectifier = SrcRectifier::CENTER_TAPPED;
+    double diodeDrop = 0.0;                         // V, one rectifier diode (main rail)
+};
+// Normalises `circuit` for a tank Lr, Cr driven at ±Vg into rails of turns ratios n_i (the clamp and the diode drop
+// are the main rail's). Throws on a non-physical value (k outside (0, 1],
+// leakage without Lm, non-positive parts).
+SrcTankNetwork src_tank_network(const SrcCircuit& circuit, double resonantInductance, double resonantCapacitance,
+                                double bridgeVoltage, const std::vector<double>& turnsRatios);
+struct SrcTankSolution;   // the piecewise-linear periodic steady state of a tank with a SrcTankNetwork (internal)
 struct SrcExactTank {
     double frequencyRatio;    // F = fs/f0 (>= 1)
-    double gain;              // M = V/Vg
+    double gain;              // M = V/Vg: the rectifier clamp (n·(Vo + k·Vd)) over Vg
     double capacitorPeak;     // Vc, normalised (|vCr| at the current zero crossing)
     double initialCurrent;    // i at the bridge transition, normalised (<= 0: the tank current lags, ZVS)
     double firstArc;          // θ1: radians of the resonance from the bridge transition to the current zero
     double halfPeriod;        // γ = π/F
+    // Set for a tank with a SrcTankNetwork that is not bare: the exact piecewise-linear steady state.
+    std::shared_ptr<const SrcTankSolution> network;
     // Tank current at τ = ω0·t radians after the positive bridge transition, normalised (×Vg/R0 for amperes).
+    // With Lm this is the primary winding current (the tank current, magnetizing current included).
     double current(double tau) const;
     double currentRms() const;    // normalised
     double currentPeak() const;   // normalised
+    // The full state at τ: tank current i, Cr voltage v (/Vg), magnetizing current im, the rectifier-side winding
+    // voltage w (/Vg, referred to the primary; ±M while a diode conducts), the primary terminal voltage vp (/Vg: Lm's,
+    // which differs from w by the secondary leakage's drop) and whether a diode clamps w (+1 / −1) or none conducts
+    // (0). The bare tank: im = 0, vp = w = ±M.
+    struct State { double i, v, im, w, vp; int clamp; };
+    State state(double tau) const;
 };
-// The tank point at frequency ratio F into the normalised reflected load conductance r = R0/Re (> 0).
-// Throws below resonance (F < 1 − 1e-6; F within 1e-6 below 1 is the resonance itself, as fsw = fr recomputed
-// from Lr·Cr rounding is).
-SrcExactTank src_exact_tank(double frequencyRatio, double loadConductance);
-// The frequency ratio F >= 1 at which the tank delivers gain M (0 < M <= 1) into r = R0/Re. M = 1 is the resonance.
-double src_exact_frequency_ratio(double gain, double loadConductance);
+// The tank point at frequency ratio F into the normalised reflected load conductance r = R0/(n²·Rload) (> 0)
+// through `network`: the gain M at which the rectified output current the periodic steady state delivers equals
+// (M − k·diodeDrop)·r (the output voltage over the load; k = 2 for FULL_BRIDGE, 1 otherwise). Throws below resonance
+// (F < 1 − 1e-6; F within 1e-6 below 1 is the resonance itself, as fsw = fr recomputed from Lr·Cr rounding is) and
+// in a commutation mode the model does not cover (it names it).
+SrcExactTank src_exact_tank(double frequencyRatio, double loadConductance, const SrcTankNetwork& network = {});
+// The frequency ratio F >= 1 at which the tank through `network` delivers gain M into r. The bare tank: 0 < M <= 1,
+// M = 1 is the resonance. With a network the gain at F = 1 is that network's (src_exact_tank(1, r, network).gain);
+// a larger M is not reached above the resonance: it throws.
+double src_exact_frequency_ratio(double gain, double loadConductance, const SrcTankNetwork& network = {});
 
 // Series Resonant Converter (SRC) operating point from the exact tank solution above (ABOVE resonance only;
 // below resonance throws). The tank current is the state-plane solution at fsw into the reflected load
@@ -575,7 +627,10 @@ double src_exact_frequency_ratio(double gain, double loadConductance);
 // is ±n·Vout in phase with the tank current (the rectifier clamp). `bridgeVoltageFactor` k_bridge = 1.0 (full
 // bridge) or 0.5 (half bridge). Pushes Primary (tank current + ±n·Vout) + per output either one full-bridge
 // Secondary i or two center-tapped "Secondary i Half {1,2}" half-windings. Throws on fsw below the tank
-// resonance, non-positive fsw / Lr / Cr / turns ratio / load.
+// resonance, non-positive fsw / Lr / Cr / turns ratio / load. With `circuit` (ABT #2179) the tank is solved through
+// that circuit (src_tank_network at Vg = k_bridge·Vin): the primary carries the tank current (magnetizing current
+// included), the winding voltages follow the clamp (±n·Vout while a diode conducts, the magnetizing branch's voltage
+// while none does) and each secondary carries its share of the rectified current.
 MAS::OperatingPoint analytical_src(double inputVoltage,
                                    const std::vector<double>& outputVoltages,
                                    const std::vector<double>& outputCurrents,
@@ -583,7 +638,8 @@ MAS::OperatingPoint analytical_src(double inputVoltage,
                                    double switchingFrequency,
                                    double resonantInductance, double resonantCapacitance,
                                    double bridgeVoltageFactor = 1.0,
-                                   SrcRectifier rectifier = SrcRectifier::FULL_BRIDGE);
+                                   SrcRectifier rectifier = SrcRectifier::FULL_BRIDGE,
+                                   const std::optional<SrcCircuit>& circuit = std::nullopt);
 
 // The LLC tank under the First-Harmonic Approximation — the ONE model both the operating-frequency solve
 // (design_llc) and the waveform solver (analytical_llc) use. A series Ls-Cr branch feeds Lm in parallel with
