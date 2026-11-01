@@ -273,6 +273,51 @@ CllcDesign design_cllc(const json& tasInputs) {
     return d;
 }
 
+namespace {
+// The tank as the DRIVING bridge sees it. Forward: the Vin side drives Lr1/Cr1, Lm, and Lr2/Cr2 referred up by
+// N², into Rac = (8/π²)·N²·Vout²/P. Reverse: the Vout side drives Lr2/Cr2, Lm/N², and Lr1/Cr1 referred down,
+// into (8/π²)·Vin²/(N²·P). Required gain = delivered rail referred to the driver / (η·driving bus).
+struct DrivenTank { double Lm, Lr1, Cr1, Lr2p, Cr2p, Rac, requiredGain, ratioAtResonance; };
+DrivenTank driven_tank(bool reverse, double N, double eta, double inputVoltage, double outputVoltage,
+                       double outputPower, double magnetizingInductance, double primaryResonantInductance,
+                       double primaryResonantCapacitance, double secondaryResonantInductance,
+                       double secondaryResonantCapacitance) {
+    DrivenTank t{};
+    if (!reverse) {
+        t.Lm = magnetizingInductance;
+        t.Lr1 = primaryResonantInductance; t.Cr1 = primaryResonantCapacitance;
+        t.Lr2p = secondaryResonantInductance * N * N; t.Cr2p = secondaryResonantCapacitance / (N * N);
+        t.Rac = (8.0 / (M_PI * M_PI)) * N * N * outputVoltage * outputVoltage / outputPower;
+        t.requiredGain = N * outputVoltage / (eta * inputVoltage);
+        t.ratioAtResonance = eta * inputVoltage / outputVoltage;   // gain 1: n = η·Vin/Vout
+    } else {
+        t.Lm = magnetizingInductance / (N * N);
+        t.Lr1 = secondaryResonantInductance; t.Cr1 = secondaryResonantCapacitance;
+        t.Lr2p = primaryResonantInductance / (N * N); t.Cr2p = primaryResonantCapacitance * N * N;
+        t.Rac = (8.0 / (M_PI * M_PI)) * inputVoltage * inputVoltage / (N * N * outputPower);
+        t.requiredGain = inputVoltage / (eta * N * outputVoltage);
+        t.ratioAtResonance = inputVoltage / (eta * outputVoltage);
+    }
+    return t;
+}
+}  // namespace
+
+TwoSidedRegulationCheck two_sided_regulation_check(
+    const std::string& who, const json& config, bool reverse, double turnsRatio, double efficiency,
+    double inputVoltage, double outputVoltage, double outputPower, double magnetizingInductance,
+    double primaryResonantInductance, double primaryResonantCapacitance, double secondaryResonantInductance,
+    double secondaryResonantCapacitance) {
+    if (!(turnsRatio > 0) || !(efficiency > 0) || !(inputVoltage > 0) || !(outputVoltage > 0) || !(outputPower > 0))
+        throw std::invalid_argument(who + ": turns ratio, efficiency, voltages and power must all be > 0");
+    const auto [fmin, fmax] = two_sided_band(who, config);
+    const DrivenTank t = driven_tank(reverse, turnsRatio, efficiency, inputVoltage, outputVoltage, outputPower,
+                                     magnetizingInductance, primaryResonantInductance, primaryResonantCapacitance,
+                                     secondaryResonantInductance, secondaryResonantCapacitance);
+    return TwoSidedRegulationCheck{
+        t.requiredGain, Kirchhoff::analytical::cllc_regulation_gain_range(fmin, fmax, t.Lm, t.Lr1, t.Cr1, t.Lr2p,
+                                                                          t.Cr2p, t.Rac)};
+}
+
 TwoSidedOperatingPoint two_sided_resonant_operating_point(
     const std::string& who, const std::string& ratioOrigin, const json& config, bool reverse,
     double turnsRatio, double efficiency, double inputVoltage, double outputVoltage, double outputPower,
@@ -283,23 +328,11 @@ TwoSidedOperatingPoint two_sided_resonant_operating_point(
     if (!(N > 0) || !(eta > 0) || !(inputVoltage > 0) || !(outputVoltage > 0) || !(outputPower > 0) || !(fr > 0))
         throw std::invalid_argument(who + ": turns ratio, efficiency, voltages, power and fr must all be > 0");
     const auto [fmin, fmax] = two_sided_band(who, config);
-
-    // The tank as the DRIVING bridge sees it. Forward: the Vin side drives Lr1/Cr1, Lm, and Lr2/Cr2 referred up by
-    // N², into Rac = (8/π²)·N²·Vout²/P. Reverse: the Vout side drives Lr2/Cr2, Lm/N², and Lr1/Cr1 referred down,
-    // into (8/π²)·Vin²/(N²·P). Required gain = delivered rail referred to the driver / (η·driving bus).
-    double Lm = magnetizingInductance, Lr1 = primaryResonantInductance, Cr1 = primaryResonantCapacitance;
-    double Lr2p = secondaryResonantInductance * N * N, Cr2p = secondaryResonantCapacitance / (N * N);
-    double Rac = (8.0 / (M_PI * M_PI)) * N * N * outputVoltage * outputVoltage / outputPower;
-    double requiredGain = N * outputVoltage / (eta * inputVoltage);
-    double ratioAtResonance = eta * inputVoltage / outputVoltage;   // gain 1: n = η·Vin/Vout
-    if (reverse) {
-        Lm = magnetizingInductance / (N * N);
-        Lr1 = secondaryResonantInductance; Cr1 = secondaryResonantCapacitance;
-        Lr2p = primaryResonantInductance / (N * N); Cr2p = primaryResonantCapacitance * N * N;
-        Rac = (8.0 / (M_PI * M_PI)) * inputVoltage * inputVoltage / (N * N * outputPower);
-        requiredGain = inputVoltage / (eta * N * outputVoltage);
-        ratioAtResonance = inputVoltage / (eta * outputVoltage);
-    }
+    const DrivenTank t = driven_tank(reverse, N, eta, inputVoltage, outputVoltage, outputPower, magnetizingInductance,
+                                     primaryResonantInductance, primaryResonantCapacitance,
+                                     secondaryResonantInductance, secondaryResonantCapacitance);
+    const double Lm = t.Lm, Lr1 = t.Lr1, Cr1 = t.Cr1, Lr2p = t.Lr2p, Cr2p = t.Cr2p, Rac = t.Rac;
+    const double requiredGain = t.requiredGain, ratioAtResonance = t.ratioAtResonance;
     // Only a symmetric tank (secondary referred to the driver equal to the primary) has gain 1 at resonance.
     const bool symmetricTank = std::abs(Lr2p - Lr1) <= 1e-9 * Lr1 && std::abs(Cr2p - Cr1) <= 1e-9 * Cr1;
     TwoSidedOperatingPoint op{fr, requiredGain};

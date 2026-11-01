@@ -3475,6 +3475,41 @@ double solve_cllc_operating_frequency(double requiredGain, std::optional<double>
             fha_num(reflectedLoadResistance) + " ohm" + band);
 }
 
+std::optional<FhaGainRange> cllc_regulation_gain_range(std::optional<double> fmin, std::optional<double> fmax,
+                                                       double magnetizingInductance,
+                                                       double primaryResonantInductance,
+                                                       double primaryResonantCapacitance,
+                                                       double referredSecondaryResonantInductance,
+                                                       double referredSecondaryResonantCapacitance,
+                                                       double reflectedLoadResistance) {
+    const double fr = 1.0 / (2.0 * M_PI * std::sqrt(primaryResonantInductance * primaryResonantCapacitance));
+    // The lower end exactly as solve_cllc_operating_frequency takes it.
+    const double lo = fmin ? *fmin
+                           : 1.0 / (2.0 * M_PI * std::sqrt((primaryResonantInductance + magnetizingInductance) *
+                                                           primaryResonantCapacitance));
+    // An unstated upper end: the solve extends the band until the gain falls below its target, so every gain down
+    // to 0 is reached; the largest gain of the branch lies at or below 2*fr (the gain falls monotonically above fr).
+    const double hi = fmax ? *fmax : 2.0 * std::max(fr, lo);
+    if (!(lo > 0.0) || !(hi >= lo))
+        throw std::invalid_argument("cllc_regulation_gain_range: band must satisfy 0 < fmin <= fmax");
+    constexpr int kSamples = 2000;   // the grid solve_fha_operating_frequency scans
+    double gMin = std::numeric_limits<double>::max(), gMax = std::numeric_limits<double>::lowest();
+    bool any = false;
+    for (int i = kSamples; i >= 0; --i) {
+        const double f = lo * std::pow(hi / lo, static_cast<double>(i) / kSamples);
+        const CllcFhaTank t = cllc_fha_tank(f, magnetizingInductance, primaryResonantInductance,
+                                            primaryResonantCapacitance, referredSecondaryResonantInductance,
+                                            referredSecondaryResonantCapacitance, reflectedLoadResistance);
+        if (!(t.zinIm > 0.0)) break;   // left of the regulation branch: capacitive input
+        any = true;
+        gMin = std::min(gMin, t.gain());
+        gMax = std::max(gMax, t.gain());
+    }
+    if (!any) return std::nullopt;
+    if (!fmax) gMin = 0.0;
+    return FhaGainRange{gMin, gMax};
+}
+
 MAS::OperatingPoint analytical_llc(double inputVoltage,
                                    const std::vector<double>& outputVoltages,
                                    const std::vector<double>& outputCurrents,

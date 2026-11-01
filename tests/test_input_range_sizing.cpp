@@ -24,8 +24,10 @@
 #include "TwoSwitchForward.hpp"
 #include "Pfc.hpp"
 #include "Src.hpp"
+#include "Clllc.hpp"
 #include "DimensionJson.hpp"
 #include "ConverterAnalytical.hpp"
+#include "KirchhoffConfig.hpp"
 
 using json = nlohmann::json;
 using Catch::Matchers::ContainsSubstring;
@@ -499,4 +501,138 @@ TEST_CASE("A design that cannot run at a corner of its range is refused, naming 
     // A spec refused at its own operating point keeps its own message.
     const std::string own = run_error("two_switch_forward", at_input_voltage(s, 24.0));
     CHECK_THAT(own, !ContainsSubstring("rating the parts over the input range"));
+}
+
+namespace {
+
+// The web's CLLLC wizard defaults ("Help me with the design"): 380-420 V -> 48 V / 5 A, 95 % efficiency, the tank
+// resonating at 120 kHz with quality factor 0.4, switching band 90-150 kHz. The design call runs at the nominal
+// (the midpoint, 400 V: the wizard states no nominal); the web then pins that design at each entered input.
+json clllc_web_spec(double vop, const std::string& direction = "") {
+    json s;
+    json& dr = s["designRequirements"];
+    dr["inputType"] = "dc";
+    dr["inputVoltage"] = {{"minimum", 380.0}, {"maximum", 420.0}};
+    dr["switchingFrequency"]["nominal"] = 120e3;
+    dr["efficiency"] = 0.95;
+    dr["outputs"] = json::array({{{"name", "out"}, {"voltage", {{"nominal", 48.0}}}, {"regulation", "voltage"}}});
+    s["operatingPoints"] = json::array({{{"name", "full_load"}, {"inputVoltage", vop}, {"ambientTemperature", 25.0},
+                                         {"outputs", json::array({{{"name", "out"}, {"power", 240.0}}})}}});
+    s["config"] = {{"qualityFactor", 0.4}, {"resonantBandMin", 90e3}, {"resonantBandMax", 150e3},
+                   {"diodeVoltageDrop", 0.7}};
+    if (!direction.empty()) s["config"]["powerFlowDirection"] = direction;
+    return s;
+}
+
+double named_value(const json& list, const std::string& name, const char* field) {
+    for (const auto& x : list)
+        if (x.at("name") == name) return x.at(field).get<double>();
+    FAIL("no part named " << name);
+    return 0.0;
+}
+
+// The web's design pins (WebSharedComponents kirchhoffRuntime.js khDesignPins + KH_EXTRA_DESIGN_PINS.clllc): the
+// main magnetic's inductance and turns ratios, Lr1 and Cr1.
+json clllc_pinned(json spec, const json& designDiagnostics) {
+    json main;
+    for (const auto& m : designDiagnostics.at("magnetics"))
+        if (m.value("isMain", false)) main = m;
+    REQUIRE(main.is_object());
+    spec["designRequirements"]["magnetizingInductance"]["nominal"] = main.at("magnetizingInductance");
+    spec["designRequirements"]["turnsRatios"] = json::array();
+    for (const auto& n : main.at("turnsRatios")) spec["designRequirements"]["turnsRatios"].push_back({{"nominal", n}});
+    spec["config"]["primarySeriesInductance"] =
+        named_value(designDiagnostics.at("computed").at("extraInductors"), "Lr1", "inductance");
+    spec["config"]["primaryResonantCapacitance"] = named_value(designDiagnostics.at("capacitors"), "Cr1", "capacitance");
+    return spec;
+}
+
+void check_clllc_design_then_pin(const std::string& direction) {
+    const json design = run("clllc", clllc_web_spec(400.0, direction));
+    const auto dDesign = Kirchhoff::design_clllc(clllc_web_spec(400.0, direction));
+    for (const double vin : {380.0, 400.0, 420.0}) {
+        INFO(direction << " evaluated at " << vin << " V");
+        const json spec = clllc_pinned(clllc_web_spec(vin, direction), design.at("diagnostics"));
+        const json r = run("clllc", spec);
+        require_same_design(design, r, "control/U1");
+        const auto d = Kirchhoff::design_clllc(spec);
+        CHECK(d.turnsRatio == dDesign.turnsRatio);
+        // Regulated inside the 90-150 kHz band: the FHA gain of the pinned tank at the solved operating frequency
+        // delivers exactly the 48 V target (forward) or the input-side rail (reverse).
+        CHECK(d.operatingFrequency >= 90e3);
+        CHECK(d.operatingFrequency <= 150e3);
+        CHECK(r.at("diagnostics").at("switchingFrequency").get<double>() == d.operatingFrequency);
+        const double N = d.turnsRatio, eta = 0.95;
+        if (direction != "reverse") {
+            const double Rac = (8.0 / (M_PI * M_PI)) * N * N * 48.0 * 48.0 / 240.0;
+            const double M = Kirchhoff::analytical::cllc_fha_tank(d.operatingFrequency, d.magnetizingInductance,
+                                 d.primaryResonantInductance, d.primaryResonantCapacitance,
+                                 d.secondaryResonantInductance * N * N, d.secondaryResonantCapacitance / (N * N), Rac)
+                                 .gain();
+            CHECK_THAT(M * eta * vin / N, WithinRel(48.0, 1e-6));
+        } else {
+            const double Rac = (8.0 / (M_PI * M_PI)) * vin * vin / (N * N * 240.0);
+            const double M = Kirchhoff::analytical::cllc_fha_tank(d.operatingFrequency, d.magnetizingInductance / (N * N),
+                                 d.secondaryResonantInductance, d.secondaryResonantCapacitance,
+                                 d.primaryResonantInductance / (N * N), d.primaryResonantCapacitance * N * N, Rac)
+                                 .gain();
+            CHECK_THAT(M * eta * N * 48.0, WithinRel(vin, 1e-6));
+        }
+    }
+}
+
+}  // namespace
+
+TEST_CASE("CLLLC: the web's design, pinned at 380, 400 and 420 V, delivers the output at every input",
+          "[input-range][clllc]") {
+    // Sized at the 400 V operating point alone the ratio was 0.95*400/48 = 7.91667, which needs a gain of 1.0526 at
+    // 380 V while the tank's regulation branch tops out at 1.032 at 90 kHz: "pinned turns ratio 7.91667 cannot
+    // deliver 48 V from 380 V".
+    check_clllc_design_then_pin("");
+}
+
+TEST_CASE("CLLLC: a reverse-flow design, pinned, delivers the input-side rail at every input",
+          "[input-range][clllc]") {
+    check_clllc_design_then_pin("reverse");
+}
+
+TEST_CASE("CLLLC: an input range no turns ratio covers inside the band is refused, naming the input",
+          "[input-range][clllc]") {
+    // A 300-420 V range needs a gain span of 1.4 from the tank; the 90-150 kHz regulation branch spans 1.16.
+    json s = clllc_web_spec(360.0);
+    s["designRequirements"]["inputVoltage"] = {{"minimum", 300.0}, {"maximum", 420.0}};
+    const std::string e = run_error("clllc", s);
+    CHECK_THAT(e, ContainsSubstring("cannot be evaluated at the input voltage"));
+    CHECK_THAT(e, ContainsSubstring("over the whole input range [300, 420] V"));
+}
+TEST_CASE("CLLLC: the ratio sits the stated gain margin inside the end of the working window nearest unity",
+          "[input-range][clllc]") {
+    // Alf 2026-11-01: "End nearest unity, with a margin". The unity-at-nominal ratio 0.95*400/48 = 7.91667 cannot
+    // deliver 48 V from 380 V; the ratios that regulate 380-420 V inside 90-150 kHz end at 7.76453 on that side (the
+    // 380 V corner at the 1.0324 peak of the regulation branch). The design takes that end, stepped inside by
+    // cfg::kClllcRatioGainMargin, so the 380 V corner needs exactly peak/(1 + margin) and the 420 V corner keeps at
+    // least the margin above the lowest gain of the band. (The geometric middle of the window gave 7.581.)
+    const auto d = Kirchhoff::design_clllc(clllc_web_spec(400.0));
+    const double N = d.turnsRatio, m = Kirchhoff::cfg::kClllcRatioGainMargin;
+    const double Rac = (8.0 / (M_PI * M_PI)) * N * N * 48.0 * 48.0 / 240.0;
+    const auto reach = Kirchhoff::analytical::cllc_regulation_gain_range(
+        90e3, 150e3, d.magnetizingInductance, d.primaryResonantInductance, d.primaryResonantCapacitance,
+        d.secondaryResonantInductance * N * N, d.secondaryResonantCapacitance / (N * N), Rac);
+    REQUIRE(reach);
+    const auto gain_at = [&](double vin) { return N * 48.0 / (0.95 * vin); };
+    CHECK_THAT(gain_at(380.0), WithinRel(reach->maximum / (1.0 + m), 1e-9));
+    CHECK(gain_at(420.0) >= reach->minimum * (1.0 + m));
+    CHECK(N < 0.95 * 400.0 / 48.0);
+    CHECK_THAT(N, WithinRel(7.61228, 1e-5));
+}
+
+TEST_CASE("CLLLC: a range whose working ratios cannot keep the gain margin at both ends is refused",
+          "[input-range][clllc]") {
+    // 380-425 V: the ratios that regulate every input lie in [7.49028, 7.76453], a 3.7 % window, narrower than the
+    // 2 % margin at both ends.
+    json s = clllc_web_spec(402.5);
+    s["designRequirements"]["inputVoltage"] = {{"minimum", 380.0}, {"maximum", 425.0}};
+    const std::string e = run_error("clllc", s);
+    CHECK_THAT(e, ContainsSubstring("over the whole input range [380, 425] V inside the switching band lie in [7.49028, 7.76453]"));
+    CHECK_THAT(e, ContainsSubstring("too narrow to keep a 2 % gain margin at both ends"));
 }

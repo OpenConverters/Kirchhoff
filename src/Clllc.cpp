@@ -9,6 +9,7 @@
 #include <limits>
 #include <algorithm>
 #include <vector>
+#include <sstream>
 
 namespace Kirchhoff {
 using nlohmann::json;
@@ -50,20 +51,11 @@ ClllcDesign design_clllc(const json& tasInputs) {
     d.inputVoltageMin = vinMin; d.inputVoltageMax = vinMax;
 
     const double Vin = d.inputVoltage, Vo = d.outputVoltage;
-    double n = req::conversion_efficiency(dr) * Vin / Vo;   // stated efficiency compensated
-    // della-Pollock Pass 2: a pinned turns ratio (the realized ratio of the chosen magnetic) overrides
-    // the duty-derived value so the rest of the stage is sized around the fixed transformer.
-    d.turnsRatio = req::provided_turns_ratio(dr, 0).value_or(n);
+    const double eta = req::conversion_efficiency(dr);   // stated efficiency compensated
     const double fr = d.switchingFrequency;
     d.resonantFrequency = fr;
     const double Rload = Vo * Vo / d.outputPower;
-    // Everything downstream is referred through the transformer the stage is built around: the pinned
-    // ratio when the magnetic is chosen (I-know-the-design / della-Pollock pass 2), else the design ratio.
-    const double N = d.turnsRatio;
-    const double Ro = (8.0 * N * N / (M_PI * M_PI)) * Rload;
     const double wr = 2.0 * M_PI * fr;
-    d.primaryResonantCapacitance = 1.0 / (2.0 * M_PI * cfg::get(d.config, "qualityFactor", kQualityFactor) * fr * Ro);
-    d.primaryResonantInductance = 1.0 / (wr * wr * d.primaryResonantCapacitance);
     // MAS clllcResonant: the operating model is the symmetric full-bridge/full-bridge tank designed to resonate at
     // fr = designRequirements.switchingFrequency and driven by frequency (FHA, no inter-bridge phase shift) at the
     // operating frequency solved below. Fields that ask for anything else are checked here and refused with the
@@ -87,24 +79,172 @@ ClllcDesign design_clllc(const json& tasInputs) {
                                         std::to_string(cfg::get(d.config, "phaseShiftDegrees", 0.0)) +
                                         " deg is not modelled (the FHA operating point has no phase shift)");
     }
+    // Power-flow direction (ABT #85). "reverse" makes the Vout side the source and delivers to the Vin side;
+    // the symmetric tank sizing is unchanged, only the deck wiring flips (and the turns ratio is sized for the
+    // direction the design runs in, below).
+    const std::string dir = cfg::get_str(d.config, "powerFlowDirection", "forward");
+    if (dir != "forward" && dir != "reverse")
+        throw std::invalid_argument("design_clllc: config.powerFlowDirection must be 'forward' or 'reverse', got '" + dir + "'");
+    d.reverse = (dir == "reverse");
+
     // MAS clllcResonant.primarySeriesInductance / primaryResonantCapacitance: explicit Lr1 / Cr1 override the
     // Q/K derivation. One given: the other follows so the tank resonates at fr. Both given: they are taken verbatim
     // and the tank resonates where they do; the operating frequency is solved from that tank below, or the design
     // throws (ABT #1538 — before the solve existed both had to resonate at fr within 1%, so the web's 50 uH / 33 nF
     // I-know seed, 123.9 kHz against 120 kHz, could not be honoured).
-    {
-        const bool hasL = d.config.contains("primarySeriesInductance");
-        const bool hasC = d.config.contains("primaryResonantCapacitance");
-        if (hasL) d.primaryResonantInductance = cfg::get(d.config, "primarySeriesInductance", 0.0);
-        if (hasC) d.primaryResonantCapacitance = cfg::get(d.config, "primaryResonantCapacitance", 0.0);
-        if ((hasL && !(d.primaryResonantInductance > 0)) || (hasC && !(d.primaryResonantCapacitance > 0)))
-            throw std::invalid_argument("design_clllc: primarySeriesInductance / primaryResonantCapacitance must be > 0");
-        if (hasL && !hasC) d.primaryResonantCapacitance = 1.0 / (wr * wr * d.primaryResonantInductance);
-        if (hasC && !hasL) d.primaryResonantInductance = 1.0 / (wr * wr * d.primaryResonantCapacitance);
+    const bool hasL = d.config.contains("primarySeriesInductance");
+    const bool hasC = d.config.contains("primaryResonantCapacitance");
+    const double pinnedLr1 = hasL ? cfg::get(d.config, "primarySeriesInductance", 0.0) : 0.0;
+    const double pinnedCr1 = hasC ? cfg::get(d.config, "primaryResonantCapacitance", 0.0) : 0.0;
+    if ((hasL && !(pinnedLr1 > 0)) || (hasC && !(pinnedCr1 > 0)))
+        throw std::invalid_argument("design_clllc: primarySeriesInductance / primaryResonantCapacitance must be > 0");
+    const auto pinnedLm = req::provided_inductance(dr);
+    const double inductanceRatio = cfg::get(d.config, "inductanceRatio", kInductanceRatio);
+    // The tank built around the transformer ratio N. Everything is referred through the transformer the stage is
+    // built around: the pinned ratio when the magnetic is chosen (I-know-the-design / della-Pollock pass 2), else
+    // the ratio sized below.
+    auto size_tank = [&](ClllcDesign& t, double N) {
+        const double Ro = (8.0 * N * N / (M_PI * M_PI)) * Rload;
+        t.resonantFrequency = fr;
+        t.primaryResonantCapacitance = 1.0 / (2.0 * M_PI * cfg::get(d.config, "qualityFactor", kQualityFactor) * fr * Ro);
+        t.primaryResonantInductance = 1.0 / (wr * wr * t.primaryResonantCapacitance);
+        if (hasL) t.primaryResonantInductance = pinnedLr1;
+        if (hasC) t.primaryResonantCapacitance = pinnedCr1;
+        if (hasL && !hasC) t.primaryResonantCapacitance = 1.0 / (wr * wr * t.primaryResonantInductance);
+        if (hasC && !hasL) t.primaryResonantInductance = 1.0 / (wr * wr * t.primaryResonantCapacitance);
         if (hasL && hasC)
-            d.resonantFrequency =
-                1.0 / (2.0 * M_PI * std::sqrt(d.primaryResonantInductance * d.primaryResonantCapacitance));
+            t.resonantFrequency =
+                1.0 / (2.0 * M_PI * std::sqrt(t.primaryResonantInductance * t.primaryResonantCapacitance));
+        t.magnetizingInductance = pinnedLm.value_or(inductanceRatio * t.primaryResonantInductance);
+        // della-Pollock resonant tank CO-DESIGN: the closed-loop realize pins Lm to the REALIZED magnetizing
+        // inductance of the chosen transformer core (sized for a saturation margin, so typically larger than
+        // k·Lr1). Once Lm is fixed it no longer equals k·Lr1, so the tank is DETUNED (k=Lm/Lr1 drifts, the gain
+        // curve shifts, the converter is pushed off resonance and can't reach target Vout). Re-size the PRIMARY
+        // tank around the pinned Lm to PRESERVE the design ratio k AND keep Lr1–Cr1 resonant at fr:
+        //   Lr1 = Lm/k,  Cr1 = 1/((2π·fr)²·Lr1).  The secondary tank (Lr2/Cr2 below) follows, staying symmetric
+        // (Lr2·Cr2 = Lr1·Cr1 → same fr). Lr1/Lr2 are their own freshly-designed magnetics and Cr1/Cr2
+        // near-nominal (role="resonant") sourced caps, so all track the new values; only the pinned transformer
+        // is fixed. (No pin → original Q·Ro sizing stands; the mkf_equivalence ideal deck never pins Lm.)
+        if (pinnedLm && !hasL && !hasC) {
+            t.primaryResonantInductance = *pinnedLm / inductanceRatio;
+            t.primaryResonantCapacitance = 1.0 / (wr * wr * t.primaryResonantInductance);
+        }
+        // The symmetric tank is Lr2 = Lr1/N^2, Cr2 = N^2*Cr1 with the transformer's REALISED ratio N. Referring it
+        // with the unpinned design value instead (n, efficiency-compensated since 7150de3: 7.92 against a pinned 8
+        // on the web's CLLLC) mismatched the two tanks, and the deck failed at t = 0 ("Timestep too small").
+        t.secondaryResonantInductance = t.primaryResonantInductance / (N * N);
+        t.secondaryResonantCapacitance = N * N * t.primaryResonantCapacitance;
+    };
+    // Whether the tank built around N regulates the output at input voltage v (the operating-frequency solve below
+    // succeeds exactly then), and the gains involved.
+    auto regulation_at = [&](double N, double v) {
+        ClllcDesign t = d;
+        size_tank(t, N);
+        return two_sided_regulation_check("design_clllc", d.config, d.reverse, N, eta, v, Vo, d.outputPower,
+                                          t.magnetizingInductance, t.primaryResonantInductance,
+                                          t.primaryResonantCapacitance, t.secondaryResonantInductance,
+                                          t.secondaryResonantCapacitance);
+    };
+
+    // ── Turns ratio over the input range (ABT #2160) ──
+    // The web designs the converter once and evaluates THAT converter (ratio and tank pinned) at every input voltage
+    // of designRequirements.inputVoltage, so the ratio must let the tank regulate the output at all of them inside
+    // the switching band. Sized at the operating point alone (n = η·Vin/Vout), the web's 380-420 V -> 48 V design
+    // took 7.91667 at 400 V, which then could not deliver 48 V from 380 V. The ratio that gives unity gain at the
+    // nominal input (the driving bus at resonance) is kept when it regulates the whole range with a gain margin;
+    // otherwise the ratio moves to the end of the window of working ratios nearest it, stepped inside that end by
+    // the margin (cfg::kClllcRatioGainMargin). A range no ratio covers is refused, naming the input.
+    // A spec without a range keeps the ratio of its own input voltage.
+    const auto pinnedN = req::provided_turns_ratio(dr, 0);
+    double N = 0.0;
+    if (pinnedN) {
+        N = *pinnedN;
+    } else if (!(vinMin < vinMax)) {
+        N = eta * Vin / Vo;
+    } else {
+        const double vinNom = PEAS::resolve_dimensional_values(iv, PEAS::DimensionalValues::NOMINAL);
+        std::vector<double> corners{vinMin};
+        if (vinNom > vinMin && vinNom < vinMax) corners.push_back(vinNom);
+        corners.push_back(vinMax);
+        // Unity gain at resonance at the nominal input, for the direction the design runs in.
+        const double preferred = d.reverse ? vinNom / (eta * Vo) : eta * vinNom / Vo;
+        auto regulates_range = [&](double n) {
+            return std::all_of(corners.begin(), corners.end(), [&](double v) { return regulation_at(n, v).regulates(); });
+        };
+        // The ratios for which every input of the range regulates, with the tank's gain curve held at the shape it has
+        // around `n` (the required gain scales as N forward, 1/N reverse). Re-evaluated at the new ratio until it holds
+        // there (one step when the tank is sized from N, whose normalised gain curve does not depend on N).
+        auto ratio_window = [&](double n) -> std::optional<std::pair<double, double>> {
+            double lo = 0.0, hi = std::numeric_limits<double>::infinity();
+            for (const double v : corners) {
+                const auto chk = regulation_at(n, v);
+                if (!chk.reachable) return std::nullopt;
+                const double g = chk.requiredGain, gMin = chk.reachable->minimum, gMax = chk.reachable->maximum;
+                if (!d.reverse) {
+                    lo = std::max(lo, n * gMin / g);
+                    hi = std::min(hi, n * gMax / g);
+                } else {
+                    lo = std::max(lo, n * g / gMax);
+                    if (gMin > 0.0) hi = std::min(hi, n * g / gMin);
+                }
+            }
+            if (!(lo < hi)) return std::nullopt;
+            return std::make_pair(lo, hi);
+        };
+        // The ratio nearest the unity ratio that keeps cfg::kClllcRatioGainMargin of gain in hand at every corner:
+        // the window of working ratios is shrunk by that margin at each stated end and the unity ratio is clamped
+        // into it (kept when it lies at least the margin inside). A window narrower than the margin at both ends is
+        // refused.
+        constexpr double m = cfg::kClllcRatioGainMargin;
+        N = preferred;
+        bool converged = false;
+        for (int it = 0; it < 20; ++it) {
+            const auto w = ratio_window(N);
+            if (!w) break;
+            const auto [lo, hi] = *w;
+            const double loM = lo * (1.0 + m);
+            const double hiM = std::isfinite(hi) ? hi / (1.0 + m) : hi;
+            if (!(loM <= hiM)) {
+                std::ostringstream e;
+                e << "design_clllc: the turns ratios that let the tank deliver " << Vo << " V over the whole input "
+                  << "range [" << vinMin << ", " << vinMax << "] V inside the switching band"
+                  << (d.reverse ? " (reverse power flow)" : "") << " lie in [" << lo << ", " << hi
+                  << "], too narrow to keep a " << 100.0 * m << " % gain margin at both ends of the range. Widen the "
+                  << "switching band, narrow the input range, or change the quality factor / inductance ratio";
+                throw std::invalid_argument(e.str());
+            }
+            const double next = std::clamp(preferred, loM, hiM);
+            if (std::abs(next - N) <= 1e-12 * N) {
+                converged = true;
+                break;
+            }
+            N = next;
+        }
+        const bool covered = converged && regulates_range(N);
+        if (!covered) {
+            // Refused, naming the first input of the range the unity-at-nominal ratio cannot regulate, with the gains.
+            for (const double v : corners) {
+                const auto chk = regulation_at(preferred, v);
+                if (chk.regulates()) continue;
+                std::ostringstream m;
+                m << "design_clllc: no turns ratio lets the tank deliver " << Vo << " V over the whole input range ["
+                  << vinMin << ", " << vinMax << "] V inside the switching band" << (d.reverse ? " (reverse power flow)" : "")
+                  << ": with the ratio " << preferred << " (unity gain at the nominal " << vinNom
+                  << " V) the design cannot be evaluated at the input voltage " << v << " V: it needs a tank gain of "
+                  << chk.requiredGain;
+                if (chk.reachable)
+                    m << ", but the regulation branch only reaches [" << chk.reachable->minimum << ", "
+                      << chk.reachable->maximum << "]";
+                else
+                    m << ", but the tank input is capacitive at the top of the band (no regulation branch)";
+                m << ". Widen the switching band, narrow the input range, or change the quality factor / inductance ratio";
+                throw std::invalid_argument(m.str());
+            }
+            throw std::logic_error("design_clllc: the input range is not covered, yet every input regulates");
+        }
     }
+    d.turnsRatio = N;
+    size_tank(d, N);
     // MAS clllcResonant.primaryResonantFrequency states the tank resonance: it must agree with the tank.
     if (d.config.contains("primaryResonantFrequency") &&
         std::abs(cfg::get(d.config, "primaryResonantFrequency", d.resonantFrequency) - d.resonantFrequency) >
@@ -114,37 +254,9 @@ ClllcDesign design_clllc(const json& tasInputs) {
                                     " Hz differs from the tank resonance " + std::to_string(d.resonantFrequency) +
                                     " Hz (designRequirements.switchingFrequency, or the resonance of the pinned "
                                     "primarySeriesInductance and primaryResonantCapacitance)");
-    const auto pinnedLm = req::provided_inductance(dr);
-    d.magnetizingInductance = pinnedLm.value_or(
-        cfg::get(d.config, "inductanceRatio", kInductanceRatio) * d.primaryResonantInductance);
-    // della-Pollock resonant tank CO-DESIGN: the closed-loop realize pins Lm to the REALIZED magnetizing
-    // inductance of the chosen transformer core (sized for a saturation margin, so typically larger than
-    // k·Lr1). Once Lm is fixed it no longer equals k·Lr1, so the tank is DETUNED (k=Lm/Lr1 drifts, the gain
-    // curve shifts, the converter is pushed off resonance and can't reach target Vout). Re-size the PRIMARY
-    // tank around the pinned Lm to PRESERVE the design ratio k AND keep Lr1–Cr1 resonant at fr:
-    //   Lr1 = Lm/k,  Cr1 = 1/((2π·fr)²·Lr1).  The secondary tank (Lr2/Cr2 below) follows, staying symmetric
-    // (Lr2·Cr2 = Lr1·Cr1 → same fr). Lr1/Lr2 are their own freshly-designed magnetics and Cr1/Cr2
-    // near-nominal (role="resonant") sourced caps, so all track the new values; only the pinned transformer
-    // is fixed. (No pin → original Q·Ro sizing stands; the mkf_equivalence ideal deck never pins Lm.)
-    if (pinnedLm && !d.config.contains("primarySeriesInductance") && !d.config.contains("primaryResonantCapacitance")) {
-        const double k = cfg::get(d.config, "inductanceRatio", kInductanceRatio);
-        d.primaryResonantInductance = *pinnedLm / k;
-        d.primaryResonantCapacitance = 1.0 / (wr * wr * d.primaryResonantInductance);
-    }
-    // The symmetric tank is Lr2 = Lr1/N^2, Cr2 = N^2*Cr1 with the transformer's REALISED ratio N. Referring it
-    // with the unpinned design value instead (n, efficiency-compensated since 7150de3: 7.92 against a pinned 8
-    // on the web's CLLLC) mismatched the two tanks, and the deck failed at t = 0 ("Timestep too small").
-    d.secondaryResonantInductance = d.primaryResonantInductance / (N * N);
-    d.secondaryResonantCapacitance = N * N * d.primaryResonantCapacitance;
     d.switchDuty = cfg::get(d.config, "switchDutyFraction", kSwitchDuty);
     d.loadResistance = Rload;
     d.outputCapacitance = 100e-6;
-    // Power-flow direction (ABT #85). "reverse" makes the Vout side the source and delivers to the Vin side;
-    // the symmetric tank/turns-ratio sizing is unchanged, only the deck wiring flips.
-    const std::string dir = cfg::get_str(d.config, "powerFlowDirection", "forward");
-    if (dir != "forward" && dir != "reverse")
-        throw std::invalid_argument("design_clllc: config.powerFlowDirection must be 'forward' or 'reverse', got '" + dir + "'");
-    d.reverse = (dir == "reverse");
 
     // ── Operating frequency (ABT #1503) ──
     // The CLLLC regulates by frequency. An engine-sized ratio (N = η·Vin/Vout) is the unity-gain ratio, so it runs
@@ -154,7 +266,7 @@ ClllcDesign design_clllc(const json& tasInputs) {
     const auto op = two_sided_resonant_operating_point(
         "design_clllc",
         req::provided_turns_ratio(dr, 0).has_value() ? "pinned turns ratio" : "turns ratio",
-        d.config, d.reverse, N, req::conversion_efficiency(dr), Vin, Vo, d.outputPower, d.resonantFrequency,
+        d.config, d.reverse, N, eta, Vin, Vo, d.outputPower, d.resonantFrequency,
         d.magnetizingInductance, d.primaryResonantInductance, d.primaryResonantCapacitance,
         d.secondaryResonantInductance, d.secondaryResonantCapacitance);
     d.operatingFrequency = op.operatingFrequency;

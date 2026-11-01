@@ -16,7 +16,9 @@
 // ideal-source caveat does NOT apply here — CLLC matches within the tighter 2% band.
 
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <string>
+#include "ConverterAnalytical.hpp"   // analytical::FhaGainRange
 #include "Fidelity.hpp"
 
 namespace Kirchhoff {
@@ -70,6 +72,23 @@ TwoSidedOperatingPoint two_sided_resonant_operating_point(
     double turnsRatio, double efficiency, double inputVoltage, double outputVoltage, double outputPower,
     double resonantFrequency, double magnetizingInductance, double primaryResonantInductance,
     double primaryResonantCapacitance, double secondaryResonantInductance, double secondaryResonantCapacitance);
+
+/**
+ * @brief Whether a two-sided (CLLC / CLLLC) tank can regulate one operating point: the gain the delivered rail needs
+ *        (as two_sided_resonant_operating_point states it) and the gains the tank reaches on its regulation (ZVS)
+ *        branch inside the switching band (analytical::cllc_regulation_gain_range; std::nullopt: no such branch).
+ *        The operating-frequency solve succeeds exactly when requiredGain lies inside the reachable range.
+ */
+struct TwoSidedRegulationCheck {
+    double requiredGain;
+    std::optional<analytical::FhaGainRange> reachable;
+    bool regulates() const { return reachable && requiredGain >= reachable->minimum && requiredGain <= reachable->maximum; }
+};
+TwoSidedRegulationCheck two_sided_regulation_check(
+    const std::string& who, const nlohmann::json& config, bool reverse, double turnsRatio, double efficiency,
+    double inputVoltage, double outputVoltage, double outputPower, double magnetizingInductance,
+    double primaryResonantInductance, double primaryResonantCapacitance, double secondaryResonantInductance,
+    double secondaryResonantCapacitance);
 
 /**
  * @brief Design a symmetric CLLC bidirectional resonant converter (full bridge both sides).

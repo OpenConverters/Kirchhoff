@@ -118,6 +118,15 @@ constexpr double kTranIterLimit     = 100;    // ngspice itl4: transient Newton 
 // setting, not a part: 1 nS across a 48 V diode is 48 nA (2 uW), below any real rectifier's reverse leakage, and
 // it does not persist into the next in-process deck (each circuit carries its own gmin).
 constexpr double kSrcJunctionGmin   = 1e-9;
+// CLLLC turns ratio over the input range (ABT #2160): the gain the tank keeps in hand at the binding corner. When the
+// unity-at-nominal ratio cannot regulate every input of designRequirements.inputVoltage inside the switching band, the
+// ratio moves to the end of the window of working ratios nearest it and steps inside by this fraction, so the corner
+// that sets that end needs at most 1/(1 + margin) of the largest (or 1 + margin times the smallest) gain the band's
+// regulation branch reaches. 2 %: on the web's default (380-420 V -> 48 V / 240 W,
+// Q 0.4, 90-150 kHz) the working ratios span only [7.402, 7.765], a 4.9 % window, so a margin above 2.4 % at both
+// ends would refuse the web's own default; at 2 % the binding 380 V corner needs 1.0122 against the 1.0324 peak the
+// band reaches, five times the 0.4 % that a +-5 % tolerance on Lr and Cr takes off that peak.
+constexpr double kClllcRatioGainMargin = 0.02;
 
 // ── Principled auxiliary-component rules (for the ideal-switch ngspice decks) ─────────────────────────
 

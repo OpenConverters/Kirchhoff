@@ -700,6 +700,21 @@ double solve_cllc_operating_frequency(double requiredGain, std::optional<double>
                                       double referredSecondaryResonantCapacitance,
                                       double reflectedLoadResistance);
 
+// The gains a CLLC / CLLLC tank reaches on its regulation branch inside the switching band: the inductive (ZVS)
+// stretch of the band that ends at its upper end, sampled on the same 2000-point log grid, with the same unstated-
+// end rules, as solve_cllc_operating_frequency. Every gain in [minimum, maximum] is one that solve finds (the
+// regulation design of the CLLLC sizes its turns ratio against it over the input range). An unstated upper end
+// reaches every gain down to 0 (above fr the gain falls monotonically to 0), so minimum is 0 then.
+// std::nullopt when the tank input is capacitive at the band's upper end (no regulation branch in the band).
+struct FhaGainRange { double minimum, maximum; };
+std::optional<FhaGainRange> cllc_regulation_gain_range(std::optional<double> fmin, std::optional<double> fmax,
+                                                       double magnetizingInductance,
+                                                       double primaryResonantInductance,
+                                                       double primaryResonantCapacitance,
+                                                       double referredSecondaryResonantInductance,
+                                                       double referredSecondaryResonantCapacitance,
+                                                       double reflectedLoadResistance);
+
 // LLC resonant converter via the load-aware First-Harmonic Approximation (see LlcFhaTank). The primary
 // winding carries the sinusoidal tank current ILs = (4/pi)*k_bridge*Vin/|Zin|; the transformer winding voltage
 // is the +/-n*Vout square clamped by the rectifier, in phase with the voltage across Lm || Rac (so the tank
