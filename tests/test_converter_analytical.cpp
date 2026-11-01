@@ -2191,6 +2191,7 @@ TEST_CASE("LLC half bridge whose pinned ratio covers its whole input range: diag
 // inside the switching band, or the design throws naming the required gain, the reachable range and a working ratio.
 #include "Cllc.hpp"
 #include "Clllc.hpp"
+#include "KirchhoffConfig.hpp"
 
 namespace {
 // 400 V -> 48 V / 480 W, tank resonance 100 kHz, efficiency 95 %, band 70-200 kHz. turnsRatio <= 0: engine-sized.
@@ -2294,11 +2295,35 @@ TEST_CASE("CLLC pinned n=12, 400 V -> 48 V: no frequency in the band reaches gai
 
 TEST_CASE("CLLLC: the unity-gain ratio stays at resonance; a pinned ratio solves its frequency in the band (ABT #1503)",
           "[analytical][clllc][abt1503]") {
-    SECTION("engine-sized ratio N = η·Vin/Vout is the unity-gain ratio: runs at fr") {
-        const Kirchhoff::ClllcDesign d = Kirchhoff::design_clllc(two_sided_1503_spec(0.0));
-        CHECK(d.requiredGain == Catch::Approx(1.0));
-        CHECK(d.operatingFrequency == d.resonantFrequency);
-        check_two_sided_operating_point("clllc", d, two_sided_1503_spec(0.0), false);
+    SECTION("engine-sized ratio regulates every corner of the input range with the gain margin, inside the band") {
+        // Alf approved this rewrite (2026-11-01): the section asserted the unity-gain ratio N = η·Vin/Vout running at
+        // fr, but that ratio cannot reach 380 V, the low end of this spec's own input range (ABT #2160). The contract
+        // is now the range sizing's: the engine-sized ratio regulates 380, 400 and 420 V with at least
+        // cfg::kClllcRatioGainMargin of gain in hand, at an operating frequency inside the 70-200 kHz band.
+        const nlohmann::json spec = two_sided_1503_spec(0.0);
+        const Kirchhoff::ClllcDesign d = Kirchhoff::design_clllc(spec);
+        constexpr double m = Kirchhoff::cfg::kClllcRatioGainMargin;
+        for (const double vin : {380.0, 400.0, 420.0}) {
+            const auto chk = Kirchhoff::two_sided_regulation_check(
+                "design_clllc", spec.at("config"), false, d.turnsRatio, 0.95, vin, 48.0, 480.0,
+                d.magnetizingInductance, d.primaryResonantInductance, d.primaryResonantCapacitance,
+                d.secondaryResonantInductance, d.secondaryResonantCapacitance);
+            INFO("N " << d.turnsRatio << " at " << vin << " V: required gain " << chk.requiredGain);
+            REQUIRE(chk.reachable);
+            INFO("reachable [" << chk.reachable->minimum << ", " << chk.reachable->maximum << "]");
+            CHECK(chk.requiredGain == Catch::Approx(d.turnsRatio * 48.0 / (0.95 * vin)));
+            // The binding corner sits exactly on the margin, so allow round-off there.
+            CHECK(chk.requiredGain * (1.0 + m) <= chk.reachable->maximum * (1.0 + 1e-9));
+            CHECK(chk.requiredGain >= chk.reachable->minimum * (1.0 + m) * (1.0 - 1e-9));
+            const auto op = Kirchhoff::two_sided_resonant_operating_point(
+                "design_clllc", "engine-sized", spec.at("config"), false, d.turnsRatio, 0.95, vin, 48.0, 480.0,
+                d.resonantFrequency, d.magnetizingInductance, d.primaryResonantInductance,
+                d.primaryResonantCapacitance, d.secondaryResonantInductance, d.secondaryResonantCapacitance);
+            CHECK(op.requiredGain == Catch::Approx(chk.requiredGain));
+            CHECK(op.operatingFrequency >= 70e3);
+            CHECK(op.operatingFrequency <= 200e3);
+        }
+        check_two_sided_operating_point("clllc", d, spec, false);
     }
     SECTION("pinned N=7.5 needs gain 0.947, above resonance") {
         const nlohmann::json spec = two_sided_1503_spec(7.5);
