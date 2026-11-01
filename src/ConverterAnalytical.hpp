@@ -296,12 +296,16 @@ MAS::OperatingPoint analytical_fsbb(double inputVoltage, double outputVoltage,
 // Np/Ns ratio. Pushes Primary (piecewise CUSTOM current) + Secondary. Note: as in MKF the
 // secondary *winding voltage* is set by the primary rail Vpri/n, so `secondaryOutputVoltage`
 // only defines the second output's presence. Ported from MKF IsolatedBuck.cpp:41. Throws if the
-// duty ≥ 1.
+// duty ≥ 1. `deadTime` > 0 models the two dead times of the complementary pair (isolated_buck_dead_times) with
+// the body diodes at `bodyDiodeVoltageDrop`, which must then be given (THROWS without it); 0 is the model without
+// dead times, unchanged.
 MAS::OperatingPoint analytical_isolated_buck(double inputVoltage, double primaryOutputVoltage,
                                              double primaryOutputCurrent, double secondaryOutputVoltage,
                                              double secondaryOutputCurrent, double switchingFrequency,
                                              double inductance, double turnsRatio,
-                                             double diodeVoltageDrop = 0.0, double efficiency = 1.0);
+                                             double diodeVoltageDrop = 0.0, double efficiency = 1.0,
+                                             double deadTime = 0.0,
+                                             std::optional<double> bodyDiodeVoltageDrop = std::nullopt);
 
 // Multi-output isolated buck (N isolated secondaries, ABT #86). Same fly-buck model as the scalar overload
 // but every declared isolated secondary is coupled into the primary/magnetizing winding: the primary
@@ -316,7 +320,9 @@ MAS::OperatingPoint analytical_isolated_buck(double inputVoltage, double primary
                                              const std::vector<double>& secondaryOutputCurrents,
                                              const std::vector<double>& turnsRatios,
                                              double switchingFrequency, double inductance,
-                                             double diodeVoltageDrop = 0.0, double efficiency = 1.0);
+                                             double diodeVoltageDrop = 0.0, double efficiency = 1.0,
+                                             double deadTime = 0.0,
+                                             std::optional<double> bodyDiodeVoltageDrop = std::nullopt);
 
 // Isolated buck-boost (fly-buck-boost). Non-isolated inverting primary rail + N isolated secondaries.
 // `inductance` is primary/magnetizing, `turnsRatios[i]` = Np/Ns_i. Pushes Primary (TRIANGULAR current
@@ -404,6 +410,27 @@ double isolated_buck_boost_duty_cycle(double inputVoltage, double primaryOutputV
 
 // Isolated buck (fly-buck) duty D = Vpri/Vin·η — the law analytical_isolated_buck runs the switch at.
 double isolated_buck_duty_cycle(double inputVoltage, double primaryOutputVoltage, double efficiency);
+
+// The two dead times of the fly-buck's complementary pair (QS1 high side on for D·T from t = 0, then a dead time,
+// QS2 low side, a dead time to T). In a dead time the primary current freewheels through a body diode with the
+// spec's diode voltage drop Vf: while the magnetizing current is positive the low-side diode conducts and the
+// primary sees -(Vpri + Vf) instead of -Vpri; while it is negative the high-side diode conducts and the primary sees
+// Vin + Vf - Vpri, the on-time voltage, so the on-time effectively starts td early. When the magnetizing current
+// reaches zero inside the dead time before the on-time, both diodes block for the rest of it: the current idles at
+// zero with no voltage across the winding (the period then starts from zero current). `conduction[j]` is how long
+// the diode conducts in dead time j (td, or less for that idle), `negative[j]` which diode it is (j = 0 after the
+// on-time, 1 before it). The volt-second balance moves the duty by `dutyShift` from `baseDuty`, the duty of the law
+// without dead times. The freewheel depends on the duty it moves, so it is solved to a fixed point; THROWS when it
+// has none, when no on-time / low-side time is left, or when the current reaches zero in the dead time after the
+// on-time (not modelled).
+struct IsolatedBuckDeadTimes {
+    double dutyShift;
+    bool negative[2];
+    double conduction[2];
+};
+IsolatedBuckDeadTimes isolated_buck_dead_times(double baseDuty, double inputVoltage, double primaryOutputVoltage,
+                                               double magnetizingCurrentAverage, double switchingFrequency,
+                                               double inductance, double deadTime, double bodyDiodeVoltageDrop);
 
 // The main-rail output voltage at which a converter whose duty follows `dutyAt(Vo)` (one of the timing
 // functions above, evaluated with the load held: Io = Vo/R) runs at exactly `dutyCycle`. dutyAt must be

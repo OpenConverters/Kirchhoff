@@ -477,6 +477,148 @@ double isolated_buck_duty_cycle(double inputVoltage, double primaryOutputVoltage
     return primaryOutputVoltage / inputVoltage * efficiency;
 }
 
+namespace {
+// The fly-buck magnetizing current at the switching instants of a period with dead times: [0] t = 0 (QS1 on),
+// [1] D·T (QS1 off), [2] D·T + td (QS2 on), [3] T - td (QS2 off), [4] T - td + conduction[1] (the end of the
+// freewheel before the on-time; == T unless it idles). It rises over the on-time at (Vin - Vpri)/L and moves over
+// each freewheel at its diode voltage. Without an idle the low-side interval closes the period (exactly -Vpri/L at
+// the balanced duty with efficiency 1, as the model without dead times closes its triangle) and the period average
+// sets the level. With an idle the period starts from zero and the length of the freewheel is what the average
+// sets (returned in conduction[1]); THROWS when no freewheel length in (0, td] gives that average.
+std::array<double, 5> isolated_buck_magnetizing_points(double dutyCycle, double inputVoltage,
+                                                       double primaryOutputVoltage, double magnetizingCurrentAverage,
+                                                       double period, double inductance, double deadTime, double vf,
+                                                       const bool negative[2], double conduction[2], bool idle) {
+    const double tOn = dutyCycle * period, td = deadTime, tOff = period - tOn - 2.0 * td;
+    const double vOn = inputVoltage - primaryOutputVoltage;
+    const auto vDead = [&](bool neg) { return neg ? inputVoltage + vf - primaryOutputVoltage : -(primaryOutputVoltage + vf); };
+    const double r1 = vOn * tOn / inductance, r2 = r1 + vDead(negative[0]) * td / inductance;
+    if (!idle) {
+        conduction[0] = conduction[1] = td;
+        const double r3 = -vDead(negative[1]) * td / inductance;   // relative to the value at t = 0
+        const double area = 0.5 * r1 * tOn + 0.5 * (r1 + r2) * td + 0.5 * (r2 + r3) * tOff + 0.5 * r3 * td;
+        const double i0 = magnetizingCurrentAverage - area / period;
+        return {i0, i0 + r1, i0 + r2, i0 + r3, i0};
+    }
+    // From zero at t = 0, through the freewheel of length x that ends at zero: i(T - td) = -s·x with s its slope.
+    // Average: 0.5·s·x² + 0.5·s·tOff·x + (A - 0.5·r2·tOff) = 0, A = ImAvg·T - (on-time and first dead time area).
+    conduction[0] = td;
+    const double sl = vDead(negative[1]) / inductance;
+    const double A = magnetizingCurrentAverage * period - 0.5 * r1 * tOn - 0.5 * (r1 + r2) * td;
+    const double qa = 0.5 * sl, qb = 0.5 * sl * tOff, qc = A - 0.5 * r2 * tOff;
+    const double disc = qb * qb - 4.0 * qa * qc;
+    double x = -1.0;
+    if (disc >= 0.0)
+        for (const double root : {(-qb + std::sqrt(disc)) / (2.0 * qa), (-qb - std::sqrt(disc)) / (2.0 * qa)})
+            if (root > 0.0 && root <= td * (1.0 + 1e-12)) x = std::min(root, td);
+    if (!(x > 0.0))
+        throw std::runtime_error("isolated_buck_dead_times: the magnetizing current reaches zero in the dead time "
+                                 "before the on-time, but no freewheel length gives the average " +
+                                 std::to_string(magnetizingCurrentAverage) + " A");
+    conduction[1] = x;
+    return {0.0, r1, r2, -sl * x, 0.0};
+}
+}  // namespace
+
+IsolatedBuckDeadTimes isolated_buck_dead_times(double baseDuty, double inputVoltage, double primaryOutputVoltage,
+                                               double magnetizingCurrentAverage, double switchingFrequency,
+                                               double inductance, double deadTime, double bodyDiodeVoltageDrop) {
+    if (!(deadTime > 0.0) || !(switchingFrequency > 0.0) || !(inductance > 0.0) || !(inputVoltage > 0.0))
+        throw std::invalid_argument("isolated_buck_dead_times: dead time, switching frequency, inductance and input "
+                                    "voltage must be > 0");
+    if (!(bodyDiodeVoltageDrop >= 0.0))
+        throw std::invalid_argument("isolated_buck_dead_times: the body-diode voltage drop must be >= 0 V");
+    const double period = 1.0 / switchingFrequency, td = deadTime, vf = bodyDiodeVoltageDrop;
+    const double vpri = primaryOutputVoltage, vin = inputVoltage;
+    IsolatedBuckDeadTimes r{0.0, {false, false}, {td, td}};
+    // The duty shift of the volt-seconds of the two dead times: a diode freewheel at v (v + Vpri = Vin + Vf high
+    // side, -Vf low side) for conduction[j], then an idle at v = 0 for the rest of the dead time.
+    const auto shift_of = [&](const bool negative[2], const double conduction[2]) {
+        double shift = 0.0;
+        for (int j = 0; j < 2; ++j) {
+            const double vPlusVpri = negative[j] ? vin + vf : -vf;
+            shift -= vPlusVpri * conduction[j];
+            shift -= vpri * (td - conduction[j]);
+        }
+        return shift / (period * vin);
+    };
+    // The idle regime: the period starts from zero current, so the duty (volt-second balance, which also returns the
+    // current to zero at T - td + x) and the freewheel length x (the period average) are solved together. The
+    // average of the period as a function of x, with the duty that x sets.
+    const auto idle_average = [&](const bool negative[2], double x, double& duty) {
+        const double conduction[2] = {td, x};
+        duty = baseDuty + shift_of(negative, conduction);
+        const double tOn = duty * period, tOff = period - tOn - 2.0 * td;
+        const auto vDead = [&](bool neg) { return neg ? vin + vf - vpri : -(vpri + vf); };
+        const double r1 = (vin - vpri) * tOn / inductance, r2 = r1 + vDead(negative[0]) * td / inductance;
+        const double i3 = r2 - vpri * tOff / inductance;
+        return (0.5 * r1 * tOn + 0.5 * (r1 + r2) * td + 0.5 * (r2 + i3) * tOff + 0.5 * i3 * x) / period;
+    };
+    bool idle = false;
+    double D = baseDuty;
+    for (int it = 0; it < 200; ++it) {
+        if (idle) {
+            // Bisect x in (0, td] for the average; the average is continuous in x, so a sign change brackets it.
+            double lo = 0.0, hi = td, dLo = 0.0, dHi = 0.0;
+            const double fLo = idle_average(r.negative, lo, dLo) - magnetizingCurrentAverage;
+            const double fHi = idle_average(r.negative, hi, dHi) - magnetizingCurrentAverage;
+            if ((fLo > 0.0) == (fHi > 0.0))
+                throw std::runtime_error("isolated_buck_dead_times: the magnetizing current reaches zero in the dead "
+                                         "time before the on-time, but no freewheel length in (0, " +
+                                         std::to_string(td) + "] s gives the average " +
+                                         std::to_string(magnetizingCurrentAverage) + " A");
+            for (int b = 0; b < 200 && hi - lo > 1e-15 * td; ++b) {
+                const double mid = 0.5 * (lo + hi);
+                double dMid = 0.0;
+                const double fMid = idle_average(r.negative, mid, dMid) - magnetizingCurrentAverage;
+                if ((fMid > 0.0) == (fLo > 0.0)) lo = mid; else hi = mid;
+            }
+            r.conduction[0] = td;
+            r.conduction[1] = 0.5 * (lo + hi);
+            idle_average(r.negative, r.conduction[1], D);
+            r.dutyShift = D - baseDuty;
+            // The regime it was solved in must hold at the solution: the current entering each dead time has the
+            // sign of the diode that conducts it.
+            double conduction[2] = {r.conduction[0], r.conduction[1]};
+            const auto im = isolated_buck_magnetizing_points(D, vin, vpri, magnetizingCurrentAverage, period,
+                                                             inductance, td, vf, r.negative, conduction, true);
+            if ((im[1] < 0.0) != r.negative[0] || (im[3] < 0.0) != r.negative[1] || (im[1] > 0.0) != (im[2] > 0.0))
+                throw std::runtime_error("isolated_buck_dead_times: the freewheel of the dead times has no fixed point");
+            if (!(D > 0.0) || !(D + 2.0 * td / period < 1.0))
+                throw std::invalid_argument("Dead Time: two dead times of " + std::to_string(deadTime) + " s at " +
+                                            std::to_string(switchingFrequency) + " Hz leave the isolated buck no " +
+                                            (D > 0.0 ? "low-side" : "high-side") + " switch on-time (duty " +
+                                            std::to_string(D) + "). Lower the Dead Time.");
+            return r;
+        }
+        if (!(D > 0.0) || !(D + 2.0 * td / period < 1.0))
+            throw std::invalid_argument("Dead Time: two dead times of " + std::to_string(deadTime) + " s at " +
+                                        std::to_string(switchingFrequency) + " Hz leave the isolated buck no " +
+                                        (D > 0.0 ? "low-side" : "high-side") + " switch on-time (duty " +
+                                        std::to_string(D) + "). Lower the Dead Time.");
+        const auto im = isolated_buck_magnetizing_points(D, vin, vpri, magnetizingCurrentAverage, period, inductance,
+                                                         td, vf, r.negative, r.conduction, false);
+        // Which diode each dead time freewheels through, from the current entering it; the one before the on-time
+        // idles when the current reaches zero inside it (the regular solution then ends the period past zero).
+        const bool neg0 = im[1] < 0.0, neg1 = im[3] < 0.0;
+        const bool nextIdle = (neg1 == r.negative[1]) && (neg1 ? im[0] > 0.0 : im[0] < 0.0);
+        if ((im[1] > 0.0) != (im[2] > 0.0) && im[2] != 0.0)
+            throw std::runtime_error("isolated_buck_dead_times: the magnetizing current reaches zero in the dead time "
+                                     "after the on-time (light load); the model does not cover that");
+        const double shift = shift_of(r.negative, r.conduction);
+        const double next = baseDuty + shift;
+        const bool settled = neg0 == r.negative[0] && neg1 == r.negative[1] && nextIdle == idle &&
+                             std::abs(next - D) <= 1e-14;
+        r.dutyShift = shift;
+        if (settled) return r;
+        r.negative[0] = neg0;
+        r.negative[1] = neg1;
+        idle = nextIdle;
+        D = next;
+    }
+    throw std::runtime_error("isolated_buck_dead_times: the freewheel of the dead times has no fixed point");
+}
+
 double isolated_buck_boost_duty_cycle(double inputVoltage, double primaryOutputVoltage, double efficiency) {
     return primaryOutputVoltage / (inputVoltage + primaryOutputVoltage) * efficiency;
 }
@@ -1526,6 +1668,121 @@ MAS::OperatingPoint analytical_fsbb(double inputVoltage, double outputVoltage,
     return with_model_duty(std::move(operatingPoint), dutyForWaveform);
 }
 
+namespace {
+// analytical_isolated_buck with the two dead times of the complementary pair (isolated_buck_dead_times). The
+// secondaries conduct while the winding voltage is negative: the low-side interval and every dead time the
+// magnetizing current enters positive. Over that window each delivers its rail current Iout_k on average, rising
+// linearly from Iout_k (the shape the model without dead times uses: it starts at Iout_k and averages Iout_k over
+// the period). The primary carries the magnetizing current less the reflected secondary currents. When the
+// magnetizing current reaches zero in the dead time before the on-time (dt.conduction[1] < td) both body diodes
+// block for the rest of it: the winding idles at zero voltage and zero current from T - td + conduction[1] to T
+// (entering that dead time positive, the secondary conducts until the idle starts).
+MAS::OperatingPoint analytical_isolated_buck_with_dead_times(double inputVoltage, double primaryOutputVoltage,
+                                                             double primaryOutputCurrent,
+                                                             const std::vector<double>& secondaryOutputCurrents,
+                                                             const std::vector<double>& turnsRatios, double period,
+                                                             double inductance, double diodeVoltageDrop,
+                                                             double baseDuty, double totalReflectedSecondaryCurrent,
+                                                             double deadTime, double vf) {
+    using Lbl = MAS::WaveformLabel;
+    const double fs = 1.0 / period, td = deadTime, Vin = inputVoltage, Vpri = primaryOutputVoltage;
+    const double ImAvg = primaryOutputCurrent + totalReflectedSecondaryCurrent;
+    const IsolatedBuckDeadTimes dt = isolated_buck_dead_times(baseDuty, Vin, Vpri, ImAvg, fs, inductance, td, vf);
+    const double D = baseDuty + dt.dutyShift, tOn = D * period;
+    const bool idle = dt.conduction[1] < td;
+    double conduction[2] = {dt.conduction[0], dt.conduction[1]};
+    const auto im = isolated_buck_magnetizing_points(D, Vin, Vpri, ImAvg, period, inductance, td, vf, dt.negative,
+                                                     conduction, idle);
+    if (idle && std::abs(conduction[1] - dt.conduction[1]) > 1e-9 * td)
+        throw std::logic_error("analytical_isolated_buck: the idle of the dead time before the on-time moved between "
+                               "the duty solve and the waveform");
+    const bool neg1 = dt.negative[0], neg2 = dt.negative[1];
+    const double tIdle = period - td + conduction[1];   // == T without an idle
+    const double tcStart = neg1 ? tOn + td : tOn, tcEnd = neg2 ? period - td : tIdle, tc = tcEnd - tcStart;
+    // Secondary k conducts from tcStart to tcEnd, from Iout_k up to (2T/tc - 1)·Iout_k (window average Iout_k·T/tc).
+    double reflS = 0.0, reflE = 0.0;
+    std::vector<double> secS(turnsRatios.size()), secE(turnsRatios.size());
+    for (size_t k = 0; k < turnsRatios.size(); ++k) {
+        secS[k] = secondaryOutputCurrents[k];
+        secE[k] = (2.0 * period / tc - 1.0) * secondaryOutputCurrents[k];
+        reflS += secS[k] / turnsRatios[k];
+        reflE += secE[k] / turnsRatios[k];
+    }
+    const auto refl_at = [&](double t) { return reflS + (reflE - reflS) * (t - tcStart) / tc; };
+
+    MAS::OperatingPoint operatingPoint;
+    {
+        std::vector<double> t, i;
+        auto push = [&](double tt, double ii) { t.push_back(tt); i.push_back(ii); };
+        push(0.0, im[0]);
+        push(tOn, im[1]);
+        if (!neg1) {
+            push(tOn, im[1] - reflS);
+            push(tOn + td, im[2] - refl_at(tOn + td));
+        } else {
+            push(tOn + td, im[2]);
+            push(tOn + td, im[2] - reflS);
+        }
+        push(period - td, im[3] - refl_at(period - td));
+        if (!neg2) {
+            push(tIdle, im[4] - reflE);
+        } else {
+            push(period - td, im[3]);
+            push(tIdle, im[4]);
+        }
+        if (idle) {
+            push(tIdle, 0.0);
+            push(period, 0.0);
+        }
+        MAS::Waveform currentWaveform;
+        currentWaveform.set_data(i);
+        currentWaveform.set_time(t);
+        currentWaveform.set_ancillary_label(Lbl::CUSTOM);
+        const double vOn = Vin - Vpri;
+        const auto vDead = [&](bool neg) { return neg ? Vin + vf - Vpri : -(Vpri + vf); };
+        std::vector<double> vData{vOn, vOn, vDead(neg1), vDead(neg1), -Vpri, -Vpri, vDead(neg2), vDead(neg2)};
+        std::vector<double> vTime{0.0, tOn, tOn, tOn + td, tOn + td, period - td, period - td, tIdle};
+        if (idle) {
+            vData.insert(vData.end(), {0.0, 0.0});
+            vTime.insert(vTime.end(), {tIdle, period});
+        }
+        MAS::Waveform voltageWaveform;
+        voltageWaveform.set_data(vData);
+        voltageWaveform.set_time(vTime);
+        voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
+        operatingPoint.get_mutable_excitations_per_winding().push_back(
+            WP::complete_excitation(currentWaveform, voltageWaveform, fs, "Primary"));
+    }
+    for (size_t k = 0; k < turnsRatios.size(); ++k) {
+        const double n = turnsRatios[k];
+        const double vOn = (Vin - Vpri) / n, vOff = -(Vpri / n - diodeVoltageDrop);
+        const auto vDead = [&](bool neg) { return neg ? (Vin + vf - Vpri) / n : -((Vpri + vf) / n - diodeVoltageDrop); };
+        std::vector<double> t{0.0, tcStart, tcStart, tcEnd}, i{0.0, 0.0, -secS[k], -secE[k]};
+        if (tcEnd < period) {
+            t.insert(t.end(), {tcEnd, period});
+            i.insert(i.end(), {0.0, 0.0});
+        }
+        MAS::Waveform currentWaveform;
+        currentWaveform.set_data(i);
+        currentWaveform.set_time(t);
+        currentWaveform.set_ancillary_label(Lbl::CUSTOM);
+        std::vector<double> vData{vOn, vOn, vDead(neg1), vDead(neg1), vOff, vOff, vDead(neg2), vDead(neg2)};
+        std::vector<double> vTime{0.0, tOn, tOn, tOn + td, tOn + td, period - td, period - td, tIdle};
+        if (idle) {
+            vData.insert(vData.end(), {0.0, 0.0});
+            vTime.insert(vTime.end(), {tIdle, period});
+        }
+        MAS::Waveform voltageWaveform;
+        voltageWaveform.set_data(vData);
+        voltageWaveform.set_time(vTime);
+        voltageWaveform.set_ancillary_label(Lbl::CUSTOM);
+        operatingPoint.get_mutable_excitations_per_winding().push_back(
+            WP::complete_excitation(currentWaveform, voltageWaveform, fs, "Secondary " + std::to_string(k)));
+    }
+    return with_model_duty(std::move(operatingPoint), D);
+}
+}  // namespace
+
 // Ported from MKF converter_models/IsolatedBuck.cpp:41 (fly-buck; D = Vpri/Vin·η, calculate_duty_cycle:10).
 // Multi-secondary form (ABT #86): every isolated secondary is coupled into the primary/magnetizing winding.
 MAS::OperatingPoint analytical_isolated_buck(double inputVoltage, double primaryOutputVoltage,
@@ -1534,7 +1791,8 @@ MAS::OperatingPoint analytical_isolated_buck(double inputVoltage, double primary
                                              const std::vector<double>& secondaryOutputCurrents,
                                              const std::vector<double>& turnsRatios,
                                              double switchingFrequency, double inductance,
-                                             double diodeVoltageDrop, double efficiency) {
+                                             double diodeVoltageDrop, double efficiency, double deadTime,
+                                             std::optional<double> bodyDiodeVoltageDrop) {
     using Lbl = MAS::WaveformLabel;
     const size_t nSec = secondaryOutputCurrents.size();
     if (nSec == 0)
@@ -1546,11 +1804,22 @@ MAS::OperatingPoint analytical_isolated_buck(double inputVoltage, double primary
     double dutyCycle = isolated_buck_duty_cycle(inputVoltage, primaryOutputVoltage, efficiency);
     if (dutyCycle >= 1) throw std::invalid_argument("analytical_isolated_buck: duty cycle must be smaller than 1");
     const double period = 1.0 / switchingFrequency;
-    double tOn = dutyCycle * period;
 
     // Σ Iout_sec_k / N_k reflected into the primary (average).
     double totalReflectedSecondaryCurrent = 0.0;
     for (size_t k = 0; k < nSec; ++k) totalReflectedSecondaryCurrent += secondaryOutputCurrents[k] / turnsRatios[k];
+    if (!(deadTime >= 0.0))
+        throw std::invalid_argument("analytical_isolated_buck: the dead time must be >= 0 s");
+    if (deadTime > 0.0) {
+        if (!bodyDiodeVoltageDrop)
+            throw std::invalid_argument("analytical_isolated_buck: a dead time needs the body-diode voltage drop the "
+                                        "primary current freewheels through");
+        return analytical_isolated_buck_with_dead_times(inputVoltage, primaryOutputVoltage, primaryOutputCurrent,
+                                                        secondaryOutputCurrents, turnsRatios, period, inductance,
+                                                        diodeVoltageDrop, dutyCycle, totalReflectedSecondaryCurrent,
+                                                        deadTime, *bodyDiodeVoltageDrop);
+    }
+    double tOn = dutyCycle * period;
     double magnetizingCurrentRipple = (inputVoltage - primaryOutputVoltage) * tOn / inductance;
     double magnetizingCurrentAverage = primaryOutputCurrent + totalReflectedSecondaryCurrent;
     double magnetizingCurrentMax = magnetizingCurrentAverage + magnetizingCurrentRipple / 2;
@@ -1617,12 +1886,13 @@ MAS::OperatingPoint analytical_isolated_buck(double inputVoltage, double primary
                                              double primaryOutputCurrent, double secondaryOutputVoltage,
                                              double secondaryOutputCurrent, double switchingFrequency,
                                              double inductance, double turnsRatio,
-                                             double diodeVoltageDrop, double efficiency) {
+                                             double diodeVoltageDrop, double efficiency, double deadTime,
+                                             std::optional<double> bodyDiodeVoltageDrop) {
     return analytical_isolated_buck(inputVoltage, primaryOutputVoltage, primaryOutputCurrent,
                                     std::vector<double>{secondaryOutputVoltage},
                                     std::vector<double>{secondaryOutputCurrent},
                                     std::vector<double>{turnsRatio}, switchingFrequency, inductance,
-                                    diodeVoltageDrop, efficiency);
+                                    diodeVoltageDrop, efficiency, deadTime, bodyDiodeVoltageDrop);
 }
 
 // Ported from MKF converter_models/IsolatedBuckBoost.cpp:47 (fly-buck-boost; D = Vpri/(Vin+Vpri)·η, calculate_duty_cycle:16).

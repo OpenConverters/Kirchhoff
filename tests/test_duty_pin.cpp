@@ -17,6 +17,8 @@
 #include <vector>
 #include "KirchhoffApi.hpp"
 #include "Psfb.hpp"
+#include "IsolatedBuck.hpp"
+#include "ConverterAnalytical.hpp"
 #include "Pshb.hpp"
 
 using json = nlohmann::json;
@@ -277,6 +279,199 @@ TEST_CASE("Isolated buck duty pins that cannot be honoured are refused", "[duty-
                ContainsSubstring("Duty Cycle"));
 }
 
+// ── Isolated buck dead time (Alf 2026-11-01: "Kirchhoff takes the dead time", "Use the spec's diode drop") ──────
+// config.forcedDeadTime sets the QS1/QS2 dead time on both edges, in the deck and in the model. During a dead time
+// the primary current freewheels through a body diode at the spec's config.diodeVoltageDrop: with the magnetizing
+// current positive the primary sees -(Vpri + Vf) instead of -Vpri, with it negative the high-side diode conducts and
+// the on-time effectively starts td early. The duty moves with those volt-seconds, so the deck still delivers the rail.
+namespace {
+// 36-72 V (48 V operating point) -> 12 V / 24 W primary rail + 12 V / 12 W isolated rail, 200 kHz, no stated
+// efficiency (the model and the deck then share one duty law).
+json isolated_buck_dead_time_spec(const json& config) {
+    json s = spec(36.0, 48.0, 72.0, 48.0, {{12.0, 24.0}, {12.0, 12.0}}, 200e3, json::object(), config);
+    s["designRequirements"].erase("efficiency");
+    return s;
+}
+// Time-weighted mean of a sampled waveform {data, time}.
+double waveform_mean(const json& waveform) {
+    const auto& v = waveform.at("data");
+    const auto& t = waveform.at("time");
+    REQUIRE(v.size() == t.size());
+    REQUIRE(v.size() >= 2);
+    double area = 0.0;
+    for (size_t k = 1; k < v.size(); ++k)
+        area += 0.5 * (v[k].get<double>() + v[k - 1].get<double>()) * (t[k].get<double>() - t[k - 1].get<double>());
+    return area / (t.back().get<double>() - t.front().get<double>());
+}
+double waveform_rms(const json& waveform) {
+    const auto& v = waveform.at("data");
+    const auto& t = waveform.at("time");
+    double area = 0.0;
+    for (size_t k = 1; k < v.size(); ++k) {
+        const double a = v[k - 1].get<double>(), b = v[k].get<double>();
+        area += (a * a + a * b + b * b) / 3.0 * (t[k].get<double>() - t[k - 1].get<double>());
+    }
+    return std::sqrt(area / (t.back().get<double>() - t.front().get<double>()));
+}
+// The value of a sampled waveform at time t (the segment to the right of a jump at t; t == the last sample time is
+// that sample).
+double waveform_at(const MAS::Waveform& w, double t) {
+    const auto& v = w.get_data();
+    const std::vector<double> tt = w.get_time().value();   // get_time() returns a copy: no reference into it
+    for (size_t k = 0; k + 1 < tt.size(); ++k)
+        if (t >= tt[k] && t < tt[k + 1] && tt[k + 1] > tt[k])
+            return v[k] + (v[k + 1] - v[k]) * (t - tt[k]) / (tt[k + 1] - tt[k]);
+    if (!tt.empty() && t == tt.back()) return v.back();
+    FAIL("t = " << t << " is outside the waveform");
+    return 0.0;
+}
+}  // namespace
+
+TEST_CASE("Isolated buck with a dead time: the deck and the model agree, and the deck delivers the rail",
+          "[duty-pin][isolated-buck][dead-time][ngspice]") {
+    // 250 ns at 200 kHz: 5 % of the period on each edge. The deck's body diodes are DIDEAL (0.83 V at 1 A), so the
+    // spec's drop is 0.8 V. Two magnetizing-current regimes: the default 40 % ripple keeps it positive at both dead
+    // times; a ripple ratio of 3 takes it negative before the on-time (the high-side diode conducts there).
+    for (const double ripple : {0.4, 3.0}) {
+        CAPTURE(ripple);
+        const json s = isolated_buck_dead_time_spec(
+            json{{"forcedDeadTime", 250e-9}, {"diodeVoltageDrop", 0.8}, {"inductorRippleRatio", ripple}});
+        const json an = process("isolated_buck", s);
+        CHECK_THAT(stimulus_duty(an, "QS2"), WithinAbs(1.0 - stimulus_duty(an, "QS1") - 0.1, 1e-12));
+        const double D = stimulus_duty(an, "QS1");
+        // The deck is driven at the duty the model runs. At 40 % ripple both dead times freewheel low:
+        // 0.25 + 2·0.05·0.8/48. At 300 % the one before the on-time freewheels high for x and idles for td - x (the
+        // current reaches zero inside it): 0.25 + (0.8·td - (48 + 0.8)·x - 12·(td - x))·fs/48, x from the model.
+        CHECK_THAT(analytical_primary_duty(an), WithinAbs(D, 1e-12));
+        const Kirchhoff::IsolatedBuckDesign design = Kirchhoff::design_isolated_buck(s);
+        const Kirchhoff::analytical::IsolatedBuckDeadTimes regime = Kirchhoff::analytical::isolated_buck_dead_times(
+            0.25, 48.0, 12.0, 2.0 + 1.0, 200e3, design.magnetizingInductance, 250e-9, 0.8);
+        CHECK(regime.negative[1] == (ripple > 1.0));
+        CHECK((regime.conduction[1] < 250e-9) == (ripple > 1.0));
+        const double x = regime.conduction[1];
+        CHECK_THAT(D, WithinAbs(ripple < 1.0 ? 0.25 + 2.0 * 0.05 * 0.8 / 48.0
+                                             : 0.25 + (0.8 * 250e-9 - 48.8 * x - 12.0 * (250e-9 - x)) * 200e3 / 48.0,
+                                1e-12));
+
+        const std::string raw = Kirchhoff::api::process_converter("isolated_buck", s.dump(), "ngspice");
+        INFO(raw.substr(0, 400));
+        REQUIRE(raw.rfind("Exception:", 0) != 0);
+        const json sim = json::parse(raw);
+        const auto& simPri = sim.at("operatingPoint").at("excitationsPerWinding").at(0);
+        const auto& anPri = sim.at("analyticalWaveforms").at("T1").at("excitationsPerWinding").at(0);
+        // The deck delivers the 12 V rail into its 6 ohm load: the primary winding carries the rail current 2 A on
+        // average (its capacitor none).
+        const double iSim = waveform_mean(simPri.at("current").at("waveform"));
+        INFO("deck primary mean " << iSim << " A, rms " << waveform_rms(simPri.at("current").at("waveform"))
+             << " A; model rms " << waveform_rms(anPri.at("current").at("waveform")) << " A");
+        CHECK_THAT(iSim * 6.0, WithinRel(12.0, 0.02));
+        // Alf 2026-11-01, "Drop that check, ticket the model": the primary-current rms is not compared at ripple 3.
+        // Deck 2.786 A against model 3.213 A (-13.3 %), and the base model without a dead time is already -9.7 % on
+        // the primary and +32 % on the secondary there: with the magnetizing current negative the deck's secondary
+        // spikes to -6.7 A and decays, while the model ramps up from Iout. A model gap, not a dead-time one.
+        if (ripple < 1.0)
+            CHECK_THAT(waveform_rms(simPri.at("current").at("waveform")),
+                       WithinRel(waveform_rms(anPri.at("current").at("waveform")), 0.05));
+        CHECK_THAT(waveform_rms(simPri.at("voltage").at("waveform")),
+                   WithinRel(waveform_rms(anPri.at("voltage").at("waveform")), 0.05));
+    }
+}
+
+TEST_CASE("Isolated buck model with a dead time against none: the freewheel voltage and the duty move as they should",
+          "[isolated-buck][dead-time]") {
+    namespace AN = Kirchhoff::analytical;
+    const double Vin = 48.0, Vpri = 12.0, Ipri = 2.0, Vsec = 12.0, Isec = 1.0, fs = 200e3, n = 1.0, Vf = 0.8;
+    const double T = 1.0 / fs, td = 250e-9;
+    // Lm for a 40 % ripple (positive magnetizing current throughout) and for a 300 % one (negative at the end of
+    // the low-side interval).
+    for (const double L : {(Vin - Vpri) * 0.25 * T / (0.4 * 3.0), (Vin - Vpri) * 0.25 * T / (3.0 * 3.0)}) {
+        CAPTURE(L);
+        const MAS::OperatingPoint none = AN::analytical_isolated_buck(Vin, Vpri, Ipri, Vsec, Isec, fs, L, n, Vf, 1.0);
+        const MAS::OperatingPoint dead = AN::analytical_isolated_buck(Vin, Vpri, Ipri, Vsec, Isec, fs, L, n, Vf, 1.0,
+                                                                      td, Vf);
+        const double D0 = AN::model_duty_of(none)->dutyCycle, D = AN::model_duty_of(dead)->dutyCycle;
+        CHECK_THAT(D0, WithinAbs(0.25, 1e-12));
+        // By value: get_current() / get_voltage() return copies, so a reference into them dangles.
+        const MAS::Waveform im = dead.get_excitations_per_winding().at(0).get_current()->get_waveform().value();
+        const MAS::Waveform v = dead.get_excitations_per_winding().at(0).get_voltage()->get_waveform().value();
+        const MAS::Waveform is = dead.get_excitations_per_winding().at(1).get_current()->get_waveform().value();
+        const std::vector<double> vt = v.get_time().value();
+        const double tOn = D * T, tLast = vt.back();
+        // The regime the model solved: which body diode each dead time freewheels through, and for how long.
+        const AN::IsolatedBuckDeadTimes regime = AN::isolated_buck_dead_times(D0, Vin, Vpri, Ipri + Isec / n, fs, L, td, Vf);
+        CHECK_THAT(D, WithinAbs(D0 + regime.dutyShift, 1e-15));
+        const bool negativeBeforeOn = regime.negative[1];
+        CHECK(negativeBeforeOn == (L < 1e-5));
+        CHECK_FALSE(regime.negative[0]);
+        CHECK(regime.conduction[0] == td);
+        // After the on-time the magnetizing current is at its peak, positive: the low-side diode clamps the switch
+        // node at -Vf, so the primary sees -(Vpri + Vf), where it saw -Vpri with no dead time.
+        CHECK_THAT(waveform_at(v, tOn + 0.5 * td), WithinAbs(-(Vpri + Vf), 1e-12));
+        CHECK_THAT(waveform_at(v, 0.5 * (tOn + td + T - td)), WithinAbs(-Vpri, 1e-12));
+        // The primary winding carries the primary rail's current on average and the secondary the isolated rail's
+        // (source convention: -Isec), whatever the dead times do. The samples are 128 per period, so the mean of a
+        // waveform with jumps is good to its jumps times half a sample.
+        const auto mean_and_bound = [&](const MAS::Waveform& w) {
+            const auto& d = w.get_data();
+            const double dt = T / d.size();
+            double area = 0.0, bound = 0.0;
+            for (size_t k = 0; k < d.size(); ++k) {
+                const double a = d[k], b = d[(k + 1) % d.size()];
+                area += 0.5 * (a + b) * dt;
+                bound += 0.5 * std::abs(b - a) * dt;
+            }
+            return std::make_pair(area / T, bound / T);
+        };
+        const auto [iPriMean, iPriBound] = mean_and_bound(im);
+        const auto [iSecMean, iSecBound] = mean_and_bound(is);
+        const auto [vMean, vBound] = mean_and_bound(v);
+        CHECK_THAT(iPriMean, WithinAbs(Ipri, iPriBound));
+        CHECK_THAT(iSecMean, WithinAbs(-Isec, iSecBound));
+        // Volt-second balance on the primary over the period (efficiency 1).
+        CHECK_THAT(vMean, WithinAbs(0.0, vBound));
+        if (!negativeBeforeOn) {
+            CHECK(regime.conduction[1] == td);
+            CHECK_THAT(waveform_at(v, T - 0.5 * td), WithinAbs(-(Vpri + Vf), 1e-12));
+            CHECK_THAT(D - D0, WithinAbs(2.0 * td * fs * Vf / Vin, 1e-12));
+        } else {
+            // Negative before the on-time: the high-side diode conducts and the primary sees the on-time voltage
+            // Vin + Vf - Vpri. In this design the current reaches zero inside that dead time, after x = conduction[1]:
+            // both diodes then block and the winding idles at zero voltage and current until QS1 turns on. The duty
+            // moves by the volt-seconds of the two dead times: +Vf·td after the on-time, -(Vin + Vf)·x for the
+            // freewheel and -Vpri·(td - x) for the idle (a full freewheel, x = td, would move it by -td·fs).
+            const double x = regime.conduction[1];
+            CHECK(x > 0.0);
+            CHECK(x < td);
+            CHECK_THAT(D - D0, WithinAbs((Vf * td - (Vin + Vf) * x - Vpri * (td - x)) * fs / Vin, 1e-12));
+            CHECK_THAT(waveform_at(v, T - td + 0.5 * x), WithinAbs(Vin + Vf - Vpri, 1e-12));
+            REQUIRE(tLast > T - td + x);   // the last sample falls in the idle
+            CHECK_THAT(waveform_at(v, tLast), WithinAbs(0.0, 1e-12));
+            CHECK_THAT(waveform_at(im, tLast), WithinAbs(0.0, 1e-12));
+            CHECK_THAT(waveform_at(is, tLast), WithinAbs(0.0, 1e-12));
+            CHECK(waveform_at(im, T - td + 0.5 * x) < 0.0);
+        }
+    }
+}
+
+TEST_CASE("Isolated buck dead time: refused without the spec's diode drop, or with a dead-time fraction beside it",
+          "[duty-pin][isolated-buck][dead-time][errors]") {
+    CHECK_THAT(refusal("isolated_buck", isolated_buck_dead_time_spec(json{{"forcedDeadTime", 250e-9}})),
+               ContainsSubstring("Diode Voltage Drop"));
+    CHECK_THAT(refusal("isolated_buck", isolated_buck_dead_time_spec(
+                                            json{{"forcedDeadTime", 250e-9}, {"diodeVoltageDrop", 0.8},
+                                                 {"deadTimeFraction", 0.01}})),
+               ContainsSubstring("both a dead time and a dead-time fraction"));
+    // 2.6 us at 200 kHz is 52 % of the period on the two edges: no low-side time is left.
+    CHECK_THAT(refusal("isolated_buck", isolated_buck_dead_time_spec(
+                                            json{{"forcedDeadTime", 2.6e-6}, {"diodeVoltageDrop", 0.8}})),
+               ContainsSubstring("Lower the Dead Time"));
+    // The isolated buck-boost keeps refusing it: one switch and a diode.
+    const json ibb = spec(36.0, 48.0, 72.0, 48.0, {{12.0, 20.0}, {12.0, 10.0}}, 100e3, json::object(),
+                          json{{"forcedDeadTime", 100e-9}});
+    CHECK_THAT(refusal("isolated_buck_boost", ibb),
+               ContainsSubstring("the isolated buck-boost has no complementary switch, so a dead time does not apply"));
+}
+
 TEST_CASE("Push-pull reports the per-switch duty, which falls as the input voltage rises", "[duty-pin][push-pull]") {
     // Help mode (no pin). diagnostics.dutyCycle once measured the dot-reference primary half's current, about
     // 1 − D: 0.709 / 0.811 / 0.858 at 36 / 54 / 72 V. The model's duty is per switch: t1/T = N(Vo+Vd)/(2·Vin) < 0.5.
@@ -505,3 +700,4 @@ TEST_CASE("A current-doubler PSFB reports the effective duty its inline excitati
     CHECK(analytical_primary_duty(r) == d.effectiveDuty);
     CHECK(analytical_primary_duty(r) < d.phaseDeg / 180.0);
 }
+

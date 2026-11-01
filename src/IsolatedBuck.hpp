@@ -15,6 +15,8 @@
 // primary) + a flyback secondary rectifier, and the complementary synchronous low-side switch.
 
 #include <nlohmann/json.hpp>
+#include <optional>
+#include <vector>
 #include "Fidelity.hpp"
 
 namespace Kirchhoff {
@@ -48,6 +50,12 @@ struct IsolatedBuckDesign {
     // the worst-corner ratings still use the requested ones).
     bool dutyPinned = false;
     std::vector<double> requestedVoltages, requestedPowers;
+    // The dead time of the QS1/QS2 pair as a fraction of the period, one on each edge. config.forcedDeadTime (s,
+    // "I know the design I want") sets it as forcedDeadTime·fs, and the model then runs with it too (forcedDeadTime
+    // below; its body diodes at the spec's config.diodeVoltageDrop). Without it the deck keeps 0.02 (200 ns at
+    // 100 kHz) and the model runs without dead times.
+    double deadFraction = 0.02;
+    std::optional<double> forcedDeadTime;
 };
 
 /**

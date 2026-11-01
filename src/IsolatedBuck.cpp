@@ -111,6 +111,36 @@ IsolatedBuckDesign design_isolated_buck(const json& tasInputs) {
     d.outputCapacitance  = 100e-6;    // Cpri (matches MKF)
     d.secondaryCapacitance = d.secondaries[0].capacitance;  // Cout_sec (== secondaries[0])
 
+    // "I know the design I want": config.forcedDeadTime (s) sets the QS1/QS2 dead time (both edges). The deck runs
+    // it and so does the model, whose body diodes freewheel at the spec's diode voltage drop: a dead time without
+    // one is refused rather than modelled with a drop nobody stated. The duty moves with the dead times' volt-seconds
+    // (analytical::isolated_buck_dead_times), so the deck is driven at the duty the model runs.
+    if (const auto deadTime = cfg::forced_dead_time(d.config)) {
+        if (d.config.contains("deadTimeFraction"))
+            throw std::invalid_argument("Dead Time: the design states both a dead time and a dead-time fraction; "
+                                        "give only one.");
+        if (*deadTime > 0.0) {
+            if (!req::fixed_diode_drop(d.config))
+                throw std::invalid_argument("Dead Time: the isolated buck models its two body diodes during the dead "
+                                            "time with the diode voltage drop of the design, and none is given "
+                                            "(config.diodeVoltageDrop). Enter the Diode Voltage Drop.");
+            d.forcedDeadTime = *deadTime;
+            d.deadFraction = *deadTime * Fs;
+        } else {
+            d.deadFraction = 0.0;
+        }
+    }
+    auto magnetizingCurrentAverage = [&](double vPri, double pPri) {
+        double im = pPri / vPri;
+        for (const auto& leg : d.secondaries) im += (leg.power / leg.voltage) / leg.turnsRatio;
+        return im;
+    };
+    if (d.forcedDeadTime)
+        d.dutyCycle += analytical::isolated_buck_dead_times(
+                           d.dutyCycle, Vin, Vpri, magnetizingCurrentAverage(Vpri, d.primaryPower), Fs,
+                           d.magnetizingInductance, *d.forcedDeadTime, *req::fixed_diode_drop(d.config))
+                           .dutyShift;
+
     // "I know the design I want" (ABT #2134): config.forcedDutyCycle drives QS1 at exactly that duty, and the
     // rails it delivers into the requested loads (held) become the result. The primary rail follows the solver's
     // own duty law D = Vpri/Vin·η (isolated_buck_duty_cycle), i.e. Vpri = D·Vin/η; each isolated rail clamps to
@@ -132,20 +162,44 @@ IsolatedBuckDesign design_isolated_buck(const json& tasInputs) {
             d.requestedVoltages.push_back(leg.voltage);
             d.requestedPowers.push_back(leg.power);
         }
-        const double vPri = Dp * Vin / eta;
         const double vdRect = req::analytical_rectifier_drop(d.config);
-        d.primaryVoltage = vPri;
-        d.primaryPower = vPri * vPri / d.loadResistance;
-        for (size_t k = 0; k < d.secondaries.size(); ++k) {
-            auto& leg = d.secondaries[k];
-            const double vSec = vPri / leg.turnsRatio - vdRect;
-            if (!(vSec > 0.0))
-                throw std::invalid_argument("Isolated buck: at a Duty Cycle of " + duty_pin::num(Dp) +
-                                            " isolated output " + std::to_string(k + 1) + " (turns ratio " +
-                                            duty_pin::num(leg.turnsRatio) + ") gets no voltage above its "
-                                            "rectifier drop. Raise the Duty Cycle.");
-            leg.voltage = vSec;
-            leg.power = vSec * vSec / leg.loadResistance;
+        // The rails at the primary voltage vPri, the loads held.
+        auto deliver = [&](double vPri) {
+            d.primaryVoltage = vPri;
+            d.primaryPower = vPri * vPri / d.loadResistance;
+            for (size_t k = 0; k < d.secondaries.size(); ++k) {
+                auto& leg = d.secondaries[k];
+                const double vSec = vPri / leg.turnsRatio - vdRect;
+                if (!(vSec > 0.0))
+                    throw std::invalid_argument("Isolated buck: at a Duty Cycle of " + duty_pin::num(Dp) +
+                                                " isolated output " + std::to_string(k + 1) + " (turns ratio " +
+                                                duty_pin::num(leg.turnsRatio) + ") gets no voltage above its "
+                                                "rectifier drop. Raise the Duty Cycle.");
+                leg.voltage = vSec;
+                leg.power = vSec * vSec / leg.loadResistance;
+            }
+        };
+        deliver(Dp * Vin / eta);
+        if (d.forcedDeadTime) {
+            // With dead times the model's duty is Vpri·η/Vin + dutyShift(Vpri): the primary rail the pinned duty
+            // delivers is its fixed point (the shift depends on the rail through the currents it sets).
+            bool converged = false;
+            for (int it = 0; it < 50 && !converged; ++it) {
+                const double shift = analytical::isolated_buck_dead_times(
+                    d.primaryVoltage * eta / Vin, Vin, d.primaryVoltage,
+                    magnetizingCurrentAverage(d.primaryVoltage, d.primaryPower), Fs, d.magnetizingInductance,
+                    *d.forcedDeadTime, *req::fixed_diode_drop(d.config)).dutyShift;
+                const double vPri = (Dp - shift) * Vin / eta;
+                if (!(vPri > 0.0))
+                    throw std::invalid_argument("Isolated buck: a Duty Cycle of " + duty_pin::num(Dp) + " is spent "
+                                                "on the dead times; no primary rail is left. Raise the Duty Cycle "
+                                                "or lower the Dead Time.");
+                converged = std::abs(vPri - d.primaryVoltage) <= 1e-12 * vPri;
+                deliver(vPri);
+            }
+            if (!converged)
+                throw std::runtime_error("Isolated buck: the primary rail at a Duty Cycle of " + duty_pin::num(Dp) +
+                                         " with the dead time did not settle");
         }
         d.secondaryVoltage = d.secondaries.at(0).voltage;
         d.secondaryPower = d.secondaries.at(0).power;
@@ -205,9 +259,11 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
             }
         }
         const MAS::OperatingPoint aopWorst = AN::analytical_isolated_buck(d.inputVoltageMin, worstVpri,
-                                                worstIpri, worstSecV, worstSecI, secN, fsw, Lm, req::analytical_rectifier_drop(d.config), d.efficiency);
+                                                worstIpri, worstSecV, worstSecI, secN, fsw, Lm, req::analytical_rectifier_drop(d.config), d.efficiency,
+                                                d.forcedDeadTime.value_or(0.0), req::fixed_diode_drop(d.config));
         const MAS::OperatingPoint aopNom   = AN::analytical_isolated_buck(d.inputVoltage,    d.primaryVoltage,
-                                                IpriLoad, secV, secI, secN, fsw, Lm, req::analytical_rectifier_drop(d.config), d.efficiency);
+                                                IpriLoad, secV, secI, secN, fsw, Lm, req::analytical_rectifier_drop(d.config), d.efficiency,
+                                                d.forcedDeadTime.value_or(0.0), req::fixed_diode_drop(d.config));
         auto rating = [&](size_t winding, const char* what) {
             const double worst = AN::winding_current(aopWorst, winding, what);
             return d.dutyPinned ? std::max(worst, AN::winding_current(aopNom, winding, what)) : worst;
@@ -325,7 +381,7 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
 
         json an; an["type"] = "transient"; an["stopTime"] = cfg::tran_stop_time(d.config, 0.004); an["maximumTimeStep"] = cfg::tran_max_timestep(d.config, 5e-8);
         tas["simulation"]["analyses"] = json::array({an});
-        constexpr double deadFrac = 0.02;
+        const double deadFrac = d.deadFraction;   // config.forcedDeadTime·fs, else 0.02
         auto stim = [&](const char* sw, double duty, double phaseDeg) {
             json st; st["stage"] = "flybuckCell"; st["component"] = sw; st["signal"] = "gate";
             st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;
@@ -364,9 +420,11 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
     const double worstVsec = d.dutyPinned ? d.requestedVoltages.at(1) : d.secondaryVoltage;
     const double worstIsec = d.dutyPinned ? d.requestedPowers.at(1) / d.requestedVoltages.at(1) : IsecLoad;
     const MAS::OperatingPoint aopWorst = AN::analytical_isolated_buck(d.inputVoltageMin, worstVpri,
-                                            worstIpri, worstVsec, worstIsec, fsw, Lm, N, req::analytical_rectifier_drop(d.config), d.efficiency);
+                                            worstIpri, worstVsec, worstIsec, fsw, Lm, N, req::analytical_rectifier_drop(d.config), d.efficiency,
+                                            d.forcedDeadTime.value_or(0.0), req::fixed_diode_drop(d.config));
     const MAS::OperatingPoint aopNom   = AN::analytical_isolated_buck(d.inputVoltage,    d.primaryVoltage,
-                                            IpriLoad, d.secondaryVoltage, IsecLoad, fsw, Lm, N, req::analytical_rectifier_drop(d.config), d.efficiency);
+                                            IpriLoad, d.secondaryVoltage, IsecLoad, fsw, Lm, N, req::analytical_rectifier_drop(d.config), d.efficiency,
+                                            d.forcedDeadTime.value_or(0.0), req::fixed_diode_drop(d.config));
     auto rating = [&](size_t winding, const char* what) {
         const double worst = AN::winding_current(aopWorst, winding, what);
         return d.dutyPinned ? std::max(worst, AN::winding_current(aopNom, winding, what)) : worst;
@@ -470,7 +528,7 @@ json build_isolated_buck_tas(const IsolatedBuckDesign& d) {
     // QS1 buck switch at duty D (phase 0) — D alone sets V_pri = D·Vin, so it keeps the full duty. QS2
     // synchronous rectifier conducts the rest of the period MINUS a small dead time on each edge
     // (deadFrac), so QS1/QS2 never overlap. The two dead-time gaps are bridged by the body diodes.
-    constexpr double deadFrac = 0.02;   // 200 ns at 100 kHz, like the other bridge ports
+    const double deadFrac = d.deadFraction;   // config.forcedDeadTime·fs, else 0.02 (200 ns at 100 kHz)
     auto stim = [&](const char* sw, double duty, double phaseDeg) {
         json st; st["stage"] = "flybuckCell"; st["component"] = sw; st["signal"] = "gate";
         st["waveform"]["type"] = "pwm"; st["waveform"]["frequency"] = d.switchingFrequency;

@@ -183,8 +183,8 @@ void validate_requirements(const json& spec) {
 
 // "I know the design I want" switch-timing pins (ABT #2134): config.forcedDutyCycle is honoured by the PWM
 // converters whose design drives one main duty (DutyPin.hpp), config.forcedDeadTime only by the active-clamp
-// forward (the one design with a dead time between complementary switches). Any other topology REFUSES them
-// rather than silently designing at a duty the caller did not ask for.
+// forward and the isolated buck (the designs with a dead time between complementary switches). Any other
+// topology REFUSES them rather than silently designing at a duty the caller did not ask for.
 void validate_switch_timing_pins(const std::string& topology, const json& spec) {
     const json config = Kirchhoff::cfg::object_of(spec);
     static const char* const kDutyPinnable[] = {"flyback", "forward", "two_switch_forward", "acf", "push_pull",
@@ -196,9 +196,14 @@ void validate_switch_timing_pins(const std::string& topology, const json& spec) 
                                     "(it is available for the flyback, forward, two-switch forward, active clamp "
                                     "forward, push-pull, isolated buck-boost and isolated buck). Leave the Duty "
                                     "Cycle empty.");
-    if (config.contains("forcedDeadTime") && topology != "acf")
+    if (config.contains("forcedDeadTime") && topology != "acf" && topology != "isolated_buck") {
+        if (topology == "isolated_buck_boost")
+            throw std::invalid_argument("Dead Time: the isolated buck-boost has no complementary switch, so a dead "
+                                        "time does not apply. Leave the Dead Time empty.");
         throw std::invalid_argument("Dead Time: the " + topology + " design has no dead time to set (only the "
-                                    "active clamp forward takes one). Leave the Dead Time empty.");
+                                    "active clamp forward and the isolated buck take one). Leave the Dead Time "
+                                    "empty.");
+    }
 }
 
 // The rails a duty-pinned design delivers, {|V|, P} per requested output in order. Read from the design itself
