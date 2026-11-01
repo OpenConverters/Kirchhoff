@@ -4302,8 +4302,15 @@ MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
                                    PfcConductionMode mode,
                                    double efficiency,
                                    double diodeVoltageDrop,
-                                   bool bipolar) {
+                                   bool bipolar,
+                                   PfcPowerStage stage) {
     using Lbl = MAS::WaveformLabel;
+    const bool buckBoost = (stage == PfcPowerStage::BUCK_BOOST);
+    if (buckBoost && bipolar)
+        throw std::invalid_argument("analytical_pfc: the buck-boost (SEPIC/Cuk) power stage is unipolar (bridged)");
+    if (buckBoost && mode != PfcConductionMode::CONTINUOUS)
+        throw std::invalid_argument("analytical_pfc: the buck-boost (SEPIC/Cuk) power stage is modelled in "
+                                    "continuous conduction only");
 
     // Guards — mirror MKF's own (PowerFactorCorrection::run_checks :175-216,
     // calculate_inductance_ccm :263); no fabricated defaults.
@@ -4321,9 +4328,10 @@ MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
         throw std::invalid_argument("analytical_pfc: boostInductance must be > 0");
     if (efficiency <= 0 || efficiency > 1.0)   // MKF run_checks :207
         throw std::invalid_argument("analytical_pfc: efficiency must be in (0, 1]");
-    // Boost can only step UP: Vout must exceed the peak line voltage (MKF run_checks :194-204).
+    // Boost can only step UP: Vout must exceed the peak line voltage (MKF run_checks :194-204). A buck-boost
+    // stage may sit either side of it.
     const double vinPeakForCheck = inputVoltageRms * std::sqrt(2.0);
-    if (outputVoltage + diodeVoltageDrop <= vinPeakForCheck)
+    if (!buckBoost && outputVoltage + diodeVoltageDrop <= vinPeakForCheck)
         throw std::invalid_argument(
             "analytical_pfc: outputVoltage must exceed peak input voltage sqrt(2)*inputVoltageRms "
             "(a boost PFC can only step up)");
@@ -4366,13 +4374,17 @@ MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
     // ON: L sees +Vin (MKF :570-572). OFF: L discharges into the bus through the diode, Vin − (Vout+Vd);
     // for totem-pole the bus AND the diode drop take the half-cycle's polarity (MKF :579-585 signed only
     // Vout, leaving the drop unsigned, which unbalances the negative half-cycle by 2·Vd·(1−D)).
+    // Buck-boost (SEPIC/Ćuk L1): the energy-transfer capacitor holds |Vin|, so OFF is −(Vout+Vd) at any |Vin|.
     auto offLevel = [&](double vinInst) {
+        if (buckBoost) return -vOutPlusDrop;
         return vinInst - (bipolar ? std::copysign(vOutPlusDrop, vinInst) : vOutPlusDrop);
     };
+    // The magnitude of the OFF level of a unipolar cycle at line voltage |Vin|.
+    auto offMagnitude = [&](double vinAbsInst) { return buckBoost ? vOutPlusDrop : vOutPlusDrop - vinAbsInst; };
     // A cycle that starts from zero current: ON for tOn, then the diode conducts until the current is back at
     // zero (tOn·|Vin|/(Vout+Vd−|Vin|)), within a cycle of period Tc (the rest idles at zero current).
     auto fromZeroCycle = [&](double vinInst, double vinAbsInst, double tOn, double Tc, std::optional<double> period) {
-        const double tOff = tOn * vinAbsInst / (vOutPlusDrop - vinAbsInst);
+        const double tOff = tOn * vinAbsInst / offMagnitude(vinAbsInst);
         return SwitchingCycleLevels{vinInst, offLevel(vinInst), tOn / Tc, tOff / Tc, true, period, std::nullopt};
     };
 
@@ -4395,8 +4407,9 @@ MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
             double vinInst = 0.0, vinAbsInst = 0.0;
             lineVoltageAt(tc, vinInst, vinAbsInst);
             // Boost duty D = 1 − |Vin|/(Vout+Vd)  (MKF :543-547). It lies in (0, 1] without clipping: the
-            // step-up guard above makes Vout+Vd exceed every |Vin|.
-            const double D = 1.0 - vinAbsInst / vOutPlusDrop;
+            // step-up guard above makes Vout+Vd exceed every |Vin|. Buck-boost: D = (Vout+Vd)/(Vout+Vd+|Vin|).
+            // Both are the volt-second balance |Vin|·D = offMagnitude·(1 − D).
+            const double D = buckBoost ? vOutPlusDrop / (vOutPlusDrop + vinAbsInst) : 1.0 - vinAbsInst / vOutPlusDrop;
             if (bipolar) return continuous_cycle(vinInst, offLevel(vinInst), D);
             const double averageCurrent = iLinePeak * std::abs(lineShape(tc));
             const double halfRipple = 0.5 * vinAbsInst * D * Tsw / L;
@@ -4407,7 +4420,10 @@ MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
                 held.heldAverage = averageCurrent;
                 return held;
             }
-            const double tOn = std::sqrt(2.0 * L * Tsw * conductance * (vOutPlusDrop - vinAbsInst) / vOutPlusDrop);
+            // Same cycle average I_avg = G·|Vin| from zero: t_on² = 2·L·Tsw·G·offMagnitude/(|Vin| + offMagnitude).
+            const double tOn = buckBoost
+                ? std::sqrt(2.0 * L * Tsw * conductance * vOutPlusDrop / (vOutPlusDrop + vinAbsInst))
+                : std::sqrt(2.0 * L * Tsw * conductance * (vOutPlusDrop - vinAbsInst) / vOutPlusDrop);
             return fromZeroCycle(vinInst, vinAbsInst, tOn, Tsw, std::nullopt);
         };
     } else if (mode == PfcConductionMode::DISCONTINUOUS) {

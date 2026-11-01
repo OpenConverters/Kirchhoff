@@ -440,6 +440,61 @@ TEST_CASE("Boost PFC reports the duty at the line-voltage peak", "[duty-pin][pfc
     }
 }
 
+// The spec the web PFC wizard sends for its SEPIC / Ćuk / interleaved-boost variants (captured from the browser,
+// 2026-11-01): only config.topologyVariant (and numberOfPhases for the interleaved boost) differs between them.
+static json web_pfc_variant_spec(const std::string& variant) {
+    json s = json::parse(R"({"designRequirements":{"inputType":"acSinglePhase","inputVoltage":{"minimum":85,
+        "maximum":265},"switchingFrequency":{"nominal":65000},"outputs":[{"name":"out","voltage":{"nominal":400},
+        "regulation":"voltage"}],"efficiency":0.95,"lineFrequency":{"nominal":50}},"operatingPoints":[{"name":
+        "full_load","inputVoltage":175,"ambientTemperature":25,"outputs":[{"name":"out","power":300}]}],"config":
+        {"currentRippleFraction":0.3,"diodeVoltageDrop":0.6,"mode":"ccm","wideBandgapSwitch":true}})");
+    s["config"]["topologyVariant"] = variant;
+    if (variant == "interleavedBoost") s["config"]["numberOfPhases"] = 2;
+    return s;
+}
+
+TEST_CASE("The web's SEPIC, Cuk and interleaved PFC capture their inductors under the TAS names",
+          "[duty-pin][pfc][pfc-variants]") {
+    // The variant builders captured their inductor excitation as "L" while their TAS names the inductors L1, L2:
+    // process_converter then found no operating point for the main magnetic L1 and threw, and before the duty
+    // report the analyticalWaveforms registry keyed a component the TAS does not have.
+    for (const std::string variant : {"sepic", "cuk", "interleavedBoost"}) {
+        CAPTURE(variant);
+        const json r = process("pfc", web_pfc_variant_spec(variant));
+        std::vector<std::string> magnetics;
+        for (const auto& m : r.at("diagnostics").at("magnetics")) magnetics.push_back(m.at("name").get<std::string>());
+        const json& waveforms = r.at("analyticalWaveforms");
+        REQUIRE(waveforms.contains("L1"));
+        for (const auto& [name, op] : waveforms.items()) {
+            CAPTURE(name);
+            CHECK(std::find(magnetics.begin(), magnetics.end(), name) != magnetics.end());
+        }
+        // Both interleaved phases carry the per-phase inductor excitation.
+        if (variant == "interleavedBoost") CHECK(waveforms.contains("L2"));
+        // The TAS operating point of L1 is the captured one.
+        const json& l1 = component(r, "L1").at("data").at("inputs").at("operatingPoints").at(0)
+                             .at("excitationsPerWinding").at(0).at("current").at("processed");
+        const json& captured = waveforms.at("L1").at("excitationsPerWinding").at(0).at("current").at("processed");
+        CHECK(l1.at("peak").get<double>() == captured.at("peak").get<double>());
+        CHECK(l1.at("rms").get<double>() == captured.at("rms").get<double>());
+    }
+}
+
+TEST_CASE("SEPIC and Cuk PFC report the buck-boost duty at the line peak, the interleaved boost the boost duty",
+          "[duty-pin][pfc][pfc-variants]") {
+    // At the line peak a SEPIC / Ćuk input inductor is ON at +Vpk and OFF at −(Vout + Vd) (the energy-transfer
+    // capacitor holds the line voltage), so D = (Vout + Vd)/(Vout + Vd + Vpk) — the duty design_pfc sizes L1 with.
+    // A boost leg is OFF at Vpk − (Vout + Vd): D = 1 − Vpk/(Vout + Vd).
+    const double vpk = 175.0 * std::sqrt(2.0), vo = 400.0 + 0.6;
+    for (const std::string variant : {"sepic", "cuk"}) {
+        CAPTURE(variant);
+        const json r = process("pfc", web_pfc_variant_spec(variant));
+        CHECK_THAT(analytical_primary_duty(r), WithinAbs(vo / (vo + vpk), 1e-12));
+    }
+    const json r = process("pfc", web_pfc_variant_spec("interleavedBoost"));
+    CHECK_THAT(analytical_primary_duty(r), WithinAbs(1.0 - vpk / vo, 1e-12));
+}
+
 TEST_CASE("A current-doubler PSFB reports the effective duty its inline excitation is built at", "[duty-pin][psfb]") {
     // The current doubler is not modelled by the analytical solver: T1's excitation is written inline at the
     // design's effective duty, declared for diagnostics (it threw "captured no operating point" without it).

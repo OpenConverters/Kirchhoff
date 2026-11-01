@@ -820,7 +820,8 @@ static json build_pfc_interleaved_tas(const PfcDesign& d) {
     cfg::check_maximum_switch_current(d.config, IpkL, "build_pfc_tas");
     const double IrmsL = AN::winding_current(aopPfc, 0, "rms");
     const double IavgL = AN::winding_current(aopPfc, 0, "offset");
-    const json indExc = AN::excitations_processed(aopPfc, "L").at(0);
+    // Every phase inductor L1..LN carries this per-phase excitation; each is captured under its own TAS name
+    // (below, where the phases are built), so the registry names components the TAS has.
 
     // Ratings: each phase switch/diode carries the PER-PHASE current; the shared bridge carries the TOTAL
     // (sum of all N phases). All block the DC bus.
@@ -849,7 +850,9 @@ static json build_pfc_interleaved_tas(const PfcDesign& d) {
         comp("Rref", resBrick(10e3, 0.25))};
     for (int p = 1; p <= N; ++p) {
         pcomps.push_back(comp("Rsense" + std::to_string(p), resBrick(d.senseResistance, d.outputPower / (d.inputVoltageRms * d.efficiency) * d.outputPower / (d.inputVoltageRms * d.efficiency) * d.senseResistance * 2.0)));
-        pcomps.push_back(comp("L" + std::to_string(p), indBrick(d.boostInductance, indExc)));
+        const std::string phaseInductor = "L" + std::to_string(p);
+        pcomps.push_back(comp(phaseInductor, indBrick(d.boostInductance,
+                                                      AN::excitations_processed(aopPfc, phaseInductor).at(0))));
         pcomps.push_back(comp("SW" + std::to_string(p), mosfet(reqSW)));
         pcomps.push_back(comp("D5" + std::to_string(p), diode(reqD5)));
     }
@@ -1008,18 +1011,21 @@ static json build_pfc_buckboost_tas(const PfcDesign& d) {
         e["gain"] = gain; e["initial"] = initial; e["reference"] = ref;
         e["outputLow"] = lo; e["outputHigh"] = hi; return j; };
 
-    // Input-inductor L1 excitation from the (unipolar, bridged) analytical PFC solver — its current is the
-    // rectified-sine line-current envelope + HF ripple, exactly as for the boost (L1 IS the PFC inductor).
+    // Input-inductor L1 excitation from the (unipolar, bridged) analytical PFC solver with the buck-boost power
+    // stage: its current is the rectified-sine line-current envelope + HF ripple as for the boost (L1 IS the PFC
+    // inductor), but it discharges at −(Vout + Vd) (the energy-transfer capacitor Cs holds the line voltage), so
+    // the duty is the buck-boost one design_pfc sized L1 with. Captured under L1, its TAS name.
     namespace AN = Kirchhoff::analytical;
     const MAS::OperatingPoint aopPfc = AN::analytical_pfc(d.inputVoltageRms, d.outputVoltage, d.outputPower,
                                                           d.lineFrequency, d.switchingFrequency,
                                                           d.boostInductance, AN::pfc_conduction_mode(d.mode), d.efficiency,
-                                                          req::analytical_rectifier_drop(d.config));
+                                                          req::analytical_rectifier_drop(d.config), /*bipolar*/ false,
+                                                          AN::PfcPowerStage::BUCK_BOOST);
     const double IpkL  = AN::winding_current(aopPfc, 0, "peak");
     cfg::check_maximum_switch_current(d.config, IpkL, "build_pfc_tas");
     const double IrmsL = AN::winding_current(aopPfc, 0, "rms");
     const double IavgL = AN::winding_current(aopPfc, 0, "offset");
-    const json indExc = AN::excitations_processed(aopPfc, "L").at(0);
+    const json indExc = AN::excitations_processed(aopPfc, "L1").at(0);
 
     // ── semiconductor requirements. The switch SW and diode D5 block Vout + the peak line voltage
     // (buck-boost stress = Vout + Vpk); the bridge diodes block the bus; all carry the L1/line current. ──

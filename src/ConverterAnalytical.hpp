@@ -918,6 +918,17 @@ double pfc_discontinuous_on_time(double inputVoltageRms,
                                  double diodeVoltageDrop,
                                  bool bipolar);
 
+// The power stage behind the PFC input inductor.
+//   * BOOST — boost, bridgeless, semi-bridgeless, totem-pole and every interleaved boost leg: the inductor
+//     discharges into the bus at Vin − (Vout + Vd), so Vout must exceed the line peak and D = 1 − |Vin|/(Vout + Vd).
+//   * BUCK_BOOST — the SEPIC / Ćuk input inductor L1: the energy-transfer capacitor holds the line voltage, so L1
+//     discharges at −(Vout + Vd) whatever the line voltage, Vout may sit below the line peak and
+//     D = (Vout + Vd)/(Vout + Vd + |Vin|). Unipolar CONTINUOUS only (design_pfc sizes these variants in CCM
+//     only); THROWS otherwise. A cycle at a line zero crossing too short for the ripple is modelled as the
+//     from-zero cycle of L1 alone (the SEPIC/Ćuk discontinuous mode, in which L1 + L2 reach zero together, is
+//     not modelled).
+enum class PfcPowerStage { BOOST, BUCK_BOOST };
+
 MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
                                    double outputVoltage,
                                    double outputPower,
@@ -927,7 +938,8 @@ MAS::OperatingPoint analytical_pfc(double inputVoltageRms,
                                    PfcConductionMode mode,
                                    double efficiency = 1.0,
                                    double diodeVoltageDrop = 0.0,
-                                   bool bipolar = false);
+                                   bool bipolar = false,
+                                   PfcPowerStage stage = PfcPowerStage::BOOST);
 
 // ── Phase 8: magnetic-COMPONENT operating-point models ───────────────────────
 // The final three MKF converter_models that have no KH analytical counterpart. Unlike the switching
