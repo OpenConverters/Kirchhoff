@@ -2880,6 +2880,78 @@ TEST_CASE("CLLC / CLLLC ngspice with pinned tank values: the pins reach the deck
     }
 }
 
+// The web's CLLLC "I know the design I want" default (Alf 2026-11-01): Lm 350 uH, n 8, Lr1 50 uH, Cr1 33 nF, band
+// 90-150 kHz, 380-420 V -> 48 V / 240 W, efficiency 0.95, in the request shape kirchhoffRuntime.js buildKhConverterSpec
+// gives the ClllcWizard's I-know params: designRequirements.turnsRatios / magnetizingInductance, the tank pins in
+// config.primarySeriesInductance / primaryResonantCapacitance, the band in config.resonantBandMin/Max, the operating
+// frequency 120 kHz as designRequirements.switchingFrequency (no qualityFactor or diode drop in I-know mode).
+// The operating point is the input voltage the design is evaluated at.
+namespace {
+nlohmann::json clllc_iknow_default_spec(double vop) {
+    nlohmann::json s;
+    auto& dr = s["designRequirements"];
+    dr["inputType"] = "dc";
+    dr["inputVoltage"] = {{"minimum", 380.0}, {"maximum", 420.0}};
+    dr["switchingFrequency"] = {{"nominal", 120e3}};
+    dr["outputs"] = nlohmann::json::array({{{"name", "out"}, {"voltage", {{"nominal", 48.0}}}, {"regulation", "voltage"}}});
+    dr["efficiency"] = 0.95;
+    dr["magnetizingInductance"] = {{"nominal", 350e-6}};
+    dr["turnsRatios"] = nlohmann::json::array({{{"nominal", 8.0}}});
+    s["operatingPoints"] = nlohmann::json::array({{{"name", "full_load"}, {"inputVoltage", vop},
+        {"ambientTemperature", 25.0}, {"outputs", nlohmann::json::array({{{"name", "out"}, {"power", 240.0}}})}}});
+    s["config"] = {{"resonantBandMin", 90e3}, {"resonantBandMax", 150e3},
+                   {"primarySeriesInductance", 50e-6}, {"primaryResonantCapacitance", 33e-9}};
+    return s;
+}
+}  // namespace
+
+TEST_CASE("CLLLC I-know default (Lm 350 uH, n 8, Lr 50 uH, Cr 33 nF) runs at 380, 400 and 420 V and delivers 48 V "
+          "inside 90-150 kHz", "[ngspice][clllc][iknow]") {
+    for (const double vin : {380.0, 400.0, 420.0}) {
+        INFO("input " << vin << " V");
+        const nlohmann::json spec = clllc_iknow_default_spec(vin);
+        const std::string raw = Kirchhoff::api::process_converter("clllc", spec.dump(), "analytical");
+        INFO(raw.substr(0, 400));
+        REQUIRE(raw.rfind("Exception:", 0) != 0);
+        const nlohmann::json out = nlohmann::json::parse(raw);
+        const auto d = Kirchhoff::design_clllc(spec);
+        // The parts are the ones asked for.
+        CHECK(d.turnsRatio == 8.0);
+        CHECK(d.magnetizingInductance == Catch::Approx(350e-6).epsilon(1e-12));
+        CHECK(d.primaryResonantInductance == Catch::Approx(50e-6).epsilon(1e-12));
+        CHECK(d.primaryResonantCapacitance == Catch::Approx(33e-9).epsilon(1e-12));
+        // The engine runs the deck at the frequency it solved, inside the band.
+        const double fsw = out.at("diagnostics").at("switchingFrequency").get<double>();
+        CHECK(fsw == d.operatingFrequency);
+        CHECK(fsw >= 90e3);
+        CHECK(fsw <= 150e3);
+        for (const auto& st : out.at("tas").at("simulation").at("stimulus"))
+            CHECK(st.at("waveform").at("frequency").get<double>() == Catch::Approx(fsw).epsilon(1e-12));
+        // FHA: the gain at that frequency delivers 48 V after the stated efficiency.
+        const double N = d.turnsRatio;
+        const double Rac = (8.0 / (M_PI * M_PI)) * N * N * 48.0 * 48.0 / 240.0;
+        const double M = Kirchhoff::analytical::cllc_fha_tank(fsw, d.magnetizingInductance, d.primaryResonantInductance,
+                             d.primaryResonantCapacitance, d.secondaryResonantInductance * N * N,
+                             d.secondaryResonantCapacitance / (N * N), Rac).gain();
+        CHECK(M * 0.95 * vin / N == Catch::Approx(48.0).epsilon(1e-6));
+        // The engine's own deck has ideal parts, so none of the 5 % losses the design compensates for: it delivers
+        // 48/0.95 = 50.53 V where the FHA puts it, within 2 % (measured: 50.99 V at 380 V, 50.45 V at 400 V, 49.81 V at
+        // 420 V), with power flowing forward.
+        const TwoSidedDeckRun deck = run_two_sided_deck(out.at("tas"), fsw, vin, "vvin#branch", "vout",
+                                                        d.loadResistance, 0.030);
+        INFO("fsw " << fsw << " Hz, deck Vout " << deck.vDelivered << " V, Psource " << deck.pSource << " W, Pload "
+             << deck.pLoad << " W");
+        CHECK(deck.vDelivered == Catch::Approx(48.0 / 0.95).epsilon(0.02));
+        CHECK(deck.pLoad > 0.0);
+        CHECK(deck.pLoad / deck.pSource > 0.90);
+        CHECK(deck.pLoad / deck.pSource <= 1.0);
+        // And the ngspice engine path runs it.
+        const std::string sim = Kirchhoff::api::process_converter("clllc", spec.dump(), "ngspice");
+        INFO(sim.substr(0, 400));
+        CHECK(sim.rfind("Exception:", 0) != 0);
+    }
+}
+
 // ── ABT #1539: "I know the design I want" forces the drive frequency; the output voltage is a result ────────────
 // config.driveAtSwitchingFrequency drives the tank at exactly designRequirements.switchingFrequency. The LLC used to
 // embed the TARGET Vout at that frequency (a power-inconsistent point off resonance) and the CLLC had no such key at
