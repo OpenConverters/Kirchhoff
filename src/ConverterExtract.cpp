@@ -7,6 +7,7 @@
 #include "processors/WaveformProcessor.h"  // the shared DSP (sampled/harmonics/processed) — reused, not re-implemented
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <cctype>
 #include <cmath>
@@ -75,6 +76,109 @@ std::vector<MagneticExtract> topology_waveforms(const json& tas) {
         e.inputs = mags[i].inputs->get<MAS::Inputs>();   // MAS quicktype from_json
         e.isMain = (i == mi);
         out.push_back(std::move(e));
+    }
+    return out;
+}
+
+SteadyStateMismatch steady_state_mismatch(const std::vector<double>& time,
+                                          const std::vector<const std::vector<double>*>& windingCurrents,
+                                          double period) {
+    if (windingCurrents.empty())
+        throw std::invalid_argument("steady_state_mismatch: no winding currents");
+    if (!(period > 0))
+        throw std::invalid_argument("steady_state_mismatch: the comparison period must be > 0");
+    if (time.size() < 2)
+        throw std::invalid_argument("steady_state_mismatch: the run has fewer than two time points");
+    for (const auto* w : windingCurrents)
+        if (!w || w->size() != time.size())
+            throw std::invalid_argument("steady_state_mismatch: a winding current does not match the time vector");
+    const double tEnd = time.back();
+    const double span = tEnd - time.front();
+    if (span < 2.0 * period * (1.0 - 1e-6))
+        throw std::invalid_argument("steady_state_mismatch: the run spans less than two comparison periods");
+    // The earlier windows end a WHOLE number of periods before the end, about mid-run and about three quarters
+    // into the run, so a periodic waveform lines up with itself (comparing against the literal mid-point shifted
+    // the phase and flagged perfectly steady decks). Two windows a quarter-run apart, not one (ABT #1525): one
+    // comparison aliases with a slow ring whose period divides the half-run (the diode-rectified CLLLC's output
+    // capacitor rings against the tank at ~0.5 kHz after start-up, and mid-run and the end sat on the same phase
+    // of it, so a run 15 % off its steady power passed as settled).
+    const double periodsBack = std::max(1.0, std::floor(0.5 * span / period * (1.0 + 1e-9)));
+    const double periodsBackQuarter = std::max(1.0, std::floor(0.25 * span / period * (1.0 + 1e-9)));
+    // Each window is K whole periods, folded onto one period: the synchronous average (the periodic part of the
+    // waveform at the operating period) and the rms of what is left (the part not synchronous with it). One
+    // period per window could not tell a run that is still moving from a SETTLED run with a stationary component
+    // at another frequency: the web's CLLLC I-know default at 380 V runs below its tank resonance with a ~6 kHz
+    // beat on the secondary current (±6 % of its rms, the same amplitude from 2 ms to 60 ms) while the output
+    // holds to ±3 mV, and single periods taken at different phases of that beat differed by 5.5-7 % however long
+    // the run, so it was refused. A still-moving run moves the synchronous average (a drift, or a ring slower than
+    // the K periods) or the non-synchronous rms (a faster ring that is still decaying or growing), so it is still
+    // refused. K stays within a quarter of the run so the windows never overlap.
+    const int K = static_cast<int>(std::min(static_cast<double>(kSteadyStateWindowPeriods), periodsBackQuarter));
+    constexpr int M = 256;   // bins per period
+    // Each bin holds the AVERAGE of the signal over it, as the extraction resamples its period: a commutation ring
+    // of a few nanoseconds (the push-pull's primary rings at +-18 A for ~2 ns at every edge) landing on an
+    // instantaneous sample read as a 25 A error in one period of a window, which folding 32 periods per window
+    // made 32 times as likely to be caught as one period was.
+    auto integrals = [&](const std::vector<double>& src) {
+        std::vector<double> c(time.size(), 0.0);
+        for (size_t i = 1; i < time.size(); ++i) c[i] = c[i - 1] + 0.5 * (src[i] + src[i - 1]) * (time[i] - time[i - 1]);
+        return c;
+    };
+    auto integral_at = [&](const std::vector<double>& c, double t) {
+        const size_t j = static_cast<size_t>(std::upper_bound(time.begin(), time.end(), t) - time.begin());
+        if (j == 0) return c.front();
+        if (j >= time.size()) return c.back();
+        const double f = (t - time[j - 1]) / (time[j] - time[j - 1]);
+        return c[j - 1] + f * (c[j] - c[j - 1]);
+    };
+    struct Window { std::vector<double> sync; double residualRms, rms; };
+    auto window = [&](const std::vector<double>& cumulative, double tStop) {
+        Window w{std::vector<double>(M, 0.0), 0.0, 0.0};
+        std::vector<double> samples(static_cast<size_t>(K) * M);
+        const double dt = period / M;
+        for (int k = 0; k < K; ++k) {
+            const double t0 = tStop - (K - k) * period;
+            double previous = integral_at(cumulative, t0);
+            for (int m = 0; m < M; ++m) {
+                const double next = integral_at(cumulative, t0 + dt * (m + 1));
+                const double v = (next - previous) / dt;
+                previous = next;
+                samples[static_cast<size_t>(k) * M + m] = v;
+                w.sync[m] += v / K;
+            }
+        }
+        double r2 = 0.0, a2 = 0.0;
+        for (int k = 0; k < K; ++k)
+            for (int m = 0; m < M; ++m) {
+                const double v = samples[static_cast<size_t>(k) * M + m];
+                r2 += (v - w.sync[m]) * (v - w.sync[m]);
+                a2 += v * v;
+            }
+        w.residualRms = std::sqrt(r2 / samples.size());
+        w.rms = std::sqrt(a2 / samples.size());
+        return w;
+    };
+    SteadyStateMismatch out{0.0, 0, 0.0};
+    std::vector<std::array<Window, 3>> windows;
+    for (const auto* src : windingCurrents) {
+        const std::vector<double> c = integrals(*src);
+        windows.push_back({window(c, tEnd), window(c, tEnd - periodsBack * period),
+                           window(c, tEnd - periodsBackQuarter * period)});
+        // Every winding is judged against the LARGEST winding rms, so a winding that legitimately carries almost
+        // nothing (an unloaded or blocked rail) is not judged on its own noise.
+        out.referenceRms = std::max(out.referenceRms, windows.back()[0].rms);
+    }
+    if (!(out.referenceRms > 0)) return out;
+    for (size_t w = 0; w < windows.size(); ++w) {
+        const Window& last = windows[w][0];
+        for (size_t e = 1; e < 3; ++e) {
+            const Window& earlier = windows[w][e];
+            double d2 = 0.0;
+            for (int m = 0; m < M; ++m) d2 += (last.sync[m] - earlier.sync[m]) * (last.sync[m] - earlier.sync[m]);
+            const double mismatch = std::max(std::sqrt(d2 / M), std::abs(last.residualRms - earlier.residualRms))
+                                    / out.referenceRms;
+            if (mismatch > out.mismatch) { out.mismatch = mismatch; out.winding = w; }
+        }
     }
     return out;
 }
@@ -151,7 +255,8 @@ MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vecto
     // ringing) returned currents several times the design value and winding voltages with a DC mean,
     // and the advisers then found no core for them — silently. The caller's stop time (the wizard's
     // steady-state periods) is where we START: each run is checked by comparing every winding current over
-    // its last comparison window with the same window at mid-run. A deck that has not settled and declares
+    // its last kSteadyStateWindowPeriods periods with the same span at mid-run and three quarters in
+    // (steady_state_mismatch). A deck that has not settled and declares
     // its slow states (simulation.initialConditions) is solved for its periodic steady state by shooting
     // (below) and re-run from it — briefly when the solve converged, over kVerifyPeriods when it did not;
     // otherwise, or if that run still differs, the run is repeated with twice the stop time. A circuit that has not settled within those budgets is an
@@ -162,7 +267,7 @@ MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vecto
     constexpr double kMaxRunBytes = 512e6;    // ... and never a run whose captured vectors exceed ~512 MB:
                                               // an AC-input deck (122 saved vectors, 0.5 us step) doubled
                                               // blindly reached tens of GB and exhausted the host / WASM heap.
-    constexpr double kSteadyTolerance = 0.05; // NRMSE between the two windows, per winding current
+    constexpr double kSteadyTolerance = 0.05; // steady_state_mismatch: change between the windows, per winding current
     constexpr double kShootTolerance = 1e-5;  // |Φ(x) − x| per declared state, relative to its group's scale
     constexpr double kShotRunPeriods = 8.0;   // a converged shot is re-run for this many periods and read at
                                               // the end (undeclared fast states settle in the first one)
@@ -356,66 +461,26 @@ MAS::OperatingPoint ngspice_operating_point_of(const json& tas, const std::vecto
         // then they keep the single run they always had rather than turning into errors here.
         if (acInput) { steady = true; break; }
         const double tEndRun = r.time.back();
-        // The earlier window ends a WHOLE number of comparison periods before the end (about mid-run), so a
-        // periodic waveform lines up with itself; comparing against the literal mid-point shifted the phase
-        // and flagged perfectly steady decks. A relative epsilon absorbs the float round-off of the stop time.
+        // The windows steady_state_mismatch compares end WHOLE numbers of comparison periods before the end of
+        // the run; a relative epsilon absorbs the float round-off of the stop time.
         const double span = tEndRun - r.time.front();
         if (span < 2.0 * cmpPeriod * (1.0 - 1e-6))
             throw std::runtime_error("extract_operating_point(NGSPICE): transient span " + std::to_string(tEndRun)
                                      + "s is shorter than two comparison windows of " + std::to_string(cmpPeriod)
                                      + "s — cannot verify steady state for magnetic '" + mags[idx].name + "'");
-        const double periodsBack = std::max(1.0, std::floor(0.5 * span / cmpPeriod * (1.0 + 1e-9)));
-        const double tMid = tEndRun - periodsBack * cmpPeriod;
-        // A second earlier window, about three quarters into the run (ABT #1525). One comparison aliases with a
-        // slow ring whose period divides the half-run: the diode-rectified CLLLC's output capacitor rings
-        // against the tank at ~0.5 kHz after start-up (source power 3.0 → 4.0 → 3.5 kW at 3 / 4 / 8 ms), and
-        // mid-run (2 ms) and the end (4 ms) sat on the same phase of it, so a run 15 % off its steady power
-        // passed as settled. Two windows a quarter-run apart cannot both line up with such a ring.
-        const double periodsBackQuarter = std::max(1.0, std::floor(0.25 * span / cmpPeriod * (1.0 + 1e-9)));
-        const double tThreeQuarter = tEndRun - periodsBackQuarter * cmpPeriod;
-        // Compare the winding currents over [tEnd-cmp, tEnd] and [tMid-cmp, tMid] on a common 256-point grid.
-        auto window = [&](const std::vector<double>& src, double tStop) {
-            const int M = 256;
-            std::vector<double> out(M);
-            for (int k = 0; k < M; ++k) {
-                const double t = tStop - cmpPeriod + cmpPeriod * k / M;
-                size_t j = static_cast<size_t>(std::upper_bound(r.time.begin(), r.time.end(), t) - r.time.begin());
-                if (j == 0) { out[k] = src.front(); continue; }
-                if (j >= r.time.size()) { out[k] = src.back(); continue; }
-                const double f = (t - r.time[j - 1]) / (r.time[j] - r.time[j - 1]);
-                out[k] = src[j - 1] + f * (src[j] - src[j - 1]);
-            }
-            return out;
-        };
-        // Normalise every winding's difference by the LARGEST winding rms, so a winding that legitimately
-        // carries almost nothing (an unloaded or blocked rail) is not judged on its own noise.
-        double refRms = 0.0;
-        std::vector<std::pair<std::vector<double>, std::vector<double>>> pairs;
-        size_t windingsFound = 0;
+        std::vector<const std::vector<double>*> currents;
         for (size_t w = 0; w < excs0.size(); ++w) {
             const std::vector<double>* sig = branch_of(r, w);
             if (!sig) break;   // the extraction below throws the specific missing-branch error
-            ++windingsFound;
-            auto a = window(*sig, tEndRun);
-            double ra = 0.0; for (double v : a) ra += v * v;
-            refRms = std::max(refRms, std::sqrt(ra / a.size()));
-            pairs.emplace_back(a, window(*sig, tMid));
-            pairs.emplace_back(std::move(a), window(*sig, tThreeQuarter));
+            currents.push_back(sig);
         }
-        if (windingsFound != excs0.size()) { steady = true; break; }   // let the extraction name the branch
-        if (!(refRms > 0))
+        if (currents.size() != excs0.size()) { steady = true; break; }   // let the extraction name the branch
+        const SteadyStateMismatch ss = steady_state_mismatch(r.time, currents, cmpPeriod);
+        if (!(ss.referenceRms > 0))
             throw std::runtime_error("extract_operating_point(NGSPICE): every winding current of magnetic '"
                                      + mags[idx].name + "' is zero at the end of the run");
-        lastMismatch = 0.0;
-        for (size_t w = 0; w < pairs.size(); ++w) {
-            double d2 = 0.0;
-            for (size_t k = 0; k < pairs[w].first.size(); ++k) {
-                const double dv = pairs[w].first[k] - pairs[w].second[k];
-                d2 += dv * dv;
-            }
-            const double nrmse = std::sqrt(d2 / pairs[w].first.size()) / refRms;
-            if (nrmse > lastMismatch) { lastMismatch = nrmse; lastMismatchWinding = std::to_string(w / 2); }
-        }
+        lastMismatch = ss.mismatch;
+        lastMismatchWinding = std::to_string(ss.winding);
         if (lastMismatch <= kSteadyTolerance) { steady = true; break; }
         const double bytesThisRun = 8.0 * static_cast<double>(r.time.size()) * static_cast<double>(r.vectors.size() + 1);
         // Shooting needs the deck's STATE: a declared winding or inductor current alongside the rails (the

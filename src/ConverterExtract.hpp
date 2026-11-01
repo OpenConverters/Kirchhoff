@@ -59,6 +59,24 @@ MAS::OperatingPoint extract_operating_point(const nlohmann::json& tas, ExtractEn
                                             const PEAS::Fidelity& fidelity =
                                                 PEAS::Fidelity(PEAS::Fidelity::Origin::REQUIREMENTS));
 
+// STEADY-STATE CHECK of an ngspice run (used by extract_operating_point(NGSPICE) for DC converters): how much the
+// winding currents still change between the last kSteadyStateWindowPeriods periods of the run and the same number
+// of periods ending a whole number of periods before, about mid-run and about three quarters in. Each window is
+// sampled as 256 bin averages per period and folded onto one period: the synchronous average (the waveform periodic at `period`) and the rms of what is left
+// (the part not synchronous with it) are compared, each against the largest winding's rms over the last window.
+// `mismatch` is the largest of those relative differences over windings and windows, `winding` the winding that
+// set it, `referenceRms` that largest rms (0: every winding current is zero). `period` is the operating period of
+// the run (the frequency the deck is driven at). Throws when the run spans less than two periods.
+constexpr int kSteadyStateWindowPeriods = 32;
+struct SteadyStateMismatch {
+    double mismatch;
+    size_t winding;
+    double referenceRms;
+};
+SteadyStateMismatch steady_state_mismatch(const std::vector<double>& time,
+                                          const std::vector<const std::vector<double>*>& windingCurrents,
+                                          double period);
+
 // The MAS::Inputs the converter is designed around — the main magnetic (transformer / single inductor).
 // This IS "the design requirements for a MAS": a full MAS::Inputs (designRequirements + operatingPoints)
 // ready to hand to MKF's MagneticAdviser. Equivalent to the isMain entry of topology_waveforms(tas).

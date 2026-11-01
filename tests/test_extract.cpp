@@ -569,6 +569,85 @@ TEST_CASE("extract(NGSPICE): the DAB reaches its own periodic steady state", "[e
 
 
 
+namespace {
+// A synthetic run sampled 64 times per period of a 100 kHz operating frequency over 640 periods: the windows then
+// hold kSteadyStateWindowPeriods periods each and end 320 and 160 periods before the end of the run.
+struct SyntheticRun {
+    double period = 1.0 / 100e3;
+    std::vector<double> time;
+    explicit SyntheticRun(int periods = 640) {
+        for (int i = 0; i <= periods * 64; ++i) time.push_back(i * period / 64);
+    }
+    std::vector<double> signal(const std::function<double(double)>& f) const {
+        std::vector<double> x;
+        for (double t : time) x.push_back(f(t));
+        return x;
+    }
+    double mismatch(const std::vector<double>& x) const {
+        return Kirchhoff::steady_state_mismatch(time, {&x}, period).mismatch;
+    }
+};
+}  // namespace
+
+TEST_CASE("steady_state_mismatch: a settled run with a stationary component off the operating period passes",
+          "[extract][steady-state]") {
+    const SyntheticRun run;
+    const double w = 2.0 * M_PI / run.period;
+    // Periodic at the operating period: nothing changes.
+    CHECK(run.mismatch(run.signal([&](double t) { return std::sin(w * t) + 0.3 * std::sin(3.0 * w * t + 0.2); })) < 1e-9);
+    // The settled CLLLC I-know default at 380 V carries a ~6 kHz beat on its secondary current, the same amplitude
+    // from 2 ms to 60 ms. A 12 % beat at 6.65 kHz: single periods taken mid-run and at the end differ by 14 %
+    // (the single-period comparison refused this as unsettled at any run length); the folded windows agree.
+    const auto beat = run.signal([&](double t) { return std::sin(w * t) * (1.0 + 0.12 * std::sin(2.0 * M_PI * 6.65e3 * t)); });
+    CHECK(run.mismatch(beat) < 0.01);
+}
+
+TEST_CASE("steady_state_mismatch: a run that is still moving is refused", "[extract][steady-state]") {
+    const SyntheticRun run;
+    const double w = 2.0 * M_PI / run.period;
+    constexpr double kTolerance = 0.05;   // extract_operating_point's kSteadyTolerance
+    // The amplitude still drifting towards its final value (an output capacitor still charging).
+    CHECK(run.mismatch(run.signal([&](double t) { return (1.0 - 0.3 * std::exp(-t / 3e-3)) * std::sin(w * t); })) > kTolerance);
+    // A ring slower than the window (ABT #1525: an output capacitor ringing against the tank at ~0.5 kHz).
+    CHECK(run.mismatch(run.signal([&](double t) {
+              return std::sin(w * t) + 0.15 * std::exp(-t / 20e-3) * std::sin(2.0 * M_PI * 500.0 * t);
+          })) > kTolerance);
+    // A ring faster than the window that is still decaying: its synchronous average is gone, its rms is not steady.
+    CHECK(run.mismatch(run.signal([&](double t) {
+              return std::sin(w * t) + 0.5 * std::exp(-t / 2e-3) * std::sin(2.0 * M_PI * 6.2e3 * t);
+          })) > kTolerance);
+    // A run too short for two windows cannot be judged.
+    const SyntheticRun tooShort(1);
+    const auto x = tooShort.signal([&](double t) { return std::sin(w * t); });
+    CHECK_THROWS_WITH(Kirchhoff::steady_state_mismatch(tooShort.time, {&x}, tooShort.period),
+                      Catch::Matchers::ContainsSubstring("spans less than two comparison periods"));
+}
+
+TEST_CASE("extract(NGSPICE): the CLLLC I-know default at 380 V reaches its steady state below resonance",
+          "[extract][steady-state][clllc]") {
+    if (!Kirchhoff::ngspice_in_process_available()) {
+        WARN("libngspice not linked — steady-state extract skipped");
+        return;
+    }
+    // The web's CLLLC "I know the design I want" default (Lm 350 uH, n 8, Lr1 50 uH, Cr1 33 nF, 90-150 kHz band,
+    // nominal 120 kHz) evaluated at 380 V: the engine solves 103.6 kHz, below the 123.9 kHz tank resonance. The run
+    // settles within ~2 ms (its output holds to +-3 mV over 60 ms) with a stationary ~6 kHz beat on the secondary
+    // current; it was refused as "did not reach steady state within 0.032 s (winding 1 still changes by 5.49 %)".
+    const std::string spec = R"KH({"designRequirements":{"inputType":"dc","inputVoltage":{"minimum":380,"maximum":420},"switchingFrequency":{"nominal":120000},"outputs":[{"name":"out","voltage":{"nominal":48},"regulation":"voltage"}],"efficiency":0.95,"magnetizingInductance":{"nominal":0.00035},"turnsRatios":[{"nominal":8}]},"operatingPoints":[{"name":"full_load","inputVoltage":380,"ambientTemperature":25,"outputs":[{"name":"out","power":240}]}],"config":{"resonantBandMin":90000,"resonantBandMax":150000,"primarySeriesInductance":5e-05,"primaryResonantCapacitance":3.3e-08}})KH";
+    const std::string analytical = Kirchhoff::api::process_converter("clllc", spec, "analytical");
+    REQUIRE(analytical.rfind("Exception:", 0) != 0);
+    const double fsw = json::parse(analytical).at("diagnostics").at("switchingFrequency").get<double>();
+    CHECK(fsw == Catch::Approx(103.6e3).epsilon(0.002));
+    const std::string out = Kirchhoff::api::process_converter("clllc", spec, "ngspice");
+    INFO(out.substr(0, 400));
+    REQUIRE(out.rfind("Exception:", 0) != 0);
+    const json result = json::parse(out);
+    const json& excs = result.at("operatingPoint").at("excitationsPerWinding");
+    REQUIRE(excs.size() == 2);
+    // Extracted at the operating frequency the deck ran at, not the nominal 120 kHz.
+    for (const auto& e : excs) CHECK(e.at("frequency").get<double>() == Catch::Approx(fsw).epsilon(1e-9));
+}
+
 TEST_CASE("extract(NGSPICE): the AHB's simulated transformer matches its analytical one, winding by winding", "[extract][steady-state][ahb]") {
     if (!Kirchhoff::ngspice_in_process_available()) {
         WARN("libngspice not linked — AHB extract skipped");
