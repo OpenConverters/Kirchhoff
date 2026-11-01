@@ -110,6 +110,14 @@ constexpr double kVoltageDerate     = 0.8;    // operate devices at <= this frac
 constexpr double kNodeShuntCap      = 1e-12;  // ngspice cshunt: tiny node-to-ground cap, REAL decks only (see below)
 constexpr double kNodeShuntRes      = 1e9;    // ngspice rshunt: large node-to-ground R, REAL decks only (see below)
 constexpr double kTranIterLimit     = 100;    // ngspice itl4: transient Newton iterations per timestep (default 10)
+// ngspice gmin (the conductance ngspice puts across every pn junction; default 1e-12 S) for the SRC deck (ABT #2189). Its full-
+// bridge rectifier hangs the transformer secondary on four junctions alone: while all four are off (at the start,
+// and at every tank-current zero crossing) the secondary's common mode sees nothing but 4 x gmin, the coupled-
+// winding stamp goes near singular, and the transient aborts ("Timestep too small ... node sec_a", the web's
+// 400 V -> 48 V / 500 W default). 1e-12 and 1e-11 abort, 1e-10 runs; 1e-9 keeps a decade of margin. A solver
+// setting, not a part: 1 nS across a 48 V diode is 48 nA (2 uW), below any real rectifier's reverse leakage, and
+// it does not persist into the next in-process deck (each circuit carries its own gmin).
+constexpr double kSrcJunctionGmin   = 1e-9;
 
 // ── Principled auxiliary-component rules (for the ideal-switch ngspice decks) ─────────────────────────
 

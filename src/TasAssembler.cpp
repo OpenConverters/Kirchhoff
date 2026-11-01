@@ -813,6 +813,10 @@ static std::string tas_to_spice(const json& tasDoc, const PEAS::Fidelity& fideli
     // (@s.<inst>.<sw>[i], @d...[id], @c...[i], @r...[i], @l...[i]) — the data the per-component
     // waveform extraction reads. ngspice-only (LTspice has no such option and would reject it).
     if (!lt) os << " savecurrents";
+    // SRC: the full-bridge rectifier's secondary floats on its junctions while the diodes are off (cfg::
+    // kSrcJunctionGmin). Keyed on the topology the components declare, like PSHB's shunt below; gmin is a
+    // per-circuit option, so it does not leak into the next deck the way cshunt/rshunt do.
+    if (deck_declares_topology(tasDoc, "seriesResonantConverter")) os << " gmin=" << cfg::kSrcJunctionGmin;
     if (deckHasRealComponent) {
         // Real-deck convergence aids (ABT #33): cshunt = node-to-ground dV/dt; rshunt = node-to-ground DC
         // reference that breaks a stiff MKF_MODEL core's near-singular branch (cshunt alone can't); itl4 lets

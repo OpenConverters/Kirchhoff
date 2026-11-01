@@ -308,7 +308,7 @@ target_link_libraries(test_schema_knobs PRIVATE kirchhoff Catch2::Catch2WithMain
 add_executable(test_nrmse_gate tests/test_nrmse_gate.cpp)
 target_link_libraries(test_nrmse_gate PRIVATE kirchhoff Catch2::Catch2WithMain)
 
-add_executable(test_resonant_validation tests/test_resonant_validation.cpp)
+add_executable(test_resonant_validation tests/test_resonant_validation.cpp src/KirchhoffApi.cpp)
 target_link_libraries(test_resonant_validation PRIVATE kirchhoff Catch2::Catch2WithMain)
 
 add_executable(test_extract tests/test_extract.cpp src/KirchhoffApi.cpp)
