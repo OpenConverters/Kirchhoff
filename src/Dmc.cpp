@@ -76,6 +76,22 @@ DmcFilterTarget dmc_filter_target(double loadImpedance,
     return {targetFrequency, targetAttenuation, cutoffFrequency};
 }
 
+// The smallest inductance whose own reactance meets the impedance requirement the DMC hands the
+// MagneticAdviser: L_Z = Z/(2πf) at the LOWEST spec frequency (MKF :78-95, the same choke-only rule as
+// before). Every advised choke must have |Z(f)| ≥ Z there (minimumImpedance is a designRequirement),
+// so no compliant part has less inductance than L_Z. 0 when there are no impedance points.
+double dmc_impedance_inductance(const std::vector<MAS::ImpedanceAtFrequency>& impedancePoints) {
+    double lowestFreq = std::numeric_limits<double>::max();
+    double zAtLowest = 0.0;
+    for (const auto& pt : impedancePoints) {
+        if (pt.get_frequency() < lowestFreq) {
+            lowestFreq = pt.get_frequency();
+            zAtLowest = impedance_magnitude(pt);
+        }
+    }
+    return impedancePoints.empty() ? 0.0 : impedance_to_inductance(zAtLowest, lowestFreq);
+}
+
 }  // namespace
 
 // ═══ dmc_required_inductance — ported verbatim from MKF calculate_required_inductance (:549) ═════════
@@ -142,28 +158,29 @@ DmcDesign design_dmc(const json& spec) {
             if (f > highestFreq) highestFreq = f;
         }
         if (!d.impedancePoints.empty()) {
-            chokeOnlyInductance = impedance_to_inductance(zAtLowest, lowestFreq);
+            chokeOnlyInductance = dmc_impedance_inductance(d.impedancePoints);
             d.computedMinFrequency = lowestFreq;
             d.computedMaxFrequency = highestFreq;
             d.computedImpedanceAtMinFreq = zAtLowest;
         }
     }
 
-    // Inductance requirement (ABT #78, option b). A real DM EMI filter is an LC low-pass: when a
-    // filterCapacitance is supplied the choke is sized by the LC cutoff — the SAME inductance
-    // propose_dmc_design synthesises — NOT by its own reactance. Using the choke-only Z/(2πf) here
-    // would hand the MagneticAdviser a ~70× larger part than the ngspice sim + verify_dmc_attenuation
-    // (which include the cap) exercise, so the advised part and the verified part disagree. With no
-    // cap the choke IS the whole filter, so the choke-only bound stands. The impedance points survive
-    // as minimumImpedance metadata either way (kept above, consumed by build_dmc_inputs).
+    // Inductance requirement. With a filterCapacitance the LC cutoff gives one bound (ABT #78 b: the
+    // SAME inductance propose_dmc_design synthesises); the impedance points give another, because
+    // build_dmc_inputs hands them to the MagneticAdviser as minimumImpedance, which it enforces on
+    // the choke ALONE: |Z_choke(f)| ≥ Z. The requirement is the stricter of the two. Taking only the
+    // LC value (as before) emitted a self-contradictory MAS designRequirements — e.g. the wizard
+    // default (230 V, 3 A, 1 µF, 450 Ω @ 150 kHz) asked for L ≥ 6.6 µH AND |Z| ≥ 450 Ω (≥ 477 µH) —
+    // and the excitation simulated at 6.6 µH (8.9 A pk-pk ripple) belonged to no compliant choke.
+    // With no cap the choke IS the whole filter, so the impedance bound alone stands.
+    d.computedInductance = chokeOnlyInductance;
     if (d.filterCapacitance && (!d.impedancePoints.empty() || d.switchingFrequency > 0)) {
         const double loadImpedance = d.inputVoltage / d.operatingCurrent;
         const DmcFilterTarget target =
             dmc_filter_target(loadImpedance, d.impedancePoints, d.switchingFrequency);
-        d.computedInductance =
-            dmc_required_inductance(target.attenuationDb, target.frequency, *d.filterCapacitance);
-    } else {
-        d.computedInductance = chokeOnlyInductance;
+        d.computedInductance = std::max(
+            d.computedInductance,
+            dmc_required_inductance(target.attenuationDb, target.frequency, *d.filterCapacitance));
     }
 
     // MAS differentialModeChoke.targetAttenuation: each {frequency, attenuation dB} target sizes the LC filter's
@@ -266,7 +283,7 @@ json propose_dmc_design(const json& spec) {
     // with design_dmc via dmc_filter_target so the proposed and designed inductances stay identical.
     const DmcFilterTarget target = dmc_filter_target(loadImpedance, d.impedancePoints, d.switchingFrequency);
     const double targetAttenuation = target.attenuationDb;
-    const double cutoffFrequency = target.cutoffFrequency;
+    double cutoffFrequency = target.cutoffFrequency;
 
     // Choose a practical capacitance (MKF :700-714): default via a 470 µH target inductance, clamped
     // to [100 nF, 10 µF], overridden by an explicit filterCapacitance.
@@ -278,6 +295,24 @@ json propose_dmc_design(const json& spec) {
     }
 
     double inductance = 1.0 / (4.0 * M_PI * M_PI * cutoffFrequency * cutoffFrequency * capacitance);
+
+    // The proposed choke must also meet the impedance requirement design_dmc puts in the MAS
+    // designRequirements (minimumImpedance, enforced by the MagneticAdviser on the choke alone):
+    // L ≥ L_Z = Z/(2πf). This L is what the help-mode wizard simulates to build the winding
+    // excitation, so it sets the ripple. In the LC deck (noise source V_n at f into L, then C ∥ R_load)
+    // the choke carries i_ripple = V_n/|jωL + (R_load ∥ 1/jωC)| ≈ V_n/(2πf·L) once 2πfL ≫ 1/(2πfC):
+    // a choke sized only by the LC cutoff (6.6 µH for the wizard default: 23 V at 150 kHz through
+    // 6.2 Ω → 8.9 A pk-pk) is rejected by the impedance requirement (450 Ω ⇒ L ≥ 477 µH), whose
+    // ripple is V_n/Z ≈ 23 V/450 Ω ≈ 0.1 A pk-pk. Proposing max(L_LC, L_Z) keeps the simulated
+    // excitation the one a compliant choke actually carries. The capacitance is kept: a larger L
+    // only lowers the cutoff, so the attenuation target is still met (cutoffFrequency below reports
+    // the realised pair).
+    if (const double impedanceInductance = dmc_impedance_inductance(d.impedancePoints);
+        impedanceInductance > inductance) {
+        inductance = impedanceInductance;
+        cutoffFrequency = 1.0 / (2.0 * M_PI * std::sqrt(inductance * capacitance));
+    }
+
     if (spec.contains("minimumInductance")) {
         const double minL = spec.at("minimumInductance").get<double>();
         if (minL > inductance) {

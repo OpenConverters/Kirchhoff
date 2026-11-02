@@ -12,6 +12,7 @@
 #include "ChokeDesign.hpp"
 #include "KirchhoffApi.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <regex>
 #include <string>
@@ -117,6 +118,57 @@ TEST_CASE("design_dmc: a filterCapacitance switches the requirement to the LC in
 
     // No cap → the choke IS the whole filter, so the choke-only bound is unchanged.
     CHECK(Kirchhoff::design_dmc(dmc_spec()).computedInductance == Approx(chokeOnly));
+}
+
+TEST_CASE("DMC help mode: the proposed inductance meets the impedance requirement, so the simulated "
+          "ripple is the one a compliant choke carries", "[dmc][propose][excitation]") {
+    // The DmcWizard default, help mode: 230 V, 3 A (R_load = 76.7 Ω), 1 µF, 20 dB at 150 kHz over the
+    // 50 Ω LISN → |Z| ≥ 50·(10 − 1) = 450 Ω. The LC cutoff alone sizes 6.6 µH, but build_dmc_inputs
+    // hands the 450 Ω point to the MagneticAdviser as minimumImpedance, which it enforces on the choke
+    // alone: L ≥ 450/(2π·150 kHz) = 477 µH. Before the fix the wizard simulated the 6.6 µH choke
+    // (8.9 A pk-pk ripple at 150 kHz) while the adviser could only accept ≥ 477 µH chokes, whose ripple
+    // is ~V_n/Z — no compliant design existed for that excitation.
+    json spec = {{"configuration", "singlePhaseBalanced"}, {"inputVoltage", {{"nominal", 230.0}, {"tolerance", 0.1}}},
+                 {"operatingCurrent", 3.0}, {"lineFrequency", 50.0}, {"switchingFrequency", 100000.0},
+                 {"ambientTemperature", 25.0}, {"filterCapacitance", 1e-6},
+                 {"minimumImpedance", json::array({{{"frequency", 150000.0}, {"impedance", 450.0}}})}};
+    const double impedanceL = Kirchhoff::impedance_to_inductance(450.0, 150000.0);   // 477 µH
+    const double lcL = Kirchhoff::dmc_required_inductance(20.0 * std::log10(450.0 / (230.0 / 3.0)), 150000.0, 1e-6);
+    REQUIRE(lcL < impedanceL);   // the premise: the LC bound is the weaker one here (6.6 µH)
+
+    json p = Kirchhoff::propose_dmc_design(spec);
+    const double L = p["inductance"].get<double>();
+    CHECK(L == Approx(impedanceL));
+    CHECK(p["capacitance"].get<double>() == Approx(1e-6));                       // the user's cap is kept
+    CHECK(p["cutoffFrequency"].get<double>()
+          == Approx(1.0 / (2.0 * M_PI * std::sqrt(L * 1e-6))).epsilon(1e-9));   // the realised pair
+
+    // design_dmc emits the same, self-consistent requirement with or without the re-sent L.
+    CHECK(Kirchhoff::design_dmc(spec).computedInductance == Approx(impedanceL));
+    json help = spec;
+    help["minimumInductance"] = L;
+    MAS::Inputs in = Kirchhoff::build_dmc_inputs(Kirchhoff::design_dmc(help));
+    CHECK(in.get_design_requirements().get_magnetizing_inductance().get_minimum().value() == Approx(impedanceL));
+
+    // The excitation the wizard builds: the LC deck simulated with that L. The noise source is
+    // 0.1·V_in = 23 V at 150 kHz; with 2πfL = 450 Ω ≫ 1/(2πfC) ≈ 1 Ω the choke takes almost all of it,
+    // so i_pk ≈ 23 V / 450 Ω = 51 mA (≈ 0.1 A pk-pk) on the 3 A DC, and v_L ≈ 2πfL·i.
+    json wf = json::parse(Kirchhoff::api::simulate_dmc_waveforms(spec.dump(), L, 1e-6));
+    if (!wf.value("success", false)) {
+        WARN("ngspice unavailable: " + wf.value("error", std::string("(no error)")));
+        return;
+    }
+    const auto& row = wf["converterWaveforms"].at(0);
+    const std::vector<double> i = row["inductorCurrent"].get<std::vector<double>>();
+    const std::vector<double> v = row["inductorVoltage"].get<std::vector<double>>();
+    const auto [iMin, iMax] = std::minmax_element(i.begin(), i.end());
+    const auto [vMin, vMax] = std::minmax_element(v.begin(), v.end());
+    const double iPeakToPeak = *iMax - *iMin;
+    const double vAmplitude = (*vMax - *vMin) / 2.0;
+    INFO("i pk-pk=" << iPeakToPeak << " v amp=" << vAmplitude);
+    CHECK(iPeakToPeak == Approx(2.0 * 23.0 / 450.0).epsilon(0.05));                 // ≈ 2·V_n/Z
+    CHECK(iPeakToPeak == Approx(2.0 * vAmplitude / (2.0 * M_PI * 150000.0 * L)).epsilon(0.05));  // Faraday
+    CHECK(iPeakToPeak < 0.2);   // vs the 8.9 A pk-pk of the LC-only 6.6 µH choke
 }
 
 TEST_CASE("build_dmc_inputs requires the switching frequency (no silent lineFrequency ripple)",
