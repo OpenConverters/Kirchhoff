@@ -472,6 +472,85 @@ TEST_CASE("Isolated buck dead time: refused without the spec's diode drop, or wi
                ContainsSubstring("the isolated buck-boost has no complementary switch, so a dead time does not apply"));
 }
 
+// The web wizard's "I know the design" default, exactly as the page sends it: Vin 36..72 V (54 V for the design
+// call), 750 kHz, Lm 10 uH, n = 5, 10 V / 0.02 A primary and 10 V / 0.1 A isolated rails, efficiency 0.9, 100 ns
+// dead time, Vf 0.7 V. The magnetizing current averages only 0.04 A against a ~1 A ripple, so it is negative before
+// the on-time and reaches zero inside that dead time: the high-side diode conducts for x < td, then the converter
+// idles. Below efficiency 1 the duty law D = Vpri·eta/Vin does not balance the volt-seconds with a low-side slope of
+// -Vpri/L; the model without an idle lets the low-side interval close the period, and the idle regime must too, or
+// its freewheel length (solved with -Vpri/L) and its waveform (closed at zero) disagree and every input voltage threw
+// "no freewheel length gives the average 0.040000 A".
+json isolated_buck_web_default_spec(double inputVoltage) {
+    json s = json::parse(R"({"designRequirements":{"inputType":"dc","inputVoltage":{"minimum":36,"maximum":72},
+        "switchingFrequency":{"nominal":750000},"outputs":[{"name":"out","voltage":{"nominal":10},"regulation":"voltage"},
+        {"name":"out2","voltage":{"nominal":10},"regulation":"voltage"}],"efficiency":0.9,
+        "magnetizingInductance":{"nominal":0.00001},"turnsRatios":[{"nominal":5},{"nominal":5}]},
+        "operatingPoints":[{"name":"op","ambientTemperature":25,"outputs":[{"name":"out","power":0.2},
+        {"name":"out2","power":1}]}],"config":{"diodeVoltageDrop":0.7,"forcedDeadTime":1e-7}})");
+    s["operatingPoints"][0]["inputVoltage"] = inputVoltage;
+    return s;
+}
+
+TEST_CASE("Isolated buck dead time below efficiency 1: the current that reaches zero before the on-time idles",
+          "[duty-pin][isolated-buck][dead-time]") {
+    namespace AN = Kirchhoff::analytical;
+    const double Vpri = 10.0, eta = 0.9, fs = 750e3, L = 10e-6, td = 100e-9, Vf = 0.7;
+    const double imAverage = 0.02 + 0.1 / 5.0;
+    for (const double Vin : {54.0, 36.0, 72.0}) {
+        CAPTURE(Vin);
+        const json an = process("isolated_buck", isolated_buck_web_default_spec(Vin));
+        const double D = analytical_primary_duty(an);
+        const AN::IsolatedBuckDeadTimes regime =
+            AN::isolated_buck_dead_times(Vpri / Vin * eta, Vin, Vpri, imAverage, fs, L, td, Vf);
+        CHECK_THAT(D, WithinAbs(Vpri / Vin * eta + regime.dutyShift, 1e-12));
+        CHECK_FALSE(regime.negative[0]);
+        CHECK(regime.negative[1]);
+        const double x = regime.conduction[1];
+        INFO("freewheel before the on-time " << x * 1e9 << " ns of " << td * 1e9 << " ns, duty " << D);
+        CHECK(x > 0.0);
+        CHECK(x <= td);
+        // The model's waveforms: the period averages the magnetizing current, so the primary winding carries the
+        // primary rail's 0.02 A and the secondary the isolated rail's 0.1 A (source convention -0.1 A), whatever the
+        // dead times do. The samples are 128 per period, so the mean of a waveform with jumps is good to its jumps
+        // times half a sample (as in the model test above).
+        const MAS::OperatingPoint op =
+            AN::analytical_isolated_buck(Vin, Vpri, 0.02, 10.0, 0.1, fs, L, 5.0, 0.7, eta, td, Vf);
+        CHECK_THAT(AN::model_duty_of(op)->dutyCycle, WithinAbs(D, 1e-12));
+        const double T = 1.0 / fs;
+        const auto mean_and_bound = [&](const MAS::Waveform& w) {
+            const auto& d = w.get_data();
+            const double dt = T / d.size();
+            double area = 0.0, bound = 0.0;
+            for (size_t k = 0; k < d.size(); ++k) {
+                const double a = d[k], b = d[(k + 1) % d.size()];
+                area += 0.5 * (a + b) * dt;
+                bound += 0.5 * std::abs(b - a) * dt;
+            }
+            return std::make_pair(area / T, bound / T);
+        };
+        const auto [iPriMean, iPriBound] =
+            mean_and_bound(op.get_excitations_per_winding().at(0).get_current()->get_waveform().value());
+        const auto [iSecMean, iSecBound] =
+            mean_and_bound(op.get_excitations_per_winding().at(1).get_current()->get_waveform().value());
+        CHECK_THAT(iPriMean, WithinAbs(0.02, iPriBound));
+        CHECK_THAT(iSecMean, WithinAbs(-0.1, iSecBound));
+    }
+}
+
+TEST_CASE("Isolated buck dead time below efficiency 1: the web default runs in ngspice",
+          "[duty-pin][isolated-buck][dead-time][ngspice]") {
+    // As the page's Simulated button sends it: the design's turns ratio pinned, 50 + 2 periods of transient.
+    for (const double Vin : {36.0, 72.0}) {
+        CAPTURE(Vin);
+        json s = isolated_buck_web_default_spec(Vin);
+        s["designRequirements"]["turnsRatios"] = json::array({json{{"nominal", 5}}});
+        s["config"]["tranStopTime"] = 52.0 / 750e3;
+        const std::string raw = Kirchhoff::api::process_converter("isolated_buck", s.dump(), "ngspice");
+        INFO(raw.substr(0, 400));
+        REQUIRE(raw.rfind("Exception", 0) != 0);
+    }
+}
+
 TEST_CASE("Push-pull reports the per-switch duty, which falls as the input voltage rises", "[duty-pin][push-pull]") {
     // Help mode (no pin). diagnostics.dutyCycle once measured the dot-reference primary half's current, about
     // 1 − D: 0.709 / 0.811 / 0.858 at 36 / 54 / 72 V. The model's duty is per switch: t1/T = N(Vo+Vd)/(2·Vin) < 0.5.

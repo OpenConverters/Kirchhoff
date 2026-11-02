@@ -542,16 +542,21 @@ IsolatedBuckDeadTimes isolated_buck_dead_times(double baseDuty, double inputVolt
         }
         return shift / (period * vin);
     };
-    // The idle regime: the period starts from zero current, so the duty (volt-second balance, which also returns the
-    // current to zero at T - td + x) and the freewheel length x (the period average) are solved together. The
-    // average of the period as a function of x, with the duty that x sets.
+    // The idle regime: the period starts from zero current and the freewheel before the on-time returns it to zero
+    // at T - td + x, so the duty (the volt-seconds the dead times move) and the freewheel length x (the period
+    // average) are solved together. The average of the period as a function of x, with the duty that x sets.
+    // The low-side interval closes the period, as in the regime without an idle (isolated_buck_magnetizing_points):
+    // the current at its end is the one the freewheel of length x brings back to zero, -s·x. With efficiency 1 that
+    // is exactly the -Vpri/L slope; the duty law D = Vpri·eta/Vin of an efficiency below 1 does not balance the
+    // volt-seconds, and a low side at -Vpri/L then ended the period off zero, so the x that set this average was not
+    // the x of the waveform (the web's I-know default threw "no freewheel length gives the average").
     const auto idle_average = [&](const bool negative[2], double x, double& duty) {
         const double conduction[2] = {td, x};
         duty = baseDuty + shift_of(negative, conduction);
         const double tOn = duty * period, tOff = period - tOn - 2.0 * td;
         const auto vDead = [&](bool neg) { return neg ? vin + vf - vpri : -(vpri + vf); };
         const double r1 = (vin - vpri) * tOn / inductance, r2 = r1 + vDead(negative[0]) * td / inductance;
-        const double i3 = r2 - vpri * tOff / inductance;
+        const double i3 = -vDead(negative[1]) * x / inductance;
         return (0.5 * r1 * tOn + 0.5 * (r1 + r2) * td + 0.5 * (r2 + i3) * tOff + 0.5 * i3 * x) / period;
     };
     bool idle = false;
