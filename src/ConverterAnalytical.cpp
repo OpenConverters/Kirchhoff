@@ -559,48 +559,66 @@ IsolatedBuckDeadTimes isolated_buck_dead_times(double baseDuty, double inputVolt
         const double i3 = -vDead(negative[1]) * x / inductance;
         return (0.5 * r1 * tOn + 0.5 * (r1 + r2) * td + 0.5 * (r2 + i3) * tOff + 0.5 * i3 * x) / period;
     };
+    const auto throw_no_on_time = [&](double duty) {
+        throw std::invalid_argument("Dead Time: two dead times of " + std::to_string(deadTime) + " s at " +
+                                    std::to_string(switchingFrequency) + " Hz leave the isolated buck no " +
+                                    (duty > 0.0 ? "low-side" : "high-side") + " switch on-time (duty " +
+                                    std::to_string(duty) + "). Lower the Dead Time.");
+    };
+    // Two dead times of a period or more leave no on-time in any regime (whatever the duty, D > 0 and
+    // D + 2·td/T < 1 cannot both hold), so that is refused before the regimes are solved.
+    if (!(2.0 * td / period < 1.0)) throw_no_on_time(baseDuty);
     bool idle = false;
     double D = baseDuty;
     for (int it = 0; it < 200; ++it) {
         if (idle) {
-            // Bisect x in (0, td] for the average; the average is continuous in x, so a sign change brackets it.
-            double lo = 0.0, hi = td, dLo = 0.0, dHi = 0.0;
-            const double fLo = idle_average(r.negative, lo, dLo) - magnetizingCurrentAverage;
-            const double fHi = idle_average(r.negative, hi, dHi) - magnetizingCurrentAverage;
-            if ((fLo > 0.0) == (fHi > 0.0))
+            // The iterate that found the idle came from the regime without one, whose sign of the current entering
+            // the dead time before the on-time need not be the sign of the idle's freewheel (the current at T - td
+            // can cross zero between the two). So both signs are solved, and the one whose solution holds the regime
+            // it was solved in is kept. A sign whose average no freewheel length in (0, td] brackets has no solution.
+            bool bracketed = false, consistent = false;
+            double consistentDuty = 0.0;
+            for (const bool neg1 : {r.negative[1], !r.negative[1]}) {
+                const bool negative[2] = {r.negative[0], neg1};
+                // Bisect x in (0, td] for the average; the average is continuous in x, so a sign change brackets it.
+                double lo = 0.0, hi = td, dLo = 0.0, dHi = 0.0;
+                const double fLo = idle_average(negative, lo, dLo) - magnetizingCurrentAverage;
+                const double fHi = idle_average(negative, hi, dHi) - magnetizingCurrentAverage;
+                if ((fLo > 0.0) == (fHi > 0.0)) continue;
+                bracketed = true;
+                for (int b = 0; b < 200 && hi - lo > 1e-15 * td; ++b) {
+                    const double mid = 0.5 * (lo + hi);
+                    double dMid = 0.0;
+                    const double fMid = idle_average(negative, mid, dMid) - magnetizingCurrentAverage;
+                    if ((fMid > 0.0) == (fLo > 0.0)) lo = mid; else hi = mid;
+                }
+                double conduction[2] = {td, 0.5 * (lo + hi)};
+                double duty = 0.0;
+                idle_average(negative, conduction[1], duty);
+                // The regime it was solved in must hold at the solution: the current entering each dead time has
+                // the sign of the diode that conducts it.
+                const auto im = isolated_buck_magnetizing_points(duty, vin, vpri, magnetizingCurrentAverage, period,
+                                                                 inductance, td, vf, negative, conduction, true);
+                if ((im[1] < 0.0) != negative[0] || (im[3] < 0.0) != negative[1] || (im[1] > 0.0) != (im[2] > 0.0))
+                    continue;
+                consistent = true;
+                consistentDuty = duty;
+                if (!(duty > 0.0) || !(duty + 2.0 * td / period < 1.0)) continue;
+                r.negative[1] = neg1;
+                r.conduction[0] = conduction[0];
+                r.conduction[1] = conduction[1];
+                r.dutyShift = duty - baseDuty;
+                return r;
+            }
+            if (consistent) throw_no_on_time(consistentDuty);
+            if (!bracketed)
                 throw std::runtime_error("isolated_buck_dead_times: the magnetizing current reaches zero in the dead "
                                          "time before the on-time, but no freewheel length in (0, " +
                                          std::to_string(td) + "] s gives the average " +
                                          std::to_string(magnetizingCurrentAverage) + " A");
-            for (int b = 0; b < 200 && hi - lo > 1e-15 * td; ++b) {
-                const double mid = 0.5 * (lo + hi);
-                double dMid = 0.0;
-                const double fMid = idle_average(r.negative, mid, dMid) - magnetizingCurrentAverage;
-                if ((fMid > 0.0) == (fLo > 0.0)) lo = mid; else hi = mid;
-            }
-            r.conduction[0] = td;
-            r.conduction[1] = 0.5 * (lo + hi);
-            idle_average(r.negative, r.conduction[1], D);
-            r.dutyShift = D - baseDuty;
-            // The regime it was solved in must hold at the solution: the current entering each dead time has the
-            // sign of the diode that conducts it.
-            double conduction[2] = {r.conduction[0], r.conduction[1]};
-            const auto im = isolated_buck_magnetizing_points(D, vin, vpri, magnetizingCurrentAverage, period,
-                                                             inductance, td, vf, r.negative, conduction, true);
-            if ((im[1] < 0.0) != r.negative[0] || (im[3] < 0.0) != r.negative[1] || (im[1] > 0.0) != (im[2] > 0.0))
-                throw std::runtime_error("isolated_buck_dead_times: the freewheel of the dead times has no fixed point");
-            if (!(D > 0.0) || !(D + 2.0 * td / period < 1.0))
-                throw std::invalid_argument("Dead Time: two dead times of " + std::to_string(deadTime) + " s at " +
-                                            std::to_string(switchingFrequency) + " Hz leave the isolated buck no " +
-                                            (D > 0.0 ? "low-side" : "high-side") + " switch on-time (duty " +
-                                            std::to_string(D) + "). Lower the Dead Time.");
-            return r;
+            throw std::runtime_error("isolated_buck_dead_times: the freewheel of the dead times has no fixed point");
         }
-        if (!(D > 0.0) || !(D + 2.0 * td / period < 1.0))
-            throw std::invalid_argument("Dead Time: two dead times of " + std::to_string(deadTime) + " s at " +
-                                        std::to_string(switchingFrequency) + " Hz leave the isolated buck no " +
-                                        (D > 0.0 ? "low-side" : "high-side") + " switch on-time (duty " +
-                                        std::to_string(D) + "). Lower the Dead Time.");
+        // The duty of an intermediate iterate may lie outside (0, 1 - 2·td/T); only the settled regime's must not.
         const auto im = isolated_buck_magnetizing_points(D, vin, vpri, magnetizingCurrentAverage, period, inductance,
                                                          td, vf, r.negative, r.conduction, false);
         // Which diode each dead time freewheels through, from the current entering it; the one before the on-time
@@ -615,7 +633,10 @@ IsolatedBuckDeadTimes isolated_buck_dead_times(double baseDuty, double inputVolt
         const bool settled = neg0 == r.negative[0] && neg1 == r.negative[1] && nextIdle == idle &&
                              std::abs(next - D) <= 1e-14;
         r.dutyShift = shift;
-        if (settled) return r;
+        if (settled) {
+            if (!(D > 0.0) || !(D + 2.0 * td / period < 1.0)) throw_no_on_time(D);
+            return r;
+        }
         r.negative[0] = neg0;
         r.negative[1] = neg1;
         idle = nextIdle;

@@ -537,6 +537,38 @@ TEST_CASE("Isolated buck dead time below efficiency 1: the current that reaches 
     }
 }
 
+// Inputs that have exactly one steady state, which the fixed point missed: a 5616-case sweep (eta 0.8..1, Vin
+// 30..80 V, Lm 2..20 uH, ImAvg 0..1 A, td 50..200 ns at 750 kHz, Vpri 10 V, Vf 0.7 V) against a brute-force
+// enumeration of the four diode regimes, with and without the idle. The expected numbers are the brute force's.
+// (a) The iterate without an idle ends the period with the current positive before the on-time (low-side diode),
+//     but the idle's freewheel is through the high-side diode; solving the idle only with the iterate's sign threw
+//     "no freewheel length in (0, td] gives the average".
+// (b) An intermediate iterate's duty fell below zero (-0.000x) and was refused as "no high-side switch on-time",
+//     although the settled regime's duty is 0.07.
+// (c) As (a), with a freewheel of only 0.15 ns of the 200 ns dead time (a brute force sampling the freewheel from
+//     td/400 up misses it; sampled from ~0 it finds this one solution).
+TEST_CASE("Isolated buck dead time: the regimes the fixed point missed", "[duty-pin][isolated-buck][dead-time]") {
+    namespace AN = Kirchhoff::analytical;
+    const double Vpri = 10.0, fs = 750e3, Vf = 0.7;
+    struct Case { double eta, Vin, L, imAverage, td, duty, freewheel; };
+    for (const Case& c : {Case{0.8, 30.0, 2e-6, 1.0, 200e-9, 0.20949758728737683, 2.0616578510704986e-08},
+                          Case{0.8, 54.0, 2e-6, 0.0, 200e-9, 0.07146111774848649, 8.19119952746228e-08},
+                          Case{0.8, 76.0, 10e-6, 0.3, 200e-9, 0.08681020058765276, 1.4842089631963602e-10}}) {
+        DYNAMIC_SECTION("eta " << c.eta << ", Vin " << c.Vin << " V, Lm " << c.L << " H, ImAvg " << c.imAverage << " A") {
+            const double base = Vpri / c.Vin * c.eta;
+            const AN::IsolatedBuckDeadTimes r = AN::isolated_buck_dead_times(base, c.Vin, Vpri, c.imAverage, fs, c.L, c.td, Vf);
+            CHECK_THAT(base + r.dutyShift, WithinAbs(c.duty, 1e-9));
+            CHECK_FALSE(r.negative[0]);
+            CHECK(r.negative[1]);
+            CHECK(r.conduction[0] == c.td);
+            CHECK_THAT(r.conduction[1], WithinRel(c.freewheel, 1e-6));
+        }
+    }
+    // Still refused: two dead times longer than the period leave no on-time in any regime.
+    CHECK_THROWS_WITH(AN::isolated_buck_dead_times(10.0 / 54.0 * 0.8, 54.0, Vpri, 0.0, fs, 2e-6, 700e-9, Vf),
+                      ContainsSubstring("Lower the Dead Time"));
+}
+
 TEST_CASE("Isolated buck dead time below efficiency 1: the web default runs in ngspice",
           "[duty-pin][isolated-buck][dead-time][ngspice]") {
     // As the page's Simulated button sends it: the design's turns ratio pinned, 50 + 2 periods of transient.
