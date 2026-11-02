@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <regex>
 #include <string>
 
@@ -102,7 +103,23 @@ TEST_CASE("design_dmc: a filterCapacitance switches the requirement to the LC in
     const double chokeOnly = Kirchhoff::impedance_to_inductance(800.0, 150000.0);  // the OLD value
     const double proposedL = Kirchhoff::propose_dmc_design(spec)["inductance"].get<double>();
     CHECK(d.computedInductance == Approx(proposedL));       // design == propose (advise == verify)
-    CHECK(d.computedInductance < chokeOnly);                // LC needs far less L than the choke alone
+    // The requirement is the stricter of the LC-filter inductance (WITH this cap) and the choke-only
+    // impedance inductance, because the impedance points also reach the MagneticAdviser as
+    // minimumImpedance, which it enforces on the choke alone. Both terms are computed explicitly here:
+    // the LC term from the cap (binding point = lowest required cutoff, A = 20·log10(Z/R_load)).
+    const double loadImpedance = 230.0 / 8.0;
+    double lcInductance = 0.0;
+    double lowestCutoff = std::numeric_limits<double>::max();
+    for (const auto& [f, z] : {std::pair{150000.0, 800.0}, std::pair{500000.0, 1500.0}}) {
+        const double atten = 20.0 * std::log10(z / loadImpedance);
+        const double cutoff = f / std::pow(10.0, atten / 40.0);
+        if (cutoff < lowestCutoff) {
+            lowestCutoff = cutoff;
+            lcInductance = 1.0 / (4.0 * M_PI * M_PI * cutoff * cutoff * 1e-6);
+        }
+    }
+    REQUIRE(lcInductance > 0.0);
+    CHECK(d.computedInductance == Approx(std::max(lcInductance, chokeOnly)).epsilon(1e-9));
     CHECK(d.impedancePoints.size() == 2);                   // points survive as CoreAdviser metadata
     CHECK(d.computedImpedanceAtMinFreq == Approx(800.0));   // diagnostics still describe the spec
 
