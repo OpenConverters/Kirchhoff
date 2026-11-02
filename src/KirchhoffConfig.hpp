@@ -118,6 +118,15 @@ constexpr double kTranIterLimit     = 100;    // ngspice itl4: transient Newton 
 // setting, not a part: 1 nS across a 48 V diode is 48 nA (2 uW), below any real rectifier's reverse leakage, and
 // it does not persist into the next in-process deck (each circuit carries its own gmin).
 constexpr double kSrcJunctionGmin   = 1e-9;
+// SRC full-bridge rectifier: the capacitance of each secondary winding terminal to the secondary return (ABT #2189) —
+// what the bridge's return-diode junction gives a real rectifier. The deck's diodes have none, so while all four block
+// (every tank-current zero crossing) the secondary's common mode had no capacitance at all and its inductance hung on
+// junction leakage alone: a pole of L/R ~ 1e-17 s that ngspice cannot step through ("Timestep too small ... node
+// sec_a"). gmin only stretches that pole, so a design whose tank current is discontinuous every half period still
+// aborted: the web's I-know default (n = 8.33, driven at the 100 kHz resonance) at t = 78 us. With this capacitance
+// the deck runs at the default gmin too (1 pF already does). A numerical aid like the bridge's Csw (same value): it
+// is lossless and stores 2 x 0.5 x 100 pF x Vout^2 per edge (0.1 % of the rail's period energy at 48 V / 500 W).
+constexpr double kSrcRectifierNodeCap = 100e-12;
 // CLLLC turns ratio over the input range (ABT #2160): the gain the tank keeps in hand at the binding corner. When the
 // unity-at-nominal ratio cannot regulate every input of designRequirements.inputVoltage inside the switching band, the
 // ratio moves to the end of the window of working ratios nearest it and steps inside by this fraction, so the corner
@@ -179,6 +188,7 @@ inline double node_snubber_cap(const json& in)      { return get(in, "nodeSnubbe
 inline double qr_resonant_cap(const json& in)       { return get(in, "resonantCapacitance", kQrResonantCap); }
 inline double rectifier_snubber_cap(const json& in) { return get(in, "rectifierSnubberCap", kRectifierSnubberCap); }
 inline double diode_snubber_cap(const json& in)     { return get(in, "diodeSnubberCap",     kDiodeSnubberCap); }
+inline double src_rectifier_node_cap(const json& in) { return get(in, "rectifierNodeCap", kSrcRectifierNodeCap); }
 
 // Series-RC / R∥C snubber damping resistance — the documented numerical constant above, overridable.
 inline double snubber_res(const json& in) {

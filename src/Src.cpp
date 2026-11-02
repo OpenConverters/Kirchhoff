@@ -33,9 +33,10 @@ double bus_split_cap(const json& config) { return cfg::get(config, "busSplitCap"
 
 // The circuit around the series tank exactly as build_src_tas emits it into the deck (ABT #2179), from the same
 // values: T1's magnetizing inductance and coupling, the half bridge's split bus capacitors (Chi + Clo in series with
-// Cr for the tank current) and the main rail's diode drop. The deck's convergence aids (Csw, the bus bleeders) are
-// not modelled; it carries no rectifier snubbers (Alf 2026-10-31: "Real circuit; fix the deck" — the 100 Ω ∥ 100 pF
-// numerical snubbers across the rectifier diodes loaded the tank by 4-7 % above resonance).
+// Cr for the tank current) and the main rail's diode drop. The deck's convergence aids (Csw, the rectifier node caps
+// Cja/Cjb, the bus bleeders) are not modelled; it carries no rectifier snubbers (Alf 2026-10-31: "Real circuit; fix
+// the deck" — the 100 Ω ∥ 100 pF numerical snubbers across the rectifier diodes loaded the tank by 4-7 % above
+// resonance).
 analytical::SrcCircuit src_tank_circuit(const SrcDesign& d) {
     analytical::SrcCircuit c;
     c.magnetizingInductance = d.magnetizingInductance;
@@ -543,6 +544,14 @@ json build_src_tas(const SrcDesign& d) {
         c["inputs"]["designRequirements"]["capacitance"]["nominal"] = 100e-12;
         c["inputs"]["designRequirements"]["ratedVoltage"] = d.inputVoltage * 2;
         cfg::mark_numerical_aid(c); return c; };   // sw-node dV/dt aid — tagged for the real strip (ABT #96)
+    // Full-bridge rectifier: each secondary winding terminal's capacitance to the secondary return (the return
+    // diode's junction, cfg::kSrcRectifierNodeCap). Without it the secondary's common mode has no capacitance while
+    // the four diodes block, and ngspice aborts at the tank-current zero crossings (ABT #2189). Lossless; tagged for
+    // the real strip like Csw (a real diode carries its own junction capacitance).
+    auto recNodeCap = [&](double railVoltage) { json c; c["capacitor"] = json::object();
+        c["inputs"]["designRequirements"]["capacitance"]["nominal"] = cfg::src_rectifier_node_cap(d.config);
+        c["inputs"]["designRequirements"]["ratedVoltage"] = railVoltage * 2;
+        cfg::mark_numerical_aid(c); return c; };
     // CURRENT_DOUBLER output inductor (single-winding magnetic; carries Iout/2 DC with 2·fr ripple).
     auto outInductor = [&]() { json m; m["magnetic"] = json::object();
         const double Idc = Iout / 2.0, Irip = cfg::ripple_ratio(d.config, 0.30) * Idc;
@@ -651,7 +660,7 @@ json build_src_tas(const SrcDesign& d) {
     case RectifierType::FullBridge: {
         comps.insert(comps.end(), {comp("DH1", diodeReq(reqD)), comp("DH2", diodeReq(reqD)),
             comp("DL1", diodeReq(reqD)), comp("DL2", diodeReq(reqD)), comp("Cout", cout),
-            comp("Csw1", swSnub())});
+            comp("Csw1", swSnub()), comp("Cja", recNodeCap(d.outputVoltage)), comp("Cjb", recNodeCap(d.outputVoltage))});
         // The LOW-side pair is the mirror of the high-side pair, so it uses the
         // aliases the other way round: a bridge's return diode conducts GROUND ->
         // winding, which puts its winding-facing end at rK and its ground-facing
@@ -661,11 +670,11 @@ json build_src_tas(const SrcDesign& d) {
         // charges. That is what it did — Vout settled at -0.07 V, one diode drop
         // below ground, at an efficiency of 8e-05.
         conns.push_back(conn("sec_a", {pin("T1", "secondary1_start"), pin("DH1", rA),
-                                       pin("DL1", rK)}));
+                                       pin("DL1", rK), pin("Cja", "1")}));
         conns.push_back(conn("sec_b", {pin("T1", "secondary1_end"), pin("DH2", rA),
-                                       pin("DL2", rK)}));
+                                       pin("DL2", rK), pin("Cjb", "1")}));
         railEps = {pin("DH1", rK), pin("DH2", rK), pin("Cout", "1")};
-        secGndEps = {pin("DL1", rA), pin("DL2", rA), pin("Cout", "2")};
+        secGndEps = {pin("DL1", rA), pin("DL2", rA), pin("Cout", "2"), pin("Cja", "2"), pin("Cjb", "2")};
         break; }
     case RectifierType::CurrentDoubler: {
         comps.insert(comps.end(), {comp("D1", diodeReq(reqD)), comp("D2", diodeReq(reqD)),
@@ -726,15 +735,17 @@ json build_src_tas(const SrcDesign& d) {
             break; }
         case RectifierType::FullBridge: {
             const std::string DH1 = "DH1_" + sfx, DH2 = "DH2_" + sfx, DL1 = "DL1_" + sfx, DL2 = "DL2_" + sfx,
-                Co = "Cout_" + sfx;
+                Co = "Cout_" + sfx, Cja = "Cja_" + sfx, Cjb = "Cjb_" + sfx;
             comps.insert(comps.end(), {comp(DH1.c_str(), diodeReq(reqDi)), comp(DH2.c_str(), diodeReq(reqDi)),
-                comp(DL1.c_str(), diodeReq(reqDi)), comp(DL2.c_str(), diodeReq(reqDi)), comp(Co.c_str(), couti)});
+                comp(DL1.c_str(), diodeReq(reqDi)), comp(DL2.c_str(), diodeReq(reqDi)), comp(Co.c_str(), couti),
+                comp(Cja.c_str(), recNodeCap(leg.voltage)), comp(Cjb.c_str(), recNodeCap(leg.voltage))});
             conns.push_back(conn(("sec_a" + sfx).c_str(), {pin("T1", wA.c_str()), pin(DH1.c_str(), "anode"),
-                                                           pin(DL1.c_str(), "cathode")}));
+                                                           pin(DL1.c_str(), "cathode"), pin(Cja.c_str(), "1")}));
             conns.push_back(conn(("sec_b" + sfx).c_str(), {pin("T1", wAe.c_str()), pin(DH2.c_str(), "anode"),
-                                                           pin(DL2.c_str(), "cathode")}));
+                                                           pin(DL2.c_str(), "cathode"), pin(Cjb.c_str(), "1")}));
             legRail = {pin(DH1.c_str(), "cathode"), pin(DH2.c_str(), "cathode"), pin(Co.c_str(), "1")};
-            legGnd  = {pin(DL1.c_str(), "anode"), pin(DL2.c_str(), "anode"), pin(Co.c_str(), "2")};
+            legGnd  = {pin(DL1.c_str(), "anode"), pin(DL2.c_str(), "anode"), pin(Co.c_str(), "2"),
+                       pin(Cja.c_str(), "2"), pin(Cjb.c_str(), "2")};
             break; }
         default:
             throw std::invalid_argument("Kirchhoff SRC multi-output: rectifierType '" +

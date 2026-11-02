@@ -384,3 +384,65 @@ TEST_CASE("SRC: the web's default full-bridge-rectifier design simulates in ngsp
               << " deck=" << voutDeck << " (" << 100.0 * (voutDeck / voutModel - 1.0) << " %)\n";
     CHECK(std::abs(voutDeck / voutModel - 1.0) <= 0.01);
 }
+
+// ── SRC: the web's "I know the design" default simulates in ngspice (full-bridge rectifier, ABT #2189) ───────────────
+// The same SrcWizard defaults in "I know the design I want": turns ratio 8.33 and the drive forced at the 100 kHz
+// resonance (driveAtSwitchingFrequency), so the output is the result (~46 V). Both specs are the requests the web sent
+// (captured 2026-11-02 through the node probe on Kirchhoff 193bb99). At resonance the tank current reaches zero at
+// every half period and all four rectifier diodes block until the next edge, so the secondary's common mode spent
+// every half period on junction leakage alone and the Simulated call aborted at t = 78 us ("Timestep too small ...
+// node xsrccell.sec_a") even at gmin 1e-9: the deck now gives each secondary terminal its rectifier node capacitance
+// (cfg::kSrcRectifierNodeCap). Guards: the design call stands, and the Simulated call returns a waveform on every
+// winding at the nominal input and at both ends of the range.
+TEST_CASE("SRC: the web's I-know full-bridge-rectifier design, driven at resonance, simulates in ngspice",
+          "[src][abt2189][web-default][i-know][ngspice]") {
+    REQUIRE(Kirchhoff::ngspice_in_process_available());
+    const json designSpec = json::parse(R"js({"designRequirements":{"inputType":"dc","inputVoltage":{"nominal":400,"tolerance":0.1},"switchingFrequency":{"nominal":100000},"outputs":[{"name":"out","voltage":{"nominal":48},"regulation":"voltage"}],"efficiency":0.96,"turnsRatios":[{"nominal":8.33}]},"operatingPoints":[{"name":"full_load","inputVoltage":400,"ambientTemperature":25,"outputs":[{"name":"out","power":500}]}],"config":{"qualityFactor":1,"resonantBandMin":80000,"resonantBandMax":150000,"driveAtSwitchingFrequency":true,"resonantFrequency":100000,"rectifierType":"fullBridge","bridgeType":"fullBridge","tranStopTime":0.00052}})js");
+    const json simSpec = json::parse(R"js({"designRequirements":{"inputType":"dc","inputVoltage":{"nominal":400,"tolerance":0.1},"switchingFrequency":{"nominal":100000},"outputs":[{"name":"out","voltage":{"nominal":48},"regulation":"voltage"}],"efficiency":0.96,"turnsRatios":[{"nominal":8.33}],"magnetizingInductance":{"nominal":0.003031719771947776},"desiredResonantInductance":0.0003031719771947776,"desiredResonantCapacitance":8.355091438517288e-9},"operatingPoints":[{"name":"Nom. input (400 V)","inputVoltage":400,"ambientTemperature":25,"outputs":[{"name":"out","power":500}]}],"config":{"qualityFactor":1,"resonantBandMin":80000,"resonantBandMax":150000,"driveAtSwitchingFrequency":true,"resonantFrequency":100000,"rectifierType":"fullBridge","bridgeType":"fullBridge","tranStopTime":0.00052}})js");
+
+    const std::string designRaw = Kirchhoff::api::process_converter("src", designSpec.dump(), "analytical");
+    INFO(designRaw.substr(0, 400));
+    REQUIRE(designRaw.rfind("Exception", 0) != 0);
+
+    for (const double vin : {400.0, 360.0, 440.0}) {
+        CAPTURE(vin);
+        json spec = simSpec;
+        spec["operatingPoints"][0]["inputVoltage"] = vin;
+        const std::string simRaw = Kirchhoff::api::process_converter("src", spec.dump(), "ngspice");
+        INFO(simRaw.substr(0, 600));
+        REQUIRE(simRaw.rfind("Exception", 0) != 0);
+        const json sim = json::parse(simRaw);
+        const json& exc = sim.at("operatingPoint").at("excitationsPerWinding");
+        REQUIRE(exc.size() >= 2);
+        for (const auto& e : exc) {
+            CHECK(e.at("current").at("waveform").at("data").size() > 10);
+            CHECK(e.at("voltage").at("waveform").at("data").size() > 10);
+        }
+    }
+
+    // The same deck against the lossless exact-tank model at the nominal input, as in the help-me test above (the
+    // node capacitance that lets the deck run must not load the tank).
+    const Kirchhoff::SrcDesign d = Kirchhoff::design_src(simSpec);
+    const double fsw = d.switchingFrequency, T = 1.0 / fsw;
+    const double vg = d.inputVoltage, n = d.turnsRatio, vd = d.outputs.at(0).diodeDrop;
+    const double lr = d.resonantInductance, cr = d.resonantCapacitance;
+    const double r0 = std::sqrt(lr / cr), f0 = 1.0 / (2.0 * M_PI * std::sqrt(lr * cr));
+    const auto network = Kirchhoff::analytical::src_tank_network(Kirchhoff::src_tank_circuit(d), lr, cr, vg, {n});
+    const auto tank = Kirchhoff::analytical::src_exact_tank(fsw / f0, r0 / (n * n * d.loadResistance), network);
+    const double voutModel = tank.gain * vg / n - 2.0 * vd;
+    PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
+    std::string deck = Kirchhoff::tas_to_ngspice(Kirchhoff::build_src_tas(d), ideal);
+    const double rc = d.loadResistance * d.outputCapacitance;
+    const double tstop = std::max(400.0 * T, std::ceil(30.0 * rc / T) * T), tstep = T / 200.0;
+    deck = std::regex_replace(deck, std::regex(R"(\.tran\s+\S+\s+\S+\s+\S+\s+\S+)"),
+                              ".tran " + src_num(tstep) + " " + src_num(tstop) + " 0 " + src_num(tstep));
+    const Kirchhoff::NgspiceRunResult r = Kirchhoff::run_ngspice_in_process(deck);
+    INFO("fsw " << fsw << " Hz: " << r.error);
+    REQUIRE(r.success);
+    const auto vout = r.average("v(Vout)", tstop - 40.0 * T, tstop);
+    REQUIRE(vout.has_value());
+    std::cout << std::setprecision(6) << "[src web I-know] fsw=" << fsw << " Hz f0=" << f0 << " Hz  Vout model="
+              << voutModel << " deck=" << std::abs(*vout) << " (" << 100.0 * (std::abs(*vout) / voutModel - 1.0)
+              << " %)\n";
+    CHECK(std::abs(std::abs(*vout) / voutModel - 1.0) <= 0.01);
+}
