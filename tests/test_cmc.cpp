@@ -385,3 +385,28 @@ TEST_CASE("api::generate_cmc_ngspice_circuit returns the ideal CM deck as netlis
     noNoise.erase("dvdt_V_ns");
     CHECK(Kirchhoff::api::generate_cmc_ngspice_circuit(noNoise.dump()).rfind("Exception: ", 0) == 0);
 }
+
+TEST_CASE("A TAS output's regulation: voltage is designed, any other mode is refused", "[api][regulation]") {
+    // Alf, 2026-11-15: Kirchhoff models voltage-regulated outputs only; TAS states the mode per output.
+    json buck;
+    buck["designRequirements"]["efficiency"] = 1.0;
+    buck["designRequirements"]["inputVoltage"] = {{"minimum", 43.2}, {"nominal", 48.0}, {"maximum", 52.8}};
+    buck["designRequirements"]["switchingFrequency"]["nominal"] = 100e3;
+    buck["designRequirements"]["outputs"] =
+        json::array({ {{"name", "out"}, {"voltage", {{"nominal", 12.0}}}, {"regulation", "voltage"}} });
+    buck["operatingPoints"] =
+        json::array({ {{"inputVoltage", 48.0}, {"outputs", json::array({{{"power", 24.0}}})}} });
+    const json stated = json::parse(Kirchhoff::api::design_magnetic_inputs("buck", buck.dump()));
+    REQUIRE(stated.contains("designRequirements"));
+    json unstated = buck;
+    unstated["designRequirements"]["outputs"][0].erase("regulation");
+    CHECK(json::parse(Kirchhoff::api::design_magnetic_inputs("buck", unstated.dump())) == stated);   // deprecated: voltage
+    for (const char* mode : {"current", "both", "constantPower", "fixedRatio", "unregulated"}) {
+        json other = buck;
+        other["designRequirements"]["outputs"][0]["regulation"] = mode;
+        const std::string out = Kirchhoff::api::design_magnetic_inputs("buck", other.dump());
+        INFO(mode << ": " << out);
+        CHECK(out.rfind("Exception: ", 0) == 0);
+        CHECK(out.find("is not modelled") != std::string::npos);
+    }
+}

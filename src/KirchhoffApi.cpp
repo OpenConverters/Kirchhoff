@@ -16,6 +16,7 @@
 #include "KirchhoffConfig.hpp"      // cfg::forced_duty_cycle (ABT #2134)
 #include "JsonUtil.hpp"           // strip_nulls — schema-valid serialization of typed MAS objects
 
+#include <iostream>
 #include <algorithm>
 #include <optional>
 #include <sstream>
@@ -116,6 +117,28 @@ void validate_requirements(const json& spec) {
     if (!spec.contains("designRequirements") || !spec.at("designRequirements").is_object())
         throw std::invalid_argument("spec: designRequirements missing");
     const json& dr = spec.at("designRequirements");
+
+    // TAS's regulation mode per output (TAS inputs.json outputRequirement): Kirchhoff models voltage-regulated outputs
+    // only, so any other mode is refused, never designed as if it were voltage-regulated (Alf, 2026-11-15). An output
+    // that states none is read as voltage-regulated with a deprecation warning: TAS requires the field and this becomes
+    // an error once Kirchhoff's callers state it (WebFrontend, Henry, the examples).
+    if (dr.contains("outputs") && dr.at("outputs").is_array()) {
+        for (size_t i = 0; i < dr.at("outputs").size(); ++i) {
+            const json& o = dr.at("outputs").at(i);
+            const std::string name = o.contains("name") && o.at("name").is_string() ? o.at("name").get<std::string>() : std::to_string(i);
+            if (!o.contains("regulation")) {
+                std::cerr << "[Kirchhoff] deprecated: designRequirements.outputs '" << name
+                          << "' states no regulation; read as 'voltage' (TAS requires it; it will become an error)\n";
+                continue;
+            }
+            if (!o.at("regulation").is_string())
+                throw std::invalid_argument("designRequirements.outputs '" + name + "': regulation must be a string");
+            const std::string mode = o.at("regulation").get<std::string>();
+            if (mode != "voltage")
+                throw std::invalid_argument("designRequirements.outputs '" + name + "': regulation '" + mode +
+                                            "' is not modelled; Kirchhoff models voltage-regulated outputs only");
+        }
+    }
 
     if (dr.contains("efficiency") && dr.at("efficiency").is_number()) {
         const double eta = dr.at("efficiency").get<double>();
