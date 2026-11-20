@@ -497,7 +497,6 @@ export const KNOBS = {
     kPinN(), kPinL('Magnetizing inductance', 'Lm'),
     num('bridgeFactor', 'Bridge factor', 0.5, { tier: 2, min: 0, max: 1, step: 0.05 }),
     num('switchDutyFraction', 'Switch duty fraction', 0.45, { min: 0.05, max: 0.5, step: 0.01 }),
-    num('cdOutputFactor', 'Current-doubler factor', 0.465, { min: 0, max: 1, step: 0.05 }),
     num('rippleRatio', 'Output ripple', 0.3, { sym: 'ΔVo', min: 0.001, max: 1, step: 0.02 }),
     num('transformerCoupling', 'Transformer coupling k', 0.999, { tier: 2, sym: 'k', min: 0, max: 1, step: 0.001 }),
     num('busSplitCap', 'Bus split cap', 10e-6, { tier: 2, unit: 'F', min: 0 }), kVderate()],

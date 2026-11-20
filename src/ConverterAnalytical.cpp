@@ -2856,60 +2856,71 @@ constexpr double kSrcResonanceTolerance = 1e-6;   // F within this below 1 is th
 }  // namespace
 
 // ── SRC tank through its circuit (ABT #2179): the exact piecewise-linear periodic steady state ──
-// State z = (i, v, im, w, 1, q): tank current, Cr-series voltage, magnetizing current, rectifier-side winding voltage
-// (all normalised as the tank), the constant 1 (the affine inputs) and q = ∫ output current dτ (exact average). Each
-// conduction mode is linear, so a mode advances exactly by the matrix exponential of its 6×6 system; a mode ends when a
+// State z = (i, v, im, w, 1, q, iL1, iL2): tank current, Cr-series voltage, magnetizing current, rectifier-side winding
+// voltage (all normalised as the tank), the constant 1 (the affine inputs), q = ∫ output current dτ (exact average) and
+// the current doubler's two output-inductor currents (0 for the other rectifiers). Each
+// conduction mode is linear, so a mode advances exactly by the matrix exponential of its 8×8 system; a mode ends when a
 // diode current or a winding voltage crosses its bound (located to the double resolution). The steady state is the
 // period-periodic state (shooting, Newton) at which the average output current equals the output voltage over the
 // load. Nothing is fitted: the deck's elements, ideal switching diodes with a constant drop.
 namespace {
-using SrcZ = std::array<double, 6>;
-using SrcA = std::array<std::array<double, 6>, 6>;
-enum SrcIdx { kI = 0, kV = 1, kIm = 2, kW = 3, kOne = 4, kQ = 5 };
-// CP / CN: a diode (pair) clamps w at +M / −M. FREE0: no diode conducts: the winding current is 0.
-enum SrcMode { kCP = 0, kCN, kFree0 };
+constexpr int kZ = 8;
+using SrcZ = std::array<double, kZ>;
+using SrcA = std::array<std::array<double, kZ>, kZ>;
+// iL1 / iL2: the current doubler's two output-inductor currents (referred to the primary, normalised as the tank);
+// identically 0 for the other rectifiers.
+enum SrcIdx { kI = 0, kV = 1, kIm = 2, kW = 3, kOne = 4, kQ = 5, kL1 = 6, kL2 = 7 };
+// Centre-tapped / full bridge: CP / CN: a diode (pair) clamps w at +M / −M; FREE0: no diode conducts, the winding
+// current is 0.
+// Current doubler: CP: D1 off, D2 on, the winding carries Lo1's current (i − im = iL1); CN: D2 off, D1 on (i − im =
+// −iL2); SHORT: both diodes conduct and short the winding (w = 0) while both inductors freewheel; DCM: an inductor
+// current would have to reverse through its off diode (the output current fell to zero inside the period), which
+// the model does not cover: entering it throws.
+enum SrcMode { kCP = 0, kCN, kFree0, kShort, kDcm };
 const char* src_mode_name(int m) {
     switch (m) {
         case kCP: return "+ clamp"; case kCN: return "- clamp";
+        case kShort: return "both doubler diodes conducting";
+        case kDcm: return "doubler output current at zero";
         default: return "no diode conducting";
     }
 }
 
 SrcA src_mat_mul(const SrcA& a, const SrcA& b) {
     SrcA c{};
-    for (int r = 0; r < 6; ++r)
-        for (int k = 0; k < 6; ++k) {
+    for (int r = 0; r < kZ; ++r)
+        for (int k = 0; k < kZ; ++k) {
             const double ark = a[r][k];
             if (ark == 0.0) continue;
-            for (int col = 0; col < 6; ++col) c[r][col] += ark * b[k][col];
+            for (int col = 0; col < kZ; ++col) c[r][col] += ark * b[k][col];
         }
     return c;
 }
 SrcZ src_mat_vec(const SrcA& a, const SrcZ& x) {
     SrcZ y{};
-    for (int r = 0; r < 6; ++r) { double s = 0.0; for (int k = 0; k < 6; ++k) s += a[r][k] * x[k]; y[r] = s; }
+    for (int r = 0; r < kZ; ++r) { double s = 0.0; for (int k = 0; k < kZ; ++k) s += a[r][k] * x[k]; y[r] = s; }
     return y;
 }
 // exp(A·t): scaling and squaring of the Taylor series (‖A·t/2^s‖∞ <= 1/2, terms to the double resolution).
 SrcA src_expm(const SrcA& A, double t) {
     double nrm = 0.0;
-    for (int r = 0; r < 6; ++r) { double s = 0.0; for (int k = 0; k < 6; ++k) s += std::abs(A[r][k] * t); nrm = std::max(nrm, s); }
+    for (int r = 0; r < kZ; ++r) { double s = 0.0; for (int k = 0; k < kZ; ++k) s += std::abs(A[r][k] * t); nrm = std::max(nrm, s); }
     int sq = 0;
     if (nrm > 0.5) sq = static_cast<int>(std::ceil(std::log2(nrm / 0.5)));
     const double scale = t / std::ldexp(1.0, sq);
     SrcA X{}, E{}, term{};
-    for (int r = 0; r < 6; ++r) for (int k = 0; k < 6; ++k) X[r][k] = A[r][k] * scale;
-    for (int r = 0; r < 6; ++r) { E[r][r] = 1.0; term[r][r] = 1.0; }
+    for (int r = 0; r < kZ; ++r) for (int k = 0; k < kZ; ++k) X[r][k] = A[r][k] * scale;
+    for (int r = 0; r < kZ; ++r) { E[r][r] = 1.0; term[r][r] = 1.0; }
     for (int n = 1; n <= 40; ++n) {
         term = src_mat_mul(term, X);
         double big = 0.0;
-        for (int r = 0; r < 6; ++r) for (int k = 0; k < 6; ++k) { term[r][k] /= n; E[r][k] += term[r][k]; big = std::max(big, std::abs(term[r][k])); }
+        for (int r = 0; r < kZ; ++r) for (int k = 0; k < kZ; ++k) { term[r][k] /= n; E[r][k] += term[r][k]; big = std::max(big, std::abs(term[r][k])); }
         if (big < 1e-18) break;
     }
     for (int k = 0; k < sq; ++k) E = src_mat_mul(E, E);
     return E;
 }
-double src_dot(const SrcZ& g, const SrcZ& z) { double s = 0.0; for (int k = 0; k < 6; ++k) s += g[k] * z[k]; return s; }
+double src_dot(const SrcZ& g, const SrcZ& z) { double s = 0.0; for (int k = 0; k < kZ; ++k) s += g[k] * z[k]; return s; }
 
 struct SrcGuard { SrcZ g; int next; };
 struct SrcGuards {   // at most two per mode (no allocation in the stepping loop)
@@ -2924,22 +2935,67 @@ struct SrcGuards {   // at most two per mode (no allocation in the stepping loop
 
 // The tank + network at clamp M: each mode's system matrix and the guards that end it.
 struct SrcPwl {
-    double M, lam, a, l, Ed, eo;
-    bool hasLm, fb;
+    double M, lam, a, l, Ed, eo, beta;
+    bool hasLm, fb, cd;
     SrcPwl(const SrcTankNetwork& n, double gain) : M(gain) {
         lam = n.capacitanceRatio;
         hasLm = n.magnetizingRatio.has_value();
         a = hasLm ? *n.magnetizingRatio : 0.0;
         l = n.leakageRatio;
         fb = n.rectifier == SrcRectifier::FULL_BRIDGE;
+        cd = n.rectifier == SrcRectifier::CURRENT_DOUBLER;
+        beta = n.outputInductanceRatio;
+        if (cd && !(beta > 0.0))
+            throw std::invalid_argument("SRC tank: a current-doubler rectifier needs its output inductance (n²·Lo/Lr > 0)");
         Ed = n.diodeDrop;
         eo = M - (fb ? 2.0 : 1.0) * Ed;
     }
     // FREE0's winding voltage (the magnetizing share of the tank drive; the whole drive without Lm).
     double free0_w(double s, double v) const { return hasLm ? a * (s - v) / (1.0 + a) : (s - v); }
+    // Current doubler, CP (sg = +1) / CN (sg = −1): the conducting inductor (referred β = n²·Lo/Lr) sits in series
+    // with the secondary leakage l, and the rectifier node it does not feed is held at −Ed by its diode, so that
+    // series branch sees the clamp sg·(eo + Ed) = sg·M:  (l + β)·d(i − im)/dτ = vP − sg·M. With the tank
+    // (di/dτ = s − v − vP, Lm: a·dim/dτ = vP) the magnetizing node is vP = pV·v + pOne. The winding voltage is what
+    // the leakage leaves of vP: w = vP − l·d(i − im)/dτ.
+    struct CdBranch { double Lp, pV, pOne; };
+    CdBranch cd_branch(double sg, double s) const {
+        const double Lp = l + beta;
+        const double den = 1.0 + Lp + (hasLm ? Lp / a : 0.0);
+        return {Lp, -Lp / den, (Lp * s + sg * M) / den};
+    }
+    double cd_w(int mode, double s, double v) const {
+        if (mode == kShort) return 0.0;
+        const double sg = mode == kCP ? 1.0 : -1.0;
+        const CdBranch b = cd_branch(sg, s);
+        const double vP = b.pV * v + b.pOne;
+        return vP - l * (vP - sg * M) / b.Lp;
+    }
     SrcA matrix(int mode, double s) const {
         SrcA A{};
         A[kV][kI] = 1.0 / lam;
+        if (cd) {
+            if (mode == kShort) {
+                // Both diodes short the winding: the clamp rows below at w = 0; both inductors freewheel into eo + Ed.
+                const double den = 1.0 + l + (hasLm ? l / a : 0.0);
+                const double pV = -l / den, pOne = l * s / den;
+                A[kI][kV] = -1.0 - pV; A[kI][kOne] = s - pOne;
+                if (hasLm) { A[kIm][kV] = pV / a; A[kIm][kOne] = pOne / a; }
+                A[kL1][kOne] = -M / beta; A[kL2][kOne] = -M / beta;
+            } else {
+                const double sg = mode == kCP ? 1.0 : -1.0;
+                const CdBranch b = cd_branch(sg, s);
+                A[kI][kV] = -1.0 - b.pV; A[kI][kOne] = s - b.pOne;
+                if (hasLm) { A[kIm][kV] = b.pV / a; A[kIm][kOne] = b.pOne / a; }
+                // The conducting inductor carries the winding current sg·(i − im); the other freewheels.
+                const int on = mode == kCP ? kL1 : kL2, off = mode == kCP ? kL2 : kL1;
+                A[on][kV] = sg * b.pV / b.Lp; A[on][kOne] = sg * (b.pOne - sg * M) / b.Lp;
+                A[off][kOne] = -M / beta;
+                A[kW][kI] = (beta / b.Lp) * b.pV / lam;   // w = (β/Lp)·vP + l·sg·M/Lp
+            }
+            // Both inductors deliver the output current in every mode.
+            A[kQ][kL1] = 1.0; A[kQ][kL2] = 1.0;
+            return A;
+        }
         if (mode == kFree0) {
             if (hasLm) {
                 const double L = 1.0 + a;   // Lr + Lm in series (the leakage carries no current)
@@ -2965,6 +3021,20 @@ struct SrcPwl {
         // A guard g·z >= 0 holds in the mode; its crossing leads to `next`.
         auto it = [](double ki) { SrcZ z{}; z[kI] = ki; z[kIm] = -ki; return z; };              // the diode current
         auto wg = [&](double kw) { SrcZ z{}; z[kW] = kw; z[kOne] = M; return z; };              // M ∓ w
+        if (cd) {
+            // D1's current iL1 − (i − im), D2's iL2 + (i − im); the off diode's voltage sg·w; the output current.
+            SrcZ d1{}; d1[kL1] = 1.0; d1[kI] = -1.0; d1[kIm] = 1.0;
+            SrcZ d2{}; d2[kL2] = 1.0; d2[kI] = 1.0; d2[kIm] = -1.0;
+            SrcZ wp{}; wp[kW] = 1.0;
+            SrcZ wn{}; wn[kW] = -1.0;
+            SrcZ io{}; io[kL1] = 1.0; io[kL2] = 1.0;
+            switch (mode) {
+                case kShort: return {{d1, kCP}, {d2, kCN}};
+                case kCP: return {{wp, kShort}, {io, kDcm}};
+                case kCN: return {{wn, kShort}, {io, kDcm}};
+            }
+            throw std::logic_error("SRC tank: unknown current-doubler conduction mode");
+        }
         switch (mode) {
             case kCP: return {{it(1.0), kFree0}};
             case kCN: return {{it(-1.0), kFree0}};
@@ -2974,17 +3044,31 @@ struct SrcPwl {
     }
     // Entering `mode` at state z (the bridge drive s): the clamped / algebraic winding voltage.
     void enter(int mode, double s, SrcZ& z) const {
+        if (cd) {
+            if (mode == kDcm)
+                throw std::invalid_argument("SRC tank: the current doubler's output current falls to zero inside the "
+                                            "switching period (discontinuous conduction of its output inductors), which "
+                                            "the model does not cover");
+            z[kW] = cd_w(mode, s, z[kV]);
+            return;
+        }
         if (mode == kCP) z[kW] = M;
         else if (mode == kCN) z[kW] = -M;
         else if (mode == kFree0) z[kW] = free0_w(s, z[kV]);
+    }
+    // Across a bridge transition (s flips): every algebraic winding voltage follows the drive (FREE0; the current
+    // doubler's every mode), a diode clamp holds.
+    void edge(int mode, double s, SrcZ& z) const {
+        if (cd || mode == kFree0) enter(mode, s, z);
     }
 };
 
 struct SrcSegment { double t0, t1; int mode; double s; SrcZ z0; };
 struct SrcPeriod { SrcZ z; int mode; std::vector<SrcSegment> segments; };
 
-// One period from (z0, mode0) at the positive bridge transition: τ ∈ [0, γ) at s = +1, [γ, 2γ) at s = −1.
-SrcPeriod src_propagate(const SrcPwl& P, double gamma, SrcZ z, int mode, bool record) {
+// One period from (z0, mode0) at the positive bridge transition: τ ∈ [0, γ) at s = +1, [γ, 2γ) at s = −1 (only the
+// first half with halfOnly: the state just before the negative transition).
+SrcPeriod src_propagate(const SrcPwl& P, double gamma, SrcZ z, int mode, bool record, bool halfOnly = false) {
     constexpr int kStepsPerHalf = 128;   // event bracketing only: every event is located exactly inside its step
     const double h = gamma / kStepsPerHalf;
     SrcPeriod out;
@@ -3017,8 +3101,11 @@ SrcPeriod src_propagate(const SrcPwl& P, double gamma, SrcZ z, int mode, bool re
     };
     for (int half = 0; half < 2; ++half) {
         const double s = half == 0 ? 1.0 : -1.0;
-        if (half == 1) { close(gamma, 1.0); }
-        P.enter(mode == kFree0 ? kFree0 : -1, s, z);   // FREE0's w follows the drive across the bridge edge
+        if (half == 1) {
+            close(gamma, 1.0);
+            if (halfOnly) { out.z = z; out.mode = mode; return out; }
+        }
+        P.edge(mode, s, z);   // an algebraic w follows the drive across the bridge edge
         settle(half * gamma, s);
         for (int step = 0; step < kStepsPerHalf; ++step) {
             double t = half * gamma + step * h;
@@ -3115,18 +3202,29 @@ struct SrcTankSolution {
 
 namespace {
 // The periodic steady state at (M, γ) for load r, solving either M (γ given) or γ (M given) with it: Newton on the
-// state at the positive bridge transition (i, v, im; see unpack) plus the unknown
+// state at the positive bridge transition (i, v, im, and the current doubler's iL1 / iL2; see unpack) plus the unknown
 // parameter, residuals = periodicity and the output current balance. Starts from the bare tank's solution.
 std::shared_ptr<SrcTankSolution> src_network_steady_state(const SrcTankNetwork& net, double r, double M, double gamma,
                                                           bool solveGain) {
+    const bool cd = net.rectifier == SrcRectifier::CURRENT_DOUBLER;
     SrcZ z{}; z[kOne] = 1.0;
     {
         // Start: the bare tank's arcs, the magnetizing current at its negative peak, the − clamp.
-        const double Mb = M;
-        const double Vc = std::min(1.0, Mb) * r * gamma / 2.0;
-        z[kI] = -std::sqrt(std::max(0.0, Vc * (1.0 - std::min(1.0, Mb * Mb)) * (2.0 + Vc)));
-        z[kV] = -std::min(1.0, Mb) * Vc;
+        const double Mb = cd ? 2.0 * M : M;
         z[kIm] = net.magnetizingRatio ? -Mb * gamma / (2.0 * *net.magnetizingRatio) : 0.0;
+        if (cd) {
+            // A current doubler's output inductors hold their currents near half the output current each (eo·r/2), so
+            // its winding current is close to a square wave of that amplitude (CN: i − im = −iL2) and its winding
+            // swings about ±2·M; the series capacitor is then at the negative end of its ramp, −γ·iL/(2·λ).
+            const double iL = std::max(0.0, M - net.diodeDrop) * r / 2.0;
+            z[kL1] = z[kL2] = iL;
+            z[kI] = z[kIm] - iL;
+            z[kV] = -gamma * iL / (2.0 * net.capacitanceRatio);
+        } else {
+            const double Vc = std::min(1.0, Mb) * r * gamma / 2.0;
+            z[kI] = -std::sqrt(std::max(0.0, Vc * (1.0 - std::min(1.0, Mb * Mb)) * (2.0 + Vc)));
+            z[kV] = -std::min(1.0, Mb) * Vc;
+        }
         z[kW] = -M;
     }
     int mode0 = kCN;
@@ -3137,6 +3235,10 @@ std::shared_ptr<SrcTankSolution> src_network_steady_state(const SrcTankNetwork& 
     const bool hasLm = net.magnetizingRatio.has_value();
     auto iFree = [&]() { return !(mode0 == kFree0 && !hasLm); };
     auto imFree = [&]() { return hasLm && mode0 != kFree0; };
+    // Current doubler: the inductor that carries the winding current is tied to it (CP: iL1 = i − im, CN: iL2 =
+    // −(i − im)); the other (both in SHORT) is free.
+    auto l1Free = [&]() { return cd && mode0 != kCP; };
+    auto l2Free = [&]() { return cd && mode0 != kCN; };
     auto unpack = [&](const std::vector<double>& u, SrcZ& zz, double& MM, double& gg) {
         zz = SrcZ{}; zz[kOne] = 1.0;
         size_t k = 0;
@@ -3144,9 +3246,14 @@ std::shared_ptr<SrcTankSolution> src_network_steady_state(const SrcTankNetwork& 
         zz[kV] = u[k++];
         if (imFree()) zz[kIm] = u[k++];
         else if (mode0 == kFree0) zz[kIm] = zz[kI];
+        if (l1Free()) zz[kL1] = u[k++];
+        if (l2Free()) zz[kL2] = u[k++];
+        if (cd && mode0 == kCP) zz[kL1] = zz[kI] - zz[kIm];
+        if (cd && mode0 == kCN) zz[kL2] = -(zz[kI] - zz[kIm]);
         const double pp = u.back();
         MM = solveGain ? pp : M; gg = solveGain ? gamma : pp;
-        if (mode0 == kCP) zz[kW] = MM;
+        if (cd) zz[kW] = SrcPwl(net, MM).cd_w(mode0, 1.0, zz[kV]);   // algebraic in every doubler mode
+        else if (mode0 == kCP) zz[kW] = MM;
         else if (mode0 == kCN) zz[kW] = -MM;
         else zz[kW] = SrcPwl(net, MM).free0_w(1.0, zz[kV]);   // algebraic in FREE0
     };
@@ -3155,9 +3262,25 @@ std::shared_ptr<SrcTankSolution> src_network_steady_state(const SrcTankNetwork& 
         if (iFree()) u.push_back(zz[kI]);
         u.push_back(zz[kV]);
         if (imFree()) u.push_back(zz[kIm]);
+        if (l1Free()) u.push_back(zz[kL1]);
+        if (l2Free()) u.push_back(zz[kL2]);
         u.push_back(pp);
         return u;
     };
+    // Current doubler: the period is solved as its half-wave symmetry, the state just before the negative bridge
+    // transition being the mirror of the start (i, v, im, w negated, Lo1 and Lo2 exchanged, the clamps exchanged).
+    // The full-period periodicity alone does not fix the solution there: a DC current circulating Lm → winding →
+    // Lo1 → Lo2 changes no diode current and no winding voltage, so every such offset is periodic too (a singular
+    // Jacobian). What fixes it in the circuit is the loop's resistance, which damps the circulating current away:
+    // the symmetric solution, the one the half-wave condition selects.
+    auto mirrorMode = [](int m) { return m == kCP ? kCN : (m == kCN ? kCP : m); };
+    auto mirrorZ = [](SrcZ zz) {
+        zz[kI] = -zz[kI]; zz[kV] = -zz[kV]; zz[kIm] = -zz[kIm]; zz[kW] = -zz[kW];
+        std::swap(zz[kL1], zz[kL2]); zz[kQ] = 0.0;
+        return zz;
+    };
+    // The mode the solved stretch must end in: the start's (a period), its mirror (the doubler's half period).
+    auto endTarget = [&]() { return cd ? mirrorMode(mode0) : mode0; };
     // residual: periodicity of the free state components + output current balance; also returns the end mode.
     auto residual = [&](const std::vector<double>& u, int& endMode) {
         SrcZ zz; double MM, gg;
@@ -3165,12 +3288,27 @@ std::shared_ptr<SrcTankSolution> src_network_steady_state(const SrcTankNetwork& 
         if (!(MM > 0.0) || !(gg > 0.0)) throw std::invalid_argument("SRC tank: the steady-state solve left the physical "
                                                                    "range (gain or half period <= 0)");
         const SrcPwl P(net, MM);
+        if (cd) {
+            const SrcPeriod hp = src_propagate(P, gg, zz, mode0, false, true);
+            endMode = hp.mode;
+            const SrcZ zm = mirrorZ(hp.z);
+            std::vector<double> R;
+            R.push_back(zm[kI] - zz[kI]);
+            R.push_back(zm[kV] - zz[kV]);
+            if (imFree()) R.push_back(zm[kIm] - zz[kIm]);
+            if (l1Free()) R.push_back(zm[kL1] - zz[kL1]);
+            if (l2Free()) R.push_back(zm[kL2] - zz[kL2]);
+            R.push_back(hp.z[kQ] / gg - P.eo * r);
+            return R;
+        }
         const SrcPeriod per = src_propagate(P, gg, zz, mode0, false);
         endMode = per.mode;
         std::vector<double> R;
         if (iFree()) R.push_back(per.z[kI] - zz[kI]);
         R.push_back(per.z[kV] - zz[kV]);
         if (imFree()) R.push_back(per.z[kIm] - zz[kIm]);
+        if (l1Free()) R.push_back(per.z[kL1] - zz[kL1]);
+        if (l2Free()) R.push_back(per.z[kL2] - zz[kL2]);
         R.push_back(per.z[kQ] / (2.0 * gg) - P.eo * r);
         return R;
     };
@@ -3179,10 +3317,19 @@ std::shared_ptr<SrcTankSolution> src_network_steady_state(const SrcTankNetwork& 
     int endMode = mode0;
     std::vector<double> R = residual(u, endMode);
     for (int iter = 0; iter < 80; ++iter) {
-        if (endMode != mode0) {
-            // The period ends in another mode than it started: restart from that mode (the state is continuous).
+        if (endMode != endTarget()) {
+            // The period ends in another mode than it started: restart from that mode (the state is continuous; the
+            // doubler's half period: from the mirror of its end).
             SrcZ zz; double MM, gg; unpack(u, zz, MM, gg);
             const SrcPwl P(net, MM);
+            if (cd) {
+                const SrcPeriod hp = src_propagate(P, gg, zz, mode0, false, true);
+                const double pp = u.back();
+                mode0 = mirrorMode(hp.mode);
+                u = pack(mirrorZ(hp.z), pp);
+                R = residual(u, endMode);
+                continue;
+            }
             const SrcPeriod per = src_propagate(P, gg, zz, mode0, false);
             const double pp = u.back();
             mode0 = per.mode;
@@ -3213,11 +3360,11 @@ std::shared_ptr<SrcTankSolution> src_network_steady_state(const SrcTankNetwork& 
             int em = 0;
             std::vector<double> Rn;
             try { Rn = residual(un, em); } catch (const std::invalid_argument&) { continue; }
-            if (norm(Rn) < norm(R) || em != mode0) { u = un; R = Rn; endMode = em; accepted = true; break; }
+            if (norm(Rn) < norm(R) || em != endTarget()) { u = un; R = Rn; endMode = em; accepted = true; break; }
         }
         if (!accepted) break;
     }
-    if (endMode != mode0 || !(norm(R) < 1e-10))
+    if (endMode != endTarget() || !(norm(R) < 1e-10))
         throw std::runtime_error("SRC tank: the periodic steady state through the converter circuit did not converge "
                                  "(F = " + std::to_string(M_PI / (solveGain ? gamma : u.back())) + ", M = " +
                                  std::to_string(solveGain ? u.back() : M) + ", residual " + std::to_string(norm(R)) + ")");
@@ -3303,6 +3450,15 @@ SrcTankNetwork src_tank_network(const SrcCircuit& circuit, double resonantInduct
     }
     if (!(circuit.diodeDrop >= 0.0)) throw std::invalid_argument("src_tank_network: the diode drop must be >= 0");
     net.diodeDrop = turnsRatios[0] * circuit.diodeDrop / Vg;
+    // The current doubler's output inductors, referred to the primary through the main rail's ratio. Only that
+    // rectifier has them; any other with one stated is a caller error, not a value to drop.
+    if (circuit.rectifier == SrcRectifier::CURRENT_DOUBLER) {
+        if (!circuit.outputInductance || !(*circuit.outputInductance > 0.0))
+            throw std::invalid_argument("src_tank_network: a current-doubler rectifier needs its output inductance (> 0)");
+        net.outputInductanceRatio = turnsRatios[0] * turnsRatios[0] * *circuit.outputInductance / Lr;
+    } else if (circuit.outputInductance) {
+        throw std::invalid_argument("src_tank_network: an output inductance is only part of the current-doubler rectifier");
+    }
     return net;
 }
 
@@ -3402,7 +3558,12 @@ double src_bare_frequency_ratio(double gain, double loadConductance) {
 
 SrcExactTank src_exact_tank(double frequencyRatio, double loadConductance, const SrcTankNetwork& network) {
     if (network.bare()) return src_bare_tank(frequencyRatio, loadConductance);
-    // The same guards and resonance tolerance as the bare tank; its gain is the Newton start.
+    // The same guards and resonance tolerance as the bare tank; its gain is the Newton start (a current doubler: half
+    // the bare tank's gain into a quarter of the load, its winding swinging ±2·M at half the output current).
+    if (network.rectifier == SrcRectifier::CURRENT_DOUBLER) {
+        const SrcExactTank bare = src_bare_tank(frequencyRatio, loadConductance / 4.0);
+        return src_network_tank(src_network_steady_state(network, loadConductance, bare.gain / 2.0, bare.halfPeriod, true));
+    }
     const SrcExactTank bare = src_bare_tank(frequencyRatio, loadConductance);
     return src_network_tank(src_network_steady_state(network, loadConductance, bare.gain, bare.halfPeriod, true));
 }
@@ -3415,7 +3576,10 @@ double src_exact_frequency_ratio(double gain, double loadConductance, const SrcT
         throw std::invalid_argument("src_exact_frequency_ratio: the load conductance must be > 0");
     // Through the circuit the gain at the series resonance is not 1 (src_exact_tank(1, r, network).gain): a gain above
     // it is solved below the resonance, which throws.
-    const double start = gain < 1.0 ? src_bare_frequency_ratio(gain, loadConductance) : 1.0;
+    // The Newton start: the bare tank's frequency for that gain (a current doubler: gain 2·M into a quarter of the load).
+    const bool cd = network.rectifier == SrcRectifier::CURRENT_DOUBLER;
+    const double gBare = cd ? 2.0 * gain : gain, rBare = cd ? loadConductance / 4.0 : loadConductance;
+    const double start = gBare < 1.0 ? src_bare_frequency_ratio(gBare, rBare) : 1.0;
     const auto sol = src_network_steady_state(network, loadConductance, gain, M_PI / start, false);
     const double F = M_PI / sol->gamma;
     if (F < 1.0 - kSrcResonanceTolerance)
@@ -5295,3 +5459,4 @@ MAS::OperatingPoint analytical_hard_switched_bridge(double inputVoltage, double 
 
 } // namespace analytical
 } // namespace Kirchhoff
+

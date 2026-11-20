@@ -595,11 +595,19 @@ struct SrcTankNetwork {
     // The secondary leakage referred to the primary, /Lr, between Lm and the rectifier (needs Lm).
     double leakageRatio = 0.0;
     // CENTER_TAPPED / CURRENT_DOUBLER: one diode per polarity; FULL_BRIDGE: two diodes in each path.
+    // CENTER_TAPPED / FULL_BRIDGE clamp the winding at ±M while a diode conducts. CURRENT_DOUBLER is solved as the
+    // circuit it is: the winding feeds one output inductor at a time (D1 off: Lo1 carries the winding current; D2
+    // off: Lo2), both diodes short it while the winding current lies between the inductor currents, and the two
+    // inductors' currents (states of the solution) deliver the output; M is then n·(Vo + Vd)/Vg, the output plus
+    // the conducting catch diode's drop.
     SrcRectifier rectifier = SrcRectifier::CENTER_TAPPED;
     // One rectifier diode's forward drop referred to the primary, n·Vd/Vg (0: ideal diodes).
     double diodeDrop = 0.0;
+    // CURRENT_DOUBLER: each of its two (equal) output inductors referred to the primary, n²·Lo/Lr. 0 otherwise.
+    double outputInductanceRatio = 0.0;
     bool bare() const {
-        return capacitanceRatio == 1.0 && !magnetizingRatio && leakageRatio == 0.0 && diodeDrop == 0.0;
+        return capacitanceRatio == 1.0 && !magnetizingRatio && leakageRatio == 0.0 && diodeDrop == 0.0 &&
+               rectifier != SrcRectifier::CURRENT_DOUBLER;
     }
 };
 // The same circuit in physical units, as the converter states it (the deck's values).
@@ -609,6 +617,7 @@ struct SrcCircuit {
     std::optional<double> bridgeSeriesCapacitance;  // F, in series with Cr (half bridge: Chi + Clo)
     SrcRectifier rectifier = SrcRectifier::CENTER_TAPPED;
     double diodeDrop = 0.0;                         // V, one rectifier diode (main rail)
+    std::optional<double> outputInductance;         // H, CURRENT_DOUBLER only: each of Lo1 = Lo2 (required there)
 };
 // Normalises `circuit` for a tank Lr, Cr driven at ±Vg into rails of turns ratios n_i (the clamp and the diode drop
 // are the main rail's). Throws on a non-physical value (k outside (0, 1],
