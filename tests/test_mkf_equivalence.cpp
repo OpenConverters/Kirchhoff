@@ -1091,15 +1091,13 @@ TEST_CASE("SRC: Kirchhoff design+simulation matches MKF ideal reference", "[equi
     json tas = Kirchhoff::build_src_tas(d);
     KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "src");
 
-    // Kirchhoff now designs the SRC tank with ~8% GAIN HEADROOM (n sized so the fr peak delivers
-    // kGainHeadroom·Vo, plus a lower tank Q) so the closed-loop regulator can hit Vo just ABOVE fr where
-    // the tank is efficient, instead of pinning the nominal point at the M=1 peak (abt #62). MKF's
-    // converter model had NO headroom, so Kirchhoff's OPEN-LOOP output at fr now overshoots MKF's by that
-    // factor BY DESIGN — the della-Pollock cutover makes Kirchhoff the authoritative resonant designer, so
-    // it deliberately no longer matches the (retired) MKF converter model. The closed-loop regulator trims
-    // this overshoot back to Vo in production (verified: src reaches verdict=pass). Compare the open-loop
-    // figures against the headroom-scaled MKF reference.
-    constexpr double kGainHeadroom = 1.08;   // mirrors Src.cpp kGainHeadroom
+    // Kirchhoff designs the SRC tank with ~8% GAIN HEADROOM (n sized so the fr peak delivers
+    // kGainHeadroom·Vo at Vin_min, plus a lower tank Q, abt #62). Since 18ce54a (ABT #2171, Alf 2026-10-31) design_src
+    // SPENDS that headroom itself: every input, the range minimum included, runs at the frequency that delivers
+    // exactly Vo (the regulated frequency just above fr), so the simulated output is Vo, not the old open-loop
+    // 1.08·Vo overshoot this case used to expect. The expectation is therefore MKF's reference at ratio 1.0, the same
+    // re-target 18ce54a made to test_ptp's SRC expectedRatio (1.08 -> 1.0) and missed here.
+    constexpr double kGainHeadroom = 1.0;   // the regulated output is Vo (18ce54a); Src.cpp's 1.08 sizes n only
     check_close("Vout (headroom·MKF)", r.vout, sim.at("voutMean").get<double>() * kGainHeadroom, kResTol);
     check_close("Iout (headroom·MKF)", r.iout, sim.at("ioutMean").get<double>() * kGainHeadroom, kResTol);
     // Efficiency not compared (MKF's ideal-bipolar-source bridge draws ~no vin_dc current); sanity only.
@@ -1108,10 +1106,11 @@ TEST_CASE("SRC: Kirchhoff design+simulation matches MKF ideal reference", "[equi
 }
 
 TEST_CASE("SRC full-bridge rectifier variant settles to headroom target", "[equivalence][src][rectifier]") {
-    // No MKF fixture for the non-default rectifier. SRC keeps its 8% gain headroom for every variant, so
-    // the open-loop output sits at ~1.08·Vo; the full-bridge (single winding + 4-diode bridge, n
-    // compensated for two diode drops) must track the same headroom-scaled target.
-    constexpr double kGainHeadroom = 1.08;
+    // No MKF fixture for the non-default rectifier. Every variant runs at the frequency that delivers Vo
+    // (18ce54a, ABT #2171: the 8% gain headroom sizes n but is spent by the regulated frequency), so the
+    // full-bridge (single winding + 4-diode bridge, n compensated for two diode drops) tracks the same ratio-1.0
+    // target as the default case.
+    constexpr double kGainHeadroom = 1.0;
     json fx = load_fixture("src");
     const json& in = fx.at("inputs"); const json& sim = fx.at("sim");
     json di = kirchhoff_inputs(in);
@@ -1128,8 +1127,9 @@ TEST_CASE("SRC full-bridge rectifier variant settles to headroom target", "[equi
 
 TEST_CASE("SRC current-doubler rectifier variant settles to headroom target", "[equivalence][src][rectifier]") {
     // Current-doubler (single winding + 2 catch diodes + 2 output inductors). LC output filter rings below
-    // fsw → average over 64 switching periods. Tracks the same ~1.08·Vo headroom target.
-    constexpr double kGainHeadroom = 1.08;
+    // fsw → average over 64 switching periods. Tracks the same ratio-1.0 target (18ce54a: every input runs at
+    // the frequency that delivers Vo).
+    constexpr double kGainHeadroom = 1.0;
     json fx = load_fixture("src");
     const json& in = fx.at("inputs"); const json& sim = fx.at("sim");
     json di = kirchhoff_inputs(in);
@@ -1146,9 +1146,9 @@ TEST_CASE("SRC current-doubler rectifier variant settles to headroom target", "[
 
 TEST_CASE("SRC full-bridge primary settles to headroom target (ABT #91)", "[equivalence][src][fullbridge]") {
     // config.bridgeType="fullBridge": a 4-MOSFET primary drives the tank at ±Vin (bridge factor 1.0). Default
-    // sizing doubles the turns ratio, so the converter tracks the SAME ~1.08·Vo gain-headroom target as the
-    // half-bridge (the SRC operates at series resonance fr=fsw, unity tank gain). No MKF fixture — standalone.
-    constexpr double kGainHeadroom = 1.08;
+    // sizing doubles the turns ratio, so the converter tracks the SAME target as the half-bridge: ratio 1.0, since
+    // 18ce54a (ABT #2171) runs every input at the frequency that delivers Vo. No MKF fixture — standalone.
+    constexpr double kGainHeadroom = 1.0;
     json fx = load_fixture("src");
     const json& in = fx.at("inputs"); const json& sim = fx.at("sim");
     json di = kirchhoff_inputs(in);
