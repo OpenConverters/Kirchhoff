@@ -10,9 +10,25 @@
 #include <emscripten/val.h>
 
 #include <string>
-#include <vector>
 
 #include "KirchhoffApi.hpp"
+
+namespace {
+
+// A Uint8Array copied into a std::string ONCE: a typed_memory_view over the string's own buffer and a
+// single TypedArray.set(), i.e. one bulk memcpy across the JS/WASM boundary. em::vecFromJSArray went
+// element by element (one JS->WASM round trip per byte, ~74 ns/byte: ~15 s for the 202.7 MB capacitor
+// shard) and was then copied twice more (vector -> string). Mirrors Kelvin's bytes_of (libKelvin.cpp,
+// Kelvin b86fe3f), which is file-local there and so cannot be reused from a header.
+std::string bytes_of(const emscripten::val& bytes) {
+    const size_t n = bytes["length"].as<size_t>();
+    std::string out(n, '\0');
+    emscripten::val view(emscripten::typed_memory_view(n, reinterpret_cast<unsigned char*>(out.data())));
+    view.call<void>("set", bytes);
+    return out;
+}
+
+}  // namespace
 
 EMSCRIPTEN_BINDINGS(kirchhoff) {
     namespace em = emscripten;
@@ -43,8 +59,7 @@ EMSCRIPTEN_BINDINGS(kirchhoff) {
     // JSON, so plain strings are fine.
     em::function("kelvin_load_shard",
                  em::optional_override([](std::string family, em::val bytes) {
-                     std::vector<unsigned char> v = em::vecFromJSArray<unsigned char>(bytes);
-                     return api::kelvin_load_shard(family, std::string(v.begin(), v.end()));
+                     return api::kelvin_load_shard(family, bytes_of(bytes));
                  }));
     em::function("kelvin_shard_format_version", &api::kelvin_shard_format_version);
     em::function("kelvin_select", &api::kelvin_select);
