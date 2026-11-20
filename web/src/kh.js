@@ -85,19 +85,29 @@ export function createKirchhoff({
   }
 
   function rpc(fn, ...args) {
+    return rpcTransfer([], fn, ...args)
+  }
+
+  // rpc that MOVES the listed ArrayBuffers to the worker instead of structured-cloning them (a
+  // 200 MB shard cloned is another 200 MB copy made on the main thread). The caller's views onto a
+  // transferred buffer are detached afterwards, so pass only buffers the page never touches again.
+  function rpcTransfer(transfer, fn, ...args) {
     return new Promise((resolve, reject) => {
       const id = ++seq
       pending.set(id, { resolve, reject })
-      getWorker().postMessage({ id, fn, args })
+      getWorker().postMessage({ id, fn, args }, transfer)
     })
   }
 
-  async function call(fn, ...args) {
-    const out = await rpc(fn, ...args)
+  function unwrap(out) {
     if (typeof out === 'string' && out.startsWith('Exception: ')) {
       throw new Error(out.slice('Exception: '.length))
     }
     return out
+  }
+
+  async function call(fn, ...args) {
+    return unwrap(await rpc(fn, ...args))
   }
 
   const callJson = async (fn, ...args) => JSON.parse(await call(fn, ...args))
@@ -372,7 +382,10 @@ export function createKirchhoff({
       _kelvinShards.set(category, (async () => {
         const entry = await manifestEntry(category)
         const bytes = await fetchShardBytes(category, entry.buildId)
-        return callJson('kelvin_load_shard', category, bytes)
+        // Transferred, not cloned: `bytes` wraps the buffer of fetchShardBytes' own arrayBuffer()
+        // read (the Cache entry was written from res.clone(), a separate body), and nothing reads it
+        // after this call.
+        return JSON.parse(unwrap(await rpcTransfer([bytes.buffer], 'kelvin_load_shard', category, bytes)))
       })())
     }
     return _kelvinShards.get(category)
