@@ -52,6 +52,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <regex>
 #include <sstream>
 #include <string>
@@ -101,6 +102,25 @@ bool parse_meas(const std::string& out, const std::string& name, double& v) {
     return true;
 }
 
+// The switching period the deck actually runs at: the period of its gate stimuli (every Vstim PULSE). A frequency-
+// regulated converter (SRC) switches above the fixture's nominal frequency, so a window of fixture periods is not a
+// whole number of its periods and biases the mean of a pulsating input current. Throws when the deck has no gate
+// stimulus or its stimuli disagree.
+double deck_switching_period(const std::string& deck) {
+    static const std::regex re(R"(^Vstim\S*\s+\S+\s+\S+\s+PULSE\(\s*(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s*\))",
+                                std::regex::multiline);
+    std::optional<double> period;
+    for (auto it = std::sregex_iterator(deck.begin(), deck.end(), re); it != std::sregex_iterator(); ++it) {
+        const double per = std::stod((*it)[7].str());
+        if (!(per > 0.0)) throw std::runtime_error("deck gate stimulus with a non-positive PULSE period");
+        if (period && std::fabs(per - *period) > 1e-9 * *period)
+            throw std::runtime_error("deck gate stimuli disagree on the switching period");
+        period = per;
+    }
+    if (!period) throw std::runtime_error("deck has no Vstim PULSE gate stimulus to read its switching period from");
+    return *period;
+}
+
 // ── Reproducibility guard: re-run MKF's stored deck, measure Vout ─────────
 double rerun_mkf_vout(const json& fx, const std::string& tag) {
     const std::string node = fx.at("probes").at("voutNode").get<std::string>();
@@ -125,7 +145,8 @@ double rerun_mkf_vout(const json& fx, const std::string& tag) {
 struct KirchhoffResult { double vout, iout, eff; };
 
 KirchhoffResult run_kirchhoff(const json& tasInputs, const json& tas, double loadResistance,
-                    double outputCapacitance, double vin, const std::string& tag, int measPeriods = 1) {
+                    double outputCapacitance, double vin, const std::string& tag, int measPeriods = 1,
+                    bool measureDeckPeriods = false) {
     PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
     std::string deck = Kirchhoff::tas_to_ngspice(tas, ideal);
     // fsw from the stimulus (period sets the timestep + measurement window).
@@ -151,7 +172,8 @@ KirchhoffResult run_kirchhoff(const json& tasInputs, const json& tas, double loa
     // with an LC output filter (e.g. the current-doubler's two output inductors + Cout) rings at a SUB-
     // switching-frequency, so a 1-period average samples one phase of that envelope and biases Vout/iin —
     // such cases pass a window long enough to span the LC envelope.
-    const double from = tstop - measPeriods * period;
+    // measureDeckPeriods: the window is measPeriods whole periods of the frequency the deck switches at (SRC).
+    const double from = tstop - measPeriods * (measureDeckPeriods ? deck_switching_period(deck) : period);
 
     auto cpos = deck.rfind("\n.control");
     if (cpos != std::string::npos) deck = deck.substr(0, cpos);
@@ -210,7 +232,8 @@ json kirchhoff_inputs(const json& in) {
 // switching period. Returns one mean voltage per requested node (same order as `nodes`). The assembler
 // synthesizes one load per external output port, so this measures every rail delivering into its own load.
 std::vector<double> measure_multi_output(const json& tas, double fsw,
-                                         const std::vector<std::string>& nodes, const std::string& tag) {
+                                         const std::vector<std::string>& nodes, const std::string& tag,
+                                         bool measureDeckPeriods = false) {
     std::string deck = Kirchhoff::tas_to_ngspice(tas, PEAS::Fidelity(PEAS::Fidelity::Origin::REQUIREMENTS));
     const double period = 1.0 / fsw;
     const double settle = std::max(1200.0 * period, 0.012);   // >= 10 output-filter RC for a 100u/12R rail
@@ -219,9 +242,11 @@ std::vector<double> measure_multi_output(const json& tas, double fsw,
         ".tran " + fmt(tstep) + " " + fmt(settle) + " 0 " + fmt(tstep));
     auto cpos = deck.rfind("\n.control");
     if (cpos != std::string::npos) deck = deck.substr(0, cpos);
+    // measureDeckPeriods: average over one period of the frequency the deck switches at (SRC).
+    const double window = measureDeckPeriods ? deck_switching_period(deck) : period;
     std::ostringstream ctl; ctl << "\n.control\nrun\n";
     for (size_t i = 0; i < nodes.size(); ++i)
-        ctl << "meas tran v" << i << " AVG v(" << nodes[i] << ") from=" << fmt(settle - period)
+        ctl << "meas tran v" << i << " AVG v(" << nodes[i] << ") from=" << fmt(settle - window)
             << " to=" << fmt(settle) << "\n";
     ctl << "print";
     for (size_t i = 0; i < nodes.size(); ++i) ctl << " v" << i;
@@ -1086,7 +1111,7 @@ TEST_CASE("SRC: Kirchhoff design+simulation matches MKF ideal reference", "[equi
     di["simStimulusFsw"] = json::array({in.at("switchingFrequency").get<double>()});
     Kirchhoff::SrcDesign d = Kirchhoff::design_src(di);
     json tas = Kirchhoff::build_src_tas(d);
-    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "src");
+    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "src", 1, true);
 
     // Kirchhoff designs the SRC tank with ~8% GAIN HEADROOM (n sized so the fr peak delivers
     // kGainHeadroom·Vo at Vin_min, plus a lower tank Q, abt #62). Since 18ce54a (ABT #2171, Alf 2026-10-31) design_src
@@ -1116,7 +1141,7 @@ TEST_CASE("SRC full-bridge rectifier variant settles to headroom target", "[equi
     Kirchhoff::SrcDesign d = Kirchhoff::design_src(di);
     REQUIRE(d.rectifierType == Kirchhoff::RectifierType::FullBridge);
     json tas = Kirchhoff::build_src_tas(d);
-    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "src_fb");
+    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "src_fb", 1, true);
     INFO("SRC full-bridge: Vout=" << r.vout << " (target " << sim.at("voutMean").get<double>()*kGainHeadroom << ")");
     check_close("Vout (full-bridge)", r.vout, sim.at("voutMean").get<double>() * kGainHeadroom, kSpecTol);
     CHECK(r.eff <= 1.05);
@@ -1135,7 +1160,7 @@ TEST_CASE("SRC current-doubler rectifier variant settles to headroom target", "[
     Kirchhoff::SrcDesign d = Kirchhoff::design_src(di);
     REQUIRE(d.rectifierType == Kirchhoff::RectifierType::CurrentDoubler);
     json tas = Kirchhoff::build_src_tas(d);
-    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "src_cd", 64);
+    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "src_cd", 64, true);
     INFO("SRC current-doubler: Vout=" << r.vout << " (target " << sim.at("voutMean").get<double>()*kGainHeadroom << ")");
     check_close("Vout (current-doubler)", r.vout, sim.at("voutMean").get<double>() * kGainHeadroom, kSpecTol);
     CHECK(r.eff <= 1.05);
@@ -1154,7 +1179,7 @@ TEST_CASE("SRC full-bridge primary settles to headroom target (ABT #91)", "[equi
     Kirchhoff::SrcDesign d = Kirchhoff::design_src(di);
     REQUIRE(d.fullBridge);
     json tas = Kirchhoff::build_src_tas(d);
-    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "src_fbprim");
+    KirchhoffResult r = run_kirchhoff(di, tas, d.loadResistance, d.outputCapacitance, d.inputVoltage, "src_fbprim", 1, true);
     INFO("SRC full-bridge primary: Vout=" << r.vout << " (target " << sim.at("voutMean").get<double>()*kGainHeadroom << ")");
     check_close("Vout (full-bridge primary)", r.vout, sim.at("voutMean").get<double>() * kGainHeadroom, kSpecTol);
     CHECK(r.eff <= 1.05);
@@ -1650,7 +1675,7 @@ TEST_CASE("SRC multi-output: two isolated secondaries each regulate on one share
     json tas = Kirchhoff::build_src_tas(d);
     // center-tapped rectifier: 2 half-windings per rail -> 4 secondary-side windings.
     CHECK(transformer_secondary_windings(tas, "srcCell", "T1") == 4);
-    check_dual_rails_resonant(measure_multi_output(tas, 100000.0, {"Vout", "Vout2"}, "src_multi"));
+    check_dual_rails_resonant(measure_multi_output(tas, 100000.0, {"Vout", "Vout2"}, "src_multi", true));
 }
 
 TEST_CASE("LLC multi-output: two isolated secondaries each regulate on one shared tank (ABT #86)",
