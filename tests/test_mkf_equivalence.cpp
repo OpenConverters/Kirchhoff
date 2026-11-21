@@ -43,6 +43,7 @@
 #include "Flyback.hpp"
 #include "TasAssembler.hpp"
 #include "Fidelity.hpp"
+#include "NgspiceRunner.hpp"
 
 #include <nlohmann/json.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -77,16 +78,12 @@ void check_close(const std::string& what, double got, double ref, double relTol)
     CHECK(relErr <= relTol);
 }
 
+// Runs the deck (its .control block included) through Kirchhoff's integrated libngspice and returns the console
+// text its .meas/print lines write, which parse_meas reads. The deck is also written to /tmp for inspection.
 std::string run_ngspice(const std::string& deck, const std::string& tag) {
     const std::string path = "/tmp/kirchhoff_equiv_" + tag + ".cir";
     { std::ofstream f(path); f << deck; }
-    std::string out;
-    char buf[4096];
-    FILE* p = popen(("ngspice -b " + path + " 2>&1").c_str(), "r");
-    if (!p) throw std::runtime_error("failed to launch ngspice");
-    while (fgets(buf, sizeof(buf), p)) out += buf;
-    pclose(p);
-    return out;
+    return Kirchhoff::run_ngspice_console(deck);
 }
 
 std::string fmt(double v) {
