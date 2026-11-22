@@ -8,6 +8,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "CrossRef.hpp"   // kelvin::crossref::cross_reference_json
 #include "Index.hpp"     // kelvin::shard_format_version
 #include "KelvinApi.hpp"  // kelvin::api::Engine / select_components / bind_part
 #include "Select.hpp"     // kelvin::NoCandidates
@@ -78,6 +79,17 @@ std::string kelvin_select(const std::string& category, const std::string& reqJso
                     {"category", e.category},
                     {"rejections", e.rejections},
                     {"totalRowsConsidered", e.total_rows_considered}}
+            .dump();
+    } catch (const std::exception& e) {
+        return std::string("Exception: ") + e.what();
+    }
+}
+
+std::string cross_reference_string(const std::string& category, const std::string& originalJson,
+                                   const std::string& candidatesJson, const std::string& optionsJson) {
+    try {
+        return kelvin::crossref::cross_reference_json(category, json::parse(originalJson),
+                                                      json::parse(candidatesJson), json::parse(optionsJson))
             .dump();
     } catch (const std::exception& e) {
         return std::string("Exception: ") + e.what();

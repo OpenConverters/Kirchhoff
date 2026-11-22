@@ -63,6 +63,7 @@ EMSCRIPTEN_BINDINGS(kirchhoff) {
                  }));
     em::function("kelvin_shard_format_version", &api::kelvin_shard_format_version);
     em::function("kelvin_select", &api::kelvin_select);
+    em::function("cross_reference_string", &api::cross_reference_string);  // kh.crossReference
     em::function("diagnostics", &api::diagnostics);
     em::function("main_magnetic_inputs", &api::main_magnetic_inputs);
     // the one-shot Wizard entry point

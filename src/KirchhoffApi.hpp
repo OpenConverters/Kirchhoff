@@ -118,6 +118,12 @@ KH_API std::string kelvin_load_shard(const std::string& family, const std::strin
 KH_API unsigned kelvin_shard_format_version();
 KH_API std::string kelvin_select(const std::string& category, const std::string& designReqJson,
                                  const std::string& optionsJson);
+// Kelvin's substitute ranker over spec blocks the caller supplies (no shard, no FS). The blocks are
+// CrossRef.hpp's flat ones, and every candidate needs `lifecycle_status` (null when its record states
+// none): a kelvin_select candidate is not one. A refusal comes back as "Exception: ...".
+KH_API std::string cross_reference_string(const std::string& category, const std::string& originalJson,
+                                          const std::string& candidatesJson,
+                                          const std::string& optionsJson);
 
 // One-shot: spec -> {topology, inputs, operatingPoint, diagnostics, tas}. Mirrors WebLibMKF process_converter.
 KH_API std::string process_converter(const std::string& topology, const std::string& specJson,

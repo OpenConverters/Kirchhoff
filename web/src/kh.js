@@ -454,9 +454,11 @@ export function createKirchhoff({
     return callJson('bind_part', JSON.stringify(tas), ref, JSON.stringify(envelope))
   }
 
-  // Cross-reference: given an ORIGINAL part's spec block and a candidate list
-  // (e.g. from selectCandidates over the original's value), return Kelvin's
-  // deterministic scored substitutes — {category, original_verified, candidates:
+  // Cross-reference: given an ORIGINAL part's spec block and candidate spec blocks, return Kelvin's
+  // deterministic scored substitutes. The blocks are the ranker's flat ones, e.g. for a MOSFET
+  // {mpn, vds, id, rds_on, lifecycle_status}; every candidate must carry lifecycle_status (null when
+  // its record states none). A selectCandidates candidate is NOT a spec block and is rejected by
+  // name. A kind Kelvin has no ranking rules for (Controller) is rejected too. Result: {category, original_verified, candidates:
   // [{mpn, status, penalty, params, ...}]}, ranked best-first. Runs fully
   // in-browser over the WASM ranker, NO LLM (Kirchhoff's program-only mode; the
   // same authority Heaviside runs its LLM chooser over). `originalVerified=false`
