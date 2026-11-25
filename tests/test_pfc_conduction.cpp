@@ -415,18 +415,27 @@ TEST_CASE("PFC CCM: analytical line cycle unchanged by the conduction-mode work"
 
 namespace {
 
-struct SimRun { std::vector<double> t, i; double inputPower; double ripple; };
+struct SimRun { std::vector<double> t, i, iD5; double inputPower; double ripple; };
 
-// The boost inductor's raw branch current over the LAST line cycle of the design's own deck, run by
-// Kirchhoff's in-process libngspice (never the ngspice binary), with the input power mean(V(busP)·iL) and the
-// bus ripple Vmax − Vmin over the same window.
+// The boost diode D5 (stage pfcPower, instance XpfcPower) as ngspice names its device current: the anode-to-
+// cathode current @d.<instance>.d<ref>[id], the same token Kirchhoff::component_waveforms reads.
+const char* const kBoostDiodeCurrent = "@d.xpfcpower.dd5[id]";
+
+// The boost inductor's raw branch current and the boost diode D5's current over the LAST line cycle of the
+// design's own deck, run by Kirchhoff's in-process libngspice (never the ngspice binary), with the input power
+// mean(V(busP)·iL) and the bus ripple Vmax − Vmin over the same window. `savecurrents` (every device current)
+// is dropped for memory; D5's current is saved explicitly beside the default vectors (`.save all`).
 SimRun simulate(const Kirchhoff::PfcDesign& d) {
     PEAS::Fidelity ideal(PEAS::Fidelity::Origin::REQUIREMENTS);
     std::string deck = Kirchhoff::tas_to_ngspice(Kirchhoff::build_pfc_tas(d), ideal);
     for (std::string::size_type at; (at = deck.find(" savecurrents")) != std::string::npos; )
         deck.erase(at, std::string(" savecurrents").size());
+    const std::string::size_type tran = deck.find("\n.tran ");
+    if (tran == std::string::npos) throw std::runtime_error("no .tran line in the PFC deck");
+    deck.insert(tran + 1, std::string(".save all ") + kBoostDiodeCurrent + "\n");
     const Kirchhoff::NgspiceRunResult r = Kirchhoff::run_ngspice_in_process(deck);
     if (!r.success) throw std::runtime_error("ngspice run failed: " + r.error);
+    const std::vector<double>* iD5 = nullptr;
     const std::vector<double>* iL = nullptr;
     const std::vector<double>* busP = nullptr;
     const std::vector<double>* vout = nullptr;
@@ -436,7 +445,9 @@ SimRun simulate(const Kirchhoff::PfcDesign& d) {
         if (k.find("#branch") != std::string::npos && k.find("ll_pri") != std::string::npos) iL = &kv.second;
         if (k == "v(busp)" || k == "busp") busP = &kv.second;
         if (k == "v(vout)" || k == "vout") vout = &kv.second;
+        if (k == kBoostDiodeCurrent) iD5 = &kv.second;
     }
+    if (!iD5)  throw std::runtime_error(std::string("no boost-diode current (") + kBoostDiodeCurrent + ") in the ngspice run");
     if (!iL)   throw std::runtime_error("no boost-inductor branch current (ll_pri#branch) in the ngspice run");
     if (!busP) throw std::runtime_error("no V(busP) in the ngspice run");
     if (!vout) throw std::runtime_error("no V(vout) in the ngspice run");
@@ -448,6 +459,7 @@ SimRun simulate(const Kirchhoff::PfcDesign& d) {
         if (r.time[k] < t0) continue;
         out.t.push_back(r.time[k]);
         out.i.push_back((*iL)[k]);
+        out.iD5.push_back((*iD5)[k]);
         pw.push_back((*iL)[k] * (*busP)[k]);
         vMin = std::min(vMin, (*vout)[k]);
         vMax = std::max(vMax, (*vout)[k]);
@@ -488,8 +500,12 @@ TEST_CASE("PFC deck: each conduction mode's controller reproduces its closed-for
         INFO("ngspice pk/mean/rms " << st.peak << "/" << st.mean << "/" << st.rms
              << "  closed form " << cf.peak << "/" << cf.mean << "/" << cf.rms);
 
-        // A boost's diode blocks reverse current.
-        CHECK(st.min > -1e-6);
+        // A boost's diode blocks reverse current: D5's anode-to-cathode current never goes negative. (Not the
+        // inductor's: near a line zero crossing the inductor rings with the bridge diodes' junction capacitance
+        // and swings below zero by tens of mA while D5 is blocking.)
+        const Stats stD5 = stats_of(sim.t, sim.iD5);
+        INFO("D5 current min " << stD5.min << " A, inductor current min " << st.min << " A");
+        CHECK(stD5.min > -1e-6);
         CHECK(st.peak <= cf.peak * (1.0 + binTol));
         CHECK(st.peak >= cf.peak * (1.0 - binTol));
         CHECK(st.mean == Catch::Approx(cf.mean).epsilon(0.03));
@@ -500,8 +516,18 @@ TEST_CASE("PFC deck: each conduction mode's controller reproduces its closed-for
         const double tEnd = sim.t.back();
         const size_t bins = static_cast<size_t>(std::lround((tEnd - sim.t.front()) / binWidth));
         REQUIRE(bins == 20);
+        size_t excluded = 0;
         for (size_t b = 0; b < bins; ++b) {
             const double ta = tEnd - static_cast<double>(bins - b) * binWidth, tb = ta + binWidth;
+            // Average-current control (CCM) only: the bin that begins at a line zero crossing is not compared.
+            // There the inductor rings with the bridge diodes' junction capacitance as the bridge commutates,
+            // so the closed form (an ideal bridge, no capacitance) does not hold. Every other bin is asserted.
+            const double halfCycles = ta * 2.0 * d.lineFrequency;
+            if (acm && std::abs(halfCycles - std::round(halfCycles)) < 1e-6) {
+                INFO("excluded bin " << b << " [" << ta * 1e3 << ", " << tb * 1e3 << "] ms");
+                ++excluded;
+                continue;
+            }
             std::vector<double> bt, bi;
             for (size_t k = 0; k < sim.t.size(); ++k)
                 if (sim.t[k] >= ta && sim.t[k] <= tb) { bt.push_back(sim.t[k]); bi.push_back(sim.i[k]); }
@@ -516,5 +542,7 @@ TEST_CASE("PFC deck: each conduction mode's controller reproduces its closed-for
             INFO("bin " << b << " [" << ta * 1e3 << ", " << tb * 1e3 << "] ms: ngspice " << simMean << " A, closed form " << cfMean << " A");
             CHECK(simMean == Catch::Approx(cfMean).epsilon(binTol));
         }
+        // Exactly the two half-cycle-start bins (0 and 10) of the CCM line cycle are excluded; none otherwise.
+        CHECK(excluded == (acm ? 2u : 0u));
     }
 }

@@ -32,6 +32,28 @@ constexpr double kZeroCurrentFraction = 1e-2;
 // the reset-dominant latch cannot re-arm inside one pulse.
 constexpr double kClockPulseDuty    = 0.01;
 
+// Junction capacitance of the input-bridge rectifier diodes D1..D4 of the bridge-fed PFC decks (bridged
+// boost, interleaved, SEPIC/Cuk), a DESIGN REQUIREMENT of the not-yet-selected bridge diodes (SAS
+// designRequirements.junctionCapacitance at junctionCapacitanceVr). ASSUMPTION, not a selected part's
+// datasheet value: a typical catalogue figure for 600-650 V, 16-40 A line rectifiers, e.g. Vishay BYV42-600:
+// 100 pF at VR = 10 V; Vishay BYV34-600: 70 pF. Physically every rectifier has it; numerically it limits
+// dV/dt at the bridge nodes when all four diodes turn off near a line zero crossing. Without it (the ideal
+// diode has no capacitance) the transient collapses there with "timestep too small" in the WASM engine.
+// The diodes stay requirement seeds (ideal fidelity): the CIAS emitter puts the capacitance on the ideal
+// diode card as CJO = Cj * (1 + VR/VJ)^M, so the deck has 100 pF at 10 V. A bound part's own datasheet
+// junction capacitance supersedes it.
+constexpr double kBridgeDiodeJunctionCapacitance   = 100e-12;   // [F]
+constexpr double kBridgeDiodeJunctionCapacitanceVr = 10.0;      // [V] reverse bias the figure is quoted at
+
+// Design requirements of a bridge rectifier diode D1..D4: the rectifier requirements plus the junction
+// capacitance above.
+json bridge_diode_requirements(double ratedVr, double ratedIf, double maxVf) {
+    json r = req::diode(ratedVr, ratedIf, maxVf);   // line-freq rectifier (no trr spec)
+    r["junctionCapacitance"]   = kBridgeDiodeJunctionCapacitance;
+    r["junctionCapacitanceVr"] = kBridgeDiodeJunctionCapacitanceVr;
+    return r;
+}
+
 std::string to_lower(std::string s) {
     for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return s;
@@ -352,7 +374,7 @@ json build_pfc_tas(const PfcDesign& d) {
     const double IfBoost  = IavgL / 0.7;   // boost-diode average current (= mean inductor current)
     const json reqSW = req::mosfet("mainSwitch", ratedVdsP, IpkL, maxRdsOnP, 125.0);
     const json reqD5 = req::diode(ratedVrBoost, IfBoost, maxVfBoost, 0.05 / d.switchingFrequency);
-    const json reqBridge = req::diode(ratedVrBridge, IfBridge, maxVfBridge);  // line-freq rectifier (no trr spec)
+    const json reqBridge = bridge_diode_requirements(ratedVrBridge, IfBridge, maxVfBridge);
 
     json pcell; pcell["name"] = "pfc-power";
     pcell["ports"] = json::array({port("acLine"), port("acNeutral"), port("gnd"), port("vout"),
@@ -843,7 +865,7 @@ static json build_pfc_interleaved_tas(const PfcDesign& d) {
     const double IfBoost  = IavgL / 0.7;       // per-phase boost-diode average current
     const json reqSW = req::mosfet("mainSwitch", ratedVdsP, IpkL, maxRdsOnP, 125.0);
     const json reqD5 = req::diode(ratedVrBoost, IfBoost, maxVfBoost, 0.05 / d.switchingFrequency);
-    const json reqBridge = req::diode(ratedVrBridge, IfBridge, maxVfBridge);
+    const json reqBridge = bridge_diode_requirements(ratedVrBridge, IfBridge, maxVfBridge);
 
     // ───────────── POWER stage: one bridge + N boost legs sharing busP / vout / gnd ─────────────
     json pcell; pcell["name"] = "pfc-power-interleaved";
@@ -1053,7 +1075,7 @@ static json build_pfc_buckboost_tas(const PfcDesign& d) {
     const double IfD5     = (d.outputPower / d.outputVoltage) / 0.7;   // output-side average current
     const json reqSW = req::mosfet("mainSwitch", ratedVdsP, IpkL, maxRdsOnP, 125.0);
     const json reqD5 = req::diode(ratedVrD5, IfD5, maxVfD5, 0.05 / d.switchingFrequency);
-    const json reqBridge = req::diode(ratedVrBridge, IfBridge, maxVfBridge);
+    const json reqBridge = bridge_diode_requirements(ratedVrBridge, IfBridge, maxVfBridge);
 
     // ───────────── POWER stage: diode bridge + SEPIC/Ćuk front end + L1-current sense ─────────────
     json pcell; pcell["name"] = inverting ? "pfc-power-cuk" : "pfc-power-sepic";
