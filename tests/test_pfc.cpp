@@ -25,6 +25,7 @@
 #include "TasAssembler.hpp"
 #include "Fidelity.hpp"
 #include "KirchhoffApi.hpp"
+#include "NgspiceRunner.hpp"
 #include "self_capacitance_inductor.hpp"
 
 #include <nlohmann/json.hpp>
@@ -51,12 +52,9 @@ std::string fmt(double v) { std::ostringstream os; os.precision(12); os << v; re
 std::string run_ngspice(const std::string& deck, const std::string& tag) {
     const std::string path = "/tmp/kirchhoff_pfc_" + tag + ".cir";
     { std::ofstream f(path); f << deck; }
-    std::string out; char buf[4096];
-    FILE* p = popen(("ngspice -b " + path + " 2>&1").c_str(), "r");
-    if (!p) throw std::runtime_error("failed to launch ngspice");
-    while (fgets(buf, sizeof(buf), p)) out += buf;
-    pclose(p);
-    return out;
+    // Kirchhoff's in-process libngspice (never the system `ngspice -b`): runs the deck's .control block
+    // and returns the console text the .meas results are parsed from. The file above is a debug copy.
+    return Kirchhoff::run_ngspice_console(deck);
 }
 bool meas(const std::string& out, const std::string& name, double& v) {
     std::smatch m; std::regex re(name + R"(\s*=\s*([-0-9.eE+]+))");
@@ -116,10 +114,7 @@ Margin measure_phase_margin(double kp, double ki, double kv, double K0, double w
       << "print fc ph\n.endc\n.end\n";
     const std::string path = "/tmp/kirchhoff_pfc_pm_" + tag + ".cir";
     { std::ofstream f(path); f << d.str(); }
-    std::string out; char buf[4096];
-    FILE* p = popen(("ngspice -b " + path + " 2>&1").c_str(), "r");
-    while (fgets(buf, sizeof(buf), p)) out += buf;
-    pclose(p);
+    const std::string out = Kirchhoff::run_ngspice_console(d.str());   // in-process libngspice
     double fc = 0, ph = 0;
     REQUIRE(meas(out, "fc", fc));
     REQUIRE(meas(out, "ph", ph));   // radians
