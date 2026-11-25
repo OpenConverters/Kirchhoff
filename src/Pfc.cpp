@@ -4,6 +4,7 @@
 #include "JsonUtil.hpp"
 #include "ComponentRequirements.hpp"
 #include "ConverterAnalytical.hpp"
+#include "CurrentSenseFilter.hpp"
 #include <cmath>
 #include <optional>
 #include <vector>
@@ -516,6 +517,10 @@ json build_pfc_tas(const PfcDesign& d) {
     }
     }
 
+    // The control law reads the inductor current through the current-sense filter (ABT #2524, see
+    // CurrentSenseFilter.hpp): every law above sees V(busP) − LPF[iL·Rsense] in place of V(nL).
+    req::insert_current_sense_filter(ccell, "busP", "nL", req::current_sense_filter_time_constant(d.switchingFrequency));
+
     json tas;
     json& dreq = tas["inputs"]["designRequirements"];
     dreq["efficiency"] = d.efficiency;
@@ -726,6 +731,9 @@ static json build_pfc_totempole_tas(const PfcDesign& d) {
         conn("gLo",       {pin("MgLo","out"), prt("gLo")}),
         conn("gHi",       {pin("MgHi","out"), prt("gHi")})});
 
+    // Current-sense filter on the bipolar shunt voltage V(acLine) − V(nL) (ABT #2524, CurrentSenseFilter.hpp).
+    req::insert_current_sense_filter(ccell, "acLine", "nL", req::current_sense_filter_time_constant(d.switchingFrequency));
+
     json tas;
     json& dreq = tas["inputs"]["designRequirements"];
     dreq["efficiency"] = d.efficiency;
@@ -919,6 +927,10 @@ static json build_pfc_interleaved_tas(const PfcDesign& d) {
         cconns.push_back(conn(gp(p), {pin("Cmp"+std::to_string(p),"out"),    prt(gp(p))}));
     }
     ccell["connections"] = cconns;
+
+    // Current-sense filter on every phase shunt V(busP) − V(nL_p) (ABT #2524, CurrentSenseFilter.hpp).
+    for (int p = 1; p <= N; ++p)
+        req::insert_current_sense_filter(ccell, "busP", nL(p), req::current_sense_filter_time_constant(d.switchingFrequency));
 
     json tas;
     json& dreq = tas["inputs"]["designRequirements"];
@@ -1134,6 +1146,9 @@ static json build_pfc_buckboost_tas(const PfcDesign& d) {
         cconns.push_back(conn("voutScaled",{pin("Svo","out"), pin("Iv","in"), pin("Sgv","inB")}));
     }
     ccell["connections"] = cconns;
+
+    // Current-sense filter on the L1 shunt V(busP) − V(nL) (ABT #2524, CurrentSenseFilter.hpp).
+    req::insert_current_sense_filter(ccell, "busP", "nL", req::current_sense_filter_time_constant(d.switchingFrequency));
 
     json tas;
     json& dreq = tas["inputs"]["designRequirements"];

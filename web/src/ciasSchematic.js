@@ -99,6 +99,27 @@ const merge = (...frags) => ({
   synthEls: (b) => frags.flatMap((f) => (f.synthEls ? f.synthEls(b) : [])),
 })
 
+// Current-sense filter of the closed-loop PFC / Vienna current loops (Kirchhoff CurrentSenseFilter.hpp): four
+// analog blocks per sensed shunt, built from the same summer/integrator blocks as the rest of the control law
+// and drawn the same way, as icBoxes on net-label flags. For the shunt between control ports `ref` and
+// `sense`: Fsub forms the shunt voltage V(ref) − V(sense) = iL·Rsense; Ferr and Fint close a first-order
+// low-pass on it (y' = (shunt − y)/τ); Fout hands the control law V(ref) − y, which stands in for V(sense).
+// Pin labels are the net names the engine gives those connections (<sense>_shunt / _ferr / _fshunt /
+// _filtered, shortened to _sh / _e / _shf / _f), so the law block that read `sense` now reads `<sense>_f`.
+// Returned as a fragment row at height y, columns from x0 every dx (200: room for two pin labels such as nla_sh | nla_shf
+// between neighbouring boxes; 155 made them overlap).
+const senseFilterRow = (ref, sense, y, x0 = 150, dx = 200) => ({
+  place: {
+    [`Fsub_${sense}`]: { draw: (b) => icBox(`Fsub_${sense}`, b, x0, y, 60, 56, [ref, sense], [`${sense}_sh`], '−') },
+    [`Ferr_${sense}`]: { draw: (b) => icBox(`Ferr_${sense}`, b, x0 + dx, y, 60, 56, [`${sense}_sh`, `${sense}_shf`], [`${sense}_e`], '−') },
+    [`Fint_${sense}`]: { draw: (b) => icBox(`Fint_${sense}`, b, x0 + 2 * dx, y, 60, 56, [`${sense}_e`], [`${sense}_shf`], '∫/τ') },
+    [`Fout_${sense}`]: { draw: (b) => icBox(`Fout_${sense}`, b, x0 + 3 * dx, y, 60, 56, [ref, `${sense}_shf`], [`${sense}_f`], '−') },
+  },
+})
+// The control law reads the filtered sense net when the design carries the filter (every current build
+// does); a TAS from before the filter still draws with the raw sense net.
+const sensed = (present, sense) => (present.has(`Fsub_${sense}`) ? `${sense}_f` : sense)
+
 // Output tail: optional choke, Cout, the load, the VOUT port and the isolated return.
 // loadGap: Cout-to-load spacing — wider where Cout's value string is long (an HV design's "24.7 nF").
 const outTailFrag = (x0, yTop, retY, lout, loadGap = 58) => {
@@ -1475,8 +1496,9 @@ const LAYOUTS = {
   cllc: (present) => cllcLike(present, ['Qa', 'Qb', 'Qc', 'Qd']),
   clllc: (present) => cllcLike(present, ['QE', 'QF', 'QG', 'QH']),
   // ── PFC: single-phase boost power-factor corrector ────────────────────────
-  pfc: {
-    size: [880, 520],
+  pfc: (present) => {
+    const filt = present.has('Fsub_nL')
+    const frag = merge({
     place: {
       // -30y: at y=197 the value sat on the bus lane; shifted left it landed on the VAC source
       D1: { draw: (b) => diode('D1', b, 180, 197, 'up', 'left', false, 0, -30) },
@@ -1494,7 +1516,7 @@ const LAYOUTS = {
       Iv:  { draw: (b) => icBox('Iv', b, 160, 460, 60, 56, ['vs'], ['iv'], '∫') },
       Sgv: { draw: (b) => icBox('Sgv', b, 300, 460, 60, 56, ['iv', 'vs'], ['gv'], 'EA') },
       Mv:  { draw: (b) => icBox('Mv', b, 440, 460, 60, 56, ['busP', 'gv'], ['vth'], '×') },
-      Cmp: { draw: (b) => icBox('Cmp', b, 580, 460, 60, 56, ['nL', 'vth'], ['g'], 'PWM') },
+      Cmp: { draw: (b) => icBox('Cmp', b, 580, 460, 60, 56, [sensed(present, 'nL'), 'vth'], ['g'], 'PWM') },
     },
     wires: [
       // full-bridge line rectifier: acLine into the D1/D2 midpoints, acNeutral wrapping under it
@@ -1524,17 +1546,21 @@ const LAYOUTS = {
       { from: 'Rv1.p1', to: 'Rv2.p0' },
       { from: 'Rv2.p1', to: [700, 320] },
     ],
-    synth: (b) => [
+    synthEls: (b) => [
       srcAC(70, 200, 'VAC'), gnd(180, 320), loadR(630, 235, 150, 320, 21), port(740, 150, 'VBUS'),
       sig(255, 150, 'busP', 'down', 10), sig(303, 150, 'nL', 'down'),   // +10: the flag text sat on D2's riser
       sig(700, 226, 'vs', 'right'), sig(384, 225, 'g'),
       txt(60, 405, 'CONTROL — average-current-mode PFC law', 'sch-blk', 'start'),
       ctrlIC(b, 740, 460, ['g'], 'U1', 'CTRL'),
+      ...(filt ? [txt(60, 525, 'CURRENT SENSE — first-order low-pass of iL·Rsense (τ = 0.01/fsw)', 'sch-blk', 'start')] : []),
     ],
+    }, filt ? senseFilterRow('busP', 'nL', 580, 160, 200) : {})
+    return { size: [880, filt ? 640 : 520], place: frag.place, wires: frag.wires, synth: (b) => frag.synthEls(b) }
   },
   // ── PFC: three-phase Vienna rectifier ─────────────────────────────────────
-  vienna: () => {
+  vienna: (present) => {
     const busP = 60, neu = 270, busN = 340, X = 130
+    const filt = ['a', 'b', 'c'].every((ph) => present.has(`Fsub_nl${ph}`))
     const cols = [{ x: 155, ph: 'a' }, { x: 365, ph: 'b' }, { x: 575, ph: 'c' }]
     // One phase leg: phase-in → Rs (current shunt) → L → node X, with Dp↑ to busP and Dn↑ from busN,
     // plus the bidirectional midpoint switch (SW+SQ, common source) clamping X to the neutral rail.
@@ -1572,7 +1598,7 @@ const LAYOUTS = {
     const phaseRow = (ph, y) => ({
       place: {
         [`Gvm${ph}`]: { draw: (b) => icBox(`Gvm${ph}`, b, 150, y, 60, 56, [ph, 'gcond'], [`gvp${ph}`], '×') },
-        [`Sub${ph}`]: { draw: (b) => icBox(`Sub${ph}`, b, 305, y, 60, 56, [`nl${ph}`, ph], [`nmp${ph}`], '−') },
+        [`Sub${ph}`]: { draw: (b) => icBox(`Sub${ph}`, b, 305, y, 60, 56, [sensed(present, `nl${ph}`), ph], [`nmp${ph}`], '−') },
         [`Sum${ph}`]: { draw: (b) => icBox(`Sum${ph}`, b, 460, y, 60, 56, [`nmp${ph}`, `gvp${ph}`], [`err${ph}`], 'Σ') },
         [`Add${ph}`]: { draw: (b) => icBox(`Add${ph}`, b, 615, y, 60, 56, [`err${ph}`, 'bal'], [`errp${ph}`], '+') },
         [`Mul${ph}`]: { draw: (b) => icBox(`Mul${ph}`, b, 770, y, 60, 56, [ph, `errp${ph}`], [`m${ph}`], '×') },
@@ -1581,6 +1607,8 @@ const LAYOUTS = {
     })
     const frag = merge(
       ...cols.map(leg), phaseRow('a', 650), phaseRow('b', 730), phaseRow('c', 810),
+      // per-phase current-sense filters, one row each below the current loops they feed
+      ...(filt ? [senseFilterRow('a', 'nla', 920), senseFilterRow('b', 'nlb', 1000), senseFilterRow('c', 'nlc', 1080)] : []),
       {
         place: {
           Cp: { draw: (b) => capV('Cp', b, 720, 165, 'right') },
@@ -1610,10 +1638,11 @@ const LAYOUTS = {
           sig(770, busP, 'busP', 'up'), sig(770, busN, 'busN', 'down'),
           txt(60, 505, 'CONTROL — bus-voltage + balance loops, per-phase current loops', 'sch-blk', 'start'),
           ctrlIC(b, 900, 560, ['ga', 'gb', 'gc'], 'U1', 'CTRL'),
+          ...(filt ? [txt(60, 865, 'CURRENT SENSE — first-order low-pass of each iL·Rs (τ = 0.01/fsw)', 'sch-blk', 'start')] : []),
         ],
       },
     )
-    return { size: [1010, 880], place: frag.place, wires: frag.wires, synth: (b) => frag.synthEls(b) }
+    return { size: [1010, filt ? 1140 : 880], place: frag.place, wires: frag.wires, synth: (b) => frag.synthEls(b) }
   },
   // ── non-isolated: buck ────────────────────────────────────────────────────
   buck: {

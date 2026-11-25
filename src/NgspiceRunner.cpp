@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <sstream>
+#include <new>
 #include <stdexcept>
 
 namespace Kirchhoff {
@@ -76,6 +77,7 @@ void NgspiceRunResult::drop_samples_before(double tStart) {
 #include <ngspice/sharedspice.h>
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -93,6 +95,7 @@ struct Capture {
     std::map<std::string, std::vector<double>> vectors;
     std::map<std::string, std::vector<double>> vectorsImag;
     std::string console;                                       // full SendChar text (for .meas parsing)
+    std::deque<std::string> recentErr;                         // last few "stderr" lines (for error reports)
     std::atomic<bool> complete{false};
     std::atomic<bool> error{false};
     std::string errorMessage;
@@ -118,6 +121,15 @@ std::atomic<Capture*> g_runCapture{nullptr};
 // Set by controlled_exit: ngspice has left its command loop, so the next run initialises it again.
 std::atomic<bool> g_needsInit{true};
 
+// How many of ngspice's last stderr lines a failed run quotes in its error message.
+constexpr size_t kRecentErrLines = 6;
+
+std::string recent_err_text(const Capture& c) {
+    std::string s;
+    for (const auto& l : c.recentErr) { if (!s.empty()) s += " | "; s += l; }
+    return s;
+}
+
 extern "C" int kh_send_char(char* out, int /*id*/, void* /*ud*/) {
     Capture* c = g_runCapture.load();
     if (!out || !c) return 0;
@@ -129,6 +141,12 @@ extern "C" int kh_send_char(char* out, int /*id*/, void* /*ud*/) {
     else if (std::strncmp(out, "stderr ", 7) == 0) text = out + 7;
     c->console.append(text);
     c->console.push_back('\n');
+    // Keep ngspice's own last error lines so a failed run reports WHY it failed (ABT #2524: the runner
+    // returned only "ngspice exit status 1", hiding ngspice's message).
+    if (std::strncmp(out, "stderr ", 7) == 0) {
+        c->recentErr.emplace_back(text);
+        if (c->recentErr.size() > kRecentErrLines) c->recentErr.pop_front();
+    }
     if (line_is_fatal(out)) {
         c->error = true;
         if (c->errorMessage.empty()) c->errorMessage = out;
@@ -148,7 +166,11 @@ extern "C" int kh_controlled_exit(int status, bool /*immediate*/, bool /*quit*/,
         if (status != 0) {
             std::lock_guard<std::mutex> lk(c->mtx);
             c->error = true;
-            if (c->errorMessage.empty()) c->errorMessage = "ngspice exit status " + std::to_string(status);
+            if (c->errorMessage.empty()) {
+                c->errorMessage = "ngspice exit status " + std::to_string(status);
+                const std::string why = recent_err_text(*c);
+                c->errorMessage += why.empty() ? std::string(" (ngspice printed no error text)") : ": " + why;
+            }
         }
         c->complete = true;
     }
@@ -270,7 +292,25 @@ NgspiceRunResult run_ngspice_in_process(const std::string& deck, double timeoutS
         throw std::runtime_error("libngspice: ngSpice_Circ failed to load the deck");
     }
 
-    ngSpice_Command(const_cast<char*>("run"));
+    try {
+        ngSpice_Command(const_cast<char*>("run"));
+    } catch (const std::bad_alloc&) {
+        // The run exhausted memory (in the browser: the WASM heap) while ngspice was still accepting time
+        // points — typically a transient whose time step collapsed. Report how far it got and what ngspice
+        // said instead of a bare std::bad_alloc. ngspice was unwound mid-run: initialise it again next time.
+        g_needsInit = true;
+        g_runCapture = nullptr;
+        std::string msg = "ngspice ran out of memory during the transient";
+        {
+            std::lock_guard<std::mutex> lk(cap->mtx);
+            if (!cap->time.empty())
+                msg += " at t = " + std::to_string(cap->time.back()) + " s after " +
+                       std::to_string(cap->time.size()) + " accepted time points";
+            const std::string why = recent_err_text(*cap);
+            if (!why.empty()) msg += "; ngspice: " + why;
+        }
+        throw std::runtime_error(msg);
+    }
 
     // The native shared library runs the transient on a background thread; wait for a completion
     // callback, with a fallback (data captured + thread idle) and a hard timeout.

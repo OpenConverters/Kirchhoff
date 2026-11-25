@@ -4,6 +4,7 @@
 #include "JsonUtil.hpp"
 #include "ComponentRequirements.hpp"
 #include "ConverterAnalytical.hpp"
+#include "CurrentSenseFilter.hpp"
 #include <cmath>
 #include <vector>
 #include <string>
@@ -337,6 +338,11 @@ json build_vienna_tas(const ViennaDesign& d) {
     cconns.push_back(json{{"name","bal"},{"endpoints",balEps}});
     cconns.push_back(json{{"name","gnd"},{"endpoints",gndEps}});
     ccell["ports"] = cports; ccell["components"] = ccomps; ccell["connections"] = cconns;
+    // The per-phase current loops read the inductor current through the current-sense filter (ABT #2524, see
+    // CurrentSenseFilter.hpp): V(phase) − LPF[iL·Rsense] stands in for V(nL) in the error above.
+    for (int i = 0; i < 3; ++i)
+        req::insert_current_sense_filter(ccell, ph[i], "nl" + std::string(ph[i]),
+                                         req::current_sense_filter_time_constant(d.switchingFrequency));
 
     json tas;
     json& dreq = tas["inputs"]["designRequirements"];

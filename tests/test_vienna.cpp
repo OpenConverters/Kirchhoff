@@ -22,11 +22,13 @@
 #include "ConverterAnalytical.hpp"
 #include "Kirchhoff.hpp"
 #include "KirchhoffApi.hpp"
+#include "self_capacitance_inductor.hpp"
 
 #include <nlohmann/json.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -391,4 +393,52 @@ TEST_CASE("vienna peakOfLineOnly: the SIMULATED inductor window sits on the line
     // switching make it differ by a few percent, never by orders of magnitude).
     CHECK(simulatedPeak / analyticalPeak > 0.8);
     CHECK(simulatedPeak / analyticalPeak < 1.25);
+}
+
+// ABT #2524: the closed-loop Vienna deck with REAL inductor models (see the PFC case in test_pfc.cpp for the
+// mechanism: the winding self-capacitance makes the sensed current dip at each switch edge and the ideal
+// hysteretic comparators chattered at the solver step). Design = the Alvier drives active front end
+// (400 Vac line-line 50 Hz -> 700 V, 11 kW, 8 kHz) with the self-capacitance of its X-SMC27a inductor
+// export (44 pF) on all three phases; 2 ms of the deck.
+TEST_CASE("Vienna with real inductors carrying winding self-capacitance simulates (no chatter) — ABT #2524",
+          "[vienna][real][abt2524]") {
+    const double tstop = 2e-3;
+    json di;
+    di["designRequirements"]["efficiency"] = 0.98;
+    di["designRequirements"]["inputType"] = "acThreePhase";
+    di["designRequirements"]["inputVoltage"]["nominal"] = 400.0 / std::sqrt(3.0);
+    di["designRequirements"]["lineFrequency"]["nominal"] = 50.0;
+    di["designRequirements"]["switchingFrequency"]["nominal"] = 8e3;
+    { json o; o["name"]="out"; o["voltage"]["nominal"]=700.0; di["designRequirements"]["outputs"]=json::array({o}); }
+    { json op; op["inputVoltage"]=400.0 / std::sqrt(3.0); json o; o["power"]=11000.0; op["outputs"]=json::array({o});
+      di["operatingPoints"]=json::array({op}); }
+    di["config"]["tranStopTime"] = tstop;
+    Kirchhoff::ViennaDesign d = Kirchhoff::design_vienna(di);
+    json tas = Kirchhoff::build_vienna_tas(d);
+    const double maxStep = tas.at("simulation").at("analyses").at(0).at("maximumTimeStep").get<double>();
+    abt2524::bind_subcircuit(tas, {"La", "Lb", "Lc"},
+                             abt2524::inductor_with_self_capacitance("ABT2524_L", d.boostInductance, 0.02, 44e-12),
+                             "ABT2524_L");
+    const Kirchhoff::NgspiceRunResult r = abt2524::run_real(tas, 120.0);
+    INFO("ngspice error: " << r.error << "  points: " << r.time.size()
+         << "  t_end: " << (r.time.empty() ? 0.0 : r.time.back()));
+    REQUIRE(r.success);
+    REQUIRE(r.time.back() >= tstop * (1.0 - 1e-9));
+    CHECK(static_cast<double>(r.time.size()) < 5.0 * tstop / maxStep);
+    const auto vp = r.average("v(busP)", tstop - 0.5e-3, tstop);
+    const auto vn = r.average("v(busN)", tstop - 0.5e-3, tstop);
+    REQUIRE(vp.has_value()); REQUIRE(vn.has_value());
+    const Kirchhoff::NgspiceRunResult ri = Kirchhoff::run_ngspice_in_process(
+        Kirchhoff::tas_to_ngspice(Kirchhoff::build_vienna_tas(d), PEAS::Fidelity(PEAS::Fidelity::Origin::REQUIREMENTS)), 120.0);
+    REQUIRE(ri.success);
+    const auto vpi = ri.average("v(busP)", tstop - 0.5e-3, tstop);
+    const auto vni = ri.average("v(busN)", tstop - 0.5e-3, tstop);
+    REQUIRE(vpi.has_value()); REQUIRE(vni.has_value());
+    INFO("bus real " << (*vp - *vn) << " V, ideal " << (*vpi - *vni) << " V");
+    CHECK(std::abs((*vp - *vn) - (*vpi - *vni)) / (*vpi - *vni) < 0.02);
+    double iMax = 0.0;
+    for (const auto& kv : r.vectors)
+        if (kv.first.find("vlla_pri_sense#branch") != std::string::npos)
+            for (double x : kv.second) iMax = std::max(iMax, std::abs(x));
+    CHECK(iMax > 1.0);
 }

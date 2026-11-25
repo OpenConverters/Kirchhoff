@@ -25,11 +25,13 @@
 #include "TasAssembler.hpp"
 #include "Fidelity.hpp"
 #include "KirchhoffApi.hpp"
+#include "self_capacitance_inductor.hpp"
 
 #include <nlohmann/json.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -601,4 +603,45 @@ TEST_CASE("api::determine_pfc_mode labels CCM/DCM against the CrCM boundary — 
           == "Discontinuous Conduction Mode");
     CHECK(json::parse(Kirchhoff::api::determine_pfc_mode(spec, lCrit)).at("actualMode")
           == "Critical Conduction Mode");
+}
+
+// ABT #2524: the closed-loop PFC deck with a REAL inductor model. A real inductor (MKF's ngspice export)
+// carries the winding self-capacitance across its terminals; at every switch edge the switch-node swing
+// drives ~iL through it for ~1 ns, so the current through the sense shunt collapses for that nanosecond.
+// The controller's ideal hysteretic comparator re-toggled on that dip, the edge re-launched, and the loop
+// chattered at the solver step (time step -> ps, the run never advanced: std::bad_alloc in the browser).
+// The controller's current-sense filter (CurrentSenseFilter.hpp) is what keeps the loop on the real
+// current. Design = the Alvier UPS PFC operating point (230 Vac 50 Hz -> 385 V, 3.6 kW, 65 kHz, CCM) with
+// the self-capacitance of its X-SMC27b inductor export (24 pF); 3 ms of the 60 ms deck.
+TEST_CASE("PFC with a real inductor carrying winding self-capacitance simulates (no chatter) — ABT #2524",
+          "[pfc][real][abt2524]") {
+    const double tstop = 3e-3;
+    json di = pfc_inputs(230.0, 385.0, 50.0, 65e3, 3600.0, json{{"tranStopTime", tstop}});
+    Kirchhoff::PfcDesign d = Kirchhoff::design_pfc(di);
+    json tas = Kirchhoff::build_pfc_tas(d);
+    const double maxStep = tas.at("simulation").at("analyses").at(0).at("maximumTimeStep").get<double>();
+    abt2524::bind_subcircuit(tas, {"L"}, abt2524::inductor_with_self_capacitance("ABT2524_L", d.boostInductance,
+                                                                                 0.016, 24e-12), "ABT2524_L");
+    const Kirchhoff::NgspiceRunResult r = abt2524::run_real(tas, 120.0);
+    INFO("ngspice error: " << r.error << "  points: " << r.time.size()
+         << "  t_end: " << (r.time.empty() ? 0.0 : r.time.back()));
+    REQUIRE(r.success);
+    REQUIRE(r.time.back() >= tstop * (1.0 - 1e-9));
+    // No time-step collapse: the accepted points stay within a few times the max-step count.
+    CHECK(static_cast<double>(r.time.size()) < 5.0 * tstop / maxStep);
+    // The loop is alive on the real current: the bus follows the ideal-inductor deck of the same design over
+    // the same window, and the inductor current switches.
+    const Kirchhoff::NgspiceRunResult ri = Kirchhoff::run_ngspice_in_process(
+        Kirchhoff::tas_to_ngspice(Kirchhoff::build_pfc_tas(d), PEAS::Fidelity(PEAS::Fidelity::Origin::REQUIREMENTS)), 120.0);
+    REQUIRE(ri.success);
+    const auto vout = r.average("v(Vout)", tstop - 1e-3, tstop);
+    const auto voutIdeal = ri.average("v(Vout)", tstop - 1e-3, tstop);
+    REQUIRE(vout.has_value()); REQUIRE(voutIdeal.has_value());
+    INFO("Vout real " << *vout << " V, ideal " << *voutIdeal << " V");
+    CHECK(std::abs(*vout - *voutIdeal) / *voutIdeal < 0.02);
+    double iMax = 0.0;
+    for (const auto& kv : r.vectors)
+        if (kv.first.find("vll_pri_sense#branch") != std::string::npos)
+            for (double x : kv.second) iMax = std::max(iMax, x);
+    CHECK(iMax > 1.0);
 }
