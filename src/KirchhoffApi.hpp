@@ -74,7 +74,10 @@ KH_API std::string topology_waveforms(const std::string& tasJson);   // [{name,i
 // voltage:{label,waveform,processed}, current:{waveform,processed}}]}. Magnetics keep their per-winding
 // waveforms via topology_waveforms/extract_operating_point; this is the complement (switch V_DS, diode
 // current, cap ripple…). Returns {"success":false,...} when built without libngspice, so callers branch.
-KH_API std::string component_waveforms(const std::string& tasJson, const std::string& fidelityJson);
+// windowJson selects the switching period read (see ComponentWaveforms.hpp): "{}" = the last period for a
+// DC converter, the inductor-current peak of the line cycle for a PFC / Vienna stage.
+KH_API std::string component_waveforms(const std::string& tasJson, const std::string& fidelityJson,
+                                       const std::string& windowJson = "{}");
 
 // Add a requirements-derived datasheet model (real Rds(on) / forward drop / ratings, NO fabricated
 // parasitics) to every MOSFET/diode that isn't already bound, so a subsequent DATASHEET-fidelity

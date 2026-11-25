@@ -221,6 +221,9 @@ export function toCsv(signals, meta = {}) {
   comment('source', [...new Set(kept.map((s) => s.origin))].join(', '))
   comment('periods', meta.periods > 1
     ? `${meta.periods} (the steady-state cycle repeated; no data invented)` : meta.periods)
+  // Which switching period of the run the component columns were read over (a PFC / Vienna run holds a
+  // whole line cycle; the window may sit anywhere in it).
+  if (signals.some((s) => s.origin === 'ngspice' && /\.excitation(sPerPort)?[.[]/.test(s.path))) comment('componentWindow', meta.componentWindow)
   comment('exported', meta.exported)
   lines.push('# column headers are the signal\'s path in the companion .json export ' +
              '(PEAS/MAS operatingPointExcitation.json signalDescriptor keys)')
@@ -322,6 +325,7 @@ export function designExcitationsJson(ctx) {
       topology: ctx.topology ?? null,
       exported: ctx.exported ?? new Date().toISOString(),
       conditionsFrom: `MAS operating point of ${from}`,
+      ...(componentWaves?.window ? { componentWindow: componentWaves.window } : {}),
       waveformSource: sources,
       note: 'Each member of magnetics[]/components[] validates against the schema named in ' +
             '`schemas`; the wrapper object itself is not a schema type.',

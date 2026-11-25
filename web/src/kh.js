@@ -125,10 +125,13 @@ export function createKirchhoff({
     return callJson('topology_waveforms', JSON.stringify(tas))
   }
 
-  // Per-component V/I (switches, diodes, caps, resistors) from one ngspice run.
-  // Returns { engine, referencePeriod, components:[...] } or { success:false } if no libngspice.
-  function componentWaveforms(tas, fidelity = { origin: 'REQUIREMENTS' }) {
-    return callJson('component_waveforms', JSON.stringify(tas), JSON.stringify(fidelity))
+  // Per-component V/I (switches, diodes, caps, resistors) from one ngspice run, over ONE switching period:
+  // `window` = { at: 'auto' | 'end' | 'inductorPeak' | 'linePhase', magnetic?, linePhaseDegrees? } (see the
+  // engine's ComponentWaveforms.hpp; 'auto' = last period for DC input, inductor-current peak of the line
+  // cycle for PFC / Vienna). Returns { engine, referencePeriod, window, components:[...] } or
+  // { success:false } if no libngspice.
+  function componentWaveforms(tas, fidelity = { origin: 'REQUIREMENTS' }, window = { at: 'auto' }) {
+    return callJson('component_waveforms', JSON.stringify(tas), JSON.stringify(fidelity), JSON.stringify(window ?? {}))
   }
 
   // Add requirements-derived datasheet models (real Rds(on)/Vf) to every semiconductor so a

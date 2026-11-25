@@ -288,10 +288,11 @@ assembly/simulate steps (tas_to_ngspice / tas_to_ltspice) are topology-agnostic.
           "transient result rather than raw console text.");
 
     m.def("component_waveforms",
-          [unwrap](const json& tas, const json& fidelity) {
-              return unwrap(Kirchhoff::api::component_waveforms(tas.dump(), fidelity.dump()));
+          [unwrap](const json& tas, const json& fidelity, const json& window) {
+              return unwrap(Kirchhoff::api::component_waveforms(tas.dump(), fidelity.dump(), window.dump()));
           },
           py::arg("tas"), py::arg("fidelity") = json{{"origin", "REQUIREMENTS"}},
+          py::arg("window") = json::object(),
           "Per-component V/I (switches, diodes, caps, resistors) from ONE ngspice run →\n"
           "{engine, referencePeriod, components:[...]}.");
 

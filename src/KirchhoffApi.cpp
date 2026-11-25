@@ -656,14 +656,15 @@ std::string topology_waveforms(const std::string& tas) {
     });
 }
 
-std::string component_waveforms(const std::string& tas, const std::string& fidelity) {
+std::string component_waveforms(const std::string& tas, const std::string& fidelity, const std::string& window) {
     return guarded([&] {
         // Like simulate_ngspice, report the no-libngspice case as data (success:false), not an Exception
         // string, so the frontend can branch to "run analytical / rebuild" instead of erroring.
         if (!Kirchhoff::ngspice_in_process_available())
             return json{{"success", false}, {"error", "Kirchhoff built without libngspice"}}.dump();
         return Kirchhoff::component_waveforms(json::parse(tas),
-                                              PEAS::fidelity_from_json(json::parse(fidelity))).dump();
+                                              PEAS::fidelity_from_json(json::parse(fidelity)),
+                                              json::parse(window.empty() ? std::string("{}") : window)).dump();
     });
 }
 

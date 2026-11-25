@@ -30,7 +30,7 @@ const {
   waveTarget, waveMagnetics, deviceGroups, targetIsMagnetic, waveOps, waveOpIdx, waveSource,
   waveExcitations, waveMag, ngspiceOps, ngspiceBusy, simulateMagnetic, downloadMagneticInputs,
   exportSelectionCsv, exportDesignCsv, exportDesignJson, runExport, exportError,
-  deviceExcitation, deviceComp, componentWaves, componentBusy, fetchComponentWaves,
+  deviceExcitation, deviceComp, componentWaves, componentBusy, fetchComponentWaves, componentWindow, lineCycleRun,
   componentStress, stressSummary, verdict, mainExcNames, form, visualSim, visualScopeSet,
   deck, deckFlavor, deckFidelity, simStop, simStep, deckBusy, designStop, designStep, periodsShown,
   makeDeck, copyDeck, downloadDeck, si, pct,
@@ -87,6 +87,38 @@ const winding = computed(() => waveExcitations.value[windingIdx.value] ?? null)
 // waveforms an ngspice run has already produced.
 const hasSelectionWaves = computed(() =>
   targetIsMagnetic.value ? waveExcitations.value.length > 0 : !!deviceComp.value)
+
+// The switching window of a line-frequency converter's component waveforms (App's componentWindow): the
+// select carries 'auto' (inductor-current peak of the main magnetic), 'peak:<magnetic>', 'phase' (a line
+// phase typed beside it) or 'end' (the last period of the run, at a line zero crossing).
+const windowChoice = computed({
+  get: () => {
+    const w = componentWindow.value
+    if (w.at === 'inductorPeak') return `peak:${w.magnetic}`
+    if (w.at === 'linePhase') return 'phase'
+    return w.at
+  },
+  set: (v) => {
+    if (v.startsWith('peak:')) componentWindow.value = { at: 'inductorPeak', magnetic: v.slice(5) }
+    else if (v === 'phase') componentWindow.value = { at: 'linePhase', linePhaseDegrees: windowPhase.value }
+    else componentWindow.value = { at: v }
+  },
+})
+const windowPhase = ref(90)
+function setWindowPhase(e) {
+  const deg = Number(e.target.value)
+  if (!(deg >= 0 && deg <= 360)) { e.target.value = windowPhase.value; return }
+  windowPhase.value = deg
+  componentWindow.value = { at: 'linePhase', linePhaseDegrees: deg }
+}
+const mainMagnetic = computed(() => waveMagnetics.value.find((m) => m.isMain)?.name ?? null)
+// What the engine resolved: where in the run, and at which line phase.
+const windowResolved = computed(() => {
+  const w = componentWaves.value?.window
+  if (!w) return null
+  const at = `t = ${(w.start * 1e3).toFixed(3)} ms`
+  return w.linePhaseDegrees !== undefined && w.linePhaseDegrees !== null ? `${at} · line ${w.linePhaseDegrees.toFixed(0)}°` : at
+})
 </script>
 
 <template>
@@ -153,6 +185,20 @@ const hasSelectionWaves = computed(() =>
                   class="fld-in" style="width: auto" v-model.number="windingIdx">
             <option v-for="(exc, i) in waveExcitations" :key="i" :value="i">{{ exc.name ?? `winding ${i}` }}</option>
           </select>
+          <!-- Line-frequency converters: which switching period of the line cycle the component waveforms
+               (chart and every component export) are read over. -->
+          <template v-if="lineCycleRun">
+            <select class="fld-in" style="width: auto" data-testid="switch-window" v-model="windowChoice"
+                    title="Switching period the component waveforms and their exports are read over">
+              <option value="auto">window: {{ mainMagnetic ?? 'inductor' }} current peak</option>
+              <option v-for="m in waveMagnetics.filter((x) => !x.isMain)" :key="m.name" :value="`peak:${m.name}`">window: {{ m.name }} current peak</option>
+              <option value="phase">window: line phase…</option>
+              <option value="end">window: end of run</option>
+            </select>
+            <input v-if="windowChoice === 'phase'" class="fld-in" style="width: 4.5rem" type="number" min="0" max="360" step="1"
+                   data-testid="switch-window-phase" :value="windowPhase" @change="setWindowPhase" title="line phase [°], phase A" />
+            <span v-if="windowResolved && !targetIsMagnetic" class="chip" data-testid="switch-window-resolved">{{ windowResolved }}</span>
+          </template>
           <span v-if="targetIsMagnetic" class="chip" :class="waveSource.kind === 'ngspice' ? 'cyan' : 'amber'">{{ waveSource.kind }}</span>
           <span v-else class="chip cyan">ngspice</span>
           <div class="sep"></div>

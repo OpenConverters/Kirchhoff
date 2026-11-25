@@ -40,8 +40,19 @@ const paneA = ref('schematic')
 const paneB = ref('waveforms')
 const ngspiceOps = ref({})        // magnetic name -> simulated MAS::OperatingPoint
 const ngspiceBusy = ref(false)
-const componentWaves = ref(null)  // { referencePeriod, components:[{ref,kind,voltage,current}] } | null
+const componentWaves = ref(null)  // { referencePeriod, window, components:[{ref,kind,voltage,current}] } | null
 const componentBusy = ref(false)
+// WHICH switching period of the run the component waveforms (chart, CSV, JSON) are read over — the engine's
+// window spec (ComponentWaveforms.hpp): { at: 'auto' } is the last period for a DC converter and, for a
+// line-frequency converter (PFC, Vienna), the switching period at the inductor-current peak of the line
+// cycle; { at: 'inductorPeak', magnetic }, { at: 'linePhase', linePhaseDegrees } and { at: 'end' } pick
+// another one. The engine echoes the window it resolved in componentWaves.window.
+const componentWindow = ref({ at: 'auto' })
+// A line-frequency converter: its run holds a whole line cycle, so the switching window can be placed in it.
+const lineCycleRun = computed(() => {
+  const t = result.value?.tas?.inputs?.designRequirements?.inputType
+  return t === 'acSinglePhase' || t === 'acThreePhase'
+})
 const realizedTas = ref(null)     // datasheet-realized TAS (real-conduction models), when models==='datasheet'
 // Every ngspice re-sim (components, per-magnetic, netlist) runs against this: the realized TAS when the
 // user picked datasheet models, else the plain design. A realized part renders real regardless of the
@@ -87,6 +98,7 @@ async function solve() {
   componentWaves.value = null
   realizedTas.value = null
   magneticModels.value = {}   // new design -> stale per-magnetic model overrides are dropped
+  if (componentWindow.value.at !== 'auto') componentWindow.value = { at: 'auto' }   // a new design starts on the default window
   trackEvent('solve', {
     target: topoId.value,
     engine: form.engine,
@@ -153,7 +165,7 @@ async function fetchComponentWaves() {
   const gen = ++cwGen
   componentBusy.value = true
   try {
-    const cw = await componentWaveforms(simTas.value, simFidelity.value)
+    const cw = await componentWaveforms(simTas.value, simFidelity.value, componentWindow.value)
     if (gen !== cwGen) return                // superseded by a newer solve — discard
     // Keep the waveform list consistent with the BOM: drop anything not in the BOM (FET body diodes,
     // which are intrinsic to their MOSFET, are excluded from the BOM) so waveforms ⊆ BOM ⊆ schematic.
@@ -167,6 +179,16 @@ async function fetchComponentWaves() {
     if (gen === cwGen) componentBusy.value = false
   }
 }
+
+// A new window re-reads the components from a fresh run over that window (the engine keeps no run between
+// calls). Only when a component run is already shown or wanted — an analytical solve stays analytical.
+watch(componentWindow, () => {
+  if (!result.value) return
+  if (componentWaves.value || componentBusy.value || form.engine === 'ngspice') {
+    componentWaves.value = null
+    fetchComponentWaves()
+  }
+}, { deep: true })
 
 // Switching component models between ideal/datasheet after a solve: re-realize (or drop) and re-run the
 // component sim + any per-magnetic sims so every ngspice view reflects the chosen model set.
@@ -253,6 +275,7 @@ if (typeof window !== 'undefined') {
     get result() { return result.value },
     get waveMagnetics() { return waveMagnetics.value },
     get componentWaves() { return componentWaves.value },
+    get componentWindow() { return componentWindow.value },
     get ngspiceOps() { return ngspiceOps.value },
     get bomRows() { return bomRows.value },
     get running() { return running.value },
@@ -534,12 +557,25 @@ function exportCtx() {
     periods: form.showPeriods,
   }
 }
+// The component window as one header line, e.g. "inductorPeak of L: t = 14.992–15.008 ms of the run, line
+// phase 89.9°". Null before a component run (a magnetic-only export has no component window).
+function componentWindowText() {
+  const w = componentWaves.value?.window
+  if (!w) return null
+  const ms = (t) => (t * 1e3).toFixed(4)
+  const what = w.at === 'inductorPeak' ? `switching period at the inductor-current peak of ${w.magnetic} in the last line cycle`
+    : w.at === 'linePhase' ? 'switching period at the chosen line phase in the last line cycle'
+    : 'last switching period of the run'
+  return `${what}: t = ${ms(w.start)} to ${ms(w.end)} ms of the run` +
+    (w.linePhaseDegrees !== undefined && w.linePhaseDegrees !== null ? `, line phase ${w.linePhaseDegrees.toFixed(1)}° (phase A)` : '')
+}
 function exportMeta(scope) {
   return {
     topology: topoId.value,
     scope,
     operatingPoint: waveOps.value[waveOpIdx.value]?.name ?? (waveOps.value.length > 1 ? `index ${waveOpIdx.value}` : null),
     periods: form.showPeriods,
+    componentWindow: componentWindowText(),
     exported: new Date().toISOString(),
   }
 }
@@ -582,7 +618,7 @@ provide('kh', {
   waveTarget, waveMagnetics, deviceGroups, targetIsMagnetic, waveOps, waveOpIdx, waveSource,
   waveExcitations, waveMag, ngspiceOps, ngspiceBusy, simulateMagnetic, downloadMagneticInputs,
   exportSelectionCsv, exportDesignCsv, exportDesignJson, runExport, exportError,
-  deviceExcitation, deviceComp, componentWaves, componentBusy, fetchComponentWaves,
+  deviceExcitation, deviceComp, componentWaves, componentBusy, fetchComponentWaves, componentWindow, lineCycleRun,
   componentStress, stressSummary, verdict, mainExcNames, form,
   deck, deckFlavor, deckFidelity, simStop, simStep, deckBusy, designStop, designStep, periodsShown,
   makeDeck, copyDeck, downloadDeck, si, pct, visualSim, visualScopeSet,
